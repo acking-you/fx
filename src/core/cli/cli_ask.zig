@@ -282,6 +282,7 @@ fn runAskChild(
 pub const PromptRunResult = struct {
     exit_code: u8,
     assistant_output: []u8,
+    thinking: []u8 = &.{},
     interrupted: bool = false,
     model: []u8 = &.{},
     session_id: []u8 = &.{},
@@ -294,6 +295,7 @@ pub const PromptRunResult = struct {
 
     pub fn deinit(self: PromptRunResult, alloc: Allocator) void {
         alloc.free(self.assistant_output);
+        if (self.thinking.len > 0) alloc.free(self.thinking);
         if (self.model.len > 0) alloc.free(self.model);
         if (self.session_id.len > 0) alloc.free(self.session_id);
         freeToolCallRecords(alloc, self.tool_calls);
@@ -316,6 +318,7 @@ const AskOptions = struct {
     verbose: bool = false,
     no_save: bool = false,
     no_color: bool = false,
+    show_thinking: bool = false,
     continue_recovery: bool = false,
 
     fn deinit(self: *AskOptions, alloc: Allocator) void {
@@ -436,6 +439,7 @@ const RunOptions = struct {
     resume_target: ?ResumeTarget = null,
     color_enabled: bool = true,
     continue_recovery: bool = false,
+    show_thinking: bool = false,
     deps: RunDeps,
 };
 
@@ -494,6 +498,7 @@ const AskContext = struct {
     typed_error_code: ?[]const u8 = null,
     auth_failure: ?auth_runtime.FailureSnapshot = null,
     output_mode: OutputMode = .raw,
+    show_thinking: bool = false,
     presenter: ?*ask_presentation.Runtime = null,
     pending_tool_progress: std.ArrayList(PendingToolProgress) = .empty,
     deferred_tool_progress: std.ArrayList([]u8) = .empty,
@@ -502,6 +507,7 @@ const AskContext = struct {
     raw_trailing_newlines: u8 = 0,
     raw_has_output: bool = false,
     assistant_output: std.ArrayList(u8) = .empty,
+    thinking_output: std.ArrayList(u8) = .empty,
     tool_call_records: std.ArrayList(ToolCallRecord) = .empty,
     tool_call_records_mutex: std.Io.Mutex = .init,
     web_search_progress_mutex: std.Io.Mutex = .init,
@@ -665,6 +671,7 @@ const AskContext = struct {
             self.alloc.free(path);
         }
         self.assistant_output.deinit(self.alloc);
+        self.thinking_output.deinit(self.alloc);
         for (self.pending_tool_progress.items) |progress| progress.deinit(self.alloc);
         self.pending_tool_progress.deinit(self.alloc);
         for (self.deferred_tool_progress.items) |progress| self.alloc.free(progress);
@@ -1183,6 +1190,7 @@ fn runWithDeps(alloc: Allocator, args: []const [:0]const u8, cfg: Config, deps: 
         .resume_target = options.resume_target,
         .color_enabled = !options.no_color,
         .continue_recovery = options.continue_recovery,
+        .show_thinking = options.show_thinking or envShowThinkingEnabled(),
         .deps = deps,
     }) catch |err| {
         if (interrupt_scope.requested()) return headless_interrupt.exitCode();
@@ -1359,6 +1367,7 @@ fn runPromptInternal(alloc: Allocator, prompt: []const u8, permission_override: 
     var worker_events_drained = false;
     ctx.workspace_access = startup.takeWorkspaceAccess();
     ctx.output_mode = options.output_mode;
+    ctx.show_thinking = options.show_thinking;
     ctx.mcp_elicitation_capabilities = askElicitationCapabilities(
         options.output_mode,
         options.deps.stdin_is_tty(options.deps.stdin_ctx),
@@ -1606,10 +1615,13 @@ fn runPromptInternal(alloc: Allocator, prompt: []const u8, permission_override: 
         error.NonInteractivePermissionRequired => {
             const assistant_output = try alloc.dupe(u8, ctx.assistant_output.items);
             errdefer alloc.free(assistant_output);
+            const thinking = try alloc.dupe(u8, ctx.thinking_output.items);
+            errdefer if (thinking.len > 0) alloc.free(thinking);
             const tool_calls = try takeToolCallRecords(&ctx, alloc);
             return .{
                 .exit_code = 1,
                 .assistant_output = assistant_output,
+                .thinking = thinking,
                 .interrupted = ctx.processInterruptRequested(),
                 .tool_calls = tool_calls,
                 .error_code = "NonInteractivePermissionRequired",
@@ -1634,6 +1646,8 @@ fn runPromptInternal(alloc: Allocator, prompt: []const u8, permission_override: 
 fn takePromptRunResult(ctx: *AskContext, alloc: Allocator) !PromptRunResult {
     const assistant_output = try alloc.dupe(u8, ctx.assistant_output.items);
     errdefer alloc.free(assistant_output);
+    const thinking = try alloc.dupe(u8, ctx.thinking_output.items);
+    errdefer if (thinking.len > 0) alloc.free(thinking);
     const model = try alloc.dupe(u8, ctx.model);
     errdefer alloc.free(model);
     const session_id = if (ctx.writable) |writable|
@@ -1647,6 +1661,7 @@ fn takePromptRunResult(ctx: *AskContext, alloc: Allocator) !PromptRunResult {
     return .{
         .exit_code = if (ctx.failed) 1 else 0,
         .assistant_output = assistant_output,
+        .thinking = thinking,
         .interrupted = ctx.processInterruptRequested(),
         .model = model,
         .session_id = session_id,
@@ -2574,6 +2589,17 @@ fn pushText(raw_ctx: *anyopaque, emission: agent_runtime.TextEmission) !void {
             .terminal, .terminal_no_color => try ctx.presenter.?.pushText(text),
             .quiet, .json, .raw => try ctx.writeStderr(text),
         },
+        .thought => |text| try pushThoughtText(ctx, text),
+    }
+}
+
+fn pushThoughtText(ctx: *AskContext, text: []const u8) !void {
+    if (text.len == 0) return;
+    try ctx.thinking_output.appendSlice(ctx.alloc, text);
+    if (!ctx.show_thinking) return;
+    switch (ctx.output_mode) {
+        .quiet, .json => {},
+        .raw, .terminal, .terminal_no_color => try ctx.writeStderr(text),
     }
 }
 
@@ -3209,6 +3235,8 @@ fn parseOptionsWithStdin(alloc: Allocator, args: []const [:0]const u8, stdin: St
             opts.no_save = true;
         } else if (std.mem.eql(u8, arg, "--no-color")) {
             opts.no_color = true;
+        } else if (std.mem.eql(u8, arg, "--show-thinking")) {
+            opts.show_thinking = true;
         } else if (std.mem.eql(u8, arg, "--continue-recovery")) {
             if (opts.continue_recovery) return error.InvalidAskArgs;
             opts.continue_recovery = true;
@@ -3276,6 +3304,14 @@ fn hasJsonFlag(args: []const [:0]const u8) bool {
         if (std.mem.eql(u8, arg, "--json")) return true;
     }
     return false;
+}
+
+fn envShowThinkingEnabled() bool {
+    const raw = io_mod.getenv("FX_SHOW_THINKING") orelse return false;
+    const value = std.mem.trim(u8, raw, " \t\r\n");
+    return std.ascii.eqlIgnoreCase(value, "1") or
+        std.ascii.eqlIgnoreCase(value, "true") or
+        std.ascii.eqlIgnoreCase(value, "on");
 }
 
 fn parseTimeoutMs(raw: []const u8) ?usize {
@@ -3357,6 +3393,10 @@ fn renderFinalJsonResult(alloc: Allocator, result: PromptRunResult) ![]u8 {
 
     try out.writer.writeAll("{\"output\":");
     try std.json.Stringify.value(result.assistant_output, .{}, &out.writer);
+    if (result.thinking.len > 0) {
+        try out.writer.writeAll(",\"thinking\":");
+        try std.json.Stringify.value(result.thinking, .{}, &out.writer);
+    }
     try out.writer.print(",\"exit_code\":{d}", .{result.exit_code});
     try out.writer.writeAll(",\"model\":");
     try std.json.Stringify.value(result.model, .{}, &out.writer);
@@ -3673,7 +3713,7 @@ fn testModelPromptOverlay(model: []const u8) ?[]const u8 {
 
 fn testConfig() Config {
     return .{
-        .command_usage = "ask [--auto|--yolo] [--image PATH] [--json] [--no-save] [--no-color] [--resume <last|id>|--resume-id <id>] [--] <prompt>",
+        .command_usage = "ask [--auto|--yolo] [--image PATH] [--json] [--no-save] [--no-color] [--show-thinking] [--resume <last|id>|--resume-id <id>] [--] <prompt>",
         .default_model = "model",
         .default_agent_step_limit = 4,
         .gateway_retry_count = 1,
@@ -4601,6 +4641,7 @@ test "parse options preserves active ask flags and operands" {
         "--verbose",
         "--no-save",
         "--no-color",
+        "--show-thinking",
         "--timeout",
         "123",
         "hello",
@@ -4614,6 +4655,7 @@ test "parse options preserves active ask flags and operands" {
     try std.testing.expect(options.verbose);
     try std.testing.expect(options.no_save);
     try std.testing.expect(options.no_color);
+    try std.testing.expect(options.show_thinking);
     try std.testing.expectEqual(@as(?usize, 123 * std.time.ms_per_s), options.timeout_ms);
     try std.testing.expectEqualStrings("second", options.system_prompt_override.?);
     try std.testing.expectEqual(@as(usize, 1), options.image_paths.items.len);
@@ -8862,6 +8904,8 @@ test "CLI tagged stream routes source output rendering and diagnostics by mode" 
     try std.testing.expectEqualStrings("Reading src/main.zig\n", stderr_capture.bytes.items);
     try deps.push_text(deps.ctx, .{ .assistant_source = "after **tool**\n" });
     try deps.push_text(deps.ctx, .{ .operational = "diagnostic\n" });
+    try deps.push_text(deps.ctx, .{ .thought = "hidden plan\n" });
+    try std.testing.expectEqualStrings("hidden plan\n", ctx.thinking_output.items);
 
     try std.testing.expectEqualStrings(
         source_output ++ "\nafter **tool**\n",
@@ -8871,6 +8915,7 @@ test "CLI tagged stream routes source output rendering and diagnostics by mode" 
         "Reading src/main.zig\ndiagnostic\n",
         stderr_capture.bytes.items,
     );
+    try std.testing.expect(std.mem.find(u8, stdout_capture.bytes.items, "hidden plan") == null);
     try std.testing.expectEqual(@as(usize, 1), ctx.step_count);
     try std.testing.expectEqual(@as(usize, 0), ctx.assistant_output.items.len);
 
@@ -8891,8 +8936,10 @@ test "CLI tagged stream routes source output rendering and diagnostics by mode" 
     try json_deps.push_text(json_deps.ctx, .{ .assistant_rendered = rendered_span });
     for (source_spans) |span| try json_deps.push_text(json_deps.ctx, .{ .assistant_source = span });
     try json_deps.push_text(json_deps.ctx, .{ .operational = "diagnostic\n" });
+    try json_deps.push_text(json_deps.ctx, .{ .thought = "json plan" });
 
     try std.testing.expectEqualStrings(source_output, json_ctx.assistant_output.items);
+    try std.testing.expectEqualStrings("json plan", json_ctx.thinking_output.items);
     try std.testing.expectEqualStrings("", json_stdout_capture.bytes.items);
     try std.testing.expectEqualStrings("diagnostic\n", json_stderr_capture.bytes.items);
 
@@ -8903,6 +8950,7 @@ test "CLI tagged stream routes source output rendering and diagnostics by mode" 
     var parsed = try std.json.parseFromSlice(std.json.Value, alloc, rendered, .{});
     defer parsed.deinit();
     try std.testing.expectEqualStrings(source_output, parsed.value.object.get("output").?.string);
+    try std.testing.expectEqualStrings("json plan", parsed.value.object.get("thinking").?.string);
 }
 
 test "CLI nonterminal progress preserves distinct deferred labels without duplicates" {
