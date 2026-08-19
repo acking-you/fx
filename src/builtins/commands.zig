@@ -30,7 +30,7 @@ pub const top_level_specs = [_]TopLevelSpec{
     .{
         .kind = .ask,
         .token = "ask",
-        .usage = "ask [--auto|--yolo] [--image PATH] [--json] [--no-save] [--no-color] [--resume <last|id>|--resume-id <id>] [--continue-recovery] [--] <prompt>",
+        .usage = "ask [--auto|--yolo] [--image PATH] [--json] [--no-save] [--no-color] [--show-thinking] [--resume <last|id>|--resume-id <id>] [--continue-recovery] [--] <prompt>",
         .summary = "Run one noninteractive request",
         .options = &.{
             .{ .flag = "--auto", .description = "Automatically review unresolved permission requests" },
@@ -39,6 +39,7 @@ pub const top_level_specs = [_]TopLevelSpec{
             json_option,
             .{ .flag = "--no-save", .description = "Do not save the session; incompatible with --resume and --resume-id" },
             .{ .flag = "--no-color", .description = "Render TTY output without colors or hyperlinks" },
+            .{ .flag = "--show-thinking", .description = "Write streamed model reasoning to stderr" },
             .{ .flag = "--resume <last|id>", .description = "Continue the last session or a session by id" },
             .{ .flag = "--resume-id <id>", .description = "Continue a session by exact id" },
             .{ .flag = "--continue-recovery", .description = "Resume the paused model response in the selected session" },
@@ -47,7 +48,7 @@ pub const top_level_specs = [_]TopLevelSpec{
         .details = &.{
             "The prompt may be passed as arguments or piped on stdin when no prompt args are given.",
             "TTY stdout uses the Minimal transcript presentation; redirected stdout emits raw assistant Markdown.",
-            "Operational progress and diagnostics are written to stderr. JSON output keeps raw Markdown in `output`.",
+            "Operational progress and diagnostics are written to stderr. JSON output keeps raw Markdown in `output` and streamed reasoning in `thinking` when present.",
         },
     },
     .{
@@ -435,6 +436,7 @@ pub const slash_specs = [_]SlashSpec{
     .{ .kind = .credits, .command = "/credits", .aliases = &.{"/balance"}, .help_entry = "/credits (/balance)", .completion_description = "show gateway credits balance", .presentation_category = .account, .requires_prompt_credential = true },
     .{ .kind = .paste, .command = "/paste", .help_entry = "/paste", .completion_description = "attach an image from the clipboard when supported", .presentation_category = .media },
     .{ .kind = .fast, .command = "/fast", .help_entry = "/fast", .completion_description = "toggle Fast mode when supported", .presentation_category = .model },
+    .{ .kind = .thinking, .command = "/thinking", .help_entry = "/thinking", .completion_description = "toggle showing streamed model reasoning", .presentation_category = .appearance },
     .{ .kind = .appearance, .command = "/appearance", .aliases = &.{ "/input", "/maxxing" }, .show_aliases_in_completion = false, .help_entry = "/appearance [input lines|tint|presentation normal|minimal]", .completion_description = "choose input and transcript presentation", .presentation_category = .appearance, .has_args = true, .accepts_payload = true },
     .{ .kind = .sandbox, .command = "/sandbox", .help_entry = "/sandbox [os|none]", .completion_description = "choose command sandbox behavior", .presentation_category = .security, .has_args = true, .accepts_payload = true },
     .{ .kind = .statusline, .command = "/statusline", .help_entry = "/statusline [sandbox|context|session]", .completion_description = "toggle status line segments", .presentation_category = .appearance, .has_args = true, .accepts_payload = true },
@@ -542,6 +544,7 @@ test "built-in slash commands register exact active order" {
         "/credits",
         "/paste",
         "/fast",
+        "/thinking",
         "/appearance",
         "/sandbox",
         "/statusline",

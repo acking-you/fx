@@ -49,6 +49,7 @@ pub const Settings = struct {
     input_appearance: ?[]u8 = null,
     maxxing_mode: ?[]u8 = null,
     slash_menu_categories: ?bool = null,
+    show_thinking: ?bool = null,
     auto_upgrade: ?bool = null,
     update_channel: ?update_target.Channel = null,
     startup_scrollback: ?bool = null,
@@ -110,6 +111,7 @@ pub const ConfigSources = struct {
     input_appearance: ConfigSource = .compiled_default,
     maxxing_mode: ConfigSource = .compiled_default,
     slash_menu_categories: ConfigSource = .compiled_default,
+    show_thinking: ConfigSource = .compiled_default,
     startup_scrollback: ConfigSource = .compiled_default,
     prompt_history_enabled: ConfigSource = .compiled_default,
     statusline_sandbox: ConfigSource = .compiled_default,
@@ -445,6 +447,10 @@ fn loadMergedSettingsDetailedWithOptionalHome(
             sources.model = .process_override;
         }
     }
+    if (parseShowThinkingOverride(io_mod.getenv("FX_SHOW_THINKING"))) |value| {
+        settings.show_thinking = value;
+        sources.show_thinking = .process_override;
+    }
 
     return .{
         .settings = settings,
@@ -518,6 +524,7 @@ fn hasLegacyWorkspacePreferences(root: std.json.Value) bool {
             "input_appearance",
             "maxxing_mode",
             "slash_menu_categories",
+            "show_thinking",
             "startup_scrollback",
         }) |key| {
             if (workspace.contains(key)) return true;
@@ -546,6 +553,7 @@ fn isProfileOnlySettingKey(key: []const u8) bool {
         "input_appearance",
         "maxxing_mode",
         "slash_menu_categories",
+        "show_thinking",
         "startup_scrollback",
         "prompt_history",
         "statusLine",
@@ -564,6 +572,20 @@ fn isProfileOnlySettingKey(key: []const u8) bool {
         if (std.mem.eql(u8, key, profile_key)) return true;
     }
     return false;
+}
+
+fn parseShowThinkingOverride(raw: ?[]const u8) ?bool {
+    const value = std.mem.trim(u8, raw orelse return null, " \t\r\n");
+    if (value.len == 0) return null;
+    if (std.ascii.eqlIgnoreCase(value, "1") or
+        std.ascii.eqlIgnoreCase(value, "true") or
+        std.ascii.eqlIgnoreCase(value, "on"))
+        return true;
+    if (std.ascii.eqlIgnoreCase(value, "0") or
+        std.ascii.eqlIgnoreCase(value, "false") or
+        std.ascii.eqlIgnoreCase(value, "off"))
+        return false;
+    return null;
 }
 
 fn appendIgnoredProjectProfileSettingDiagnostics(
@@ -591,6 +613,7 @@ fn updateConfigSources(sources: *ConfigSources, settings: Settings, source: Conf
     if (settings.input_appearance != null) sources.input_appearance = source;
     if (settings.maxxing_mode != null) sources.maxxing_mode = source;
     if (settings.slash_menu_categories != null) sources.slash_menu_categories = source;
+    if (settings.show_thinking != null) sources.show_thinking = source;
     if (settings.startup_scrollback != null) sources.startup_scrollback = source;
     if (settings.prompt_history_enabled != null) sources.prompt_history_enabled = source;
     if (settings.statusline_sandbox != null) sources.statusline_sandbox = source;
@@ -1367,6 +1390,12 @@ fn parseProfileOnlyFields(
         settings.slash_menu_categories = value.bool;
     }
 
+    if (root.object.get("show_thinking")) |show_thinking_value| {
+        const value = show_thinking_value;
+        if (value != .bool) return error.InvalidShowThinkingType;
+        settings.show_thinking = value.bool;
+    }
+
     if (root.object.get("auto_upgrade")) |auto_upgrade_value| {
         const value = auto_upgrade_value;
         if (value != .bool) return error.InvalidAutoUpgradeType;
@@ -1509,6 +1538,7 @@ fn mergeSettings(target: *Settings, incoming: *Settings, alloc: Allocator) void 
         incoming.maxxing_mode = null;
     }
     if (incoming.slash_menu_categories) |value| target.slash_menu_categories = value;
+    if (incoming.show_thinking) |value| target.show_thinking = value;
     if (incoming.auto_upgrade) |value| target.auto_upgrade = value;
     if (incoming.update_channel) |value| target.update_channel = value;
     if (incoming.startup_scrollback) |value| target.startup_scrollback = value;
@@ -2077,6 +2107,24 @@ test "skill_match_fuzzy returns a migration-specific parse error" {
         error.RetiredSkillMatchFuzzy,
         parseSettingsJson(std.testing.allocator, "{\"skill_match_fuzzy\":true}"),
     );
+}
+
+test "show_thinking parses merges rejects invalid type and honors env override" {
+    try std.testing.expect((try parseSettingsJson(std.testing.allocator, "{}")).show_thinking == null);
+
+    var first = try parseSettingsJson(std.testing.allocator, "{\"show_thinking\":true}");
+    defer first.deinit(std.testing.allocator);
+    try std.testing.expectEqual(true, first.show_thinking.?);
+
+    var second = try parseSettingsJson(std.testing.allocator, "{\"show_thinking\":false}");
+    defer second.deinit(std.testing.allocator);
+    mergeSettings(&first, &second, std.testing.allocator);
+    try std.testing.expectEqual(false, first.show_thinking.?);
+
+    try std.testing.expectError(error.InvalidShowThinkingType, parseSettingsJson(std.testing.allocator, "{\"show_thinking\":\"on\"}"));
+    try std.testing.expectEqual(true, parseShowThinkingOverride("1").?);
+    try std.testing.expectEqual(false, parseShowThinkingOverride("off").?);
+    try std.testing.expect(parseShowThinkingOverride("maybe") == null);
 }
 
 test "startup_scrollback parses merges rejects invalid type and round trips" {

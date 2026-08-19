@@ -305,6 +305,7 @@ pub fn Handlers(comptime App: type) type {
                 .show_credits = commandShowCredits,
                 .paste_clipboard = commandPasteClipboard,
                 .toggle_fast = commandToggleFast,
+                .toggle_thinking = commandToggleThinking,
                 .handle_appearance = commandHandleAppearance,
                 .handle_sandbox = commandHandleSandbox,
                 .handle_statusline = commandHandleStatusline,
@@ -1568,6 +1569,11 @@ pub fn Handlers(comptime App: type) type {
         fn commandToggleFast(ctx: *anyopaque) !void {
             const app: *App = @ptrCast(@alignCast(ctx));
             try session_commands.Commands(App).toggleFast(app);
+        }
+
+        fn commandToggleThinking(ctx: *anyopaque) !void {
+            const app: *App = @ptrCast(@alignCast(ctx));
+            try session_commands.Commands(App).toggleThinking(app);
         }
 
         fn commandHandleAppearance(ctx: *anyopaque, rest: []const u8) !void {
@@ -3281,6 +3287,7 @@ pub fn settingsCatalogSnapshot(app: anytype) settings_catalog.Snapshot {
         if (comptime @hasField(@TypeOf(app.input_runtime), "slash_menu_categories")) {
             snapshot.slash_menu_categories = app.input_runtime.slash_menu_categories;
         }
+        if (comptime @hasField(App, "show_thinking")) snapshot.show_thinking = app.show_thinking;
     }
     if (comptime @hasField(App, "shell")) {
         if (comptime @hasField(@TypeOf(app.shell), "maxxing_mode")) {
@@ -3437,6 +3444,10 @@ pub fn applySettingsCatalogChange(app: anytype, change: settings_catalog.Change)
                 .{ .slash_menu_categories = enabled },
                 runtime_changed,
             );
+        },
+        .show_thinking => {
+            const enabled = parseOnOff(change.value) orelse return error.InvalidSettingsCatalogValue;
+            if (enabled != app.show_thinking) try session_commands.Commands(@TypeOf(app.*)).toggleThinking(app);
         },
         .effort => {
             const effort = types.ReasoningEffort.parseDisplayLabel(change.value) orelse

@@ -99,6 +99,7 @@ pub const UserSettingsPatch = struct {
     input_appearance: ?[]const u8 = null,
     maxxing_mode: ?[]const u8 = null,
     slash_menu_categories: ?bool = null,
+    show_thinking: ?bool = null,
     update_channel: ?update_target.Channel = null,
     startup_scrollback: ?bool = null,
     prompt_history_enabled: ?bool = null,
@@ -118,6 +119,7 @@ pub const UserSettingsPatch = struct {
             self.input_appearance == null and
             self.maxxing_mode == null and
             self.slash_menu_categories == null and
+            self.show_thinking == null and
             self.update_channel == null and
             self.startup_scrollback == null and
             self.prompt_history_enabled == null and
@@ -213,6 +215,7 @@ const UserPreferenceField = enum(u4) {
     input_appearance,
     maxxing_mode,
     slash_menu_categories,
+    show_thinking,
     update_channel,
     startup_scrollback,
     prompt_history_enabled,
@@ -233,6 +236,7 @@ const UserPreferenceField = enum(u4) {
             .input_appearance => "settings.json.preference-migration.input_appearance.json",
             .maxxing_mode => "settings.json.preference-migration.maxxing_mode.json",
             .slash_menu_categories => "settings.json.preference-migration.slash_menu_categories.json",
+            .show_thinking => "settings.json.preference-migration.show_thinking.json",
             .update_channel => "settings.json.preference-migration.update_channel.json",
             .startup_scrollback => "settings.json.preference-migration.startup_scrollback.json",
             .prompt_history_enabled => "settings.json.preference-migration.prompt_history_enabled.json",
@@ -251,6 +255,7 @@ const user_preference_fields = [_]UserPreferenceField{
     .input_appearance,
     .maxxing_mode,
     .slash_menu_categories,
+    .show_thinking,
     .update_channel,
     .startup_scrollback,
     .prompt_history_enabled,
@@ -989,6 +994,7 @@ fn applyUserPatchToRoot(
     if (patch.input_appearance) |value| application.changed = try putString(arena, &root.object, "input_appearance", value) or application.changed;
     if (patch.maxxing_mode) |value| application.changed = try putString(arena, &root.object, "maxxing_mode", value) or application.changed;
     if (patch.slash_menu_categories) |value| application.changed = try putBool(arena, &root.object, "slash_menu_categories", value) or application.changed;
+    if (patch.show_thinking) |value| application.changed = try putBool(arena, &root.object, "show_thinking", value) or application.changed;
     if (patch.update_channel) |value| application.changed = try putString(arena, &root.object, "update_channel", value.label()) or application.changed;
     if (patch.startup_scrollback) |value| application.changed = try putBool(arena, &root.object, "startup_scrollback", value) or application.changed;
 
@@ -1102,6 +1108,13 @@ fn cleanupLegacyWorkspacePreferences(
             "slash_menu_categories",
             .slash_menu_categories,
             patch.slash_menu_categories != null,
+            application,
+        );
+        removeLegacyLeaf(
+            &entry.value_ptr.object,
+            "show_thinking",
+            .show_thinking,
+            patch.show_thinking != null,
             application,
         );
         removeLegacyLeaf(
@@ -1683,7 +1696,7 @@ fn validateKnownSettingsObject(
     if (object.get("context_limits")) |value| {
         _ = context_limits.parseJsonObject(value) catch return error.InvalidSettingsFormat;
     }
-    inline for (&.{ "context", "fast_mode", "auto_upgrade", "slash_menu_categories", "startup_scrollback", "yolo_acknowledged" }) |key| {
+    inline for (&.{ "context", "fast_mode", "auto_upgrade", "slash_menu_categories", "show_thinking", "startup_scrollback", "yolo_acknowledged" }) |key| {
         if (object.get(key)) |value| {
             if (value != .bool) return error.InvalidSettingsFormat;
         }
@@ -1915,6 +1928,7 @@ test "user patch writes user preferences at top level" {
         .input_appearance = "tint",
         .maxxing_mode = "minimal",
         .slash_menu_categories = false,
+        .show_thinking = true,
         .update_channel = .dev,
         .startup_scrollback = false,
         .prompt_history_enabled = false,
@@ -1938,6 +1952,7 @@ test "user patch writes user preferences at top level" {
     try std.testing.expect(std.mem.find(u8, bytes, "\"input_appearance\":\"tint\"") != null);
     try std.testing.expect(std.mem.find(u8, bytes, "\"maxxing_mode\":\"minimal\"") != null);
     try std.testing.expect(std.mem.find(u8, bytes, "\"slash_menu_categories\":false") != null);
+    try std.testing.expect(std.mem.find(u8, bytes, "\"show_thinking\":true") != null);
     try std.testing.expect(std.mem.find(u8, bytes, "\"update_channel\":\"dev\"") != null);
     try std.testing.expect(std.mem.find(u8, bytes, "\"startup_scrollback\":false") != null);
     try std.testing.expect(std.mem.find(u8, bytes, "\"prompt_history\":{\"enabled\":false}") != null);

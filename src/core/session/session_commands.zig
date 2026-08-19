@@ -691,6 +691,27 @@ pub fn Commands(comptime App: type) type {
             try toggleFastForModel(app, app.selected_model.items, true);
         }
 
+        pub fn toggleThinking(app: *App) !void {
+            if (comptime !@hasField(App, "show_thinking")) return;
+            const enabled = !app.show_thinking;
+            app.show_thinking = enabled;
+            var attempt = config_runtime.attemptUserPreferences(app.alloc, .{ .show_thinking = enabled });
+            defer attempt.deinit(app.alloc);
+            switch (attempt) {
+                .failure => |failure| try reportUserSettingsFailure(
+                    app,
+                    "thinking",
+                    failure.err,
+                    failure.cleanup,
+                    true,
+                ),
+                .outcome => {},
+            }
+            const label = if (enabled) "on" else "off";
+            try app.writeDomainNotice(.{ .topic = "thinking", .tone = .neutral, .body = label }, true);
+            if (comptime @hasDecl(App, "playInteractionSound")) app.playInteractionSound();
+        }
+
         fn toggleFastForModel(app: *App, model: []const u8, announce: bool) !void {
             if (app.fast_mode) {
                 try applyFastMode(app, false, announce, true);
