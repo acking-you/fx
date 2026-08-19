@@ -104,6 +104,11 @@ const DetachedWorkerEventBatch = struct {
         return event;
     }
 
+    fn peek(self: *const DetachedWorkerEventBatch) ?WorkerEvent {
+        if (self.next_unvisited >= self.events.items.len) return null;
+        return self.events.items[self.next_unvisited];
+    }
+
     fn claimedAndRemaining(self: *const DetachedWorkerEventBatch) []const WorkerEvent {
         std.debug.assert(self.next_unvisited > 0);
         return self.events.items[self.next_unvisited - 1 ..];
@@ -183,6 +188,7 @@ pub fn Runtime(comptime App: type) type {
         ) CancelledEventAdmission {
             return switch (event) {
                 .assistant_presentation,
+                .thought,
                 .open_model_picker,
                 .semantic_notice,
                 .command_output,
@@ -319,6 +325,11 @@ pub fn Runtime(comptime App: type) type {
                 "chunk_bytes={d}",
                 .{text.len},
             );
+        }
+
+        pub fn pushThought(app: *App, text: []const u8) !void {
+            if (text.len == 0) return;
+            try pushEvent(app, .{ .thought = @constCast(text) });
         }
 
         pub fn pushTable(app: *App, table: assistant_presentation.TablePayload) !void {
@@ -715,12 +726,22 @@ pub fn Runtime(comptime App: type) type {
                     .append_user_feedback => |text| {
                         try handlers.write_user_prompt(handlers.ctx, .{ .text = text });
                     },
+                    .thought => |text| {
+                        applyThoughtDisplay(app, text);
+                        while (batch.peek()) |pending| {
+                            if (pending != .thought) break;
+                            const more = batch.claim() orelse break;
+                            defer worker_runtime.freeWorkerEvent(batch.alloc, more);
+                            applyThoughtDisplay(app, more.thought);
+                        }
+                    },
                     .assistant_presentation => |presentation| {
                         if (presentation.requiresTextDrain() and !try requireAssistantTextDrain(handlers)) {
                             try retainClaimedEventAndSuffix(app, &batch, "assistant_text_drain_blocked");
                             drain_owns_current = false;
                             break :events;
                         }
+                        finalizeThoughtDisplay(app);
                         markAssistantText(app);
                         switch (presentation) {
                             .text => |text| {
@@ -867,6 +888,7 @@ pub fn Runtime(comptime App: type) type {
                     },
                     .finish_prompt => |finished| {
                         try flushPendingCommandOutputAtTurnBoundary(app, handlers);
+                        finalizeThoughtDisplay(app);
                         resetStream(app, false);
                         app.shell.render_requests.request(.footer);
                         try handlers.append_history_turn(handlers.ctx, finished);
@@ -880,6 +902,7 @@ pub fn Runtime(comptime App: type) type {
                             drain_owns_current = false;
                             break :events;
                         }
+                        finalizeThoughtDisplay(app);
                         resetStream(app, false);
                         app.shell.render_requests.request(.footer);
                         defer app.shell.render_requests.finishSubmittedPromptTransition();
@@ -917,6 +940,20 @@ pub fn Runtime(comptime App: type) type {
             return switch (try handlers.drain_assistant_text(handlers.ctx)) {
                 .drained => true,
                 .blocked => false,
+            };
+        }
+
+        fn applyThoughtDisplay(app: *App, text: []const u8) void {
+            if (comptime !@hasDecl(App, "pushThoughtDisplay")) return;
+            app.pushThoughtDisplay(text) catch |err| {
+                debug_trace.logf("worker", "thought display failed err={s}", .{@errorName(err)});
+            };
+        }
+
+        fn finalizeThoughtDisplay(app: *App) void {
+            if (comptime !@hasDecl(App, "finalizeThoughtDisplay")) return;
+            app.finalizeThoughtDisplay() catch |err| {
+                debug_trace.logf("worker", "thought display finalize failed err={s}", .{@errorName(err)});
             };
         }
 

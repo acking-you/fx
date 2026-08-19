@@ -1232,6 +1232,7 @@ fn livePresentationEventBytes(event: worker_runtime.WorkerEvent) ?usize {
         .assistant_presentation => |presentation| presentation.retainedByteCount(),
         .append_user_feedback,
         .api_status_text,
+        .thought,
         => |text| text.len,
         .command_output_complete,
         .clear_route_recovery_status,

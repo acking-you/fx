@@ -828,6 +828,7 @@ pub fn Bindings(comptime App: type) type {
                 .assistant_source => {},
                 .assistant_rendered => |text| try app_worker_runtime.Runtime(App).pushText(app, text),
                 .operational => |text| try app_worker_runtime.Runtime(App).pushText(app, text),
+                .thought => |text| try app_worker_runtime.Runtime(App).pushThought(app, text),
             }
         }
 
@@ -1782,6 +1783,19 @@ test "agent deps forward app callbacks through core types" {
     const formatted = try deps.format_tool_execution_error(deps.ctx, std.testing.allocator, "tool", error.Boom);
     defer std.testing.allocator.free(formatted);
     try std.testing.expectEqualStrings("tool:Boom", formatted);
+}
+
+test "thought chunks queue onto the worker instead of mutating immediately" {
+    var app = FakeApp.init(std.testing.allocator);
+    defer app.deinit();
+
+    const deps = Bindings(FakeApp).agentRuntimeDeps(&app);
+    try deps.push_text(deps.ctx, .{ .thought = "plan the change" });
+    try deps.push_text(deps.ctx, .{ .assistant_rendered = "done" });
+
+    try std.testing.expectEqual(@as(usize, 2), app.worker.events.items.len);
+    try std.testing.expectEqualStrings("plan the change", app.worker.events.items[0].thought);
+    try std.testing.expectEqualStrings("done", app.worker.events.items[1].assistant_presentation.text);
 }
 
 test "agent deps use request-time model capability resolution when available" {

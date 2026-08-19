@@ -8991,6 +8991,15 @@ pub const TranscriptRuntime = struct {
         return transcript_store.replaceSemanticNoticeAtomic(self, alloc, entry_id, notice);
     }
 
+    pub fn refreshReplaceableSemanticNotice(
+        self: *TranscriptRuntime,
+        alloc: Allocator,
+        entry_id: u32,
+        notice: types.SemanticNotice,
+    ) !bool {
+        return transcript_store.refreshReplaceableSemanticNoticeAtomic(self, alloc, entry_id, notice);
+    }
+
     pub fn setCommandOutputRenderPolicy(self: *TranscriptRuntime, styles: Styles) void {
         return command_output_runtime.setCommandOutputRenderPolicy(self, styles);
     }

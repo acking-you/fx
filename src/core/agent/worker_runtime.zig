@@ -454,6 +454,9 @@ pub const WorkerEvent = union(enum) {
     begin_prompt_with_skill_bindings: BeginPromptWithSkillBindings,
     append_user_feedback: []u8,
     assistant_presentation: assistant_presentation.Event,
+    /// Provider reasoning. Queued so the UI thread owns transcript mutation;
+    /// never merged into assistant history.
+    thought: []u8,
     notification: notification_contract.Notification,
     question_requested,
     open_model_picker,
@@ -2510,6 +2513,7 @@ pub fn dupeWorkerEvent(alloc: std.mem.Allocator, event: WorkerEvent) !WorkerEven
         .assistant_presentation => |presentation| .{
             .assistant_presentation = try presentation.clone(alloc),
         },
+        .thought => |text| .{ .thought = try alloc.dupe(u8, text) },
         .notification => |notification| .{ .notification = notification },
         .question_requested => .question_requested,
         .open_model_picker => .open_model_picker,
@@ -2584,6 +2588,7 @@ pub fn freeWorkerEvent(alloc: std.mem.Allocator, event: WorkerEvent) void {
             var owned = presentation;
             owned.deinit(alloc);
         },
+        .thought => |text| alloc.free(text),
         .notification => {},
         .open_model_picker => {},
         .semantic_notice => |notice| types.freeSemanticNotice(alloc, notice),
@@ -4275,6 +4280,7 @@ test "clear queued prompts preserves events and discard frees event payloads" {
     } });
     const table = try assistant_presentation.parseTablePayload(alloc, "| H |\n|---|\n| v |\n");
     freeWorkerEvent(alloc, .{ .assistant_presentation = .{ .table = table } });
+    freeWorkerEvent(alloc, try dupeWorkerEvent(alloc, .{ .thought = @constCast("plan") }));
     freeWorkerEvent(alloc, try dupeWorkerEvent(alloc, .{ .semantic_notice = .{
         .topic = "system",
         .tone = .information,

@@ -145,6 +145,7 @@ const assistant_pacer = @import("ui/assistant/pacer.zig");
 const approval_prompt = @import("core/permissions/approval_prompt.zig");
 
 const Allocator = std.mem.Allocator;
+const thought_display_max_bytes: usize = 64 * 1024;
 const Layout = types.Layout;
 const Metrics = types.Metrics;
 const StreamState = types.StreamState;
@@ -533,6 +534,9 @@ const App = struct {
     context_enabled: bool = true,
     context_limits: config_runtime.context_limits.Values = .{},
     fast_mode: bool = false,
+    show_thinking: bool = false,
+    thought_entry_id: ?u32 = null,
+    thought_body: std.ArrayList(u8) = .empty,
     auto_upgrade_enabled: bool = true,
     effort: ReasoningEffort = .auto,
     diff_entries: std.ArrayList(@import("core/output/diff.zig").DiffEntry) = .empty,
@@ -821,6 +825,7 @@ const App = struct {
         self.pacer.deinit(self.alloc);
         self.selected_model.deinit(self.alloc);
         self.session_title.deinit(self.alloc);
+        self.thought_body.deinit(self.alloc);
         SessionAppRuntime.deinitPersistence(self);
         if (self.requested_resume) |*target| {
             target.deinit(self.alloc);
@@ -2033,6 +2038,49 @@ const App = struct {
 
     pub fn replaceDomainNotice(self: *App, entry_id: u32, notice: types.SemanticNotice) !bool {
         return self.shell.replaceSemanticNotice(self.alloc, entry_id, notice);
+    }
+
+    pub fn refreshReplaceableDomainNotice(self: *App, entry_id: u32, notice: types.SemanticNotice) !bool {
+        return self.shell.refreshReplaceableSemanticNotice(self.alloc, entry_id, notice);
+    }
+
+    pub fn pushThoughtDisplay(self: *App, chunk: []const u8) !void {
+        if (!self.show_thinking or chunk.len == 0) return;
+        const remaining = thought_display_max_bytes -| self.thought_body.items.len;
+        if (remaining == 0) return;
+        const copied = chunk[0..@min(chunk.len, remaining)];
+        try self.thought_body.appendSlice(self.alloc, copied);
+        if (copied.len < chunk.len) {
+            try self.thought_body.appendSlice(self.alloc, "…");
+        }
+        const notice = types.SemanticNotice{
+            .topic = "thinking",
+            .tone = .neutral,
+            .body = self.thought_body.items,
+        };
+        if (self.thought_entry_id) |entry_id| {
+            _ = try self.refreshReplaceableDomainNotice(entry_id, notice);
+            return;
+        }
+        self.thought_entry_id = try self.appendReplaceableDomainNotice(notice);
+    }
+
+    pub fn finalizeThoughtDisplay(self: *App) !void {
+        const entry_id = self.thought_entry_id orelse {
+            self.thought_body.clearRetainingCapacity();
+            return;
+        };
+        if (self.thought_body.items.len > 0) {
+            _ = self.replaceDomainNotice(entry_id, .{
+                .topic = "thinking",
+                .tone = .neutral,
+                .body = self.thought_body.items,
+            }) catch |err| {
+                debug_trace.logf("ui", "thought display finalize failed err={s}", .{@errorName(err)});
+            };
+        }
+        self.thought_entry_id = null;
+        self.thought_body.clearRetainingCapacity();
     }
 
     pub fn writeCommandOutputChunk(self: *App, stream: command_output_content.Stream, text: []const u8, record: bool) !void {

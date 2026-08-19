@@ -1969,6 +1969,32 @@ test "semantic notice append and replacement preserve ownership identity and tim
     })));
 }
 
+test "refreshable semantic notice can stream body while remaining pinned" {
+    const alloc = std.testing.allocator;
+    var runtime = TranscriptRuntime{ .layout = transcriptTestLayout(32, 16, 12) };
+    defer runtime.deinit(alloc);
+    runtime.setCommandOutputRenderPolicy(semanticNoticePaletteA());
+
+    const entry_id = try runtime.appendReplaceableSemanticNotice(alloc, .{
+        .topic = "thinking",
+        .tone = .neutral,
+        .body = "first",
+    });
+    try std.testing.expect(try runtime.refreshReplaceableSemanticNotice(alloc, entry_id, .{
+        .topic = "thinking",
+        .tone = .neutral,
+        .body = "first second",
+    }));
+    try std.testing.expect(runtime.entries.items[0].semantic_notice.pending_replacement);
+    try std.testing.expectEqualStrings("first second", runtime.entries.items[0].semantic_notice.body);
+    try std.testing.expect(try runtime.replaceSemanticNotice(alloc, entry_id, .{
+        .topic = "thinking",
+        .tone = .neutral,
+        .body = "first second done",
+    }));
+    try std.testing.expect(!runtime.entries.items[0].semantic_notice.pending_replacement);
+}
+
 fn checkSemanticNoticeAppendAllocationFailures(alloc: Allocator) !void {
     var runtime = TranscriptRuntime{ .layout = transcriptTestLayout(32, 16, 12) };
     defer runtime.deinit(alloc);

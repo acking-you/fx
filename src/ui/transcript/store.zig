@@ -1163,6 +1163,27 @@ pub fn replaceSemanticNoticeAtomic(
     entry_id: u32,
     notice: types.SemanticNotice,
 ) !bool {
+    return replaceSemanticNoticeAtomicPinned(self, alloc, entry_id, notice, false);
+}
+
+/// Updates a replaceable notice without releasing its pin, so the producer can
+/// stream additional body bytes before the final replacement.
+pub fn refreshReplaceableSemanticNoticeAtomic(
+    self: anytype,
+    alloc: Allocator,
+    entry_id: u32,
+    notice: types.SemanticNotice,
+) !bool {
+    return replaceSemanticNoticeAtomicPinned(self, alloc, entry_id, notice, true);
+}
+
+fn replaceSemanticNoticeAtomicPinned(
+    self: anytype,
+    alloc: Allocator,
+    entry_id: u32,
+    notice: types.SemanticNotice,
+    keep_pending: bool,
+) !bool {
     std.debug.assert(notice.body.len > 0);
     if (semanticNoticeIndex(self, entry_id) == null) return false;
     try self.assertCanMutateTranscript();
@@ -1188,6 +1209,7 @@ pub fn replaceSemanticNoticeAtomic(
         .tone = owned.tone,
         .body = owned.body,
         .visibility = owned.visibility,
+        .pending_replacement = keep_pending,
     } };
     handed_off = true;
     previous.deinit(alloc);
