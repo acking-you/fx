@@ -11,8 +11,8 @@ Before reporting the work as ready:
 1. Build succeeds.
 2. Focused tests for the changed path pass locally.
 3. The **Full CI** run for the exact current commit passes on every required Linux and macOS runner.
-4. Run the built binary locally and drive at least one real interaction that exercises the change end to end.
-5. Confirm the process did not abort, stderr is clean, and the behavior matches what you are about to tell the user.
+4. Run the built binary locally and drive at least one real interaction that exercises the change end to end. If the change touches streaming display (assistant tokens, thinking, tool output, notices), drive a live stream in the TUI, not only `--help` or a unit test.
+5. Confirm the process did not abort, stderr is clean, and the behavior matches what you are about to tell the user. A SIGABRT, SIGSEGV, or "segmentation fault (core dumped)" on the happy path means the work is not done, even if tests passed.
 
 If you cannot run the binary in your environment, say so explicitly and ask the user to verify. Do not silently skip this step and declare the work ready. "The tests pass" is not a substitute for running the app.
 
@@ -68,6 +68,8 @@ Key rules:
 * `src/tools/` owns built-in tool implementations. Generic tool contracts and dispatch live in `src/core/tooling/`. Default tool specs are centralized in `src/core/tooling/tool_specs.zig` or `src/builtins/tools.zig`, not in individual tool files.
 
 * `src/ui/` owns terminal rendering, event loop, input, transcript. It must not own product state.
+
+* Agent and gateway callbacks are not the UI thread. They may queue `WorkerEvent`s. They must not mutate the transcript store or other render state. Apply those mutations on worker-event drain. See **Memory Safety**.
 
 * `src/gateway/` owns provider transport. It must not absorb product-state logic.
 
@@ -126,7 +128,7 @@ Config precedence (highest wins):
 4. `<workspace>/.fx.json` (committed project defaults)
 5. Built-in defaults
 
-Project `.fx.json` accepts only repo-safe defaults: `sandbox`, `max_agent_steps`, `max_tool_result_bytes`, and `context`. Profile-owned keys such as `model`, `effort`, `fast_mode`, `slash_menu_categories`, `startup_scrollback`, `prompt_history`, `statusLine`, `skill_match_fuzzy`, `first_call_tool_choice`, `auto_upgrade`, `permission_mode`, `credential_source`, and `permission` are ignored from project config before their values are parsed.
+Project `.fx.json` accepts only repo-safe defaults: `sandbox`, `max_agent_steps`, `max_tool_result_bytes`, and `context`. Profile-owned keys such as `model`, `effort`, `fast_mode`, `slash_menu_categories`, `show_thinking`, `startup_scrollback`, `prompt_history`, `statusLine`, `skill_match_fuzzy`, `first_call_tool_choice`, `auto_upgrade`, `permission_mode`, `credential_source`, and `permission` are ignored from project config before their values are parsed.
 
 Runtime state lives under `~/.fx/sessions/<session-id>/` (`session.json`, `background/`, `subagent/`, `logs/`). Sessions are global and portable across workspaces — each session tracks its `workspace_root` which updates when resumed in a different workspace. A subagent child is an ordinary session with its own directory; `subagent/` holds create-operation identities on a parent and the control record on a child.
 
@@ -144,17 +146,55 @@ Security is permission-first. All sensitive tool behavior must integrate with `s
 
 Do not bypass the permission system for new tools.
 
-## Zig-Specific Patterns
+## Memory Safety
 
-### Memory
+Zig does not check aliasing, lifetimes, or data races. `zig build test` will not catch use-after-free or worker/UI races: most tests never attach a TTY or run the agent worker next to a paint. Treat every new mutation of shared state as unsafe until you can name the owner thread and the lifetime of every slice.
 
-* Allocators are passed explicitly. Never use a global allocator.
+### Allocators
+
+* Allocators are passed explicitly. Never use a global allocator except the documented `std.heap.c_allocator` worker-event path.
 
 * Free what you allocate. Use `defer` for cleanup at the call site.
 
 * Prefer `ArenaAllocator` for request-scoped work that can be freed in bulk.
 
 * When a function returns allocated memory, document who owns it (caller or callee).
+
+### Slices
+
+* `[]u8` and `[]const u8` are borrows, not owned strings. Storing `array_list.items` on another object without `dupe` is a use-after-free as soon as the list reallocates.
+
+* Helpers such as `types.dupeSemanticNotice` copy topic and body. Passing a live `ArrayList` slice into that call is only valid for the duration of the call, and only because the callee dupes before it returns.
+
+* Do not keep replaceable entry IDs, pins, or notice handles across a path that can drop or rebuild the transcript without clearing them.
+
+### Threads and transcript mutation
+
+The agent worker and the UI event loop are different threads.
+
+* The worker may **queue** `WorkerEvent`s. It must not mutate the transcript store, `thought_body`, replaceable semantic notices, paint flags, or any other UI-owned render state.
+
+* Transcript mutation happens on the UI thread during worker-event drain, and never while `TranscriptRuntime.painting` is true. `assertCanMutateTranscript` is a ReleaseSafe abort if it fires, not a recoverable error.
+
+* Existing marshaled paths include assistant text, tables, code blocks, semantic notices, command output, and tool lifecycle. A new stream (reasoning, progress, status, or anything that updates the transcript while a turn is running) needs a `WorkerEvent` variant and a drain arm.
+
+* Do not call `pushThoughtDisplay`, `appendReplaceableSemanticNotice`, `refreshReplaceableSemanticNotice`, `rebuildTranscriptCacheFromEntries`, or equivalent store methods from `agentPushText`, `agentPushEvent`, or gateway stream callbacks. Queue the event; apply it on drain.
+
+Cross-thread transcript mutation has already crashed the TUI twice on one path: SIGABRT from `assertCanMutateTranscript` during paint, then SIGSEGV from a freed `std.Io.Writer` vtable (`call [rbp+0x18]`). The reproduction was `FX_SHOW_THINKING=1 ./zig-out/bin/fx` while reasoning chunks streamed. The fix is to queue `WorkerEvent.thought` and apply it only on drain. Do not reintroduce a second apply path.
+
+### When writing the code
+
+Before landing a mutation, answer:
+
+1. Which thread owns this buffer?
+2. Does any stored slice outlive a realloc, a drain, or a paint?
+3. If this is an agent or gateway callback, does it only enqueue a `WorkerEvent`?
+4. Are errors logged? Swallowing `replaceSemanticNotice` or finalize failures hides pin leaks and aborted updates.
+5. Is there a test that the event is **queued**, not applied immediately? A single-threaded call to the App method will not catch the race.
+
+If the change streams into the TUI, run `./zig-out/bin/fx` and drive that stream. A core dump on the happy path is a failed change.
+
+## Zig-Specific Patterns
 
 ### Error Handling
 
@@ -432,6 +472,8 @@ The canonical repository is `vercel-labs/fx` on GitHub. All URLs, links, and ref
 
 * Do not add hidden product state that only exists in the live shell
 
+* Do not mutate the transcript or other UI render state from the agent worker or gateway stream callbacks. Queue a `WorkerEvent` and apply it on drain.
+
 * Do not add a second execution path for the same feature without a clear reason
 
 * Do not commit generated state from `.fx/`, `.zig-cache/`, or `zig-out/`
@@ -445,6 +487,8 @@ The canonical repository is `vercel-labs/fx` on GitHub. All URLs, links, and ref
 * Do not create git tags manually (the release workflow owns tag creation)
 
 * Do not report work as ready without running the binary. See **Declaring Work Ready**.
+
+* Do not treat a green unit-test run as proof that a streaming TUI path is memory-safe.
 
 ## Before Marking a PR Ready
 

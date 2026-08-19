@@ -56,7 +56,10 @@ Use `fx ask` for a single request:
 
 ```bash
 fx ask "explain the changes in this repository"
+fx ask --show-thinking "explain the changes in this repository"
 ```
+
+Streamed model reasoning is off in the interactive transcript by default. Toggle it with `/thinking`, `/settings`, or `FX_SHOW_THINKING=1`. ACP sessions always emit `agent_thought_chunk` updates. `fx ask --json` includes a separate `thinking` field when reasoning is present; it is never merged into `output`.
 
 fx starts in `auto` permission mode, which reviews unresolved sensitive actions. See [Permissions](https://fx.sh/docs/configure-fx/permissions) for other modes and persistent rules.
 
