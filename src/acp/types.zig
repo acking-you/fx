@@ -132,6 +132,12 @@ pub fn writeAgentMessageChunk(w: *std.Io.Writer, text: []const u8) !void {
     try w.writeAll("}}");
 }
 
+pub fn writeAgentThoughtChunk(w: *std.Io.Writer, text: []const u8) !void {
+    try w.writeAll("{\"sessionUpdate\":\"agent_thought_chunk\",\"content\":{\"type\":\"text\",\"text\":");
+    try writeJsonStr(text, w);
+    try w.writeAll("}}");
+}
+
 pub fn writeUserMessageChunk(w: *std.Io.Writer, text: []const u8) !void {
     try w.writeAll("{\"sessionUpdate\":\"user_message_chunk\",\"content\":{\"type\":\"text\",\"text\":");
     try writeJsonStr(text, w);
@@ -209,6 +215,15 @@ test "writeAgentMessageChunk produces valid json" {
     defer out.deinit();
     try writeAgentMessageChunk(&out.writer, "Hello world");
     const expected = "{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"Hello world\"}}";
+    try std.testing.expectEqualStrings(expected, out.writer.buffered());
+}
+
+test "writeAgentThoughtChunk produces valid json" {
+    const alloc = std.testing.allocator;
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+    try writeAgentThoughtChunk(&out.writer, "plan the change");
+    const expected = "{\"sessionUpdate\":\"agent_thought_chunk\",\"content\":{\"type\":\"text\",\"text\":\"plan the change\"}}";
     try std.testing.expectEqualStrings(expected, out.writer.buffered());
 }
 

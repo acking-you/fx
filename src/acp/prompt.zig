@@ -122,6 +122,15 @@ const AcpContext = struct {
         try self.sendUpdate(out.writer.buffered());
     }
 
+    fn sendAgentThought(self: *AcpContext, text: []const u8) !void {
+        const plain = try stripAnsiAlloc(self.alloc, text);
+        defer if (plain.ptr != text.ptr) self.alloc.free(plain);
+        var out: std.Io.Writer.Allocating = .init(self.alloc);
+        defer out.deinit();
+        try acp_types.writeAgentThoughtChunk(&out.writer, plain);
+        try self.sendUpdate(out.writer.buffered());
+    }
+
     fn sendModelRecoveryStatus(
         self: *AcpContext,
         status: types.RouteRecoveryStatus,
@@ -1845,13 +1854,17 @@ fn pushRouteRecoveryStatus(
 
 fn pushText(raw_ctx: *anyopaque, emission: agent_runtime.TextEmission) !void {
     const ctx: *AcpContext = @ptrCast(@alignCast(raw_ctx));
-    const text = switch (emission) {
+    switch (emission) {
         .assistant_source => return,
-        .assistant_rendered => |text| text,
-        .operational => |text| text,
-    };
-    if (text.len == 0) return;
-    ctx.sendAgentText(text) catch {};
+        .thought => |text| {
+            if (text.len == 0) return;
+            ctx.sendAgentThought(text) catch {};
+        },
+        .assistant_rendered, .operational => |text| {
+            if (text.len == 0) return;
+            ctx.sendAgentText(text) catch {};
+        },
+    }
 }
 
 fn pushToolLifecycle(raw_ctx: *anyopaque, event: types.ToolLifecycleEvent) !void {
@@ -3061,6 +3074,35 @@ test "ACP stream adapter strips ANSI from agent chunks and suppresses writer fai
         notification_count += 1;
     }
     try std.testing.expectEqual(spans.len, notification_count);
+
+    {
+        var thought_capture = try tmp.dir.createFile(io_mod.getIo(), "acp-thought.jsonl", .{});
+        defer thought_capture.close(io_mod.getIo());
+        {
+            var state = try initTestAcpState(alloc, "/tmp/workspace", .ask);
+            defer state.deinit();
+            state.writer = .{ .stdout = thought_capture };
+            var ctx = AcpContext{
+                .alloc = alloc,
+                .state = &state,
+                .session_id = "session_1",
+            };
+            const deps = agentRuntimeDeps(&ctx);
+            try deps.push_text(deps.ctx, .{ .thought = "inspect the diff" });
+            try thought_capture.sync(io_mod.getIo());
+        }
+
+        var thought_file = try tmp.dir.openFile(io_mod.getIo(), "acp-thought.jsonl", .{});
+        defer thought_file.close(io_mod.getIo());
+        const thought_captured = try io_mod.readFileToEnd(alloc, &thought_file, 64 * 1024);
+        defer alloc.free(thought_captured);
+        var parsed = try std.json.parseFromSlice(std.json.Value, alloc, std.mem.trim(u8, thought_captured, "\n"), .{});
+        defer parsed.deinit();
+        try std.testing.expectEqualStrings("session/update", parsed.value.object.get("method").?.string);
+        const update = parsed.value.object.get("params").?.object.get("update").?.object;
+        try std.testing.expectEqualStrings("agent_thought_chunk", update.get("sessionUpdate").?.string);
+        try std.testing.expectEqualStrings("inspect the diff", update.get("content").?.object.get("text").?.string);
+    }
 
     var failed_output = try tmp.dir.createFile(io_mod.getIo(), "acp-stream-failure.jsonl", .{});
     failed_output.close(io_mod.getIo());
