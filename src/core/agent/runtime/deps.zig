@@ -170,10 +170,14 @@ pub const CredentialRefreshMode = auth_runtime.CredentialRefreshMode;
 
 /// Ordered text emitted by the agent runtime. Payloads are borrowed for the
 /// duration of the callback.
+///
+/// `thought` is provider reasoning. Hosts must not merge it into assistant
+/// history or `agent_message_chunk` output.
 pub const TextEmission = union(enum) {
     assistant_source: []const u8,
     assistant_rendered: []const u8,
     operational: []const u8,
+    thought: []const u8,
 };
 
 /// Accent colors for diff add/remove markers. Named fields so the two styles

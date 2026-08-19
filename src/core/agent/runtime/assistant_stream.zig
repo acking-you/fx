@@ -196,6 +196,10 @@ pub fn onStreamReasoningChunk(ctx: *anyopaque, chunk: []const u8) void {
             debug_trace.logf("agent", "token progress publication failed source=reasoning err={s}", .{@errorName(err)});
         };
     }
+    if (chunk.len == 0) return;
+    stream_ctx.hooks.push_text(stream_ctx.hooks.ctx, .{ .thought = chunk }) catch |err| {
+        debug_trace.logf("agent", "thought publication failed err={s}", .{@errorName(err)});
+    };
 }
 
 /// Tools that publish no provisional status leave the activity row with
@@ -697,6 +701,7 @@ const StreamCapture = struct {
     lifecycle_events: std.ArrayList(types.ToolLifecycleEvent) = .empty,
     source_spans: std.ArrayList([]u8) = .empty,
     text_spans: std.ArrayList([]u8) = .empty,
+    thought_spans: std.ArrayList([]u8) = .empty,
     tables: std.ArrayList(TablePayload) = .empty,
     code_blocks: std.ArrayList(assistant_presentation.CodeBlockPayload) = .empty,
     thematic_rule_count: usize = 0,
@@ -719,6 +724,8 @@ const StreamCapture = struct {
         self.source_spans.deinit(alloc);
         for (self.text_spans.items) |text| alloc.free(text);
         self.text_spans.deinit(alloc);
+        for (self.thought_spans.items) |text| alloc.free(text);
+        self.thought_spans.deinit(alloc);
         for (self.tables.items) |*table| table.deinit(alloc);
         self.tables.deinit(alloc);
         for (self.code_blocks.items) |*block| block.deinit(alloc);
@@ -830,14 +837,22 @@ const StreamCapture = struct {
                 self.source_spans.appendAssumeCapacity(owned);
                 return;
             },
-            .assistant_rendered, .operational => {},
+            .assistant_rendered, .operational, .thought => {},
+        }
+
+        if (emission == .thought) {
+            const text = emission.thought;
+            try self.thought_spans.ensureUnusedCapacity(self.capture_alloc, 1);
+            const owned = try self.capture_alloc.dupe(u8, text);
+            self.thought_spans.appendAssumeCapacity(owned);
+            return;
         }
 
         self.text_calls += 1;
         if (self.text_error) |err| return err;
 
         const text = switch (emission) {
-            .assistant_source => unreachable,
+            .assistant_source, .thought => unreachable,
             .assistant_rendered => |text| text,
             .operational => |text| text,
         };
@@ -1881,6 +1896,9 @@ test "stream callbacks publish absolute raw output token progress" {
     onStreamReasoningChunk(&stream_ctx, "thinking ");
     onStreamContentChunk(&stream_ctx, "visible");
     onStreamContentChunk(&stream_ctx, " later\n");
+    try std.testing.expectEqual(@as(usize, 1), capture.thought_spans.items.len);
+    try std.testing.expectEqualStrings("thinking ", capture.thought_spans.items[0]);
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, capture.source_spans.items[0], "thinking"));
 
     var expected_output = token_estimate.StreamingEstimator{};
     expected_output.consume("thinking ");

@@ -3028,6 +3028,13 @@ test "processQueuedPrompt estimates raw reasoning and content independently of c
     const final_progress = hooks.token_updates.items[hooks.token_updates.items.len - 1];
     try std.testing.expectEqual(expected_reasoning.estimate() + expected_content.estimate(), final_progress.output_tokens);
     try std.testing.expect(!final_progress.output_exact);
+    try std.testing.expectEqual(@as(usize, 2), hooks.thoughts.items.len);
+    try std.testing.expectEqualStrings("thinking", hooks.thoughts.items[0]);
+    try std.testing.expectEqualStrings(" through", hooks.thoughts.items[1]);
+    for (hooks.texts.items) |text| {
+        try std.testing.expect(std.mem.find(u8, text, "thinking") == null);
+    }
+    try std.testing.expect(hooks.history_assistant_text == null or std.mem.find(u8, hooks.history_assistant_text.?, "thinking") == null);
 }
 
 test "processQueuedPrompt preserves aggregate Gateway delivery ambiguity" {
