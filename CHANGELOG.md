@@ -6,6 +6,7 @@
 
 ### Improvements
 
+- **Terminal attention bells:** Emit one terminal bell when fx pauses for permission or other input so terminal multiplexers can flag waiting panes
 - **JSON recovery progress:** Report retry, recovery, and safety-pause status on stderr during `fx ask --json` while keeping stdout parseable
 - **Notification sounds:** Use clearer 48 kHz AAC cues with full tails and the intended volume differences between actions
 
