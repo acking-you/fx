@@ -308,7 +308,7 @@ describe("cli: help", () => {
 Run one noninteractive request
 
 Usage:
-  fx ask [--auto|--yolo] [--image PATH] [--json] [--no-save] [--no-color] [--resume <last|id>|--resume-id <id>] [--continue-recovery] [--] <prompt>
+  fx ask [--auto|--yolo] [--image PATH] [--json] [--no-save] [--no-color] [--show-thinking] [--resume <last|id>|--resume-id <id>] [--continue-recovery] [--] <prompt>
 
 Options:
   --auto               Automatically review unresolved permission requests
@@ -317,6 +317,7 @@ Options:
   --json               Emit machine-readable JSON instead of text
   --no-save            Do not save the session; incompatible with --resume and --resume-id
   --no-color           Render TTY output without colors or hyperlinks
+  --show-thinking      Write streamed model reasoning to stderr
   --resume <last|id>   Continue the last session or a session by id
   --resume-id <id>     Continue a session by exact id
   --continue-recovery  Resume the paused model response in the selected session
@@ -324,7 +325,7 @@ Options:
 
 The prompt may be passed as arguments or piped on stdin when no prompt args are given.
 TTY stdout uses the Minimal transcript presentation; redirected stdout emits raw assistant Markdown.
-Operational progress and diagnostics are written to stderr. JSON output keeps raw Markdown in \`output\`.
+Operational progress and diagnostics are written to stderr. JSON output keeps raw Markdown in \`output\` and streamed reasoning in \`thinking\` when present.
 `;
 
       for (const alias of ["--help", "-h"]) {
