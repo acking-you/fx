@@ -2,6 +2,52 @@
 
 Instructions for AI coding agents working with this codebase.
 
+## This Fork and Its Branches
+
+This checkout is `acking-you/fx`, a fork of the upstream `vercel-labs/fx`. It is not a divergent rewrite: upstream remains the source of truth for the shared codebase, and this fork stays close enough to keep merging from it indefinitely.
+
+### Vision for `byok`
+
+`byok` ("bring your own key") is the development branch and the default place to work. Its purpose is to make fx fully usable against any provider or endpoint the user already pays for, rather than a single hosted gateway. Work that belongs on `byok`:
+
+* Provider and endpoint flexibility: custom base URLs, alternate credential sources, self-hosted or proxied gateways, and model catalogs that are not the upstream default.
+
+* Behavior the fork wants on by default even when upstream keeps it optional or absent, such as always showing streamed model reasoning and replaying it as reasoning context.
+
+* Local experiments that are not ready to propose upstream, or that upstream would not want.
+
+Keep `byok` changes as small and as close to upstream structure as possible. Every unnecessary divergence is a future merge conflict, and a change shaped like upstream's own code is one that can still be offered back.
+
+### Branch roles
+
+| Branch | Role |
+| --- | --- |
+| `byok` | Fork development. Default branch for new work. Receives merges from `upstream`. |
+| `upstream` | Clean mirror of `vercel-labs/fx` `main`. Never commit here directly; it only ever fast-forwards to the upstream remote. |
+| `main` | Base for pull requests sent to upstream. |
+| `fix/*`, `feat/*` | Focused branches, usually cut for a single upstream pull request. |
+
+Remotes: `origin` is `acking-you/fx`; `vercel` is `vercel-labs/fx`.
+
+### Merging upstream
+
+Upstream is merged into `byok` periodically so the fork never accumulates a large, unreviewable delta. The routine:
+
+1. `git fetch vercel`
+2. Fast-forward the mirror: `git branch -f upstream vercel/main` (it must fast-forward; if it cannot, the mirror was committed to by mistake).
+3. `git switch byok && git merge upstream`
+4. Resolve conflicts in favor of upstream's structure, keeping the fork's behavior. Then build, run the focused tests for every conflicted path, and run the binary per **Declaring Work Ready**.
+
+Prefer a merge over a rebase: `byok` is shared, and a rebase would rewrite published history.
+
+Upstream frequently changes counts and layout that fork tests assert (command totals, settings rows, menu geometry). Expect to update those fixtures as part of the merge rather than treating them as regressions.
+
+### Contributing back to upstream
+
+When a change on this fork is a bug fix or a feature upstream would plausibly accept, send it to `vercel-labs/fx` as a pull request instead of letting it live only here. Fewer fork-only patches means less merge cost forever.
+
+Cut the branch from `main` (not `byok`) so the pull request carries only that change and none of the fork's opinionated defaults. Follow upstream's own rules in **Pull Request Classification** and **Before Marking a PR Ready** — a PR from a fork is held to the same standard as any other. Keep BYOK-specific behavior out of it: if a fix is entangled with fork defaults, split the upstreamable part out first.
+
 ## Declaring Work Ready
 
 Do not say the work is "ready", "done", "good to go", "complete", or similar until you have personally run the binary and exercised the change on its happy path. A passing test suite is necessary, not sufficient — tests in this repo do not always construct the full runtime, attach a TTY, or spawn background threads, so they will not catch startup crashes, render regressions, or thread-lifetime bugs.
@@ -128,7 +174,7 @@ Config precedence (highest wins):
 4. `<workspace>/.fx.json` (committed project defaults)
 5. Built-in defaults
 
-Project `.fx.json` accepts only repo-safe defaults: `sandbox`, `max_agent_steps`, `max_tool_result_bytes`, and `context`. Profile-owned keys such as `model`, `effort`, `fast_mode`, `slash_menu_categories`, `show_thinking`, `startup_scrollback`, `prompt_history`, `statusLine`, `skill_match_fuzzy`, `first_call_tool_choice`, `auto_upgrade`, `permission_mode`, `credential_source`, and `permission` are ignored from project config before their values are parsed.
+Project `.fx.json` accepts only repo-safe defaults: `sandbox`, `max_agent_steps`, `max_tool_result_bytes`, and `context`. Profile-owned keys such as `model`, `effort`, `fast_mode`, `slash_menu_categories`, `startup_scrollback`, `prompt_history`, `statusLine`, `skill_match_fuzzy`, `first_call_tool_choice`, `auto_upgrade`, `permission_mode`, `credential_source`, and `permission` are ignored from project config before their values are parsed.
 
 Runtime state lives under `~/.fx/sessions/<session-id>/` (`session.json`, `background/`, `subagent/`, `logs/`). Sessions are global and portable across workspaces — each session tracks its `workspace_root` which updates when resumed in a different workspace. A subagent child is an ordinary session with its own directory; `subagent/` holds create-operation identities on a parent and the control record on a child.
 
@@ -180,7 +226,7 @@ The agent worker and the UI event loop are different threads.
 
 * Do not call `pushThoughtDisplay`, `appendReplaceableSemanticNotice`, `refreshReplaceableSemanticNotice`, `rebuildTranscriptCacheFromEntries`, or equivalent store methods from `agentPushText`, `agentPushEvent`, or gateway stream callbacks. Queue the event; apply it on drain.
 
-Cross-thread transcript mutation has already crashed the TUI twice on one path: SIGABRT from `assertCanMutateTranscript` during paint, then SIGSEGV from a freed `std.Io.Writer` vtable (`call [rbp+0x18]`). The reproduction was `FX_SHOW_THINKING=1 ./zig-out/bin/fx` while reasoning chunks streamed. The fix is to queue `WorkerEvent.thought` and apply it only on drain. Do not reintroduce a second apply path.
+Cross-thread transcript mutation has already crashed the TUI twice on one path: SIGABRT from `assertCanMutateTranscript` during paint, then SIGSEGV from a freed `std.Io.Writer` vtable (`call [rbp+0x18]`). The reproduction was running `./zig-out/bin/fx` while reasoning chunks streamed, which every turn now does because the reasoning display is unconditional. The fix is to queue `WorkerEvent.thought` and apply it only on drain. Do not reintroduce a second apply path.
 
 ### When writing the code
 
@@ -464,7 +510,7 @@ Do not create version tags manually. Do not change `build.zig.zon` version (it i
 
 ## Repository and License
 
-The canonical repository is `vercel-labs/fx` on GitHub. All URLs, links, and references to the repo must use `vercel-labs/fx` (not `vercel/fx`, `user/fx`, or any other org/owner). Licensed under Apache-2.0.
+The canonical upstream repository is `vercel-labs/fx` on GitHub. All URLs, links, and references to the project must use `vercel-labs/fx` (not `vercel/fx`, `user/fx`, or any other org/owner), including in code and documentation written on this fork — a reference that points at the fork would break for upstream users and in any pull request sent back. This checkout is the `acking-you/fx` fork; see **This Fork and Its Branches**. Licensed under Apache-2.0.
 
 ## What Not To Do
 
