@@ -604,6 +604,7 @@ fn writeChatMessageJsonInner(
             }
             if (message.content) |content| {
                 if (content.len > 0) {
+                    if (wrote_part) try writer.writeByte(',');
                     try writer.writeAll("{\"type\":\"text\",\"text\":");
                     try std.json.Stringify.value(content, .{}, writer);
                     try writer.writeByte('}');
@@ -1664,4 +1665,40 @@ test "freeGatewayCompletion frees parsed completions under testing allocator" {
 
     const completion = try parseGatewayCompletion(alloc, body);
     freeGatewayCompletion(alloc, completion);
+}
+
+test "assistant content with reasoning stays parseable JSON in every part combination" {
+    const alloc = std.testing.allocator;
+    // A missing separator between parts made the whole request body invalid,
+    // which surfaced as error.SyntaxError from expectedProviderToolName before
+    // the request was ever sent. Cover every combination of present parts.
+    const calls = [_]ToolCall{.{ .id = "call_1", .name = "read_file", .arguments_json = "{}" }};
+    const bodies = [_]?[]const u8{ null, "", "plain", "quote\" and \\ backslash", "line\nbreak" };
+    const signatures = [_]?[]const u8{ null, "", "sig" };
+    const contents = [_]?[]const u8{ null, "", "answer" };
+
+    for (bodies) |reasoning| {
+        for (signatures) |signature| {
+            for (contents) |content| {
+                for ([_]bool{ false, true }) |with_calls| {
+                    var out: std.Io.Writer.Allocating = .init(alloc);
+                    defer out.deinit();
+                    try writeChatMessageJson(alloc, &out.writer, .{
+                        .role = .assistant,
+                        .content = content,
+                        .tool_calls = if (with_calls) &calls else &.{},
+                        .reasoning = reasoning,
+                        .reasoning_signature = signature,
+                    });
+
+                    var parsed = std.json.parseFromSlice(std.json.Value, alloc, out.written(), .{}) catch |err| {
+                        std.debug.print("unparseable assistant message: {s}\n", .{out.written()});
+                        return err;
+                    };
+                    defer parsed.deinit();
+                    try std.testing.expect(parsed.value.object.get("content").? == .array);
+                }
+            }
+        }
+    }
 }

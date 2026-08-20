@@ -139,6 +139,80 @@ describe("reasoning context replay", () => {
   );
 
   test(
+    "reasoning alongside assistant text and a tool call stays valid JSON",
+    async () => {
+      const { home, workspace } = createRoot();
+      const reasoning = "weighing the options";
+      const signature = "FX_SIG";
+
+      // Reasoning, assistant text, and a tool call in one step. A missing
+      // separator between the reasoning and text parts made the request body
+      // invalid, which failed the turn with error.SyntaxError before the
+      // request was sent, so the follow-up step never ran.
+      const gateway = startFakeGateway([
+        () =>
+          sse([
+            { type: "reasoning-start", id: "r1" },
+            {
+              type: "reasoning-delta",
+              id: "r1",
+              delta: reasoning,
+              providerMetadata: { anthropic: { signature } },
+            },
+            { type: "reasoning-end", id: "r1" },
+            { type: "text-start", id: "a1" },
+            { type: "text-delta", id: "a1", delta: "Let me run that." },
+            { type: "text-end", id: "a1" },
+            {
+              type: "tool-call",
+              toolCallId: "call_1",
+              toolName: "run_command",
+              input: { command: "printf hello" },
+            },
+            {
+              type: "finish",
+              finishReason: { unified: "tool-calls", raw: "tool_calls" },
+              usage: { inputTokens: { total: 5 }, outputTokens: { total: 6 } },
+            },
+          ]),
+        () =>
+          sse([
+            { type: "text-start", id: "a2" },
+            { type: "text-delta", id: "a2", delta: "done" },
+            {
+              type: "finish",
+              finishReason: { unified: "stop", raw: "stop" },
+              usage: { inputTokens: { total: 7 }, outputTokens: { total: 2 } },
+            },
+          ]),
+      ]);
+
+      try {
+        const result = await runFx(["ask", "--json", "--no-save", "run printf hello"], {
+          cwd: workspace,
+          env: gatewayEnv(home, gateway),
+          timeoutMs: TIMEOUT,
+        });
+
+        expect(result.code).toBe(0);
+        expect(`${result.stdout}${result.stderr}`).not.toContain("SyntaxError");
+        // A second request proves the turn survived to replay the reasoning.
+        expect(gateway.requests).toHaveLength(2);
+
+        const body = gateway.requests[1]!.body;
+        // Every message must be parseable, not just the reasoning part.
+        expect(() => JSON.parse(body)).not.toThrow();
+        const replayed = reasoningParts(body);
+        expect(replayed).toHaveLength(1);
+        expect(replayed[0]!.text).toBe(reasoning);
+      } finally {
+        gateway.stop();
+      }
+    },
+    TIMEOUT,
+  );
+
+  test(
     "a turn without provider reasoning sends no reasoning part",
     async () => {
       const { home, workspace } = createRoot();
