@@ -249,6 +249,7 @@ describe("cli: help", () => {
       expect(r.code).toBe(0);
       expect(r.stderr).toBe("");
       expect(r.stdout).not.toContain("\x1b[");
+      expect(r.stdout).not.toContain("\x1b]2;");
       expect(r.stdout).toStartWith(
         `𝒇x v${sourceVersion()}\nFast, native coding agent for the terminal.\n`,
       );
@@ -265,6 +266,7 @@ describe("cli: help", () => {
       expect(r.stdout).not.toContain("-c, -r, --continue");
       expect(r.stdout).toContain("--resume [last|<id>]");
       expect(r.stdout).toContain("--resume-last");
+      expect(r.stdout).toContain("session resume [last|id]");
       expect(r.stdout).toContain("-v, --version");
       expect(r.stdout).not.toContain("Must appear before the command");
       expect(r.stdout).toContain("Examples:\n");
@@ -308,24 +310,27 @@ describe("cli: help", () => {
 Run one noninteractive request
 
 Usage:
-  fx ask [--auto|--yolo] [--image PATH] [--json] [--no-save] [--no-color] [--show-thinking] [--resume <last|id>|--resume-id <id>] [--continue-recovery] [--] <prompt>
+  fx ask [--auto|--yolo] [--image PATH] [--json] [--quiet] [--prompt-permissions] [--no-save] [--no-color] [--show-thinking] [--resume <last|id>|--resume-id <id>] [--continue-recovery] [--] <prompt>
 
 Options:
-  --auto               Automatically review unresolved permission requests
-  --yolo               Disable permission checks and command sandboxing
-  --image PATH         Attach an image file; repeat for multiple images
-  --json               Emit machine-readable JSON instead of text
-  --no-save            Do not save the session; incompatible with --resume and --resume-id
-  --no-color           Render TTY output without colors or hyperlinks
-  --show-thinking      Write streamed model reasoning to stderr
-  --resume <last|id>   Continue the last session or a session by id
-  --resume-id <id>     Continue a session by exact id
-  --continue-recovery  Resume the paused model response in the selected session
-  --                   Treat every following argument as prompt text
+  --auto                Automatically review unresolved permission requests
+  --yolo                Disable permission checks and command sandboxing
+  --image PATH          Attach an image file; repeat for multiple images
+  --json                Emit machine-readable JSON instead of text
+  --quiet               Suppress assistant output
+  --prompt-permissions  Prompt for Y/N permission approval when stdin is a TTY
+  --no-save             Do not save the session; incompatible with --resume and --resume-id
+  --no-color            Render TTY output without colors or hyperlinks
+  --show-thinking       Write streamed model reasoning to stderr
+  --resume <last|id>    Continue the last session or a session by id
+  --resume-id <id>      Continue a session by exact id
+  --continue-recovery   Resume the paused model response in the selected session
+  --                    Treat every following argument as prompt text
 
 The prompt may be passed as arguments or piped on stdin when no prompt args are given.
 TTY stdout uses the Minimal transcript presentation; redirected stdout emits raw assistant Markdown.
 Operational progress and diagnostics are written to stderr. JSON output keeps raw Markdown in \`output\` and streamed reasoning in \`thinking\` when present.
+With --prompt-permissions, JSON and quiet requests may prompt on stderr only when stdin is a TTY.
 `;
 
       for (const alias of ["--help", "-h"]) {
@@ -333,6 +338,26 @@ Operational progress and diagnostics are written to stderr. JSON output keeps ra
         expect(result.code).toBe(0);
         expect(result.stderr).toBe("");
         expect(result.stdout).toBe(expected);
+      }
+    },
+    TIMEOUT,
+  );
+
+  test(
+    "fx session help documents inspect resume migrate and recover",
+    async () => {
+      for (const args of [
+        ["session", "--help"],
+        ["session", "resume", "--help"],
+      ]) {
+        const r = await runFx(args);
+        expect(r.code).toBe(0);
+        expect(r.stderr).toBe("");
+        expect(r.stdout).toContain("Inspect, resume, migrate, or recover saved sessions");
+        expect(r.stdout).toContain("session <last|id>|--id <id>");
+        expect(r.stdout).toContain("session resume [last|<id>]");
+        expect(r.stdout).toContain("session migrate <id>|--id <id>");
+        expect(r.stdout).toContain("session recover <id>|--id <id>");
       }
     },
     TIMEOUT,
@@ -2245,6 +2270,119 @@ describe("cli: sessions", () => {
   );
 
   test(
+    "fx sessions text shows named, unnamed, and renamed sessions",
+    async () => {
+      const root = mkdtempSync(join(tmpdir(), "fx-e2e-session-names-"));
+      try {
+        const home = join(root, "home");
+        const workspace = join(root, "workspace");
+        const sessionsDir = join(home, ".fx", "sessions");
+        mkdirSync(sessionsDir, { recursive: true, mode: 0o700 });
+        mkdirSync(workspace);
+        chmodSync(join(home, ".fx"), 0o700);
+        chmodSync(sessionsDir, 0o700);
+        const workspaceRoot = realpathSync(workspace);
+        const named = {
+          id: "named-session",
+          workspace_root: workspaceRoot,
+          origin_workspace_root: workspaceRoot,
+          title: "Investigate cache misses",
+          preview: null,
+          display_metadata_present: true,
+          created_at_ms: 1,
+          updated_at_ms: 3,
+          conversation_language: "en",
+          history_len: 2,
+        };
+        const unnamed = {
+          ...named,
+          id: "unnamed-session",
+          title: null,
+          display_metadata_present: false,
+          updated_at_ms: 2,
+          history_len: 0,
+        };
+        const scriptOnly = {
+          ...named,
+          id: "script-only-session",
+          title: "Review landing page",
+          updated_at_ms: 1_700_000_000_123,
+          conversation_language: "und-Latn",
+          history_len: 1,
+        };
+        const indexPath = join(sessionsDir, "index.json");
+        writeFileSync(
+          indexPath,
+          JSON.stringify({
+            schema_version: 3,
+            sessions: [scriptOnly, named, unnamed],
+          }),
+          { mode: 0o600 },
+        );
+
+        const first = await runFx(["sessions"], {
+          cwd: workspaceRoot,
+          env: { HOME: home, ...NO_GATEWAY_AUTH },
+          timeoutMs: TIMEOUT,
+        });
+        expect(first.code).toBe(0);
+        expect(first.stderr).toBe("");
+        expect(first.stdout).toContain(
+          " - Investigate cache misses\n   id=named-session | 2 turns | English | updated 1970-01-01 00:00:00.003 UTC",
+        );
+        expect(first.stdout).toContain(
+          " - Untitled session\n   id=unnamed-session | 0 turns | English | updated 1970-01-01 00:00:00.002 UTC",
+        );
+        expect(first.stdout).toContain(
+          " - Review landing page\n   id=script-only-session | 1 turn | Latin script | updated 2023-11-14 22:13:20.123 UTC",
+        );
+        expect(first.stdout).not.toContain("updated_at_ms");
+        expect(first.stdout).not.toContain("language=");
+
+        const structured = await runFx(["sessions", "--json"], {
+          cwd: workspaceRoot,
+          env: { HOME: home, ...NO_GATEWAY_AUTH },
+          timeoutMs: TIMEOUT,
+        });
+        expect(structured.code).toBe(0);
+        expect(structured.stderr).toBe("");
+        expect(JSON.parse(structured.stdout).sessions[0]).toMatchObject({
+          id: "script-only-session",
+          updated_at_ms: 1_700_000_000_123,
+          conversation_language: "und-Latn",
+        });
+
+        writeFileSync(
+          indexPath,
+          JSON.stringify({
+            schema_version: 3,
+            sessions: [
+              scriptOnly,
+              { ...named, title: "Investigate cache hits" },
+              unnamed,
+            ],
+          }),
+          { mode: 0o600 },
+        );
+        const renamed = await runFx(["sessions"], {
+          cwd: workspaceRoot,
+          env: { HOME: home, ...NO_GATEWAY_AUTH },
+          timeoutMs: TIMEOUT,
+        });
+        expect(renamed.code).toBe(0);
+        expect(renamed.stderr).toBe("");
+        expect(renamed.stdout).toContain(
+          " - Investigate cache hits\n   id=named-session | 2 turns | English",
+        );
+        expect(renamed.stdout).not.toContain("Investigate cache misses");
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+    TIMEOUT,
+  );
+
+  test(
     "session listing pages a 9001-entry index without scanning session directories",
     async () => {
       const root = mkdtempSync(join(tmpdir(), "fx-e2e-session-pages-"));
@@ -3674,7 +3812,13 @@ describe("cli: interactive startup", () => {
   test(
     "interactive startup without TTY exits one",
     async () => {
-      const cases = [[], ["resume", "last"], ["--resume"]];
+      const cases = [
+        [],
+        ["resume", "last"],
+        ["--resume"],
+        ["session", "resume", "last"],
+        ["session", "resume", "--id", "session.v3"],
+      ];
 
       for (const args of cases) {
         const home = realpathSync(mkdtempSync(join(tmpdir(), "fx-e2e-no-tty-")));
@@ -4151,7 +4295,9 @@ describe("cli: ask success", () => {
       const home = join(root, "home");
       const workspace = join(root, "workspace");
       const lockReady = join(root, "latest-lock-ready");
+      const unrelatedReply = `unrelated saved turn ${"x".repeat(64 * 1024)}`;
       const gateway = startFakeGateway([
+        fakeGatewayFinalText(unrelatedReply),
         fakeGatewayFinalText("first saved turn"),
         fakeGatewayFinalText("contended exact turn"),
         fakeGatewayFinalText("contended latest turn"),
@@ -4172,6 +4318,16 @@ describe("cli: ask success", () => {
           FX_MODEL: FAKE_GATEWAY_MODEL,
           FX_AUTO_UPGRADE: "0",
         };
+
+        const unrelated = await runFx(
+          ["ask", "--json", "--auto", "Save an unrelated long turn."],
+          { cwd: workspaceRoot, env, timeoutMs: 60_000 },
+        );
+        expect(unrelated.code).toBe(0);
+        expect(unrelated.stderr).toBe("");
+        const unrelatedJson = JSON.parse(unrelated.stdout);
+        const unrelatedSessionId = unrelatedJson.session_id as string;
+        expect(unrelatedJson.output).toBe(unrelatedReply);
 
         const first = await runFx(
           ["ask", "--json", "--auto", "Reply with the first saved turn."],
@@ -4233,10 +4389,16 @@ describe("cli: ask success", () => {
         });
         expect(listed.code).toBe(0);
         expect(listed.stderr).toBe("");
-        expect(JSON.parse(listed.stdout).sessions[0]).toMatchObject({
+        const listedSessions = JSON.parse(listed.stdout).sessions;
+        expect(listedSessions[0]).toMatchObject({
           id: sessionId,
           history_len: 2,
         });
+        expect(listedSessions[1]).toMatchObject({
+          id: unrelatedSessionId,
+          history_len: 1,
+        });
+        expect(existsSync(tokenPath)).toBe(true);
 
         const latest = await runFx(
           [
@@ -4253,6 +4415,7 @@ describe("cli: ask success", () => {
         expect(latest.stderr).toBe("");
         expect(JSON.parse(latest.stdout).session_id).toBe(sessionId);
         expect(JSON.parse(latest.stdout).output.trim()).toBe("contended latest turn");
+        expect(existsSync(tokenPath)).toBe(true);
 
         lockHolder.kill();
         await lockHolder.exited;
@@ -4272,7 +4435,21 @@ describe("cli: ask success", () => {
         expect(repaired.stderr).toBe("");
         expect(JSON.parse(repaired.stdout).output.trim()).toBe("repairing turn");
         expect(existsSync(tokenPath)).toBe(false);
-        expect(gateway.requests).toHaveLength(4);
+        const targetDetail = await runFx(
+          ["session", "--id", sessionId, "--json"],
+          { cwd: workspaceRoot, env: { HOME: home }, timeoutMs: 60_000 },
+        );
+        expect(targetDetail.code).toBe(0);
+        expect(targetDetail.stderr).toBe("");
+        expect(JSON.parse(targetDetail.stdout).history_len).toBe(4);
+        const unrelatedDetail = await runFx(
+          ["session", "--id", unrelatedSessionId, "--json"],
+          { cwd: workspaceRoot, env: { HOME: home }, timeoutMs: 60_000 },
+        );
+        expect(unrelatedDetail.code).toBe(0);
+        expect(unrelatedDetail.stderr).toBe("");
+        expect(JSON.parse(unrelatedDetail.stdout).history_len).toBe(1);
+        expect(gateway.requests).toHaveLength(5);
       } finally {
         if (lockHolder) {
           lockHolder.kill();
@@ -4419,7 +4596,7 @@ describe("cli: error handling", () => {
             "fx ask: --no-save cannot be used with --resume or --resume-id",
           );
           expect(rejected.stderr).toContain(
-            "usage: fx ask [--auto|--yolo] [--image PATH] [--json] [--no-save]",
+            "usage: fx ask [--auto|--yolo] [--image PATH] [--json] [--quiet] [--prompt-permissions] [--no-save]",
           );
         }
         expect(gateway.requests).toHaveLength(0);

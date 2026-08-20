@@ -313,6 +313,7 @@ const AskOptions = struct {
     images: std.ArrayList(ImageAttachment) = .empty,
     system_prompt_override: ?[]u8 = null,
     json_output: bool = false,
+    prompt_permissions: bool = false,
     timeout_ms: ?usize = null,
     quiet: bool = false,
     verbose: bool = false,
@@ -425,14 +426,11 @@ const OutputMode = enum {
     fn capturesJson(self: OutputMode) bool {
         return self == .json;
     }
-
-    fn permitsPermissionPrompt(self: OutputMode) bool {
-        return self == .raw or self.isTerminal();
-    }
 };
 
 const RunOptions = struct {
     output_mode: OutputMode,
+    prompt_permissions: bool = false,
     images: []const ImageAttachment = &.{},
     command_timeout_ms: ?usize = null,
     save_session: bool = true,
@@ -499,6 +497,7 @@ const AskContext = struct {
     auth_failure: ?auth_runtime.FailureSnapshot = null,
     output_mode: OutputMode = .raw,
     show_thinking: bool = false,
+    prompt_permissions: bool = false,
     presenter: ?*ask_presentation.Runtime = null,
     pending_tool_progress: std.ArrayList(PendingToolProgress) = .empty,
     deferred_tool_progress: std.ArrayList([]u8) = .empty,
@@ -1188,6 +1187,7 @@ fn runWithDeps(alloc: Allocator, args: []const [:0]const u8, cfg: Config, deps: 
     );
     const result = runPromptInternal(alloc, options.prompt, options.permission_override, effective_cfg, .{
         .output_mode = output_mode,
+        .prompt_permissions = options.prompt_permissions,
         .images = if (options.images.items.len > 0) options.images.items else &.{},
         .command_timeout_ms = options.timeout_ms,
         .save_session = !options.no_save,
@@ -1372,6 +1372,7 @@ fn runPromptInternal(alloc: Allocator, prompt: []const u8, permission_override: 
     ctx.workspace_access = startup.takeWorkspaceAccess();
     ctx.output_mode = options.output_mode;
     ctx.show_thinking = options.show_thinking;
+    ctx.prompt_permissions = options.prompt_permissions;
     ctx.mcp_elicitation_capabilities = askElicitationCapabilities(
         options.output_mode,
         options.deps.stdin_is_tty(options.deps.stdin_ctx),
@@ -1980,7 +1981,7 @@ fn cliAdmissionContext(
         advertised_dynamic_tool_names,
     );
     tool_ctx.permission_review_turn = review_turn;
-    if (cliPermissionPromptAllowed(ctx)) {
+    if (cliContextPermissionPromptAllowed(ctx)) {
         tool_ctx.permission_prompter = .{
             .context = @ptrCast(ctx),
             .request_fn = requestCliPermission,
@@ -2198,7 +2199,7 @@ fn promptCliPermissionApproval(
     ctx: *AskContext,
     label: []const u8,
 ) !PermissionApprovalPromptResult {
-    if (!cliPermissionPromptAllowed(ctx)) return .unavailable;
+    if (!cliContextPermissionPromptAllowed(ctx)) return .unavailable;
     return try ctx.deps.permission_approval_prompt(
         ctx.deps.permission_approval_prompt_ctx,
         ctx.deps.stderr_ctx,
@@ -2226,8 +2227,23 @@ fn emitAskNotificationBell(raw: *anyopaque) void {
     };
 }
 
-fn cliPermissionPromptAllowed(ctx: *const AskContext) bool {
-    return ctx.output_mode.permitsPermissionPrompt();
+fn cliPermissionPromptAllowed(
+    output_mode: OutputMode,
+    prompt_permissions: bool,
+    stdin_is_tty: bool,
+) bool {
+    return switch (output_mode) {
+        .raw, .terminal, .terminal_no_color => true,
+        .json, .quiet => prompt_permissions and stdin_is_tty,
+    };
+}
+
+fn cliContextPermissionPromptAllowed(ctx: *const AskContext) bool {
+    return cliPermissionPromptAllowed(
+        ctx.output_mode,
+        ctx.prompt_permissions,
+        ctx.deps.stdin_is_tty(ctx.deps.stdin_ctx),
+    );
 }
 
 fn describeToolAction(raw_ctx: *anyopaque, arena: Allocator, call: ToolCall, file_display_path: ?[]const u8, advertised_dynamic_tool_names: []const []const u8) ![]const u8 {
@@ -3233,6 +3249,8 @@ fn parseOptionsWithStdin(alloc: Allocator, args: []const [:0]const u8, stdin: St
             opts.system_prompt_override = try alloc.dupe(u8, args[i]);
         } else if (std.mem.eql(u8, arg, "--json")) {
             opts.json_output = true;
+        } else if (std.mem.eql(u8, arg, "--prompt-permissions")) {
+            opts.prompt_permissions = true;
         } else if (std.mem.eql(u8, arg, "--timeout")) {
             i += 1;
             if (i >= args.len) return error.MissingPrompt;
@@ -3723,7 +3741,7 @@ fn testModelPromptOverlay(model: []const u8) ?[]const u8 {
 
 fn testConfig() Config {
     return .{
-        .command_usage = "ask [--auto|--yolo] [--image PATH] [--json] [--no-save] [--no-color] [--show-thinking] [--resume <last|id>|--resume-id <id>] [--] <prompt>",
+        .command_usage = "ask [--auto|--yolo] [--image PATH] [--json] [--quiet] [--prompt-permissions] [--no-save] [--no-color] [--show-thinking] [--resume <last|id>|--resume-id <id>] [--] <prompt>",
         .default_model = "model",
         .default_agent_step_limit = 4,
         .gateway_retry_count = 1,
@@ -4647,6 +4665,7 @@ test "parse options preserves active ask flags and operands" {
         "--system",
         "second",
         "--json",
+        "--prompt-permissions",
         "--quiet",
         "--verbose",
         "--no-save",
@@ -4661,6 +4680,7 @@ test "parse options preserves active ask flags and operands" {
 
     try std.testing.expectEqual(@as(?PermissionMode, .auto), options.permission_override);
     try std.testing.expect(options.json_output);
+    try std.testing.expect(options.prompt_permissions);
     try std.testing.expect(options.quiet);
     try std.testing.expect(options.verbose);
     try std.testing.expect(options.no_save);
@@ -5982,6 +6002,85 @@ test "fx ask captured and quiet permission paths bypass terminal prompt" {
     try std.testing.expect(std.mem.find(u8, stderr_capture.bytes.items, "noninteractive_permission_prompt_unavailable") != null);
 }
 
+test "fx ask permission prompt policy requires explicit captured-mode opt in and TTY stdin" {
+    const Case = struct {
+        output_mode: OutputMode,
+        prompt_permissions: bool,
+        stdin_is_tty: bool,
+        expected: bool,
+    };
+    const cases = [_]Case{
+        .{ .output_mode = .raw, .prompt_permissions = false, .stdin_is_tty = false, .expected = true },
+        .{ .output_mode = .terminal, .prompt_permissions = false, .stdin_is_tty = false, .expected = true },
+        .{ .output_mode = .terminal_no_color, .prompt_permissions = false, .stdin_is_tty = false, .expected = true },
+        .{ .output_mode = .json, .prompt_permissions = false, .stdin_is_tty = true, .expected = false },
+        .{ .output_mode = .quiet, .prompt_permissions = false, .stdin_is_tty = true, .expected = false },
+        .{ .output_mode = .json, .prompt_permissions = true, .stdin_is_tty = false, .expected = false },
+        .{ .output_mode = .quiet, .prompt_permissions = true, .stdin_is_tty = false, .expected = false },
+        .{ .output_mode = .json, .prompt_permissions = true, .stdin_is_tty = true, .expected = true },
+        .{ .output_mode = .quiet, .prompt_permissions = true, .stdin_is_tty = true, .expected = true },
+    };
+
+    for (cases) |case| {
+        try std.testing.expectEqual(
+            case.expected,
+            cliPermissionPromptAllowed(
+                case.output_mode,
+                case.prompt_permissions,
+                case.stdin_is_tty,
+            ),
+        );
+    }
+}
+
+test "fx ask captured permission prompt opt in uses the existing prompter" {
+    const alloc = std.testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(alloc);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var stdout_capture: TestCapture = .{};
+    defer stdout_capture.deinit(alloc);
+    var stderr_capture: TestCapture = .{};
+    defer stderr_capture.deinit(alloc);
+    var prompt = TestPermissionPrompt{ .result = .approve };
+    var deps = testPromptRunDeps(&stdout_capture, &stderr_capture, testPresentKeyStartup);
+    deps.permission_approval_prompt_ctx = @ptrCast(&prompt);
+    deps.permission_approval_prompt = TestPermissionPrompt.prompt;
+    deps.stdin_is_tty = TestTty.yes;
+    var ctx = AskContext.init(alloc, testConfig(), deps, "/tmp/workspace");
+    defer ctx.deinit();
+    ctx.prompt_permissions = true;
+
+    ctx.output_mode = .json;
+    const approved = try requestToolPermissionOutcome(&ctx, arena, .{
+        .id = "captured-approved",
+        .name = "terminal",
+        .arguments_json = "{\"action\":\"exec\",\"command\":\"touch captured-approved.txt\"}",
+    }, .ask, &.{}, &.{});
+    try std.testing.expectEqual(ToolPermissionDecision.once, approved.decision);
+    try std.testing.expectEqual(@as(usize, 1), prompt.calls);
+    try std.testing.expect(std.mem.find(u8, stderr_capture.bytes.items, "Approve? [y/N]") != null);
+    try std.testing.expectEqualStrings("", stdout_capture.bytes.items);
+
+    prompt.result = .deny;
+    ctx.output_mode = .quiet;
+    const denied = try requestToolPermissionOutcome(&ctx, arena, .{
+        .id = "quiet-denied",
+        .name = "terminal",
+        .arguments_json = "{\"action\":\"exec\",\"command\":\"touch quiet-denied.txt\"}",
+    }, .ask, &.{}, &.{});
+    try std.testing.expectEqual(ToolPermissionDecision.deny, denied.decision);
+    try std.testing.expectEqual(@as(usize, 2), prompt.calls);
+
+    ctx.deps.stdin_is_tty = TestTty.no;
+    try std.testing.expectError(error.NonInteractivePermissionRequired, requestToolPermissionOutcome(&ctx, arena, .{
+        .id = "quiet-non-tty",
+        .name = "terminal",
+        .arguments_json = "{\"action\":\"exec\",\"command\":\"touch quiet-non-tty.txt\"}",
+    }, .ask, &.{}, &.{}));
+    try std.testing.expectEqual(@as(usize, 2), prompt.calls);
+}
+
 test "fx ask terminal permission prompt propagates prompt hook errors" {
     const FailingPrompt = struct {
         fn prompt(
@@ -6207,11 +6306,8 @@ test "fx ask auto mode uses automatic allow for external prepared file mutation"
     var review_turn = TestReviewTurn.init("Write hello to desktop-test.txt.", call);
     const accepted = try requestToolPermissionOutcomeWithRequest(&ctx, arena, call, review_turn.context(), .auto, &.{}, null, null, &.{});
 
-    try std.testing.expectEqual(@as(usize, 1), fake.calls);
-    try std.testing.expectEqualStrings(
-        "Write hello to desktop-test.txt.",
-        fake.root_text,
-    );
+    try std.testing.expectEqual(@as(usize, 0), fake.calls);
+    try std.testing.expectEqualStrings("", fake.root_text);
     try std.testing.expectEqual(ToolPermissionDecision.once, accepted.decision);
     const authorization = switch (accepted.execution_authority orelse return error.TestExpectedEqual) {
         .file_mutation => |authorization| authorization,
