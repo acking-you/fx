@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildShardPlan, selectShard } from "./ci-shards";
@@ -96,6 +96,26 @@ describe("CI shard planner", () => {
     expect(assigned).toEqual(files);
     expect(new Set(assigned).size).toBe(files.length);
     expect(selectShard(plan, 0)).toEqual(plan.shards[0]);
+  });
+
+  // Every other case here builds a synthetic manifest, so a real test file
+  // added without a weight entry only failed once CI ran the shard planner.
+  // This checks the committed manifest against the committed test files.
+  test("the committed manifest covers every committed test file", () => {
+    const discovered = readdirSync(import.meta.dir, { withFileTypes: true })
+      .filter((entry) => entry.isFile() && entry.name.endsWith(".test.ts"))
+      .map((entry) => entry.name);
+    const manifest = JSON.parse(
+      readFileSync(join(import.meta.dir, "ci-shard-weights.json"), "utf8"),
+    );
+
+    // buildShardPlan raises on a missing or stale entry, which is the exact
+    // check CI performs before running any shard.
+    expect(() => buildShardPlan(discovered, manifest, 4)).not.toThrow();
+
+    const plan = buildShardPlan(discovered, manifest, 4);
+    const assigned = plan.shards.flat().sort();
+    expect(assigned).toEqual([...discovered].sort());
   });
 
   test("an exact relative path does not select a colliding Bun test basename", () => {
