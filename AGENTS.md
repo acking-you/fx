@@ -8,13 +8,15 @@ This checkout is `acking-you/fx`, a fork of the upstream `vercel-labs/fx`. It is
 
 ### Vision for `byok`
 
-`byok` ("bring your own key") is the development branch and the default place to work. Its purpose is to make fx fully usable against any provider or endpoint the user already pays for, rather than a single hosted gateway. Work that belongs on `byok`:
+`byok` ("bring your own key") is the development branch and the default place to work. It pursues three goals, stated for users in [README.md](README.md):
 
-* Provider and endpoint flexibility: custom base URLs, alternate credential sources, self-hosted or proxied gateways, and model catalogs that are not the upstream default.
+1. **Remove every hard binding to Vercel.** Vercel stays fully supported and stops being required. No default path may assume that account, that gateway, or that key. Where upstream hardcodes one hosted provider, the fork makes it one choice among several.
 
-* Behavior the fork wants on by default even when upstream keeps it optional or absent, such as always showing streamed model reasoning and replaying it as reasoning context.
+2. **Support any BYOK provider.** Configurable base URLs, credentials from the environment or a local store rather than one vendor's login, and model catalogs that are not the upstream default, so an OpenAI-compatible endpoint, corporate proxy, or local server works.
 
-* Local experiments that are not ready to propose upstream, or that upstream would not want.
+3. **Improve the agent harness.** Better default agent behavior even where upstream keeps it optional or absent, such as always showing streamed model reasoning and replaying it as reasoning context.
+
+Local experiments that upstream would not want also belong here. Note that goals 1 and 2 are only partly implemented: `FX_GATEWAY_BASE_URL` is still honored for a loopback address only, since the base URL carries the bearer token. Do not describe either goal as finished in user-facing text, and read the code before assuming an endpoint or credential source already works.
 
 Keep `byok` changes as small and as close to upstream structure as possible. Every unnecessary divergence is a future merge conflict, and a change shaped like upstream's own code is one that can still be offered back.
 

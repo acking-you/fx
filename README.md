@@ -19,6 +19,22 @@ For end users, its CLI output style and form factor aim to be closer to a Unix s
 
 It's open source (Apache-2.0), model-agnostic, and suitable for both local and cloud inference.
 
+## About this fork (`byok`)
+
+This is the `byok` branch of [`acking-you/fx`](https://github.com/acking-you/fx), a fork of upstream [`vercel-labs/fx`](https://github.com/vercel-labs/fx). Upstream stays the source of truth for the shared codebase and is merged in regularly; this branch exists for the work upstream would not take, aimed at three goals.
+
+**1. Remove every hard binding to Vercel.** Upstream is model-agnostic in principle but is wired to one hosted path in practice: `fx login` signs in with Vercel, credentials resolve through Vercel OIDC and AI Gateway keys, and the model catalog and request endpoint assume that gateway. This fork treats all of it as one provider among many. Vercel remains fully supported, never required — nothing in a default run should assume that account, that gateway, or that key.
+
+**2. Support any BYOK provider.** Bring the key you already pay for and point fx at whatever speaks the protocol: an OpenAI-compatible endpoint, a corporate proxy, a self-hosted or local server, or another commercial provider. That means configurable base URLs, credentials from the environment or a local store instead of one vendor's login, and model catalogs that are not the upstream default.
+
+**3. Improve the agent harness.** Better default agent behavior even where upstream keeps it optional or absent. Streamed model reasoning, for example, is always shown and is replayed to the provider as reasoning context for the rest of the turn, so the model keeps its own reasoning across tool steps rather than losing it.
+
+### Status
+
+Goals 1 and 2 are in progress, not finished. Today `fx login` still signs in with Vercel, credentials still resolve through Vercel OIDC or an AI Gateway key, and `FX_GATEWAY_BASE_URL` is honored only for a loopback address because the base URL carries the bearer token — a remote override is ignored rather than used. Goal 3 has landed in part: the reasoning behavior described above works now. Treat the first two goals as the direction of this branch, and check the code before assuming a given endpoint or credential source is already supported.
+
+Fork changes stay deliberately small and shaped like upstream's own code: divergence costs a merge conflict every time, and a change that fits upstream's structure can still be sent back as a pull request. Bug fixes and features upstream would plausibly accept are contributed to `vercel-labs/fx` rather than kept here. See [AGENTS.md](AGENTS.md) for branch roles and the merge routine.
+
 ## Install
 
 ```bash
