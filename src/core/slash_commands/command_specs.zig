@@ -67,7 +67,6 @@ pub const SlashKind = enum {
     credits,
     paste,
     fast,
-    thinking,
     appearance,
     sandbox,
     statusline,
@@ -1847,10 +1846,10 @@ test "slash completion categories follow canonical entries" {
 test "help catalog groups visible commands and searches all command metadata" {
     const registry = testSlashRegistry();
 
-    try std.testing.expectEqual(@as(usize, 40), helpCatalogCount(registry, ""));
+    try std.testing.expectEqual(@as(usize, 39), helpCatalogCount(registry, ""));
     try std.testing.expectEqualStrings("/help", helpCatalogSpecAt(registry, "", 0).?.command);
     try std.testing.expectEqual(@as(usize, 5), helpCatalogCategoryCount(registry, "", .general));
-    try std.testing.expectEqual(@as(usize, 5), helpCatalogCount(registry, "appearance"));
+    try std.testing.expectEqual(@as(usize, 4), helpCatalogCount(registry, "appearance"));
     try std.testing.expectEqualStrings("/paste", helpCatalogSpecAt(registry, "clipboard", 0).?.command);
 }
 
@@ -2219,7 +2218,6 @@ test "slash completion descriptions follow completion matches" {
     try std.testing.expectEqualStrings("compact older conversation turns", nthSlashCompletionDescription(testSlashRegistry(), "/comp", 0).?);
     try std.testing.expectEqualStrings("show alias availability", nthSlashCompletionDescription(testSlashRegistry(), "/ali", 0).?);
     try std.testing.expectEqualStrings("toggle Fast mode when supported", nthSlashCompletionDescription(testSlashRegistry(), "/fa", 0).?);
-    try std.testing.expectEqualStrings("toggle showing streamed model reasoning", nthSlashCompletionDescription(testSlashRegistry(), "/thi", 0).?);
 }
 
 test "slash completion aliases participate in registry order" {

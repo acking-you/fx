@@ -121,6 +121,16 @@ pub fn streamGatewayCompletion(
     errdefer message.freeToolCalls(alloc, tool_calls);
     const content = if (result.completion.content) |content_text| try alloc.dupe(u8, content_text) else null;
     errdefer if (content) |owned| alloc.free(owned);
+    // Reasoning and its signature must survive the ownership transfer together:
+    // a replayed thinking block whose signature is missing is dropped by the
+    // provider, and one whose signature does not match its text is rejected.
+    const reasoning = if (result.completion.reasoning) |text| try alloc.dupe(u8, text) else null;
+    errdefer if (reasoning) |owned| alloc.free(owned);
+    const reasoning_signature = if (result.completion.reasoning_signature) |signature|
+        try alloc.dupe(u8, signature)
+    else
+        null;
+    errdefer if (reasoning_signature) |owned| alloc.free(owned);
     const generation_id = if (result.completion.generation_id) |id| try alloc.dupe(u8, id) else null;
     errdefer if (generation_id) |owned| alloc.free(owned);
     const provider_failure_detail = if (result.completion.provider_failure_detail) |detail| try alloc.dupe(u8, detail) else null;
@@ -139,6 +149,8 @@ pub fn streamGatewayCompletion(
         .status = status,
         .completion = .{
             .content = content,
+            .reasoning = reasoning,
+            .reasoning_signature = reasoning_signature,
             .tool_calls = tool_calls,
             .generation_id = generation_id,
             .generation_metadata_invalid = generation_metadata_invalid,

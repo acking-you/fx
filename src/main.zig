@@ -77,6 +77,7 @@ const github_publish = @import("core/github/github_publish.zig");
 const subagent_domain = @import("core/subagent/domain.zig");
 const subagent_execution = @import("core/subagent/execution.zig");
 const types = @import("core/shared/types.zig");
+const thought_presentation = @import("core/output/thought_presentation.zig");
 const image_attachments = @import("core/images/image_attachments.zig");
 const permissions = @import("core/permissions/permissions.zig");
 const sandbox = @import("core/permissions/sandbox.zig");
@@ -534,7 +535,6 @@ const App = struct {
     context_enabled: bool = true,
     context_limits: config_runtime.context_limits.Values = .{},
     fast_mode: bool = false,
-    show_thinking: bool = false,
     thought_entry_id: ?u32 = null,
     thought_body: std.ArrayList(u8) = .empty,
     auto_upgrade_enabled: bool = true,
@@ -2045,20 +2045,32 @@ const App = struct {
         return self.shell.refreshReplaceableSemanticNotice(self.alloc, entry_id, notice);
     }
 
-    pub fn pushThoughtDisplay(self: *App, chunk: []const u8) !void {
-        if (!self.show_thinking or chunk.len == 0) return;
-        const remaining = thought_display_max_bytes -| self.thought_body.items.len;
-        if (remaining == 0) return;
-        const copied = chunk[0..@min(chunk.len, remaining)];
-        try self.thought_body.appendSlice(self.alloc, copied);
-        if (copied.len < chunk.len) {
-            try self.thought_body.appendSlice(self.alloc, "…");
-        }
-        const notice = types.SemanticNotice{
+    /// Renders the trailing window of the streamed reasoning. The transcript is
+    /// bounded because long reasoning would push the answer off screen; the
+    /// untruncated body still reaches the provider through
+    /// `ChatMessage.reasoning`, which the display never touches.
+    fn renderThoughtNotice(self: *App) types.SemanticNotice {
+        const visible = thought_presentation.visibleBody(
+            self.thought_body.items,
+            thought_presentation.default_visible_lines,
+        );
+        return .{
             .topic = "thinking",
             .tone = .neutral,
-            .body = self.thought_body.items,
+            .body = visible.text,
         };
+    }
+
+    pub fn pushThoughtDisplay(self: *App, chunk: []const u8) !void {
+        if (chunk.len == 0) return;
+        // The retained buffer is capped only to bound transcript memory on a
+        // runaway stream. Display truncation is a separate, line-based window.
+        const remaining = thought_display_max_bytes -| self.thought_body.items.len;
+        if (remaining > 0) {
+            const copied = chunk[0..@min(chunk.len, remaining)];
+            try self.thought_body.appendSlice(self.alloc, copied);
+        }
+        const notice = self.renderThoughtNotice();
         if (self.thought_entry_id) |entry_id| {
             _ = try self.refreshReplaceableDomainNotice(entry_id, notice);
             return;
@@ -2072,11 +2084,7 @@ const App = struct {
             return;
         };
         if (self.thought_body.items.len > 0) {
-            _ = self.replaceDomainNotice(entry_id, .{
-                .topic = "thinking",
-                .tone = .neutral,
-                .body = self.thought_body.items,
-            }) catch |err| {
+            _ = self.replaceDomainNotice(entry_id, self.renderThoughtNotice()) catch |err| {
                 debug_trace.logf("ui", "thought display finalize failed err={s}", .{@errorName(err)});
             };
         }
@@ -3755,6 +3763,7 @@ test {
     _ = @import("napi_fetch_state.zig");
     _ = @import("acp/prompt.zig");
     _ = @import("core/output/activity_status.zig");
+    _ = @import("core/output/thought_presentation.zig");
     _ = @import("core/agent/agent_runtime.zig");
     _ = @import("core/agent/execution_memory.zig");
     _ = @import("core/agent/runtime/assistant_stream.zig");

@@ -30,7 +30,6 @@ pub const SettingId = enum {
     statusline_context,
     statusline_session,
     slash_menu_categories,
-    show_thinking,
     model,
     effort,
     fast_mode,
@@ -61,7 +60,6 @@ pub const Snapshot = struct {
     statusline_context: bool = false,
     statusline_session: bool = false,
     slash_menu_categories: bool = true,
-    show_thinking: bool = false,
     startup_scrollback: bool = true,
     prompt_history: bool = true,
     sound_level: []const u8 = "on",
@@ -79,7 +77,6 @@ pub const Snapshot = struct {
             .statusline_context => onOff(self.statusline_context),
             .statusline_session => onOff(self.statusline_session),
             .slash_menu_categories => onOff(self.slash_menu_categories),
-            .show_thinking => onOff(self.show_thinking),
             .startup_scrollback => onOff(self.startup_scrollback),
             .prompt_history => onOff(self.prompt_history),
             .sound_level => self.sound_level,
@@ -440,7 +437,6 @@ const specs = [_]Spec{
     .{ .id = .statusline_context, .category = .interface, .label = "Status line context", .description = "Show context usage in the status line" },
     .{ .id = .statusline_session, .category = .interface, .label = "Status line session", .description = "Show the session title in the status line" },
     .{ .id = .slash_menu_categories, .category = .interface, .label = "Slash menu categories", .description = "Show categories and skill sources in slash-command results" },
-    .{ .id = .show_thinking, .category = .interface, .label = "Show thinking", .description = "Show streamed model reasoning in the transcript" },
     .{ .id = .model, .category = .agent, .label = "Model", .description = "Choose the model used for new turns" },
     .{ .id = .effort, .category = .agent, .label = "Reasoning effort", .description = "Control how much reasoning the model applies" },
     .{ .id = .fast_mode, .category = .agent, .label = "Fast mode", .description = "Use faster inference when the model supports it" },
@@ -562,7 +558,6 @@ fn staticOptionsFor(id: SettingId) []const []const u8 {
         .statusline_context,
         .statusline_session,
         .slash_menu_categories,
-        .show_thinking,
         .startup_scrollback,
         .prompt_history,
         => &on_off_options,
@@ -627,8 +622,8 @@ test "settings catalog projects grouped searchable preferences" {
         .sandbox = "os",
     };
 
-    try std.testing.expectEqual(@as(usize, 15), filteredCount(snapshot, .all, ""));
-    try std.testing.expectEqual(@as(usize, 7), filteredCount(snapshot, .interface, ""));
+    try std.testing.expectEqual(@as(usize, 14), filteredCount(snapshot, .all, ""));
+    try std.testing.expectEqual(@as(usize, 6), filteredCount(snapshot, .interface, ""));
     try std.testing.expectEqual(@as(usize, 4), filteredCount(snapshot, .agent, ""));
     try std.testing.expectEqual(@as(usize, 1), filteredCount(snapshot, .notifications, ""));
     try std.testing.expectEqual(@as(usize, 3), filteredCount(snapshot, .advanced, ""));
@@ -681,17 +676,6 @@ test "settings catalog returns typed edit choices without effects" {
     try std.testing.expectEqualStrings("future-tier", optionAt(&snapshot, .effort, 1).?);
     try std.testing.expectEqualStrings("high", optionAt(&snapshot, .effort, 2).?);
     try std.testing.expectEqual(@as(usize, 1), selectedOptionIndex(&snapshot, .effort).?);
-}
-
-test "settings catalog exposes show thinking as an interface toggle" {
-    const shown: Snapshot = .{ .show_thinking = true };
-    const item = itemAt(shown, .interface, "show thinking", 0).?;
-
-    try std.testing.expectEqual(SettingId.show_thinking, item.id);
-    try std.testing.expectEqualStrings("Show thinking", item.label);
-    try std.testing.expectEqualStrings("on", item.value);
-    try std.testing.expectEqual(@as(usize, 2), optionCount(&shown, .show_thinking));
-    try std.testing.expectEqualStrings("off", optionAt(&shown, .show_thinking, 0).?);
 }
 
 test "settings catalog exposes slash menu categories as an interface toggle" {

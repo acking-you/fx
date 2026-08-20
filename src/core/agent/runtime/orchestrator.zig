@@ -4003,7 +4003,12 @@ fn processQueuedPromptLoop(
                 continuation_injected = true;
                 const continuation_prompt = "Summarize what you just did.";
                 debug_trace.logf("agent", "injecting continuation after {d} silent tool steps", .{silent_tool_steps});
-                try within_turn_suffix.append(arena, .{ .role = .assistant, .content = completion.content });
+                try within_turn_suffix.append(arena, .{
+                    .role = .assistant,
+                    .content = completion.content,
+                    .reasoning = completion.reasoning,
+                    .reasoning_signature = completion.reasoning_signature,
+                });
                 try within_turn_suffix.append(arena, .{ .role = .user, .content = continuation_prompt });
                 continue;
             }
@@ -4113,6 +4118,8 @@ fn processQueuedPromptLoop(
                     try within_turn_suffix.append(arena, .{
                         .role = .assistant,
                         .content = history_text,
+                        .reasoning = completion.reasoning,
+                        .reasoning_signature = completion.reasoning_signature,
                     });
                     const synthetic = try hooks.prompt.buildContinuationMessage(
                         arena,
@@ -4235,6 +4242,8 @@ fn processQueuedPromptLoop(
             else
                 partial_assistant,
             .tool_calls = effective_tool_calls,
+            .reasoning = completion.reasoning,
+            .reasoning_signature = completion.reasoning_signature,
         };
 
         var preparation_batch = tool_preparation.ReadyCallBatch.init(
@@ -4461,11 +4470,15 @@ fn processQueuedPromptLoop(
                 );
             };
         }
-        try runtime_tool_batch.appendAssistantToolCallStep(
+        try runtime_tool_batch.appendAssistantToolCallStepWithReasoning(
             arena,
             &within_turn_suffix,
             if (terminal_provider_completion) null else completion.content,
             effective_tool_calls,
+            .{
+                .text = completion.reasoning,
+                .signature = completion.reasoning_signature,
+            },
         );
 
         const step_has_content = !terminal_provider_completion and completion.content != null and completion.content.?.len > 0;
@@ -7109,6 +7122,8 @@ fn processQueuedPromptLoop(
                     try within_turn_suffix.append(arena, .{
                         .role = .assistant,
                         .content = rendered,
+                        .reasoning = completion.reasoning,
+                        .reasoning_signature = completion.reasoning_signature,
                     });
                     const synthetic = try hooks.prompt.buildContinuationMessage(
                         arena,

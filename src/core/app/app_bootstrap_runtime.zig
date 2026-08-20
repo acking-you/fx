@@ -272,7 +272,6 @@ pub fn Runtime(comptime App: type) type {
             app.worker.agent_turn_settings.effort = startup.effort;
             app.context_enabled = startup.context_enabled;
             app.fast_mode = startup.fast_mode;
-            if (comptime @hasField(App, "show_thinking")) app.show_thinking = startup.show_thinking;
             app.input_runtime.input_appearance = startup.input_appearance;
             app.input_runtime.slash_menu_categories = startup.slash_menu_categories;
             app.shell.maxxing_mode = startup.maxxing_mode;

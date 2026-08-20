@@ -151,6 +151,8 @@ pub const Result = struct {
         if (self.ownership == .owned) {
             if (self.err_body) |body| alloc.free(body);
             if (self.completion.content) |content| alloc.free(@constCast(content));
+            if (self.completion.reasoning) |reasoning| alloc.free(@constCast(reasoning));
+            if (self.completion.reasoning_signature) |signature| alloc.free(@constCast(signature));
             if (self.completion.generation_id) |id| alloc.free(@constCast(id));
             if (self.completion.billing) |billing| alloc.free(@constCast(billing.model));
             types.freeToolCallSlice(alloc, @constCast(self.completion.tool_calls));

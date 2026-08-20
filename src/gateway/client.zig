@@ -207,6 +207,8 @@ pub const StreamResult = struct {
     pub fn deinit(self: *StreamResult, alloc: std.mem.Allocator) void {
         if (self.err_body) |body| alloc.free(body);
         if (self.completion.content) |content| alloc.free(content);
+        if (self.completion.reasoning) |reasoning| alloc.free(@constCast(reasoning));
+        if (self.completion.reasoning_signature) |signature| alloc.free(@constCast(signature));
         if (self.completion.generation_id) |id| alloc.free(id);
         if (self.completion.billing) |billing| alloc.free(@constCast(billing.model));
         for (self.completion.tool_calls) |call| {
@@ -2223,6 +2225,8 @@ fn stringifyJsonValueOwned(alloc: std.mem.Allocator, value: std.json.Value) ![]u
 
 fn deinitGatewayCompletion(alloc: std.mem.Allocator, completion: *types.GatewayCompletion) void {
     if (completion.content) |content| alloc.free(content);
+    if (completion.reasoning) |reasoning| alloc.free(@constCast(reasoning));
+    if (completion.reasoning_signature) |signature| alloc.free(@constCast(signature));
     if (completion.generation_id) |id| alloc.free(id);
     if (completion.billing) |billing| alloc.free(@constCast(billing.model));
     for (completion.tool_calls) |call| {
@@ -2707,6 +2711,27 @@ fn captureGenerationMetadata(
     generation_id.* = try alloc.dupe(u8, generation_value.string);
 }
 
+/// Retains the provider signature for the streamed thinking block. Anthropic
+/// rejects a replayed thinking block whose signature is missing or does not
+/// match its text, so the last signature of the run is kept alongside the full
+/// reasoning body. A malformed or absent signature leaves the prior value.
+fn captureReasoningSignature(
+    alloc: std.mem.Allocator,
+    root: std.json.Value,
+    signature: *?[]u8,
+) !void {
+    if (root != .object) return;
+    const provider_metadata = root.object.get("providerMetadata") orelse return;
+    if (provider_metadata != .object) return;
+    const anthropic = provider_metadata.object.get("anthropic") orelse return;
+    if (anthropic != .object) return;
+    const value = anthropic.object.get("signature") orelse return;
+    if (value != .string or value.string.len == 0) return;
+    const owned = try alloc.dupe(u8, value.string);
+    if (signature.*) |existing| alloc.free(existing);
+    signature.* = owned;
+}
+
 fn consumeSseStream(
     alloc: std.mem.Allocator,
     reader: anytype,
@@ -2763,6 +2788,11 @@ fn consumeSseStreamTraced(
 ) !types.GatewayCompletion {
     var content_buf: std.ArrayList(u8) = .empty;
     defer content_buf.deinit(alloc);
+
+    var reasoning_buf: std.ArrayList(u8) = .empty;
+    defer reasoning_buf.deinit(alloc);
+    var reasoning_signature: ?[]u8 = null;
+    defer if (reasoning_signature) |signature| alloc.free(signature);
 
     var streamed_tool_inputs: std.ArrayList(SseStreamedToolInput) = .empty;
     defer {
@@ -2905,13 +2935,17 @@ fn consumeSseStreamTraced(
                 }
             }
         } else if (std.mem.eql(u8, event_type, "reasoning-delta")) {
-            if (on_reasoning_chunk) |callback| {
-                if (root.object.get("delta")) |delta_val| {
-                    if (delta_val == .string and delta_val.string.len > 0) {
+            if (root.object.get("delta")) |delta_val| {
+                if (delta_val == .string and delta_val.string.len > 0) {
+                    // Retained untruncated: the display cap belongs to the UI,
+                    // and a clipped thinking block fails signature validation.
+                    try reasoning_buf.appendSlice(alloc, delta_val.string);
+                    if (on_reasoning_chunk) |callback| {
                         callback(callback_ctx, delta_val.string);
                     }
                 }
             }
+            captureReasoningSignature(alloc, root, &reasoning_signature) catch {};
         } else if (std.mem.eql(u8, event_type, "tool-input-start")) {
             const id = streamedToolInputId(root, .invalid_start) orelse continue;
             const name = if (root.object.get("toolName")) |name_value|
@@ -3238,6 +3272,12 @@ fn consumeSseStreamTraced(
         completion.content = try alloc.dupe(u8, content_buf.items);
     }
 
+    if (reasoning_buf.items.len > 0) {
+        completion.reasoning = try alloc.dupe(u8, reasoning_buf.items);
+        completion.reasoning_signature = reasoning_signature;
+        reasoning_signature = null;
+    }
+
     completion.tool_calls = try materializeToolCalls(alloc, tool_accumulators.items);
 
     completion.provider_result_identity_failure = provider_result_identity_failure;
@@ -3296,6 +3336,62 @@ test "consumeSseStream preserves provider finish_reason" {
 
     try std.testing.expectEqualStrings("Hola", completion.content.?);
     try std.testing.expectEqual(types.ProviderFinishReason.length, completion.finish_reason.?);
+}
+
+test "consumeSseStream retains the full reasoning body and its signature" {
+    const payload =
+        "data: {\"type\":\"reasoning-start\",\"id\":\"r1\"}\n\n" ++
+        "data: {\"type\":\"reasoning-delta\",\"id\":\"r1\",\"delta\":\"first \"}\n\n" ++
+        "data: {\"type\":\"reasoning-delta\",\"id\":\"r1\",\"delta\":\"second\",\"providerMetadata\":{\"anthropic\":{\"signature\":\"sig-1\"}}}\n\n" ++
+        "data: {\"type\":\"reasoning-end\",\"id\":\"r1\"}\n\n" ++
+        "data: {\"type\":\"text-delta\",\"id\":\"t1\",\"delta\":\"answer\"}\n\n" ++
+        "data: {\"type\":\"finish\",\"finishReason\":{\"unified\":\"stop\"},\"usage\":{\"inputTokens\":{\"total\":1},\"outputTokens\":{\"total\":2}}}\n\n";
+
+    var reader = std.Io.Reader.fixed(payload);
+    var cancel_flag = std.atomic.Value(bool).init(false);
+
+    const Noop = struct {
+        fn chunk(_: *anyopaque, _: []const u8) void {}
+    };
+
+    var completion = try consumeSseStreamTraced(
+        std.testing.allocator,
+        &reader,
+        undefined,
+        Noop.chunk,
+        null,
+        Noop.chunk,
+        null,
+        &cancel_flag,
+        null,
+        null,
+        null,
+    );
+    defer deinitGatewayCompletion(std.testing.allocator, &completion);
+
+    // Reasoning is joined across deltas and never merged into content.
+    try std.testing.expectEqualStrings("first second", completion.reasoning.?);
+    try std.testing.expectEqualStrings("sig-1", completion.reasoning_signature.?);
+    try std.testing.expectEqualStrings("answer", completion.content.?);
+}
+
+test "consumeSseStream leaves reasoning absent when the provider streams none" {
+    const payload =
+        "data: {\"type\":\"text-delta\",\"id\":\"t1\",\"delta\":\"answer\"}\n\n" ++
+        "data: {\"type\":\"finish\",\"finishReason\":{\"unified\":\"stop\"},\"usage\":{\"inputTokens\":{\"total\":1},\"outputTokens\":{\"total\":2}}}\n\n";
+
+    var reader = std.Io.Reader.fixed(payload);
+    var cancel_flag = std.atomic.Value(bool).init(false);
+
+    const Noop = struct {
+        fn chunk(_: *anyopaque, _: []const u8) void {}
+    };
+
+    var completion = try consumeSseStream(std.testing.allocator, &reader, undefined, Noop.chunk, null, &cancel_flag);
+    defer deinitGatewayCompletion(std.testing.allocator, &completion);
+
+    try std.testing.expect(completion.reasoning == null);
+    try std.testing.expect(completion.reasoning_signature == null);
 }
 
 test "consumeSseStream captures generation identity metadata" {

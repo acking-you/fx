@@ -41,13 +41,37 @@ pub const ToolResultAccounting = struct {
     status: ?types.PersistedToolStatus = null,
 };
 
+/// Provider reasoning replayed with an assistant tool-call step. `text` and
+/// `signature` always travel together: Anthropic rejects a thinking block whose
+/// signature does not match its text.
+pub const StepReasoning = struct {
+    text: ?[]const u8 = null,
+    signature: ?[]const u8 = null,
+};
+
 pub fn appendAssistantToolCallStep(
     arena: Allocator,
     within_turn_suffix: *std.ArrayList(ChatMessage),
     content: ?[]const u8,
     tool_calls: []const ToolCall,
 ) !void {
-    try within_turn_suffix.append(arena, .{ .role = .assistant, .content = content, .tool_calls = tool_calls });
+    try appendAssistantToolCallStepWithReasoning(arena, within_turn_suffix, content, tool_calls, .{});
+}
+
+pub fn appendAssistantToolCallStepWithReasoning(
+    arena: Allocator,
+    within_turn_suffix: *std.ArrayList(ChatMessage),
+    content: ?[]const u8,
+    tool_calls: []const ToolCall,
+    reasoning: StepReasoning,
+) !void {
+    try within_turn_suffix.append(arena, .{
+        .role = .assistant,
+        .content = content,
+        .tool_calls = tool_calls,
+        .reasoning = reasoning.text,
+        .reasoning_signature = reasoning.signature,
+    });
 }
 
 pub fn appendToolResultContent(

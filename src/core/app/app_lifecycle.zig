@@ -132,7 +132,6 @@ pub const StartupState = struct {
     context_limits: config_runtime.context_limits.Values = .{},
     context_enabled: bool = true,
     fast_mode: bool = false,
-    show_thinking: bool = false,
     input_appearance: input_appearance.InputAppearance = .default,
     maxxing_mode: presentation_mode.MaxxingMode = presentation_mode.MaxxingMode.default,
     slash_menu_categories: bool = true,
@@ -412,7 +411,6 @@ fn loadStartupStateFromOwnedWorkspace(
     state.context_limits = config_runtime.resolveContextLimits(settings, &.{});
     state.context_enabled = settings.context orelse true;
     state.fast_mode = settings.fast_mode orelse false;
-    state.show_thinking = settings.show_thinking orelse false;
     state.input_appearance = initialInputAppearance(settings.input_appearance);
     state.maxxing_mode = initialMaxxingMode(settings.maxxing_mode);
     state.slash_menu_categories = settings.slash_menu_categories orelse true;
@@ -2128,7 +2126,7 @@ test "loadStartupState resolves slash menu categories default and explicit false
     try std.testing.expect(!hidden.slash_menu_categories);
 }
 
-test "loadStartupState resolves show thinking default and explicit true" {
+test "loadStartupState accepts a legacy show_thinking key without failing" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.createDirPath(io_mod.getIo(), "home/.fx");
@@ -2143,12 +2141,12 @@ test "loadStartupState resolves show thinking default and explicit true" {
 
     var initial = try loadStartupStateForWorkspace(std.testing.allocator, workspace_root, "default-model", 25);
     defer initial.deinit(std.testing.allocator);
-    try std.testing.expect(!initial.show_thinking);
 
+    // Reasoning display is unconditional now, so the key carries no state. An
+    // existing settings.json must still load rather than fail on an old key.
     try writeFixtureFile(tmp.dir, "home/.fx/settings.json", "{\"show_thinking\":true}\n");
     var shown = try loadStartupStateForWorkspace(std.testing.allocator, workspace_root, "default-model", 25);
     defer shown.deinit(std.testing.allocator);
-    try std.testing.expect(shown.show_thinking);
 }
 
 test "loadStartupState resolves max_agent_steps default zero and positive values" {

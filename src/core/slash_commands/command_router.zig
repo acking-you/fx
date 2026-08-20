@@ -41,7 +41,6 @@ pub const ParsedCommand = union(enum) {
     credits,
     paste,
     fast,
-    thinking,
     appearance: []const u8,
     sandbox: []const u8,
     statusline: []const u8,
@@ -88,7 +87,6 @@ pub const CommandHandlers = struct {
     show_credits: *const fn (ctx: *anyopaque) anyerror!void,
     paste_clipboard: *const fn (ctx: *anyopaque) anyerror!void,
     toggle_fast: *const fn (ctx: *anyopaque) anyerror!void,
-    toggle_thinking: *const fn (ctx: *anyopaque) anyerror!void,
     handle_appearance: *const fn (ctx: *anyopaque, rest: []const u8) anyerror!void,
     handle_sandbox: *const fn (ctx: *anyopaque, rest: []const u8) anyerror!void,
     handle_statusline: *const fn (ctx: *anyopaque, rest: []const u8) anyerror!void,
@@ -141,7 +139,6 @@ fn parsedCommand(kind: SlashKind, payload: []const u8) ParsedCommand {
         .credits => .credits,
         .paste => .paste,
         .fast => .fast,
-        .thinking => .thinking,
         .appearance => .{ .appearance = payload },
         .sandbox => .{ .sandbox = payload },
         .statusline => .{ .statusline = payload },
@@ -202,7 +199,6 @@ pub fn route(registry: SlashRegistry, handlers: *const CommandHandlers, cmd: []c
         .credits => try handlers.show_credits(handlers.ctx),
         .paste => try handlers.paste_clipboard(handlers.ctx),
         .fast => try handlers.toggle_fast(handlers.ctx),
-        .thinking => try handlers.toggle_thinking(handlers.ctx),
         .appearance => |rest| try handlers.handle_appearance(handlers.ctx, rest),
         .sandbox => |rest| try handlers.handle_sandbox(handlers.ctx, rest),
         .statusline => |rest| try handlers.handle_statusline(handlers.ctx, rest),
@@ -330,7 +326,6 @@ test "parse recognizes exact no-payload commands" {
     try std.testing.expectEqual(ParsedCommand.credits, parse(testSlashRegistry(), "/balance"));
     try std.testing.expectEqual(ParsedCommand.paste, parse(testSlashRegistry(), "/paste"));
     try std.testing.expectEqual(ParsedCommand.fast, parse(testSlashRegistry(), "/fast"));
-    try std.testing.expectEqual(ParsedCommand.thinking, parse(testSlashRegistry(), "/thinking"));
     try std.testing.expectEqual(ParsedCommand.version, parse(testSlashRegistry(), "/version"));
 }
 
@@ -586,7 +581,6 @@ fn testHandlers(ctx: *TestContext) CommandHandlers {
         .show_credits = unexpectedNoPayload,
         .paste_clipboard = unexpectedNoPayload,
         .toggle_fast = unexpectedNoPayload,
-        .toggle_thinking = unexpectedNoPayload,
         .handle_appearance = unexpectedPayload,
         .handle_sandbox = unexpectedPayload,
         .handle_statusline = unexpectedPayload,

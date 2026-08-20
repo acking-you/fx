@@ -990,7 +990,6 @@ fn buildSlashCommandsJson(alloc: Allocator) ![]u8 {
         .{ .name = "mcp", .description = "Show MCP server status", .hint = null },
         .{ .name = "skills", .description = "Show installed skills", .hint = null },
         .{ .name = "fast", .description = "Toggle fast mode for supported models", .hint = null },
-        .{ .name = "thinking", .description = "Toggle showing streamed model reasoning", .hint = null },
     };
 
     try out.writer.writeAll("[");
@@ -1126,7 +1125,7 @@ test "buildSlashCommandsJson includes all expected commands" {
         "compact",   "undo",  "changes",  "review",  "clear",
         "reset",     "help",  "status",   "model",   "permissions",
         "allowlist", "rules", "settings", "credits", "mcp",
-        "skills",    "fast",  "thinking",
+        "skills",    "fast",
     };
     for (expected_commands) |cmd| {
         try std.testing.expect(std.mem.find(u8, json, cmd) != null);

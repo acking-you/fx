@@ -870,6 +870,15 @@ pub const ChatMessage = struct {
     tool_result_memory: ?ToolResultMemory = null,
     permission_feedback: bool = false,
     cache_policy: ChatCachePolicy = .default,
+    /// Provider reasoning that produced this assistant turn, replayed verbatim
+    /// so the next step of the same turn keeps the reasoning context. Never
+    /// truncated: the display cap is a presentation concern, and a clipped
+    /// thinking block fails provider signature validation.
+    reasoning: ?[]const u8 = null,
+    /// Provider signature for `reasoning`. Anthropic rejects a replayed
+    /// thinking block whose signature is missing or does not match its text,
+    /// so the two always travel together.
+    reasoning_signature: ?[]const u8 = null,
 };
 
 pub const Usage = struct {
@@ -950,6 +959,11 @@ pub const ProviderFinishReason = enum {
 
 pub const GatewayCompletion = struct {
     content: ?[]const u8 = null,
+    /// Full streamed reasoning body, retained untruncated so the next step of
+    /// the same turn can replay it as reasoning context.
+    reasoning: ?[]const u8 = null,
+    /// Provider signature for `reasoning`, when the provider supplied one.
+    reasoning_signature: ?[]const u8 = null,
     tool_calls: []const ToolCall = &.{},
     generation_id: ?[]const u8 = null,
     billing: ?GatewayBilling = null,

@@ -584,6 +584,24 @@ fn writeChatMessageJsonInner(
         .assistant => {
             try writer.writeAll(",\"content\":[");
             var wrote_part = false;
+            // Reasoning leads the assistant content, as the provider emitted it.
+            // A part without its signature is dropped by the provider with a
+            // warning rather than an error, so an unsigned replay stays safe.
+            if (message.reasoning) |reasoning| {
+                if (reasoning.len > 0) {
+                    try writer.writeAll("{\"type\":\"reasoning\",\"text\":");
+                    try std.json.Stringify.value(reasoning, .{}, writer);
+                    if (message.reasoning_signature) |signature| {
+                        if (signature.len > 0) {
+                            try writer.writeAll(",\"providerOptions\":{\"anthropic\":{\"signature\":");
+                            try std.json.Stringify.value(signature, .{}, writer);
+                            try writer.writeAll("}}");
+                        }
+                    }
+                    try writer.writeByte('}');
+                    wrote_part = true;
+                }
+            }
             if (message.content) |content| {
                 if (content.len > 0) {
                     try writer.writeAll("{\"type\":\"text\",\"text\":");
@@ -843,6 +861,8 @@ pub fn parseGatewayCompletion(alloc: std.mem.Allocator, body: []const u8) !Gatew
 
 pub fn freeGatewayCompletion(alloc: std.mem.Allocator, completion: GatewayCompletion) void {
     if (completion.content) |content| alloc.free(content);
+    if (completion.reasoning) |reasoning| alloc.free(@constCast(reasoning));
+    if (completion.reasoning_signature) |signature| alloc.free(@constCast(signature));
     for (completion.tool_calls) |tool_call| {
         alloc.free(tool_call.id);
         alloc.free(tool_call.name);
@@ -989,6 +1009,69 @@ test "writeChatMessageJson serializes assistant tool call input as raw json" {
     try std.testing.expect(std.mem.find(u8, json, "\"toolCallId\":\"call_1\"") != null);
     try std.testing.expect(std.mem.find(u8, json, "\"toolName\":\"read_file\"") != null);
     try std.testing.expect(std.mem.find(u8, json, "\"input\":{\"path\":\"src/main.zig\"}") != null);
+}
+
+test "writeChatMessageJson leads assistant content with a signed reasoning part" {
+    const alloc = std.testing.allocator;
+    const calls = [_]ToolCall{.{
+        .id = "call_1",
+        .name = "read_file",
+        .arguments_json = "{}",
+    }};
+
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+
+    try writeChatMessageJson(alloc, &out.writer, .{
+        .role = .assistant,
+        .content = "answer",
+        .tool_calls = &calls,
+        .reasoning = "step one\nstep two",
+        .reasoning_signature = "sig-abc",
+    });
+    const json = out.written();
+
+    const reasoning_at = std.mem.find(u8, json, "\"type\":\"reasoning\"").?;
+    const text_at = std.mem.find(u8, json, "\"type\":\"text\"").?;
+    const call_at = std.mem.find(u8, json, "\"type\":\"tool-call\"").?;
+    // Reasoning must lead the parts, as the provider emitted it.
+    try std.testing.expect(reasoning_at < text_at);
+    try std.testing.expect(text_at < call_at);
+    try std.testing.expect(std.mem.find(u8, json, "\"text\":\"step one\\nstep two\"") != null);
+    try std.testing.expect(std.mem.find(u8, json, "\"providerOptions\":{\"anthropic\":{\"signature\":\"sig-abc\"}}") != null);
+}
+
+test "writeChatMessageJson omits reasoning provider options when unsigned and the part when absent" {
+    const alloc = std.testing.allocator;
+
+    var unsigned: std.Io.Writer.Allocating = .init(alloc);
+    defer unsigned.deinit();
+    try writeChatMessageJson(alloc, &unsigned.writer, .{
+        .role = .assistant,
+        .content = "answer",
+        .reasoning = "thought",
+    });
+    try std.testing.expect(std.mem.find(u8, unsigned.written(), "\"type\":\"reasoning\"") != null);
+    try std.testing.expect(std.mem.find(u8, unsigned.written(), "providerOptions") == null);
+
+    var absent: std.Io.Writer.Allocating = .init(alloc);
+    defer absent.deinit();
+    try writeChatMessageJson(alloc, &absent.writer, .{
+        .role = .assistant,
+        .content = "answer",
+    });
+    try std.testing.expect(std.mem.find(u8, absent.written(), "reasoning") == null);
+
+    // An empty body must not emit a part a provider would reject.
+    var empty: std.Io.Writer.Allocating = .init(alloc);
+    defer empty.deinit();
+    try writeChatMessageJson(alloc, &empty.writer, .{
+        .role = .assistant,
+        .content = "answer",
+        .reasoning = "",
+        .reasoning_signature = "sig",
+    });
+    try std.testing.expect(std.mem.find(u8, empty.written(), "reasoning") == null);
 }
 
 test "writeChatMessageJson serializes tool-result fallbacks and escaped output" {
