@@ -162,6 +162,25 @@ async function waitForSettingValue(
   );
 }
 
+async function waitForStatusLineValue(
+  settingsPath: string,
+  key: string,
+  expected: unknown,
+): Promise<void> {
+  const deadline = Date.now() + TIMEOUT;
+  let latest: unknown;
+  while (Date.now() < deadline) {
+    if (existsSync(settingsPath)) {
+      latest = JSON.parse(readFileSync(settingsPath, "utf8")).statusLine?.[key];
+      if (Object.is(latest, expected)) return;
+    }
+    await Bun.sleep(100);
+  }
+  throw new Error(
+    `Timed out waiting for statusLine.${key}=${JSON.stringify(expected)}; last=${JSON.stringify(latest)}`,
+  );
+}
+
 async function waitForAppearanceMenu(
   session: TmuxSession,
   expectedSelection?: string,
@@ -1631,7 +1650,7 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
 
       await session.resizeWindow(60, 12, 500);
       await session.sendText("/appearance");
-      pane = await session.waitForText("Appearance", 5_000);
+      pane = (await waitForAppearanceMenu(session)).join("\n");
       expect(pane).toContain("Input appearance");
       expect(pane).toContain("lines  tint");
       expect(pane).toContain("Maxxing mode");
@@ -1693,7 +1712,7 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
       await session.sendKeys("Right");
       grid = await waitForStatuslineMenu(session, "off  on");
       pane = grid.join("\n");
-      expect(JSON.parse(readFileSync(settingsPath, "utf8")).statusLine.sandbox).toBe(true);
+      await waitForStatusLineValue(settingsPath, "sandbox", true);
 
       await session.sendKeys("Down");
       await session.sendKeys("Right");
@@ -1701,7 +1720,7 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
       pane = grid.join("\n");
       expect(pane).not.toContain("saved to user settings");
       expect(pane).not.toContain("● Statusline:");
-      expect(JSON.parse(readFileSync(settingsPath, "utf8")).statusLine.context).toBe(true);
+      await waitForStatusLineValue(settingsPath, "context", true);
 
       await session.sendKeys("Escape");
       await session.waitForPane(
