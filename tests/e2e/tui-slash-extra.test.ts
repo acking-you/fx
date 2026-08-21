@@ -268,6 +268,11 @@ describe.skipIf(!tmuxAvailable())("tui: active session transitions", () => {
 
         await session.sendText("start an active turn");
         await session.waitForText("Thinking", 10_000);
+        const firstRequestDeadline = Date.now() + 5_000;
+        while (requestCount === 0 && Date.now() < firstRequestDeadline) {
+          await sleep(25);
+        }
+        expect(requestCount).toBe(1);
         await session.sendText("/clear");
         await session.waitForComposer(10_000);
 

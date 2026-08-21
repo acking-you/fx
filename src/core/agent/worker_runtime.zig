@@ -1203,7 +1203,20 @@ pub const WorkerRuntime = struct {
     }
 
     pub fn discardEvents(self: *WorkerRuntime, alloc: std.mem.Allocator) void {
-        var events = self.takeEvents();
+        self.worker_mutex.lockUncancelable(io_mod.getIo());
+        var events = self.worker_events;
+        self.worker_events = .empty;
+        var discarded_finished_prompt = false;
+        for (events.items) |event| {
+            if (event == .finish_prompt) discarded_finished_prompt = true;
+        }
+        if (discarded_finished_prompt) {
+            std.debug.assert(self.prompt_finalization_pending);
+            self.prompt_finalization_pending = false;
+            self.worker_cond.broadcast(io_mod.getIo());
+        }
+        self.worker_mutex.unlock(io_mod.getIo());
+
         defer events.deinit(alloc);
         for (events.items) |event| freeWorkerEvent(alloc, event);
     }
@@ -3979,6 +3992,26 @@ test "next prompt waits for finished prompt persistence acknowledgement" {
     const second = (try runtime.tryTakeNextPrompt(alloc)).?;
     defer freeQueuedPrompt(alloc, second);
     try std.testing.expectEqualStrings("next turn", second.prompt);
+}
+
+test "discarding a finished prompt releases its persistence barrier" {
+    const alloc = std.testing.allocator;
+    var runtime = WorkerRuntime{};
+    defer runtime.deinit(alloc);
+
+    try runtime.enqueuePrompt(alloc, try makePrompt(alloc, "next session", "model"));
+    try runtime.pushEvent(alloc, .{ .finish_prompt = .{
+        .turn = .{ .interrupted = .{
+            .user = .{ .text = @constCast("discarded turn") },
+        } },
+    } });
+
+    try std.testing.expect((try runtime.tryTakeNextPrompt(alloc)) == null);
+    runtime.discardEvents(alloc);
+
+    const next = (try runtime.tryTakeNextPrompt(alloc)).?;
+    defer freeQueuedPrompt(alloc, next);
+    try std.testing.expectEqualStrings("next session", next.prompt);
 }
 
 test "held queued prompt history is refreshed before admission" {
