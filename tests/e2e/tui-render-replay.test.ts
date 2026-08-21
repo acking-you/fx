@@ -315,7 +315,7 @@ describe("tui: render record/replay", () => {
       await session.pasteText(pasted);
       await session.waitForText("[Pasted text #1, 33 lines]", 5_000);
       await session.sendKeys("Enter");
-      await session.waitForText("● Auth: Fx needs access", 5_000);
+      await session.waitForText("● Auth: Fx needs a model credential.", 5_000);
       expect((await session.captureFullScrollback()).replace(/\s+/g, " ")).toContain(authNotice);
 
       const stdin = readTapeFrames(launched.tapePath)
