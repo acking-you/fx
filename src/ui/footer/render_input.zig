@@ -330,7 +330,6 @@ pub const RenderContext = struct {
     fast_mode: bool = false,
     model_supports_fast: bool = false,
     effort: types.ReasoningEffort = .auto,
-    model_supports_effort: bool = false,
     ctrl_c_pending: bool = false,
     shimmer_pos: i16 = -render_request.animation_padding,
     now_ms: i64 = 0,

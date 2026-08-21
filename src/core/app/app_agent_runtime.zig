@@ -212,6 +212,10 @@ pub fn Runtime(comptime App: type) type {
                     app.agentStreamProvider()
                 else
                     agent_stream_provider.unavailable_provider,
+                .responses_compaction_provider = if (comptime @hasDecl(App, "responsesCompactionProvider"))
+                    app.responsesCompactionProvider()
+                else
+                    null,
                 .gateway_team = app.auth.gatewayTeam(),
                 .credential_source = app.auth.credentialSource(),
                 .oauth_transport = app.auth.oauthTransport(),
@@ -285,6 +289,8 @@ pub fn Runtime(comptime App: type) type {
             if (comptime @hasField(App, "web_search_runtime")) {
                 app.web_search_runtime.configure(.{
                     .api_key = app.auth.apiKey() orelse "",
+                    .credential_source = app.auth.credentialSource() orelse .ai_gateway_api_key,
+                    .credential_account_id = app.auth.credentialAccountId(),
                     .gateway_team = app.auth.gatewayTeam(),
                     .worker_model = app.selected_model.items,
                     .gateway_retry_count = gateway_retry_count,
@@ -292,7 +298,7 @@ pub fn Runtime(comptime App: type) type {
                     .usage = &app.session.usage,
                     .usage_allocator = app.alloc,
                 });
-                ctx.web_search_runtime_ready = false;
+                ctx.web_search_runtime_ready = app.auth.credentialSource() == .codex_oauth;
                 ctx.web_search_backend = app.web_search_runtime.dispatchBackend();
                 ctx.web_search_progress_ctx = @ptrCast(app);
                 ctx.on_web_search_progress = app_callbacks.Bindings(App).onWebSearchProgress;

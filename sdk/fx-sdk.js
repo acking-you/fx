@@ -1039,19 +1039,30 @@ export async function createFxAgent(options) {
       get configOptions() { return configOptions; },
       async setConfigOption(configId, value, source = "sdk") {
         assertOpen();
-        const previousValue = configOptions.find((option) => option.id === configId)?.currentValue;
+        const previousValues = new Map(configOptions.map((option) => [option.id, option.currentValue]));
         const updated = updateConfig(await request("session/set_config_option", { sessionId: result.sessionId, configId, value }));
         const accepted = updated.find((option) => option.id === configId)?.currentValue;
         if (configId === "mode" && accepted) this.modes.currentModeId = accepted;
-        if (accepted === value) {
+        for (const option of updated) {
+          const previousValue = previousValues.get(option.id);
+          const changed = previousValue !== option.currentValue;
+          const reconciledByModel = source !== "restore" && configId === "model" && (option.id === "effort" || option.id === "fast_mode");
+          if (option.id !== configId && !changed && !reconciledByModel) continue;
           if (options.configStore?.set) {
-            try { await options.configStore.set(configId, value); } catch (error) { emit("config.persist_error", { configId, error }); }
+            try { await options.configStore.set(option.id, option.currentValue); } catch (error) { emit("config.persist_error", { configId: option.id, error }); }
           }
-          emit("config.changed", { configId, previousValue, value: accepted, source });
+          if (option.id === configId || changed) {
+            emit("config.changed", { configId: option.id, previousValue, value: option.currentValue, source });
+          }
         }
         return updated;
       },
       setModel(value) { return this.setConfigOption("model", value); },
+      setEffort(value) { return this.setConfigOption("effort", value); },
+      setFastMode(enabled) {
+        if (typeof enabled !== "boolean") throw new TypeError("Fast mode must be a boolean");
+        return this.setConfigOption("fast_mode", enabled ? "fast" : "normal");
+      },
       setMode(value) { return this.setConfigOption("mode", value); },
       async setConfig(config) {
         for (const [key, value] of Object.entries(config)) await this.setConfigOption(key, value);
@@ -1116,10 +1127,17 @@ export async function createFxAgent(options) {
     };
     if (options.configStore?.get) {
       activeSession = session;
-      for (const config of [...configOptions]) {
+      const configIds = [...new Set(["model", ...configOptions.map((config) => config.id)])];
+      for (const configId of configIds) {
+        const config = configOptions.find((option) => option.id === configId);
+        if (!config) continue;
         let value;
         try { value = await options.configStore.get(config.id); } catch (error) { emit("config.restore_error", { configId: config.id, error }); continue; }
         if (typeof value !== "string" || value === config.currentValue) continue;
+        if (config.id !== "model" && Array.isArray(config.options) && !config.options.some((option) => option.value === value)) {
+          try { await options.configStore.set?.(config.id, config.currentValue); } catch (error) { emit("config.persist_error", { configId: config.id, error }); }
+          continue;
+        }
         try { await session.setConfigOption(config.id, value, "restore"); } catch (error) { emit("config.restore_error", { configId: config.id, error }); }
       }
     }

@@ -215,6 +215,8 @@ const AcpContext = struct {
         const session = if (self.state.active_session) |*active| active else unreachable;
         self.state.web_search_runtime.configure(.{
             .api_key = session.api_key,
+            .credential_source = session.credential_source orelse .ai_gateway_api_key,
+            .credential_account_id = session.credential_account_id,
             .gateway_team = self.state.gateway_team,
             .worker_model = session.model,
             .gateway_retry_count = self.state.cfg.gateway_retry_count,
@@ -234,6 +236,7 @@ const AcpContext = struct {
             .max_tool_result_bytes = session.max_tool_result_bytes,
             .api_key = session.api_key,
             .agent_stream_provider = self.state.cfg.gateway_provider.agent_stream,
+            .responses_compaction_provider = self.state.cfg.gateway_provider.responses_compaction,
             .credential_source = session.credential_source,
             .oauth_transport = self.state.cfg.gateway_provider.oauth_transport,
             .gateway_team = self.state.gateway_team,
@@ -283,7 +286,7 @@ const AcpContext = struct {
             .web_fetch_runtime = &self.state.web_fetch_runtime,
             .web_fetch_artifact_store = session.session_rt.webFetchArtifactStore(),
             .web_fetch_artifact_error = session.session_rt.webFetchArtifactError(),
-            .web_search_runtime_ready = false,
+            .web_search_runtime_ready = session.credential_source == .codex_oauth,
             .web_search_backend = self.state.web_search_runtime.dispatchBackend(),
             .model_capability_resolver = .{
                 .ctx = @ptrCast(self),
@@ -952,6 +955,7 @@ fn agentRuntimeDeps(ctx: *AcpContext) agent_runtime.AgentRuntimeDeps {
     return .{
         .ctx = @ptrCast(ctx),
         .agent_stream_provider = ctx.state.cfg.gateway_provider.agent_stream,
+        .responses_compaction_provider = ctx.state.cfg.gateway_provider.responses_compaction,
         .flush_assistant_stream_per_content_chunk = host_target.is_wasm,
         .tool_registry = ctx.toolRegistry(),
         .context_registry = ctx.state.cfg.context_registry,
@@ -994,9 +998,47 @@ fn agentRuntimeDeps(ctx: *AcpContext) agent_runtime.AgentRuntimeDeps {
         .resolve_model_capabilities = resolveModelCapabilities,
         .format_tool_execution_error = formatToolExecutionError,
         .record_tool_call_rejected = recordToolCallRejected,
+        .report_usage = reportUsage,
         .usage = &session.session_rt.usage,
         .usage_allocator = ctx.state.alloc,
     };
+}
+
+/// Responses usage reports prompt occupancy rather than a per-request delta.
+/// Keep ACP session totals aligned with the interactive and `ask` runtimes by
+/// replacing the latest totals under the session persistence lock.
+fn reportUsage(raw_ctx: *anyopaque, usage: types.Usage) void {
+    const ctx: *AcpContext = @ptrCast(@alignCast(raw_ctx));
+    const active = if (ctx.state.active_session) |*session| session else return;
+    if (!std.mem.eql(u8, active.session_id, ctx.session_id)) return;
+
+    active.session_write_mutex.lockUncancelable(io_mod.getIo());
+    defer active.session_write_mutex.unlock(io_mod.getIo());
+    if (active.writable) |*writable| {
+        applyUsageTotals(&writable.state, usage);
+    }
+    if (active.wasm_state) |*state| {
+        applyUsageTotals(state, usage);
+    }
+}
+
+fn applyUsageTotals(state: *session_codec.DurableSessionState, usage: types.Usage) void {
+    if (usage.input_tokens) |input| state.total_input_tokens = input;
+    if (usage.output_tokens) |output| state.total_output_tokens = output;
+}
+
+test "ACP usage callback replaces only reported token totals" {
+    var state: session_codec.DurableSessionState = undefined;
+    state.total_input_tokens = 7;
+    state.total_output_tokens = 11;
+
+    applyUsageTotals(&state, .{ .input_tokens = 101 });
+    try std.testing.expectEqual(@as(u64, 101), state.total_input_tokens);
+    try std.testing.expectEqual(@as(u64, 11), state.total_output_tokens);
+
+    applyUsageTotals(&state, .{ .output_tokens = 29 });
+    try std.testing.expectEqual(@as(u64, 101), state.total_input_tokens);
+    try std.testing.expectEqual(@as(u64, 29), state.total_output_tokens);
 }
 
 fn persistUsageCheckpoint(
@@ -4383,4 +4425,11 @@ test "ACP prompt agent config carries request options from active session" {
     try std.testing.expectEqualStrings(state.cfg.gateway_chat_url, state.web_search_runtime.gateway_chat_url);
     try std.testing.expectEqualStrings("/models", tool_ctx.gateway_models_path);
     try std.testing.expect(tool_ctx.devbox_provider.?.execute_fn == unavailableDevboxForTest);
+
+    session.credential_source = .codex_oauth;
+    session.credential_account_id = "acct_codex";
+    const codex_tool_ctx = ctx.toolContext();
+    try std.testing.expect(codex_tool_ctx.web_search_runtime_ready);
+    try std.testing.expectEqual(types.CredentialSource.codex_oauth, state.web_search_runtime.credential_source);
+    try std.testing.expectEqualStrings("acct_codex", state.web_search_runtime.credential_account_id.?);
 }

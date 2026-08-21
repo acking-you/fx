@@ -3,6 +3,7 @@ const auth_runtime = @import("../auth/auth_runtime.zig");
 const credentials = @import("../auth/credentials.zig");
 const background_store = @import("../background/background_store.zig");
 const doctor_runtime = @import("../cli/doctor_runtime.zig");
+const codex_usage = @import("../gateway/codex_usage.zig");
 const permissions = @import("../permissions/permissions.zig");
 const sandbox = @import("../permissions/sandbox.zig");
 const session_display_metadata = @import("../session/session_display_metadata.zig");
@@ -662,6 +663,7 @@ pub const ModelListSnapshot = struct {
             .no_credential => "Using the public model catalog; sign in with Vercel or use an AI Gateway API key for team-private models.",
             .fx_login_team_required => "Choose a Vercel team to load its private models.",
             .fx_login_refresh_required => "Vercel sign-in must refresh before team-private models can load.",
+            .codex_oauth_refresh_required => "Codex sign-in must refresh before its model catalog can load.",
             .credential_refresh_failed => "Vercel sign-in refresh failed; using the public model catalog.",
             .authenticated_credential_rejected => "Your Gateway credential was rejected; using the public model catalog.",
         };
@@ -1328,6 +1330,197 @@ pub const BackgroundDetailSnapshot = struct {
     }
 };
 
+pub const CodexAccountUsageSnapshot = struct {
+    data: ?codex_usage.Snapshot = null,
+    failure: ?codex_usage.Failure = null,
+
+    pub fn deinit(self: *CodexAccountUsageSnapshot, _: Allocator) void {
+        if (self.data) |*data| data.deinit();
+        self.* = undefined;
+    }
+
+    pub fn render(
+        self: *const CodexAccountUsageSnapshot,
+        alloc: Allocator,
+        format: OutputFormat,
+    ) ![]u8 {
+        return switch (format) {
+            .text => self.renderText(alloc),
+            .json => self.renderJson(alloc),
+        };
+    }
+
+    pub fn renderText(self: *const CodexAccountUsageSnapshot, alloc: Allocator) ![]u8 {
+        var out: std.Io.Writer.Allocating = .init(alloc);
+        defer out.deinit();
+
+        if (self.failure) |failure| {
+            try out.writer.print("[codex usage] error: {s}", .{codexUsageFailureMessage(failure.kind)});
+            if (failure.http_status) |status| {
+                try out.writer.print(" (HTTP {d})", .{@intFromEnum(status)});
+            }
+            try out.writer.writeByte('\n');
+            return out.toOwnedSlice();
+        }
+        const data = self.data orelse {
+            try out.writer.writeAll("[codex usage] no data returned\n");
+            return out.toOwnedSlice();
+        };
+
+        try out.writer.writeAll("Codex account usage\n");
+        try out.writer.print("Fetched at (ms): {d}\n", .{data.fetched_at_ms});
+        try out.writer.print("Plan: {s}\n", .{data.plan_type});
+        try out.writer.writeAll("Rate limits:\n");
+        for (data.rate_limits) |limit| {
+            try out.writer.print("  {s}", .{limit.id});
+            if (limit.name) |name| try out.writer.print(" ({s})", .{name});
+            if (limit.allowed) |allowed| {
+                try out.writer.print(" allowed={s}", .{if (allowed) "true" else "false"});
+            }
+            if (limit.limit_reached) |reached| {
+                try out.writer.print(" limit_reached={s}", .{if (reached) "true" else "false"});
+            }
+            try out.writer.writeByte('\n');
+            if (limit.primary_window) |window| {
+                try writeCodexUsageWindowText(&out.writer, "primary", window);
+            }
+            if (limit.secondary_window) |window| {
+                try writeCodexUsageWindowText(&out.writer, "secondary", window);
+            }
+        }
+        if (data.credits) |credits| {
+            try out.writer.print("Credits: has_credits={s} unlimited={s}", .{
+                if (credits.has_credits) "true" else "false",
+                if (credits.unlimited) "true" else "false",
+            });
+            if (credits.balance) |balance| try out.writer.print(" balance={s}", .{balance});
+            try out.writer.writeByte('\n');
+        }
+        if (data.spend_control) |control| {
+            try out.writer.print("Spend control: reached={s}\n", .{if (control.reached) "true" else "false"});
+            if (control.individual_limit) |limit| {
+                if (limit.source) |source| {
+                    try out.writer.print("  source={s}\n", .{source});
+                }
+                try out.writer.print(
+                    "  individual limit={s} used={s} remaining={s} used_percent={d} remaining_percent={d} reset_after_seconds={d} reset_at={d}\n",
+                    .{
+                        limit.limit,
+                        limit.used,
+                        limit.remaining,
+                        limit.used_percent,
+                        limit.remaining_percent,
+                        limit.reset_after_seconds,
+                        limit.reset_at,
+                    },
+                );
+            }
+        }
+        if (data.rate_limit_reached_type) |reached_type| {
+            try out.writer.print("Rate limit reached type: {s}\n", .{reached_type});
+        }
+        if (data.rate_limit_reset_credits_available) |available| {
+            try out.writer.print("Rate limit reset credits: {d}\n", .{available});
+        }
+
+        const stats = data.token_usage;
+        try out.writer.writeAll("Token activity:");
+        var wrote_stat = false;
+        inline for (.{
+            .{ "lifetime_tokens", stats.lifetime_tokens },
+            .{ "peak_daily_tokens", stats.peak_daily_tokens },
+            .{ "longest_running_turn_sec", stats.longest_running_turn_sec },
+            .{ "current_streak_days", stats.current_streak_days },
+            .{ "longest_streak_days", stats.longest_streak_days },
+        }) |field| {
+            if (field[1]) |value| {
+                try out.writer.print(" {s}={d}", .{ field[0], value });
+                wrote_stat = true;
+            }
+        }
+        if (!wrote_stat) try out.writer.writeAll(" unavailable");
+        try out.writer.writeByte('\n');
+        for (data.daily_usage_buckets) |bucket| {
+            try out.writer.print("  {s}: {d} tokens\n", .{ bucket.start_date, bucket.tokens });
+        }
+        return out.toOwnedSlice();
+    }
+
+    pub fn renderJson(self: *const CodexAccountUsageSnapshot, alloc: Allocator) ![]u8 {
+        var out: std.Io.Writer.Allocating = .init(alloc);
+        defer out.deinit();
+
+        if (self.failure) |failure| {
+            try out.writer.writeAll("{\"kind\":\"codex_account_usage\",\"schema_version\":1,\"error\":{\"code\":");
+            try std.json.Stringify.value(@tagName(failure.kind), .{}, &out.writer);
+            try out.writer.writeAll(",\"http_status\":");
+            if (failure.http_status) |status| {
+                try out.writer.print("{d}", .{@intFromEnum(status)});
+            } else {
+                try out.writer.writeAll("null");
+            }
+            try out.writer.writeAll("}}");
+            return out.toOwnedSlice();
+        }
+        const data = self.data orelse {
+            try out.writer.writeAll("{\"kind\":\"codex_account_usage\",\"schema_version\":1,\"error\":{\"code\":\"invalid_response\",\"http_status\":null}}");
+            return out.toOwnedSlice();
+        };
+        try std.json.Stringify.value(.{
+            .kind = "codex_account_usage",
+            .schema_version = @as(u8, 1),
+            .fetched_at_ms = data.fetched_at_ms,
+            .plan_type = data.plan_type,
+            .rate_limits = data.rate_limits,
+            .credits = data.credits,
+            .spend_control = data.spend_control,
+            .rate_limit_reached_type = data.rate_limit_reached_type,
+            .rate_limit_reset_credits_available = data.rate_limit_reset_credits_available,
+            .token_usage = data.token_usage,
+            .daily_usage_buckets = data.daily_usage_buckets,
+        }, .{}, &out.writer);
+        return out.toOwnedSlice();
+    }
+};
+
+fn writeCodexUsageWindowText(
+    writer: *std.Io.Writer,
+    label: []const u8,
+    window: codex_usage.Window,
+) !void {
+    try writer.print(
+        "    {s}: used_percent={d} window_seconds={d} reset_after_seconds={d} reset_at={d}\n",
+        .{
+            label,
+            window.used_percent,
+            window.limit_window_seconds,
+            window.reset_after_seconds,
+            window.reset_at,
+        },
+    );
+}
+
+fn codexUsageFailureMessage(kind: codex_usage.FailureKind) []const u8 {
+    return switch (kind) {
+        .unsupported_credential_source => "available only with Codex OAuth",
+        .missing_credential => "Codex access token is missing",
+        .missing_account_id => "Codex account identity is missing",
+        .credential_unavailable => "stored Codex credential is unavailable",
+        .credential_changed => "Codex credential changed during the request",
+        .unauthorized => "Codex authentication failed",
+        .forbidden => "Codex account usage is forbidden",
+        .rate_limited => "Codex account usage request was rate limited",
+        .http_error => "Codex account usage request failed",
+        .invalid_endpoint => "Codex account usage endpoint is invalid",
+        .response_too_large => "Codex account usage response is too large",
+        .invalid_response => "Codex account usage response is invalid",
+        .timeout => "Codex account usage request timed out",
+        .cancelled => "Codex account usage request was cancelled",
+        .transport => "Codex account usage transport failed",
+        .resource_exhausted => "insufficient memory for Codex account usage",
+    };
+}
+
 pub const CreditsSnapshot = struct {
     balance: ?[]const u8 = null,
     used: ?[]const u8 = null,
@@ -1850,7 +2043,7 @@ test "command failure snapshot renders stable escaped json" {
 test "core status snapshot text and json stay stable" {
     const snapshot = StatusSnapshot{
         .model = "alpha",
-        .auth_help = "Fx needs access to Vercel AI Gateway. Run fx login to sign in, fx setup to use an API key, or set AI_GATEWAY_API_KEY.",
+        .auth_help = credentials.missing_credential_message,
         .permission_mode = .ask,
         .workspace_root = "/tmp/fx",
         .history_turns = 3,
@@ -1861,14 +2054,14 @@ test "core status snapshot text and json stay stable" {
     const text = try snapshot.renderText(std.testing.allocator);
     defer std.testing.allocator.free(text);
     try std.testing.expectEqualStrings(
-        "[status] model=alpha\n[status] update_channel=stable\n[status] build_channel=stable\n[status] auth=missing\n[status] auth_refreshable=false\n[status] auth_help=Fx needs access to Vercel AI Gateway. Run fx login to sign in, fx setup to use an API key, or set AI_GATEWAY_API_KEY.\n[status] permission_mode=ask\n[status] sandbox=none\n[status] workspace=/tmp/fx\n[status] history_turns=3\n[status] session_permission_grants=1\n[status] agent_step_limit=24\n",
+        "[status] model=alpha\n[status] update_channel=stable\n[status] build_channel=stable\n[status] auth=missing\n[status] auth_refreshable=false\n[status] auth_help=" ++ credentials.missing_credential_message ++ "\n[status] permission_mode=ask\n[status] sandbox=none\n[status] workspace=/tmp/fx\n[status] history_turns=3\n[status] session_permission_grants=1\n[status] agent_step_limit=24\n",
         text,
     );
 
     const json = try snapshot.renderJson(std.testing.allocator);
     defer std.testing.allocator.free(json);
     try std.testing.expectEqualStrings(
-        "{\"kind\":\"status\",\"model\":\"alpha\",\"update_channel\":\"stable\",\"build_channel\":\"stable\",\"build_revision\":\"\",\"auth\":\"missing\",\"auth_refreshable\":false,\"auth_help\":\"Fx needs access to Vercel AI Gateway. Run fx login to sign in, fx setup to use an API key, or set AI_GATEWAY_API_KEY.\",\"permission_mode\":\"ask\",\"sandbox\":\"none\",\"workspace\":\"/tmp/fx\",\"history_turns\":3,\"session_permission_grants\":1,\"agent_step_limit\":24}",
+        "{\"kind\":\"status\",\"model\":\"alpha\",\"update_channel\":\"stable\",\"build_channel\":\"stable\",\"build_revision\":\"\",\"auth\":\"missing\",\"auth_refreshable\":false,\"auth_help\":\"" ++ credentials.missing_credential_message ++ "\",\"permission_mode\":\"ask\",\"sandbox\":\"none\",\"workspace\":\"/tmp/fx\",\"history_turns\":3,\"session_permission_grants\":1,\"agent_step_limit\":24}",
         json,
     );
 }
@@ -2661,6 +2854,50 @@ test "core credits snapshot renders parsed, raw, and empty fallbacks" {
     const empty_text = try (CreditsSnapshot{}).renderText(std.testing.allocator);
     defer std.testing.allocator.free(empty_text);
     try std.testing.expectEqualStrings("[credits] no data returned by gateway\n", empty_text);
+}
+
+test "Codex account usage snapshot renders the same typed data as text and JSON" {
+    var snapshot = CodexAccountUsageSnapshot{ .data = try codex_usage.parseSnapshot(
+        std.testing.allocator,
+        "{\"plan_type\":\"pro\",\"rate_limit\":{\"allowed\":true,\"limit_reached\":false,\"primary_window\":{\"used_percent\":20,\"limit_window_seconds\":18000,\"reset_after_seconds\":600,\"reset_at\":2000}},\"credits\":{\"has_credits\":true,\"unlimited\":false,\"balance\":\"5\"},\"spend_control\":{\"reached\":false,\"individual_limit\":{\"source\":\"user\",\"limit\":\"10\",\"used\":\"2\",\"remaining\":\"8\",\"used_percent\":20,\"remaining_percent\":80,\"reset_after_seconds\":600,\"reset_at\":2000}}}",
+        "{\"stats\":{\"lifetime_tokens\":123,\"daily_usage_buckets\":[{\"start_date\":\"2026-08-20\",\"tokens\":45}]}}",
+        1000,
+    ) };
+    defer snapshot.deinit(std.testing.allocator);
+
+    const text = try snapshot.renderText(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.find(u8, text, "Fetched at (ms): 1000\n") != null);
+    try std.testing.expect(std.mem.find(u8, text, "Plan: pro\n") != null);
+    try std.testing.expect(std.mem.find(u8, text, "primary: used_percent=20") != null);
+    try std.testing.expect(std.mem.find(u8, text, "source=user\n") != null);
+    try std.testing.expect(std.mem.find(u8, text, "lifetime_tokens=123") != null);
+    try std.testing.expect(std.mem.find(u8, text, "2026-08-20: 45 tokens") != null);
+
+    const json = try snapshot.renderJson(std.testing.allocator);
+    defer std.testing.allocator.free(json);
+    try std.testing.expect(std.mem.find(u8, json, "\"kind\":\"codex_account_usage\"") != null);
+    try std.testing.expect(std.mem.find(u8, json, "\"plan_type\":\"pro\"") != null);
+    try std.testing.expect(std.mem.find(u8, json, "\"lifetime_tokens\":123") != null);
+    try std.testing.expect(std.mem.find(u8, json, "\"start_date\":\"2026-08-20\"") != null);
+}
+
+test "Codex account usage snapshot renders structured failures" {
+    const snapshot = CodexAccountUsageSnapshot{
+        .failure = .{ .kind = .unauthorized, .http_status = .unauthorized },
+    };
+    const text = try snapshot.renderText(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings(
+        "[codex usage] error: Codex authentication failed (HTTP 401)\n",
+        text,
+    );
+    const json = try snapshot.renderJson(std.testing.allocator);
+    defer std.testing.allocator.free(json);
+    try std.testing.expectEqualStrings(
+        "{\"kind\":\"codex_account_usage\",\"schema_version\":1,\"error\":{\"code\":\"unauthorized\",\"http_status\":401}}",
+        json,
+    );
 }
 
 test "core upgrade snapshot renders errors and statuses" {

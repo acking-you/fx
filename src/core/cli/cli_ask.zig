@@ -509,6 +509,7 @@ const AskContext = struct {
     api_key: []const u8 = "",
     gateway_team: ?[]const u8 = null,
     credential_source: ?types.CredentialSource = null,
+    credential_account_id: ?[]const u8 = null,
     model_catalog_access: credentials.CatalogAccess = .{ .public_only = .no_credential },
     model: []const u8 = "",
     agent_step_limit: usize = 0,
@@ -929,6 +930,8 @@ const AskContext = struct {
     fn toolContext(self: *AskContext) tool_runtime.Context {
         self.web_search_runtime.configure(.{
             .api_key = self.api_key,
+            .credential_source = self.credential_source orelse .ai_gateway_api_key,
+            .credential_account_id = self.credential_account_id,
             .gateway_team = self.gateway_team,
             .worker_model = self.model,
             .gateway_retry_count = self.cfg.gateway_retry_count,
@@ -948,6 +951,7 @@ const AskContext = struct {
             .max_tool_result_bytes = self.max_tool_result_bytes,
             .api_key = self.api_key,
             .agent_stream_provider = self.cfg.gateway_provider.agent_stream,
+            .responses_compaction_provider = self.cfg.gateway_provider.responses_compaction,
             .gateway_team = self.gateway_team,
             .credential_source = self.credential_source,
             .oauth_transport = self.cfg.gateway_provider.oauth_transport,
@@ -994,7 +998,7 @@ const AskContext = struct {
             .web_fetch_artifact_error = self.session.webFetchArtifactError(),
             .web_fetch_progress_ctx = @ptrCast(self),
             .on_web_fetch_progress = onWebFetchProgress,
-            .web_search_runtime_ready = false,
+            .web_search_runtime_ready = self.credential_source == .codex_oauth,
             .web_search_backend = self.web_search_runtime.dispatchBackend(),
             .web_search_progress_ctx = @ptrCast(self),
             .on_web_search_progress = onWebSearchProgress,
@@ -1042,6 +1046,7 @@ const AskContext = struct {
         return permission_auto_classifier.Classifier.withProvider(provider, .{
             .credential = self.api_key,
             .tenant = self.gateway_team,
+            .credential_source = self.credential_source,
             .endpoint = self.cfg.gateway_chat_url,
             .cancel_flag = self.cancelFlag(),
             .usage = &self.session.usage,
@@ -1490,6 +1495,7 @@ fn runPromptInternal(alloc: Allocator, prompt: []const u8, permission_override: 
     ctx.api_key = api_key;
     ctx.gateway_team = credential.gatewayTeam();
     ctx.credential_source = credential.source;
+    ctx.credential_account_id = credential.account_id;
     ctx.model_catalog_access = credentials.catalogAccessForCredential(credential.source, api_key, credential.gatewayTeam());
 
     const restored_image_catalog = try ctx.session.snapshotImageCatalog(alloc, &.{});
@@ -1618,6 +1624,7 @@ fn runPromptInternal(alloc: Allocator, prompt: []const u8, permission_override: 
         .api_key = api_key,
         .gateway_team = if (credential.gatewayTeam()) |team| @constCast(team) else null,
         .credential_source = credential.source,
+        .credential_account_id = if (credential.account_id) |account_id| @constCast(account_id) else null,
         .permission_mode = ctx.permission_mode,
         .sandbox_backend = ctx.sandbox_backend,
         .history = context_history,
@@ -1803,6 +1810,7 @@ fn agentRuntimeDeps(ctx: *AskContext) agent_runtime.AgentRuntimeDeps {
     return .{
         .ctx = @ptrCast(ctx),
         .agent_stream_provider = ctx.cfg.gateway_provider.agent_stream,
+        .responses_compaction_provider = ctx.cfg.gateway_provider.responses_compaction,
         .tool_registry = ctx.toolRegistry(),
         .context_registry = ctx.deps.context_registry,
         .context_enabled = ctx.context_enabled,
@@ -1855,9 +1863,9 @@ fn refreshGatewayCredential(
     alloc: Allocator,
     source: credentials.Source,
     mode: auth_runtime.CredentialRefreshMode,
-) !?[]u8 {
+) !?auth_runtime.RefreshedCredential {
     const ctx: *AskContext = @ptrCast(@alignCast(raw_ctx));
-    return auth_runtime.refreshFxLoginToken(
+    return auth_runtime.refreshCredential(
         ctx.cfg.gateway_provider.oauth_transport,
         alloc,
         source,

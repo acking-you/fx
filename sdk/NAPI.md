@@ -66,7 +66,7 @@ The adapter checks fetch control and drains ACP output on its existing timer. Wh
 | Export | Purpose |
 | --- | --- |
 | `libfxApiVersion` | Checks compatibility with the JavaScript loader. Currently `2`. Low-level `createCore` backends must declare this exact version. |
-| `createCore(options)` | Allocates a runtime and starts its ACP thread. |
+| `createCore(options)` | Allocates a runtime and starts its ACP thread. `apiKey` may be paired with `credentialSource`; direct Responses runtimes may also supply `responsesBaseUrl`. |
 | `writeCore(handle, buffer)` | Appends bytes to the bounded input queue. |
 | `closeCore(handle)` | Closes input and wakes a blocked ACP reader. |
 | `drainCore(handle)` | Returns up to 1 MiB of queued output as a Node Buffer. |
@@ -94,7 +94,7 @@ Creating a core performs these steps:
 
 1. Atomically reserve one of 64 process-wide runtime slots.
 2. Read and copy bounded configuration strings from the JavaScript options object.
-3. Validate the Gateway endpoint.
+3. Validate the credential source and its provider endpoint.
 4. Allocate a `Runtime` and bounded fetch bridge using Zig's C allocator.
 5. Spawn one native thread.
 6. Run `acp_server.runWithTransport()` on that thread using callback-backed ACP queues and the shared host-stream provider.
@@ -140,9 +140,18 @@ Accepted endpoints are:
 - the exact canonical production Gateway URL; or
 - explicit HTTP on `127.0.0.1`, `localhost`, or `[::1]`, with a port.
 
+Direct Responses base URLs use a separate policy. They may use HTTPS on a
+custom host, or explicit loopback HTTP with a port. User information, queries,
+and fragments are rejected. The normalized `/responses` and `/models`
+endpoints are derived from the same per-runtime base URL.
+
 URLs with embedded credentials or fragments are rejected. Arbitrary HTTPS hosts, non-loopback HTTP hosts, and other schemes are rejected. Loopback HTTP exists only for local development and deterministic tests.
 
-Keep the validation in `sdk/node.js`, `src/napi_core_main.zig`, and `streamable_http.validateEndpoint()` aligned. Loosening only one layer creates inconsistent behavior and may create a server-side request forgery path for callers using the low-level addon directly.
+Keep Gateway validation in `sdk/node.js`, `src/napi_core_main.zig`, and
+`streamable_http.validateEndpoint()` aligned. Keep the separate Responses
+policy aligned with `provider_route.resolveEndpointAlloc()`. Loosening only one
+layer creates inconsistent behavior and may create a server-side request
+forgery path for callers using the low-level addon directly.
 
 ## Resource limits and backpressure
 
@@ -187,9 +196,18 @@ Do not replace the tagged wrapped object with a numeric pointer, externalized ad
 
 ## Secret handling
 
-The API key is copied from the JavaScript string into native heap memory and passed as an in-memory credential override. It is not read from process-global environment state, written into generated package artifacts, or intentionally logged. Per-runtime overrides also avoid mutating environment variables shared by concurrent runtimes and workers.
+The API key is copied from the JavaScript string into native heap memory and passed as an in-memory credential override together with its typed source. It is not read from process-global environment state, written into generated package artifacts, or intentionally logged. `sdk/node.js` gives `AI_GATEWAY_API_KEY` precedence over `OPENAI_API_KEY` when both are non-empty. Per-runtime overrides also avoid mutating environment variables shared by concurrent runtimes and workers.
 
-The copied key remains resident for the runtime lifetime and is freed during destruction. The allocation is not currently zeroized before free. Code handling diagnostics, crash reports, heap inspection, or allocator changes must treat this memory as sensitive. A future zeroization change should cover all destruction and partial-construction paths and must not be optimized away.
+For a direct Responses credential, `FX_RESPONSES_BASE_URL` takes precedence
+over `OPENAI_BASE_URL`. The selected root crosses the N-API boundary as the
+bounded `responsesBaseUrl` option and is shared by the model-catalog and
+streaming transports for that runtime. It is never recovered from the native
+process environment.
+
+The copied key remains resident for the runtime lifetime and is explicitly
+zeroized before free during destruction and partial-construction cleanup. Code
+handling diagnostics, crash reports, heap inspection, or allocator changes
+must still treat this memory as sensitive.
 
 ## Native code trust boundary
 

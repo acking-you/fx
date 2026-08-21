@@ -18,7 +18,14 @@ const checkpoint = (message) => { if (trace) console.error(`[core-smoke] ${messa
 
 const encoded = new TextEncoder();
 const catalogModels = [
-  { id: "sdk/catalog-alpha", type: "language", released: 2, tags: ["tool-use"] },
+  {
+    id: "sdk/catalog-alpha",
+    type: "language",
+    released: 2,
+    tags: ["tool-use", "reasoning"],
+    reasoning_options: [{ type: "effort", values: ["high"] }],
+    fast_options: [{ type: "toggle" }],
+  },
   { id: "sdk/catalog-beta", type: "language", released: 1, tags: ["reasoning"] },
 ];
 let fetchCalls = 0;
@@ -27,6 +34,8 @@ let requestedSessionId;
 let requestedSessionAffinity;
 const persistedConfig = new Map([
   ["model", "sdk/catalog-alpha"],
+  ["effort", "high"],
+  ["fast_mode", "fast"],
   ["mode", "code"],
 ]);
 const configStore = {
@@ -115,6 +124,12 @@ if (modeOption?.options.find((option) => option.value === "code")?.permissionMod
 if (modeOption?.options.find((option) => option.value === "ask")?.permissionMode !== "ask") throw new Error("ask mode did not advertise ask permission mode");
 const modelOption = session.configOptions?.find((option) => option.id === "model");
 if (!modelOption) throw new Error("session/new did not return model options");
+const effortOption = session.configOptions?.find((option) => option.id === "effort");
+if (!effortOption?.options.some((option) => option.value === "auto")) throw new Error("session/new did not return effort options");
+if (effortOption.currentValue !== "high") throw new Error(`session/new did not restore the supported effort: ${JSON.stringify(effortOption)}`);
+const fastOption = session.configOptions?.find((option) => option.id === "fast_mode");
+if (!fastOption?.options.some((option) => option.value === "normal")) throw new Error("session/new did not return Fast mode options");
+if (fastOption.currentValue !== "fast") throw new Error(`session/new did not restore supported Fast mode: ${JSON.stringify(fastOption)}`);
 for (const model of catalogModels) {
   if (!modelOption.options.some((option) => option.value === model.id)) throw new Error(`model catalog omitted ${model.id}`);
 }
@@ -123,6 +138,8 @@ if (session.modes.currentModeId !== "code") throw new Error(`stored mode was not
 await session.setModel("sdk/browser-test-model");
 if (session.configOptions.find((option) => option.id === "model")?.currentValue !== "sdk/browser-test-model") throw new Error("model option did not update");
 if (persistedConfig.get("model") !== "sdk/browser-test-model") throw new Error("accepted model was not persisted");
+if (persistedConfig.get("effort") !== "auto") throw new Error("model normalization did not clear the stored stale effort");
+if (persistedConfig.get("fast_mode") !== "normal") throw new Error("model normalization did not clear the stored stale Fast mode");
 failNextCommit = true;
 let modelCommitRejected = false;
 try { await session.setModel("sdk/rejected-model"); } catch { modelCommitRejected = true; }
@@ -133,6 +150,13 @@ if (!events.some((event) => event.type === "config.changed" && event.configId ==
 if (!events.some((event) => event.type === "config.changed" && event.configId === "mode" && event.value === "code" && event.source === "restore")) {
   throw new Error("restored agent mode did not emit config.changed with restore source");
 }
+await session.setEffort("auto");
+if (session.configOptions.find((option) => option.id === "effort")?.currentValue !== "auto") throw new Error("effort option did not update");
+let invalidFastModeRejected = false;
+try { session.setFastMode("false"); } catch (error) { invalidFastModeRejected = error instanceof TypeError; }
+if (!invalidFastModeRejected) throw new Error("setFastMode accepted a non-boolean value");
+await session.setFastMode(false);
+if (session.configOptions.find((option) => option.id === "fast_mode")?.currentValue !== "normal") throw new Error("Fast mode option did not update");
 await session.setMode("code");
 if (session.modes.currentModeId !== "code") throw new Error("mode did not update to code");
 await session.setMode("ask");
@@ -174,6 +198,9 @@ const sessions = await agent.listSessions();
 if (!sessions.some((entry) => entry.sessionId === session.id)) throw new Error("persisted session was not listed");
 const restored = await agent.openSession(session.id);
 if (restored.id !== session.id) throw new Error("opened session id did not match");
+if (restored.configOptions.find((option) => option.id === "model")?.currentValue !== "sdk/browser-test-model") throw new Error("opened session lost its persisted model");
+if (restored.configOptions.find((option) => option.id === "effort")?.currentValue !== "auto") throw new Error("opened session lost its persisted effort");
+if (restored.configOptions.find((option) => option.id === "fast_mode")?.currentValue !== "normal") throw new Error("opened session lost its persisted Fast mode");
 if (!restored.history.some((update) => update.sessionUpdate === "agent_message_chunk" && update.content.text.includes("hello world"))) {
   throw new Error("restored session did not replay prior assistant history");
 }
@@ -187,5 +214,73 @@ await restored.remove();
 if ((await agent.listSessions()).some((entry) => entry.sessionId === session.id)) throw new Error("removed session was still listed");
 const exitCode = await agent.close();
 if (exitCode !== 0) throw new Error(`graceful agent close exited with ${exitCode}`);
+
+const directBaseUrl = "https://responses.example.test/v1";
+const directKey = "sdk-openai-direct-key";
+const directCalls = [];
+const directFetch = async (url, init) => {
+  const requestUrl = String(url);
+  const headers = new Headers(init.headers);
+  directCalls.push({ url: requestUrl, method: init.method, headers });
+  if (headers.get("authorization") !== `Bearer ${directKey}`) {
+    throw new Error("direct Responses request omitted its scoped bearer credential");
+  }
+  if (requestUrl.startsWith("https://ai-gateway.vercel.sh")) {
+    throw new Error("OpenAI credential was routed to Vercel");
+  }
+  if (init.method === "GET" && requestUrl === `${directBaseUrl}/models`) {
+    if (headers.has("x-vercel-ai-gateway-team")) throw new Error("direct model catalog leaked a Vercel team header");
+    return Response.json({ object: "list", data: [{ id: "gpt-5.4", object: "model", created: 7 }] });
+  }
+  if (init.method !== "POST" || requestUrl !== `${directBaseUrl}/responses`) {
+    throw new Error(`unexpected direct Responses request: ${init.method} ${requestUrl}`);
+  }
+  if (headers.get("accept") !== "text/event-stream") throw new Error("direct Responses request omitted SSE accept header");
+  if (headers.has("ai-gateway-protocol-version") || headers.has("ai-language-model-id")) {
+    throw new Error("direct Responses request retained Vercel gateway headers");
+  }
+  const requestBody = JSON.parse(new TextDecoder().decode(init.body));
+  if (requestBody.model !== "gpt-5.4" || requestBody.stream !== true || !Array.isArray(requestBody.input)) {
+    throw new Error("direct request did not use the Responses schema");
+  }
+  if (requestBody.prompt !== undefined || requestBody.messages !== undefined) {
+    throw new Error("direct request retained a Vercel gateway body shape");
+  }
+  return new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(encoded.encode('data: {"type":"response.reasoning_summary_text.delta","item_id":"rs_1","output_index":0,"summary_index":0,"delta":"direct thought"}\n\n'));
+      controller.enqueue(encoded.encode('data: {"type":"response.output_text.delta","item_id":"msg_1","output_index":0,"content_index":0,"delta":"direct response"}\n\n'));
+      controller.enqueue(encoded.encode('data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":5,"output_tokens":2,"output_tokens_details":{"reasoning_tokens":1},"total_tokens":7}}}\n\n'));
+      controller.close();
+    },
+  }), { status: 200, headers: { "content-type": "text/event-stream" } });
+};
+const directConfig = new Map([["model", "gpt-5.4"], ["mode", "ask"]]);
+const directAgent = await createFxAgent({
+  backend: "wasm",
+  wasm: await readFile(wasmPath),
+  fetch: directFetch,
+  env: { OPENAI_API_KEY: directKey, FX_RESPONSES_BASE_URL: directBaseUrl },
+  configStore: {
+    get(configId) { return directConfig.get(configId) ?? null; },
+    set(configId, value) { directConfig.set(configId, value); },
+  },
+});
+const directSession = await directAgent.createSession();
+const directTurn = directSession.prompt("exercise direct Responses");
+const directChunks = [];
+for await (const update of directTurn) {
+  if (update.sessionUpdate === "agent_message_chunk") directChunks.push(update.content.text);
+}
+if ((await directTurn.result).stopReason !== "end_turn") throw new Error("direct Responses turn did not complete");
+if (directChunks.join("").trimEnd() !== "direct response") {
+  throw new Error(`unexpected direct Responses text: ${JSON.stringify(directChunks)}`);
+}
+if (directCalls.filter((call) => call.method === "GET").length !== 1 || directCalls.filter((call) => call.method === "POST").length !== 1) {
+  throw new Error(`unexpected direct request count: ${directCalls.length}`);
+}
+const directExitCode = await directAgent.close();
+if (directExitCode !== 0) throw new Error(`direct Responses agent close exited with ${directExitCode}`);
 console.log(`core SDK ACP stream passed: initialize, session/new, structured prompt, and graceful close completed (${session.id})`);
 console.log(`streamed ${chunks.length} ACP message chunks: ${chunks.join("")}`);
+console.log("core SDK direct Responses routing passed: scoped model catalog, request schema, headers, and SSE stream verified");

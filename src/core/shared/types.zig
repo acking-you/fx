@@ -1,4 +1,5 @@
 const std = @import("std");
+const responses_output_items = @import("responses_output_items.zig");
 const text_utils = @import("text_utils.zig");
 
 pub const Layout = struct {
@@ -90,12 +91,75 @@ test "context notice body drops legacy markers from every line" {
 pub const CredentialSource = enum {
     vercel_oidc_token,
     ai_gateway_api_key,
+    openai_api_key,
     fx_login,
+    codex_oauth,
     stored_key,
 };
 
 pub fn parseCredentialSource(text: []const u8) ?CredentialSource {
     return std.meta.stringToEnum(CredentialSource, text);
+}
+
+/// Non-secret identity bound to one provider-generated Responses compaction
+/// checkpoint. `normalized_origin` is the canonical Responses endpoint. API
+/// keys are represented only by their SHA-256 digest.
+pub const ResponsesCompactionProviderBindingView = struct {
+    normalized_origin: []const u8,
+    account_id: ?[]const u8 = null,
+    api_key_sha256: ?[]const u8 = null,
+    organization: ?[]const u8 = null,
+    project: ?[]const u8 = null,
+};
+
+pub const ResponsesCompactionProviderBinding = struct {
+    normalized_origin: []u8,
+    account_id: ?[]u8 = null,
+    api_key_sha256: ?[]u8 = null,
+    organization: ?[]u8 = null,
+    project: ?[]u8 = null,
+
+    pub fn view(self: ResponsesCompactionProviderBinding) ResponsesCompactionProviderBindingView {
+        return .{
+            .normalized_origin = self.normalized_origin,
+            .account_id = self.account_id,
+            .api_key_sha256 = self.api_key_sha256,
+            .organization = self.organization,
+            .project = self.project,
+        };
+    }
+};
+
+pub fn dupeResponsesCompactionProviderBinding(
+    alloc: std.mem.Allocator,
+    binding: ResponsesCompactionProviderBindingView,
+) !ResponsesCompactionProviderBinding {
+    const normalized_origin = try alloc.dupe(u8, binding.normalized_origin);
+    errdefer alloc.free(normalized_origin);
+    const account_id = if (binding.account_id) |value| try alloc.dupe(u8, value) else null;
+    errdefer if (account_id) |value| alloc.free(value);
+    const api_key_sha256 = if (binding.api_key_sha256) |value| try alloc.dupe(u8, value) else null;
+    errdefer if (api_key_sha256) |value| alloc.free(value);
+    const organization = if (binding.organization) |value| try alloc.dupe(u8, value) else null;
+    errdefer if (organization) |value| alloc.free(value);
+    return .{
+        .normalized_origin = normalized_origin,
+        .account_id = account_id,
+        .api_key_sha256 = api_key_sha256,
+        .organization = organization,
+        .project = if (binding.project) |value| try alloc.dupe(u8, value) else null,
+    };
+}
+
+pub fn freeResponsesCompactionProviderBinding(
+    alloc: std.mem.Allocator,
+    binding: ResponsesCompactionProviderBinding,
+) void {
+    alloc.free(binding.normalized_origin);
+    if (binding.account_id) |value| alloc.free(value);
+    if (binding.api_key_sha256) |value| alloc.free(value);
+    if (binding.organization) |value| alloc.free(value);
+    if (binding.project) |value| alloc.free(value);
 }
 
 test "credential source round trips through its persisted name" {
@@ -116,6 +180,79 @@ pub const TurnFinished = struct {
     turn_id: u64,
     outcome: TurnPresentationOutcome,
 };
+
+pub const ResponsesCompactionWorkerOutcome = union(enum) {
+    compacted: struct {
+        input_json: []u8,
+        usage: Usage = .{},
+    },
+    rejected: std.http.Status,
+    failed: []u8,
+};
+
+/// Owned result of one background `/responses/compact` attempt. The UI drain
+/// validates every binding before it may mutate session state.
+pub const ResponsesCompactionWorkerEvent = struct {
+    generation: u64,
+    automatic: bool = false,
+    expected_history_generation: u64,
+    expected_history_len: usize,
+    expected_context_history_start: usize,
+    session_id: ?[]u8 = null,
+    credential_source: CredentialSource,
+    wire_model: []u8,
+    provider_binding: ResponsesCompactionProviderBinding,
+    outcome: ResponsesCompactionWorkerOutcome,
+};
+
+pub fn dupeResponsesCompactionWorkerEvent(
+    alloc: std.mem.Allocator,
+    event: ResponsesCompactionWorkerEvent,
+) !ResponsesCompactionWorkerEvent {
+    const session_id = if (event.session_id) |id| try alloc.dupe(u8, id) else null;
+    errdefer if (session_id) |id| alloc.free(id);
+    const wire_model = try alloc.dupe(u8, event.wire_model);
+    errdefer alloc.free(wire_model);
+    const provider_binding = try dupeResponsesCompactionProviderBinding(
+        alloc,
+        event.provider_binding.view(),
+    );
+    errdefer freeResponsesCompactionProviderBinding(alloc, provider_binding);
+    const outcome: ResponsesCompactionWorkerOutcome = switch (event.outcome) {
+        .compacted => |completed| .{ .compacted = .{
+            .input_json = try alloc.dupe(u8, completed.input_json),
+            .usage = completed.usage,
+        } },
+        .rejected => |status| .{ .rejected = status },
+        .failed => |name| .{ .failed = try alloc.dupe(u8, name) },
+    };
+    return .{
+        .generation = event.generation,
+        .automatic = event.automatic,
+        .expected_history_generation = event.expected_history_generation,
+        .expected_history_len = event.expected_history_len,
+        .expected_context_history_start = event.expected_context_history_start,
+        .session_id = session_id,
+        .credential_source = event.credential_source,
+        .wire_model = wire_model,
+        .provider_binding = provider_binding,
+        .outcome = outcome,
+    };
+}
+
+pub fn freeResponsesCompactionWorkerEvent(
+    alloc: std.mem.Allocator,
+    event: ResponsesCompactionWorkerEvent,
+) void {
+    if (event.session_id) |id| alloc.free(id);
+    alloc.free(event.wire_model);
+    freeResponsesCompactionProviderBinding(alloc, event.provider_binding);
+    switch (event.outcome) {
+        .compacted => |completed| alloc.free(completed.input_json),
+        .failed => |name| alloc.free(name),
+        .rejected => {},
+    }
+}
 
 pub const ToolLifecycleId = struct {
     turn_id: u64,
@@ -618,6 +755,11 @@ pub const ToolCall = struct {
     provider_result: ?[]const u8 = null,
     final_identity: FinalToolIdentity = .valid,
     provenance: ToolExecutionProvenance = .fx_local,
+    /// Responses output item ID (`fc_...`), distinct from the invocation's
+    /// `call_id`. Retained for stateless function-call replay.
+    responses_item_id: ?[]const u8 = null,
+    /// Responses wire index, retained only for safe incomplete-stream replay.
+    responses_output_index: ?u32 = null,
 };
 
 pub const WebSearchProgress = union(enum) {
@@ -812,8 +954,59 @@ pub const ToolResultMemory = struct {
     command_process_presentation: ?CommandProcessPresentation = null,
 };
 
+/// One finalized Responses reasoning output item. The summary is ordinary
+/// replayable text, while `encrypted_content` is opaque and must remain paired
+/// with this item's identity. Ordered slices of these items preserve the wire
+/// sequence when one response emits more than one reasoning item.
+pub const ResponsesReasoningItem = struct {
+    output_index: ?u32 = null,
+    id: ?[]const u8 = null,
+    summary: ?[]const u8 = null,
+    encrypted_content: ?[]const u8 = null,
+};
+
+/// One item in the provider's complete, ordered Responses `response.output`.
+/// The JSON bytes are owned by the containing completion, execution step, or
+/// history turn and take precedence over semantic reconstruction on replay.
+pub const ResponsesProviderOutputItem = responses_output_items.Item;
+
+/// One provider-supplied URL annotation on Responses output text. Indices are
+/// provider text offsets into the original assistant text, before fx appends
+/// its Markdown source list for presentation.
+pub const ResponsesUrlCitation = struct {
+    url: []const u8,
+    title: []const u8,
+    start_index: u64,
+    end_index: u64,
+};
+
+pub const ProviderFailureKind = enum {
+    unknown,
+    rate_limited,
+    provider_unavailable,
+};
+
+/// Typed failure metadata carried by a provider's terminal stream event. The
+/// reset timestamp is Unix seconds, matching the Responses wire field.
+pub const ProviderFailureMetadata = struct {
+    kind: ProviderFailureKind = .unknown,
+    status_code: ?u16 = null,
+    retry_after_seconds: ?u64 = null,
+    resets_at: ?i64 = null,
+};
+
 pub const ToolExecutionStep = struct {
     assistant: ?[]u8 = null,
+    responses_message_output_index: ?u32 = null,
+    /// Responses reasoning state that immediately preceded this tool call.
+    /// Kept with the durable step so `store: false` requests can replay the
+    /// complete reasoning/function-call/output sequence after resume.
+    reasoning: ?[]u8 = null,
+    reasoning_item_id: ?[]u8 = null,
+    reasoning_encrypted_content: ?[]u8 = null,
+    reasoning_items: []ResponsesReasoningItem = &.{},
+    responses_provider_output_items: []ResponsesProviderOutputItem = &.{},
+    responses_output_sequence_complete: bool = false,
     tool_calls: []ToolCall = &.{},
     tool_results: []PersistedToolResult = &.{},
 };
@@ -859,6 +1052,18 @@ pub const ChatCachePolicy = enum {
     no_cache,
 };
 
+/// Borrowed view of one provider-generated Responses compaction checkpoint.
+/// `input_json` is the complete compact endpoint `output` array and must stay
+/// opaque until the matching direct Responses route replays it.
+pub const ResponsesCompactionView = struct {
+    credential_source: CredentialSource,
+    wire_model: []const u8,
+    input_json: []const u8,
+    /// Missing only on sessions created before provider identity binding was
+    /// persisted. Such legacy checkpoints are never replayed opaquely.
+    provider_binding: ?ResponsesCompactionProviderBindingView = null,
+};
+
 pub const ChatMessage = struct {
     role: ChatRole,
     content: ?[]const u8 = null,
@@ -868,6 +1073,7 @@ pub const ChatMessage = struct {
     tool_calls: []const ToolCall = &.{},
     tool_result_status: ?PersistedToolStatus = null,
     tool_result_memory: ?ToolResultMemory = null,
+    responses_message_output_index: ?u32 = null,
     permission_feedback: bool = false,
     cache_policy: ChatCachePolicy = .default,
     /// Provider reasoning that produced this assistant turn, replayed verbatim
@@ -879,11 +1085,27 @@ pub const ChatMessage = struct {
     /// thinking block whose signature is missing or does not match its text,
     /// so the two always travel together.
     reasoning_signature: ?[]const u8 = null,
+    /// Responses reasoning item identity and opaque encrypted content. These
+    /// are replayed together after a function call so reasoning models can
+    /// continue the same server-authenticated chain without exposing it.
+    reasoning_item_id: ?[]const u8 = null,
+    reasoning_encrypted_content: ?[]const u8 = null,
+    reasoning_items: []const ResponsesReasoningItem = &.{},
+    responses_provider_output_items: []const ResponsesProviderOutputItem = &.{},
+    responses_output_sequence_complete: bool = false,
+    /// Present only on a synthetic compacted-history message. Non-Responses
+    /// providers ignore this view and consume the ordinary summary content.
+    responses_compaction: ?ResponsesCompactionView = null,
 };
 
 pub const Usage = struct {
     input_tokens: ?u64 = null,
     output_tokens: ?u64 = null,
+    cached_input_tokens: ?u64 = null,
+    cache_write_input_tokens: ?u64 = null,
+    reasoning_output_tokens: ?u64 = null,
+    total_tokens: ?u64 = null,
+    codex_rollout_budget_units: ?f64 = null,
 };
 
 /// Exact usage metadata returned by a completed Gateway stream. `model` is
@@ -959,11 +1181,23 @@ pub const ProviderFinishReason = enum {
 
 pub const GatewayCompletion = struct {
     content: ?[]const u8 = null,
+    responses_message_output_index: ?u32 = null,
     /// Full streamed reasoning body, retained untruncated so the next step of
     /// the same turn can replay it as reasoning context.
     reasoning: ?[]const u8 = null,
     /// Provider signature for `reasoning`, when the provider supplied one.
     reasoning_signature: ?[]const u8 = null,
+    reasoning_item_id: ?[]const u8 = null,
+    reasoning_encrypted_content: ?[]const u8 = null,
+    reasoning_items: []const ResponsesReasoningItem = &.{},
+    /// Owned complete provider output sequence needed for `store: false` replay.
+    responses_provider_output_items: []const ResponsesProviderOutputItem = &.{},
+    /// True only when terminal `response.output` authoritatively supplied the
+    /// complete sequence. False means raw items must merge with projections.
+    responses_output_sequence_complete: bool = false,
+    /// Owned URL annotations emitted by the Responses transport. The
+    /// completion owner must free these with `freeResponsesUrlCitations`.
+    url_citations: []const ResponsesUrlCitation = &.{},
     tool_calls: []const ToolCall = &.{},
     generation_id: ?[]const u8 = null,
     billing: ?GatewayBilling = null,
@@ -973,6 +1207,7 @@ pub const GatewayCompletion = struct {
     delivery_ambiguous: bool = false,
     provider_result_identity_failure: ?ProviderResultIdentityFailure = null,
     provider_failure_detail: ?[]const u8 = null,
+    provider_failure_metadata: ?ProviderFailureMetadata = null,
     finish_reason: ?ProviderFinishReason = null,
     usage: Usage = .{},
 };
@@ -1429,6 +1664,17 @@ pub const ConversationLanguage = struct {
 pub const AssistantHistoryTurn = struct {
     user: UserTurn,
     assistant: []u8,
+    responses_message_output_index: ?u32 = null,
+    /// Responses reasoning state emitted with the terminal assistant message.
+    /// These fields are persisted only when the provider supplies a Responses
+    /// item identity, allowing `store: false` conversations to replay the
+    /// opaque reasoning chain on the next user turn.
+    reasoning: ?[]u8 = null,
+    reasoning_item_id: ?[]u8 = null,
+    reasoning_encrypted_content: ?[]u8 = null,
+    reasoning_items: []ResponsesReasoningItem = &.{},
+    responses_provider_output_items: []ResponsesProviderOutputItem = &.{},
+    responses_output_sequence_complete: bool = false,
     execution: ExecutionMemory = .{},
 };
 
@@ -1459,6 +1705,16 @@ pub const InterruptedHistoryTurn = struct {
     terminal_reason: InterruptedTerminalReason = .cancelled,
 };
 
+/// Owned durable form of a remote Responses compaction checkpoint.
+pub const ResponsesCompactionCheckpoint = struct {
+    credential_source: CredentialSource,
+    wire_model: []u8,
+    input_json: []u8,
+    /// Optional solely for decoding legacy sessions. New checkpoints always
+    /// install a complete non-secret provider binding.
+    provider_binding: ?ResponsesCompactionProviderBinding = null,
+};
+
 pub const CompactedSummaryHistoryTurn = struct {
     summary: []u8,
     removed_turn_count: usize,
@@ -1473,6 +1729,9 @@ pub const CompactedSummaryHistoryTurn = struct {
     permission_feedback: [][]u8 = &.{},
     /// Legacy completeness marker retained for storage compatibility.
     permission_feedback_complete: bool = true,
+    /// Provider-owned compacted input. The local summary above remains the
+    /// portable fallback when the active provider or model no longer matches.
+    responses_compaction: ?ResponsesCompactionCheckpoint = null,
 };
 
 pub const HistoryTurn = union(enum) {
@@ -1511,6 +1770,13 @@ pub const FinishedPrompt = struct {
     summary: ?TurnSummary = null,
     terminal_projection: FinishedPromptProjection = .history_default,
     terminal_outcome: ?TurnPresentationOutcome = null,
+    /// Requests canonical post-turn compaction after this turn is persisted.
+    /// The agent may already have used a transient inline checkpoint to finish
+    /// the turn; persistence compacts the complete canonical turn exactly once.
+    auto_compact_after_finish: bool = false,
+    /// True when the inline provider attempt already proved that remote
+    /// compaction is unavailable for this turn's binding.
+    auto_compact_after_finish_local_only: bool = false,
     snapshot_file_ownership: ?SnapshotFileOwnership = null,
 };
 
@@ -1755,10 +2021,22 @@ pub fn freeHistoryTurn(alloc: std.mem.Allocator, turn: HistoryTurn) void {
             alloc.free(entry.summary);
             freeCompletedToolNames(alloc, entry.root_user_messages);
             freePermissionFeedback(alloc, entry.permission_feedback);
+            if (entry.responses_compaction) |checkpoint| {
+                alloc.free(checkpoint.wire_model);
+                alloc.free(checkpoint.input_json);
+                if (checkpoint.provider_binding) |binding| {
+                    freeResponsesCompactionProviderBinding(alloc, binding);
+                }
+            }
         },
         .assistant => |entry| {
             freeUserTurn(alloc, entry.user);
             alloc.free(entry.assistant);
+            if (entry.reasoning) |reasoning| alloc.free(reasoning);
+            if (entry.reasoning_item_id) |item_id| alloc.free(item_id);
+            if (entry.reasoning_encrypted_content) |content| alloc.free(content);
+            freeResponsesReasoningItems(alloc, entry.reasoning_items);
+            freeResponsesProviderOutputItems(alloc, entry.responses_provider_output_items);
             freeExecutionMemory(alloc, entry.execution);
         },
         .background_command => |entry| {
@@ -1824,10 +2102,31 @@ pub fn dupeHistoryTurn(alloc: std.mem.Allocator, turn: HistoryTurn) !HistoryTurn
             const assistant = try alloc.dupe(u8, entry.assistant);
             errdefer alloc.free(assistant);
 
+            const reasoning = if (entry.reasoning) |value| try alloc.dupe(u8, value) else null;
+            errdefer if (reasoning) |value| alloc.free(value);
+            const reasoning_item_id = if (entry.reasoning_item_id) |value| try alloc.dupe(u8, value) else null;
+            errdefer if (reasoning_item_id) |value| alloc.free(value);
+            const reasoning_encrypted_content = if (entry.reasoning_encrypted_content) |value| try alloc.dupe(u8, value) else null;
+            errdefer if (reasoning_encrypted_content) |value| alloc.free(value);
+            const reasoning_items = try dupeResponsesReasoningItems(alloc, entry.reasoning_items);
+            errdefer freeResponsesReasoningItems(alloc, reasoning_items);
+            const provider_output_items = try dupeResponsesProviderOutputItems(
+                alloc,
+                entry.responses_provider_output_items,
+            );
+            errdefer freeResponsesProviderOutputItems(alloc, provider_output_items);
+
             const execution = try dupeExecutionMemory(alloc, entry.execution);
             break :blk .{ .assistant = .{
                 .user = user,
                 .assistant = assistant,
+                .responses_message_output_index = entry.responses_message_output_index,
+                .reasoning = reasoning,
+                .reasoning_item_id = reasoning_item_id,
+                .reasoning_encrypted_content = reasoning_encrypted_content,
+                .reasoning_items = reasoning_items,
+                .responses_provider_output_items = provider_output_items,
+                .responses_output_sequence_complete = entry.responses_output_sequence_complete,
                 .execution = execution,
             } };
         },
@@ -1927,6 +2226,8 @@ pub fn dupeFinishedPrompt(alloc: std.mem.Allocator, finished: FinishedPrompt) !F
         .summary = finished.summary,
         .terminal_projection = finished.terminal_projection,
         .terminal_outcome = finished.terminal_outcome,
+        .auto_compact_after_finish = finished.auto_compact_after_finish,
+        .auto_compact_after_finish_local_only = finished.auto_compact_after_finish_local_only,
         .snapshot_file_ownership = finished.snapshot_file_ownership,
     };
 }
@@ -1972,6 +2273,115 @@ pub fn freeExecutionMemory(alloc: std.mem.Allocator, memory: ExecutionMemory) vo
     freeFileEvidenceSlice(alloc, memory.files);
 }
 
+pub fn dupeResponsesReasoningItems(
+    alloc: std.mem.Allocator,
+    items: []const ResponsesReasoningItem,
+) ![]ResponsesReasoningItem {
+    if (items.len == 0) return &.{};
+    const copy = try alloc.alloc(ResponsesReasoningItem, items.len);
+    errdefer alloc.free(copy);
+    var copied: usize = 0;
+    errdefer {
+        var i: usize = 0;
+        while (i < copied) : (i += 1) freeResponsesReasoningItem(alloc, copy[i]);
+    }
+    for (items, 0..) |item, i| {
+        copy[i] = try dupeResponsesReasoningItem(alloc, item);
+        copied += 1;
+    }
+    return copy;
+}
+
+pub fn freeResponsesReasoningItems(
+    alloc: std.mem.Allocator,
+    items: []const ResponsesReasoningItem,
+) void {
+    for (items) |item| freeResponsesReasoningItem(alloc, item);
+    if (items.len > 0) alloc.free(@constCast(items));
+}
+
+pub fn dupeResponsesProviderOutputItems(
+    alloc: std.mem.Allocator,
+    items: []const ResponsesProviderOutputItem,
+) ![]ResponsesProviderOutputItem {
+    return responses_output_items.dupe(alloc, items);
+}
+
+pub fn freeResponsesProviderOutputItems(
+    alloc: std.mem.Allocator,
+    items: []const ResponsesProviderOutputItem,
+) void {
+    responses_output_items.free(alloc, items);
+}
+
+pub fn dupeResponsesUrlCitations(
+    alloc: std.mem.Allocator,
+    citations: []const ResponsesUrlCitation,
+) ![]ResponsesUrlCitation {
+    if (citations.len == 0) return &.{};
+    const copy = try alloc.alloc(ResponsesUrlCitation, citations.len);
+    errdefer alloc.free(copy);
+    var copied: usize = 0;
+    errdefer {
+        for (copy[0..copied]) |citation| freeResponsesUrlCitation(alloc, citation);
+    }
+    for (citations, 0..) |citation, i| {
+        const url = try alloc.dupe(u8, citation.url);
+        errdefer alloc.free(url);
+        const title = try alloc.dupe(u8, citation.title);
+        copy[i] = .{
+            .url = url,
+            .title = title,
+            .start_index = citation.start_index,
+            .end_index = citation.end_index,
+        };
+        copied += 1;
+    }
+    return copy;
+}
+
+pub fn freeResponsesUrlCitations(
+    alloc: std.mem.Allocator,
+    citations: []const ResponsesUrlCitation,
+) void {
+    for (citations) |citation| freeResponsesUrlCitation(alloc, citation);
+    if (citations.len > 0) alloc.free(@constCast(citations));
+}
+
+fn freeResponsesUrlCitation(
+    alloc: std.mem.Allocator,
+    citation: ResponsesUrlCitation,
+) void {
+    alloc.free(@constCast(citation.url));
+    alloc.free(@constCast(citation.title));
+}
+
+fn dupeResponsesReasoningItem(
+    alloc: std.mem.Allocator,
+    item: ResponsesReasoningItem,
+) !ResponsesReasoningItem {
+    const id = if (item.id) |value| try alloc.dupe(u8, value) else null;
+    errdefer if (id) |value| alloc.free(value);
+    const summary = if (item.summary) |value| try alloc.dupe(u8, value) else null;
+    errdefer if (summary) |value| alloc.free(value);
+    const encrypted_content = if (item.encrypted_content) |value| try alloc.dupe(u8, value) else null;
+    return .{
+        .output_index = item.output_index,
+        .id = id,
+        .summary = summary,
+        .encrypted_content = encrypted_content,
+    };
+}
+
+fn freeResponsesReasoningItem(
+    alloc: std.mem.Allocator,
+    item: ResponsesReasoningItem,
+) void {
+    if (item.id) |value| alloc.free(@constCast(value));
+    if (item.summary) |value| alloc.free(@constCast(value));
+    if (item.encrypted_content) |value| alloc.free(@constCast(value));
+}
+
 pub fn dupeToolExecutionSteps(alloc: std.mem.Allocator, steps: []const ToolExecutionStep) ![]ToolExecutionStep {
     if (steps.len == 0) return &.{};
 
@@ -1999,6 +2409,19 @@ pub fn freeToolExecutionSteps(alloc: std.mem.Allocator, steps: []ToolExecutionSt
 fn dupeToolExecutionStep(alloc: std.mem.Allocator, step: ToolExecutionStep) !ToolExecutionStep {
     const assistant = if (step.assistant) |text| try alloc.dupe(u8, text) else null;
     errdefer if (assistant) |text| alloc.free(text);
+    const reasoning = if (step.reasoning) |value| try alloc.dupe(u8, value) else null;
+    errdefer if (reasoning) |value| alloc.free(value);
+    const reasoning_item_id = if (step.reasoning_item_id) |value| try alloc.dupe(u8, value) else null;
+    errdefer if (reasoning_item_id) |value| alloc.free(value);
+    const reasoning_encrypted_content = if (step.reasoning_encrypted_content) |value| try alloc.dupe(u8, value) else null;
+    errdefer if (reasoning_encrypted_content) |value| alloc.free(value);
+    const reasoning_items = try dupeResponsesReasoningItems(alloc, step.reasoning_items);
+    errdefer freeResponsesReasoningItems(alloc, reasoning_items);
+    const provider_output_items = try dupeResponsesProviderOutputItems(
+        alloc,
+        step.responses_provider_output_items,
+    );
+    errdefer freeResponsesProviderOutputItems(alloc, provider_output_items);
     const tool_calls = try dupeToolCallSlice(alloc, step.tool_calls);
     errdefer freeToolCallSlice(alloc, tool_calls);
     const tool_results = try dupePersistedToolResults(alloc, step.tool_results);
@@ -2006,6 +2429,13 @@ fn dupeToolExecutionStep(alloc: std.mem.Allocator, step: ToolExecutionStep) !Too
 
     return .{
         .assistant = assistant,
+        .responses_message_output_index = step.responses_message_output_index,
+        .reasoning = reasoning,
+        .reasoning_item_id = reasoning_item_id,
+        .reasoning_encrypted_content = reasoning_encrypted_content,
+        .reasoning_items = reasoning_items,
+        .responses_provider_output_items = provider_output_items,
+        .responses_output_sequence_complete = step.responses_output_sequence_complete,
         .tool_calls = tool_calls,
         .tool_results = tool_results,
     };
@@ -2013,6 +2443,11 @@ fn dupeToolExecutionStep(alloc: std.mem.Allocator, step: ToolExecutionStep) !Too
 
 fn freeToolExecutionStep(alloc: std.mem.Allocator, step: ToolExecutionStep) void {
     if (step.assistant) |assistant| alloc.free(assistant);
+    if (step.reasoning) |reasoning| alloc.free(reasoning);
+    if (step.reasoning_item_id) |item_id| alloc.free(item_id);
+    if (step.reasoning_encrypted_content) |content| alloc.free(content);
+    freeResponsesReasoningItems(alloc, step.reasoning_items);
+    freeResponsesProviderOutputItems(alloc, step.responses_provider_output_items);
     freeToolCallSlice(alloc, step.tool_calls);
     freePersistedToolResults(alloc, step.tool_results);
 }
@@ -2291,6 +2726,8 @@ pub fn dupeToolCall(alloc: std.mem.Allocator, call: ToolCall) !ToolCall {
     errdefer if (provisional_id) |value| alloc.free(value);
     const provider_result = if (call.provider_result) |result| try alloc.dupe(u8, result) else null;
     errdefer if (provider_result) |result| alloc.free(result);
+    const responses_item_id = if (call.responses_item_id) |value| try alloc.dupe(u8, value) else null;
+    errdefer if (responses_item_id) |value| alloc.free(value);
     return .{
         .id = id,
         .name = name,
@@ -2300,6 +2737,8 @@ pub fn dupeToolCall(alloc: std.mem.Allocator, call: ToolCall) !ToolCall {
         .provider_result = provider_result,
         .final_identity = call.final_identity,
         .provenance = call.provenance,
+        .responses_item_id = responses_item_id,
+        .responses_output_index = call.responses_output_index,
     };
 }
 
@@ -2309,6 +2748,7 @@ pub fn freeToolCall(alloc: std.mem.Allocator, call: ToolCall) void {
     alloc.free(call.arguments_json);
     if (call.provisional_id) |provisional_id| alloc.free(provisional_id);
     if (call.provider_result) |provider_result| alloc.free(provider_result);
+    if (call.responses_item_id) |responses_item_id| alloc.free(responses_item_id);
 }
 
 test "dupeToolCall preserves argument integrity" {
@@ -2317,12 +2757,14 @@ test "dupeToolCall preserves argument integrity" {
         .name = "ask_user_question",
         .arguments_json = "{}",
         .argument_integrity = .malformed_json,
+        .responses_item_id = "fc_call_1",
     };
 
     const copy = try dupeToolCall(std.testing.allocator, source);
     defer freeToolCall(std.testing.allocator, copy);
 
     try std.testing.expectEqual(ToolArgumentIntegrity.malformed_json, copy.argument_integrity);
+    try std.testing.expectEqualStrings("fc_call_1", copy.responses_item_id.?);
 }
 
 test "ToolArgumentIntegrity accepts complete serialized JSON roots" {

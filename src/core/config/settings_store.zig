@@ -93,6 +93,9 @@ pub const UserSettingsPatch = struct {
     /// Removes the key entirely so resolution returns to plain precedence.
     /// Distinct from a null `credential_source`, which means "leave unchanged".
     clear_credential_source: bool = false,
+    /// Removes the global choice only when it still names this source. This is
+    /// used when a credential is deleted so an unrelated choice is preserved.
+    clear_credential_source_if: ?types.CredentialSource = null,
     yolo_acknowledged: ?bool = null,
     effort: ?types.ReasoningEffort = null,
     fast_mode: ?bool = null,
@@ -113,6 +116,7 @@ pub const UserSettingsPatch = struct {
             self.permission_mode == null and
             self.credential_source == null and
             !self.clear_credential_source and
+            self.clear_credential_source_if == null and
             self.yolo_acknowledged == null and
             self.effort == null and
             self.fast_mode == null and
@@ -894,6 +898,12 @@ pub fn validateModel(model: []const u8) !void {
 }
 
 fn validateUserPatch(patch: UserSettingsPatch) !void {
+    const clears_credential = patch.clear_credential_source or patch.clear_credential_source_if != null;
+    if ((patch.credential_source != null and clears_credential) or
+        (patch.clear_credential_source and patch.clear_credential_source_if != null))
+    {
+        return error.InvalidDurableField;
+    }
     if (patch.model) |model| try validateModel(model);
     if (patch.input_appearance) |appearance| try validateInputAppearance(appearance);
     if (patch.maxxing_mode) |mode| try validateMaxxingMode(mode);
@@ -941,6 +951,50 @@ test "clearing the credential choice removes the key rather than blanking it" {
     try std.testing.expect(!application.changed);
 }
 
+test "credential source activation and conditional clearing preserve workspace precedence" {
+    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+
+    var root = try std.json.parseFromSliceLeaky(
+        std.json.Value,
+        arena.allocator(),
+        "{\"model\":\"m\",\"credential_source\":\"fx_login\",\"workspaces\":{\"/repo\":{\"credential_source\":\"openai_api_key\"}}}",
+        .{},
+    );
+
+    var application = try applyUserPatchToRoot(arena.allocator(), &root, .{ .credential_source = .codex_oauth });
+    try std.testing.expect(application.changed);
+    try std.testing.expectEqualStrings("codex_oauth", root.object.get("credential_source").?.string);
+    try std.testing.expectEqualStrings(
+        "openai_api_key",
+        root.object.get("workspaces").?.object.get("/repo").?.object.get("credential_source").?.string,
+    );
+
+    application = try applyUserPatchToRoot(arena.allocator(), &root, .{ .clear_credential_source_if = .openai_api_key });
+    try std.testing.expect(!application.changed);
+    try std.testing.expectEqualStrings("codex_oauth", root.object.get("credential_source").?.string);
+
+    application = try applyUserPatchToRoot(arena.allocator(), &root, .{ .clear_credential_source_if = .codex_oauth });
+    try std.testing.expect(application.changed);
+    try std.testing.expect(root.object.get("credential_source") == null);
+    try std.testing.expectEqualStrings(
+        "openai_api_key",
+        root.object.get("workspaces").?.object.get("/repo").?.object.get("credential_source").?.string,
+    );
+}
+
+test "credential source patch rejects contradictory selection mutations" {
+    try std.testing.expectError(
+        error.InvalidDurableField,
+        validateUserPatch(.{ .credential_source = .codex_oauth, .clear_credential_source = true }),
+    );
+    try std.testing.expectError(
+        error.InvalidDurableField,
+        validateUserPatch(.{ .clear_credential_source = true, .clear_credential_source_if = .codex_oauth }),
+    );
+}
+
 test "input appearance validation keeps experiment labels private" {
     try std.testing.expectError(error.InvalidDurableField, validateInputAppearance("minimal-maxxing"));
     try std.testing.expectError(error.InvalidDurableField, validateInputAppearance("no-lines"));
@@ -984,7 +1038,16 @@ fn applyUserPatchToRoot(
     if (patch.model) |value| application.changed = try putString(arena, &root.object, "model", value) or application.changed;
     if (patch.permission_mode) |value| application.changed = try putString(arena, &root.object, "permission_mode", @tagName(value)) or application.changed;
     if (patch.credential_source) |value| application.changed = try putString(arena, &root.object, "credential_source", @tagName(value)) or application.changed;
-    if (patch.clear_credential_source and root.object.contains("credential_source")) {
+    const clear_selected_credential = if (patch.clear_credential_source)
+        true
+    else if (patch.clear_credential_source_if) |expected| blk: {
+        const selected = root.object.get("credential_source") orelse break :blk false;
+        if (selected != .string or types.parseCredentialSource(selected.string) == null) {
+            return error.InvalidSettingsFormat;
+        }
+        break :blk std.mem.eql(u8, selected.string, @tagName(expected));
+    } else false;
+    if (clear_selected_credential and root.object.contains("credential_source")) {
         _ = root.object.orderedRemove("credential_source");
         application.changed = true;
     }

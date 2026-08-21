@@ -125,17 +125,58 @@ function validateGatewayChatUrl(value) {
   }
 }
 
+function validateResponsesBaseUrl(value) {
+  if (value === undefined) return;
+  if (typeof value !== "string") throw new TypeError("Responses base URL must be a string");
+  let url;
+  try { url = new URL(value); } catch { throw new TypeError("Responses base URL must be a valid URL"); }
+  if (url.username || url.password || url.search || url.hash) {
+    throw new TypeError("Responses base URL must not contain credentials, a query, or a fragment");
+  }
+  if (url.protocol === "https:") return;
+  const loopback = url.hostname === "127.0.0.1" || url.hostname === "[::1]" || url.hostname === "localhost";
+  if (url.protocol !== "http:" || !loopback || !url.port) {
+    throw new TypeError("Responses base URL must use HTTPS or explicit loopback HTTP");
+  }
+}
+
+function nativeCredentialFromEnv(env) {
+  for (const [name, source] of [
+    ["AI_GATEWAY_API_KEY", "ai_gateway_api_key"],
+    ["OPENAI_API_KEY", "openai_api_key"],
+  ]) {
+    const value = env?.[name];
+    if (value === undefined) continue;
+    if (typeof value !== "string") throw new TypeError(`${name} must be a string`);
+    if (value.length > 0) return { apiKey: value, credentialSource: source };
+  }
+  return { apiKey: undefined, credentialSource: undefined };
+}
+
+function responsesBaseUrlFromEnv(env) {
+  for (const name of ["FX_RESPONSES_BASE_URL", "OPENAI_BASE_URL"]) {
+    const value = env?.[name];
+    if (value === undefined) continue;
+    validateResponsesBaseUrl(value);
+    return value;
+  }
+  return undefined;
+}
+
 function createNativeCoreRuntime(addon, options) {
-  const apiKey = options.env?.AI_GATEWAY_API_KEY;
+  const { apiKey, credentialSource } = nativeCredentialFromEnv(options.env);
   const model = options.env?.FX_MODEL;
   const gatewayChatUrl = options.env?.FX_GATEWAY_CHAT_URL;
+  const responsesBaseUrl = responsesBaseUrlFromEnv(options.env);
   validateGatewayChatUrl(gatewayChatUrl);
   const core = addon.createCore({
     apiKey,
     home: options.home ?? homedir(),
     workspaceRoot: options.workspaceRoot ?? process.cwd(),
+    ...(credentialSource === undefined ? {} : { credentialSource }),
     ...(model === undefined ? {} : { model }),
     ...(gatewayChatUrl === undefined ? {} : { gatewayChatUrl }),
+    ...(responsesBaseUrl === undefined ? {} : { responsesBaseUrl }),
   });
   let exitedResolve;
   let lineHandler = null;

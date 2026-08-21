@@ -39,6 +39,21 @@ pub fn buildExecutionMemory(alloc: Allocator, within_turn_suffix: []const ChatMe
     );
 }
 
+/// Recovery checkpoints retain the bounded diff preview needed to explain file
+/// mutations after resume, but omit complete before/after file bodies. Those
+/// bodies are presentation-only and otherwise multiply checkpoint size for
+/// every edit of a large file, forcing multi-megabyte state replacements.
+pub fn boundRecoveryCheckpointPresentation(execution: *types.ExecutionMemory) void {
+    for (execution.tool_steps) |*step| {
+        for (step.tool_results) |*result| {
+            if (result.committed_file_presentation) |*presentation| {
+                presentation.previous_content = null;
+                presentation.after_content = null;
+            }
+        }
+    }
+}
+
 pub fn buildInterruptedExecutionMemory(
     alloc: Allocator,
     current_turn_messages: []const ChatMessage,
@@ -818,4 +833,42 @@ test "transcript does not mark native web_search as provider resource placeholde
 
     try std.testing.expect(!records[0].provider_native);
     try std.testing.expectEqualStrings("bounded search output", records[0].output);
+}
+
+test "recovery checkpoint presentation omits full file bodies but keeps preview" {
+    var lines = [_]types.CommittedFilePresentationLine{.{
+        .kind = .addition,
+        .new_line = 1,
+        .text = "preview line",
+    }};
+    var results = [_]types.PersistedToolResult{.{
+        .tool_call_id = @constCast("call_edit"),
+        .tool_name = @constCast("edit_file"),
+        .status = .success,
+        .output = @constCast("edited"),
+        .output_bytes = 6,
+        .stored_output_bytes = 6,
+        .committed_file_presentation = .{
+            .path = "src/main.zig",
+            .kind = .edited,
+            .lines = &lines,
+            .additions = 1,
+            .deletions = 1,
+            .truncated = false,
+            .previous_content = "large before body",
+            .after_content = "large after body",
+            .lifecycle_id = .{ .turn_id = 7, .call_id = "call_edit" },
+        },
+    }};
+    var steps = [_]types.ToolExecutionStep{.{ .tool_results = &results }};
+    var execution: types.ExecutionMemory = .{ .tool_steps = &steps };
+
+    boundRecoveryCheckpointPresentation(&execution);
+
+    const presentation = execution.tool_steps[0].tool_results[0].committed_file_presentation.?;
+    try std.testing.expectEqualStrings("preview line", presentation.lines[0].text);
+    try std.testing.expectEqualStrings("src/main.zig", presentation.path);
+    try std.testing.expect(presentation.previous_content == null);
+    try std.testing.expect(presentation.after_content == null);
+    try std.testing.expectEqual(@as(u64, 7), presentation.lifecycle_id.?.turn_id);
 }

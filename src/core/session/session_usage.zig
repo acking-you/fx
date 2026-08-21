@@ -21,6 +21,7 @@ const max_team_bytes: usize = 255;
 const max_identifier_bytes: usize = 8 * 1024;
 const max_active_invocations: usize = 64;
 const shutdown_reconciliation_budget_ms: usize = 250;
+const direct_generation_alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 pub const max_snapshot_bytes: usize = 256 * 1024;
 
 /// Completeness of the saved billing window rendered by `/cost`.
@@ -45,7 +46,25 @@ pub const DeliveryOutcome = enum {
     possibly_billed_without_identity,
     /// Transport evidence cannot prove whether a billable generation was created.
     ambiguous_delivery,
+    /// A successful direct-provider terminal omitted every aggregatable usage field.
+    possibly_billed_without_usage,
 };
+
+pub const DirectTerminalOutcome = struct {
+    /// True when the provider returned a semantic terminal over HTTP 2xx.
+    http_ok: bool,
+    /// Preserves completed, incomplete, and failed terminal semantics for
+    /// diagnostics even though all successful HTTP terminals require usage.
+    terminal_finish_reason: ?types.ProviderFinishReason = null,
+};
+
+fn hasAggregatableDirectUsage(usage: types.Usage) bool {
+    return usage.input_tokens != null or
+        usage.output_tokens != null or
+        usage.cached_input_tokens != null or
+        usage.cache_write_input_tokens != null or
+        usage.reasoning_output_tokens != null;
+}
 
 /// Host-owned durable sink. Its context and allocator remain borrowed until
 /// the sink is unset; `persist` must not retain the snapshot, checkpoint, or
@@ -177,6 +196,40 @@ pub const GatewayObservation = struct {
             );
         } else {
             ledger.flushProfilePublications();
+        }
+    }
+
+    /// Settles a direct Responses invocation from the terminal in-band usage
+    /// record. Direct providers have no Vercel generation to reconcile, but
+    /// their token totals still belong in the durable per-session aggregate.
+    /// A successful terminal that omits every aggregatable usage field leaves
+    /// a durable coverage incident instead of fabricating zero-token accounting.
+    pub fn completeDirect(
+        self: GatewayObservation,
+        alloc: Allocator,
+        model: []const u8,
+        usage: types.Usage,
+        terminal_outcome: DirectTerminalOutcome,
+    ) !void {
+        const ledger = self.usage orelse return;
+        try ledger.finishDirectInvocationDurably(
+            alloc,
+            self.sequence,
+            self.elapsedMs(),
+            model,
+            usage,
+            terminal_outcome,
+        );
+        if (terminal_outcome.http_ok and !hasAggregatableDirectUsage(usage)) {
+            const terminal_label = if (terminal_outcome.terminal_finish_reason) |reason|
+                reason.label()
+            else
+                "missing_provider_finish";
+            debug_trace.logf(
+                "session",
+                "usage billing incomplete sequence={d} reason=direct_terminal_usage_missing terminal={s}",
+                .{ self.sequence, terminal_label },
+            );
         }
     }
 
@@ -507,6 +560,47 @@ pub const Usage = struct {
         self.checkpoint_mutex.unlock(io_mod.getIo());
     }
 
+    fn finishDirectInvocationDurably(
+        self: *Usage,
+        alloc: Allocator,
+        sequence: u64,
+        duration_ms: u64,
+        model: []const u8,
+        usage: types.Usage,
+        terminal_outcome: DirectTerminalOutcome,
+    ) !void {
+        self.checkpoint_mutex.lockUncancelable(io_mod.getIo());
+        self.mutex.lockUncancelable(io_mod.getIo());
+        const has_usage = hasAggregatableDirectUsage(usage);
+        const settled = self.finishInvocationUnlocked(
+            sequence,
+            duration_ms,
+            if (terminal_outcome.http_ok and !has_usage)
+                .possibly_billed_without_usage
+            else
+                .unbilled,
+        );
+        if (settled and has_usage) {
+            self.applyDirectUsageUnlocked(alloc, sequence, model, usage) catch |err| {
+                self.billing = .incomplete;
+                self.recordIncidentUnlocked(
+                    .incomplete,
+                    @max(io_mod.milliTimestamp(), 0),
+                );
+                self.dirty = true;
+                self.mutex.unlock(io_mod.getIo());
+                _ = self.persistCheckpointBestEffortLocked();
+                self.checkpoint_mutex.unlock(io_mod.getIo());
+                self.flushProfilePublications();
+                return err;
+            };
+        }
+        self.mutex.unlock(io_mod.getIo());
+        _ = self.persistCheckpointBestEffortLocked();
+        self.checkpoint_mutex.unlock(io_mod.getIo());
+        if (settled) self.flushProfilePublications();
+    }
+
     fn persistCheckpointRequiredLocked(self: *Usage) !void {
         const sink = self.checkpoint_sink orelse return;
         var persisted = try self.snapshotCurrent(sink.allocator);
@@ -600,7 +694,10 @@ pub const Usage = struct {
         };
         switch (outcome) {
             .unbilled, .observed_generation => {},
-            .possibly_billed_without_identity, .ambiguous_delivery => {
+            .possibly_billed_without_identity,
+            .ambiguous_delivery,
+            .possibly_billed_without_usage,
+            => {
                 self.billing = .incomplete;
                 self.recordIncidentUnlocked(.incomplete, io_mod.milliTimestamp());
             },
@@ -610,6 +707,137 @@ pub const Usage = struct {
         }
         self.dirty = true;
         return true;
+    }
+
+    fn applyDirectUsageUnlocked(
+        self: *Usage,
+        alloc: Allocator,
+        sequence: u64,
+        model_name: []const u8,
+        usage: types.Usage,
+    ) !void {
+        var direct_id = self.generateDirectGenerationIdUnlocked();
+        const record = GenerationRecord{
+            .id = &direct_id,
+            .created_at_ms = @max(io_mod.milliTimestamp(), 0),
+            .model = model_name,
+            .total_cost = 0,
+            .input_tokens = usage.input_tokens orelse 0,
+            .output_tokens = usage.output_tokens orelse 0,
+            .cache_read_tokens = usage.cached_input_tokens orelse 0,
+            .cache_write_tokens = usage.cache_write_input_tokens orelse 0,
+            .reasoning_tokens = usage.reasoning_output_tokens,
+            .billable_web_search_calls = 0,
+        };
+        try validateGenerationRecord(record);
+
+        const model_index = for (self.models.items, 0..) |model, index| {
+            if (std.mem.eql(u8, model.model, model_name)) break index;
+        } else null;
+        if (model_index == null and self.models.items.len >= max_models) {
+            return error.UsageCapacityExceeded;
+        }
+
+        var added_identifier_bytes = record.id.len + record.model.len;
+        if (model_index == null) {
+            added_identifier_bytes = std.math.add(
+                usize,
+                added_identifier_bytes,
+                record.model.len,
+            ) catch return self.failOverflow();
+        }
+        const next_identifier_bytes = std.math.add(
+            usize,
+            self.identifierBytesUnlocked(),
+            added_identifier_bytes,
+        ) catch return self.failOverflow();
+        if (next_identifier_bytes > max_identifier_bytes) {
+            return error.UsageCapacityExceeded;
+        }
+
+        const next_input_tokens = std.math.add(u64, self.input_tokens, record.input_tokens) catch
+            return self.failOverflow();
+        const next_output_tokens = std.math.add(u64, self.output_tokens, record.output_tokens) catch
+            return self.failOverflow();
+        const next_cache_read_tokens = std.math.add(u64, self.cache_read_tokens, record.cache_read_tokens) catch
+            return self.failOverflow();
+        const next_cache_write_tokens = std.math.add(u64, self.cache_write_tokens, record.cache_write_tokens) catch
+            return self.failOverflow();
+        const next_reasoning_tokens = try addOptionalCounter(
+            self.reasoning_tokens,
+            record.reasoning_tokens,
+        );
+        const next_request_count = if (self.request_count) |requests|
+            std.math.add(u64, requests, 1) catch return self.failOverflow()
+        else
+            null;
+
+        var owned_model: ?[]u8 = null;
+        errdefer if (owned_model) |value| alloc.free(value);
+        if (model_index == null) {
+            owned_model = try alloc.dupe(u8, model_name);
+            try self.models.ensureUnusedCapacity(alloc, 1);
+        }
+        try self.stageDirectPublicationUnlocked(
+            alloc,
+            generationFactBorrowed(record),
+        );
+        errdefer self.removePublicationBacklogUnlocked(alloc, record.id);
+        if (model_index) |index| {
+            try addRecordToModel(&self.models.items[index], record, sequence);
+        } else {
+            var model = ModelAggregate{
+                .model = owned_model.?,
+                .first_sequence = sequence,
+                .reasoning_tokens = if (record.reasoning_tokens != null) 0 else null,
+                .request_count = 0,
+            };
+            owned_model = null;
+            try addRecordToModel(&model, record, sequence);
+            self.models.appendAssumeCapacity(model);
+            self.sortModelsBySequenceUnlocked();
+        }
+
+        self.input_tokens = next_input_tokens;
+        self.output_tokens = next_output_tokens;
+        self.cache_read_tokens = next_cache_read_tokens;
+        self.cache_write_tokens = next_cache_write_tokens;
+        self.reasoning_tokens = next_reasoning_tokens;
+        self.request_count = next_request_count;
+        self.dirty = true;
+    }
+
+    fn generateDirectGenerationIdUnlocked(self: *const Usage) [30]u8 {
+        while (true) {
+            var entropy: [25]u8 = undefined;
+            io_mod.getIo().random(&entropy);
+            // Canonical Gateway ids are ULIDs, whose first encoded symbol is
+            // 0 through 7. D keeps direct facts in a disjoint valid namespace.
+            var id = "gen_D0000000000000000000000000".*;
+            for (entropy, 5..) |byte, index| {
+                id[index] = direct_generation_alphabet[byte & 31];
+            }
+            const collision = for (self.pending.items) |pending| {
+                if (std.mem.eql(u8, pending.id, &id)) break true;
+            } else for (self.publication_backlog.items) |fact| {
+                if (std.mem.eql(u8, fact.id, &id)) break true;
+            } else false;
+            if (!collision) return id;
+        }
+    }
+
+    fn stageDirectPublicationUnlocked(
+        self: *Usage,
+        alloc: Allocator,
+        fact: usage_report.GenerationFact,
+    ) !void {
+        if (self.publication_backlog.items.len == max_publication_backlog) {
+            return error.UsageCapacityExceeded;
+        }
+        var owned = try fact.dupe(alloc);
+        errdefer owned.deinit(alloc);
+        try self.publication_backlog.append(alloc, owned);
+        self.dirty = true;
     }
 
     fn observeGenerationUnlocked(
@@ -3905,6 +4133,352 @@ test "terminal Gateway billing settles the durable observation immediately" {
     try std.testing.expectEqual(@as(u64, 130), snapshot.input_tokens);
     try std.testing.expectEqual(@as(u64, 25), snapshot.output_tokens);
     try std.testing.expectEqual(@as(u64, 2), snapshot.billable_web_search_calls);
+}
+
+test "direct Responses usage settles zero-cost token aggregates without pending billing" {
+    const alloc = std.testing.allocator;
+    var usage = Usage.initFresh();
+    defer usage.deinit(alloc);
+
+    const first = try GatewayObservation.begin(&usage);
+    try first.completeDirect(alloc, "gpt-5.4", .{
+        .input_tokens = 130,
+        .output_tokens = 25,
+        .cached_input_tokens = 20,
+        .cache_write_input_tokens = 10,
+        .reasoning_output_tokens = 5,
+        .total_tokens = 155,
+    }, .{ .http_ok = true, .terminal_finish_reason = .stop });
+    const second = try GatewayObservation.begin(&usage);
+    try second.completeDirect(alloc, "gpt-5.4", .{
+        .input_tokens = 50,
+        .output_tokens = 8,
+        .cached_input_tokens = 4,
+        .cache_write_input_tokens = 0,
+        .reasoning_output_tokens = 2,
+    }, .{ .http_ok = true, .terminal_finish_reason = .stop });
+
+    var snapshot = try usage.snapshot(alloc);
+    defer snapshot.deinit(alloc);
+    try std.testing.expectEqual(Availability.complete, snapshot.billing);
+    try std.testing.expectEqual(@as(usize, 0), snapshot.pending.len);
+    try std.testing.expectEqual(@as(f64, 0), snapshot.total_cost);
+    try std.testing.expectEqual(@as(u64, 180), snapshot.input_tokens);
+    try std.testing.expectEqual(@as(u64, 33), snapshot.output_tokens);
+    try std.testing.expectEqual(@as(u64, 24), snapshot.cache_read_tokens);
+    try std.testing.expectEqual(@as(u64, 10), snapshot.cache_write_tokens);
+    try std.testing.expectEqual(@as(?u64, 7), snapshot.reasoning_tokens);
+    try std.testing.expectEqual(@as(?u64, 2), snapshot.request_count);
+    try std.testing.expectEqual(@as(usize, 1), snapshot.models.len);
+    try std.testing.expectEqualStrings("gpt-5.4", snapshot.models[0].model);
+    try std.testing.expectEqual(@as(u64, 180), snapshot.models[0].input_tokens);
+    try std.testing.expectEqual(@as(usize, 2), snapshot.publication_backlog.len);
+    try std.testing.expect(std.mem.startsWith(
+        u8,
+        snapshot.publication_backlog[0].id,
+        "gen_D",
+    ));
+    try std.testing.expect(std.mem.startsWith(
+        u8,
+        snapshot.publication_backlog[1].id,
+        "gen_D",
+    ));
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        snapshot.publication_backlog[0].id,
+        snapshot.publication_backlog[1].id,
+    ));
+}
+
+test "direct Responses explicit zero usage remains a complete observation" {
+    const alloc = std.testing.allocator;
+    var usage = Usage.initFresh();
+    defer usage.deinit(alloc);
+
+    const observation = try GatewayObservation.begin(&usage);
+    try observation.completeDirect(alloc, "gpt-5.4", .{
+        .input_tokens = 0,
+    }, .{ .http_ok = true, .terminal_finish_reason = .stop });
+
+    var snapshot = try usage.snapshot(alloc);
+    defer snapshot.deinit(alloc);
+    try std.testing.expectEqual(Availability.complete, snapshot.billing);
+    try std.testing.expectEqual(@as(u64, 1), snapshot.settled_through_sequence);
+    try std.testing.expectEqual(@as(usize, 0), snapshot.pending.len);
+    try std.testing.expectEqual(@as(usize, 0), snapshot.incidents.len);
+    try std.testing.expectEqual(@as(u64, 0), snapshot.input_tokens);
+    try std.testing.expectEqual(@as(u64, 0), snapshot.output_tokens);
+    try std.testing.expectEqual(@as(?u64, 1), snapshot.request_count);
+    try std.testing.expectEqual(@as(usize, 1), snapshot.models.len);
+    try std.testing.expectEqual(@as(usize, 1), snapshot.publication_backlog.len);
+}
+
+test "direct Responses total-only usage remains an incomplete coverage gap" {
+    const alloc = std.testing.allocator;
+    var usage = Usage.initFresh();
+    defer usage.deinit(alloc);
+
+    const observation = try GatewayObservation.begin(&usage);
+    try observation.completeDirect(alloc, "gpt-5.4", .{
+        .total_tokens = 17,
+    }, .{ .http_ok = true, .terminal_finish_reason = .stop });
+
+    var snapshot = try usage.snapshot(alloc);
+    defer snapshot.deinit(alloc);
+    try std.testing.expectEqual(Availability.incomplete, snapshot.billing);
+    try std.testing.expectEqual(@as(u64, 1), snapshot.settled_through_sequence);
+    try std.testing.expectEqual(@as(usize, 1), snapshot.incidents.len);
+    try std.testing.expectEqual(@as(usize, 0), snapshot.models.len);
+    try std.testing.expectEqual(@as(usize, 0), snapshot.publication_backlog.len);
+    try std.testing.expectEqual(@as(u64, 0), snapshot.input_tokens);
+    try std.testing.expectEqual(@as(u64, 0), snapshot.output_tokens);
+    try std.testing.expectEqual(@as(?u64, 0), snapshot.request_count);
+}
+
+test "direct Responses missing usage persists one recoverable coverage incident" {
+    const alloc = std.testing.allocator;
+    const PublicationProbe = struct {
+        fail: bool = true,
+        incidents: usize = 0,
+
+        fn publish(
+            raw: *anyopaque,
+            event: usage_report.ProfileEvent,
+        ) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            switch (event) {
+                .incident => {},
+                .pending, .generation => return error.UnexpectedProfileEvent,
+            }
+            if (self.fail) return error.InjectedPublicationFailure;
+            self.incidents += 1;
+        }
+    };
+
+    var publication = PublicationProbe{};
+    var source = Usage.initFresh();
+    defer source.deinit(alloc);
+    source.configurePublicationSink(.{
+        .context = &publication,
+        .allocator = alloc,
+        .publish = PublicationProbe.publish,
+    });
+
+    const observation = try GatewayObservation.begin(&source);
+    try observation.completeDirect(
+        alloc,
+        "gpt-5.4",
+        .{},
+        .{ .http_ok = true, .terminal_finish_reason = .stop },
+    );
+
+    var saved = try source.snapshot(alloc);
+    defer saved.deinit(alloc);
+    try std.testing.expectEqual(Availability.incomplete, saved.billing);
+    try std.testing.expect(saved.api_duration_complete);
+    try std.testing.expectEqual(@as(u64, 2), saved.next_sequence);
+    try std.testing.expectEqual(@as(u64, 1), saved.settled_through_sequence);
+    try std.testing.expectEqual(@as(usize, 0), saved.pending.len);
+    try std.testing.expectEqual(@as(usize, 0), saved.models.len);
+    try std.testing.expectEqual(@as(usize, 0), saved.publication_backlog.len);
+    try std.testing.expectEqual(@as(usize, 1), saved.incidents.len);
+    try std.testing.expectEqual(@as(u64, 0), saved.input_tokens);
+    try std.testing.expectEqual(@as(u64, 0), saved.output_tokens);
+    try std.testing.expectEqual(@as(?u64, 0), saved.request_count);
+    try std.testing.expect(needsProfileRecovery(saved));
+
+    var encoded: std.Io.Writer.Allocating = .init(alloc);
+    defer encoded.deinit();
+    try writeRichSnapshot(&encoded.writer, saved);
+    var parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        alloc,
+        encoded.written(),
+        .{},
+    );
+    defer parsed.deinit();
+    var decoded = try parseSnapshotValue(alloc, parsed.value);
+    defer decoded.deinit(alloc);
+    try std.testing.expectEqual(Availability.incomplete, decoded.billing);
+    try std.testing.expectEqual(@as(usize, 1), decoded.incidents.len);
+    try std.testing.expect(needsProfileRecovery(decoded));
+
+    source.configurePublicationSink(null);
+    publication.fail = false;
+    var resumed = Usage.initFresh();
+    defer resumed.deinit(alloc);
+    resumed.configurePublicationSink(.{
+        .context = &publication,
+        .allocator = alloc,
+        .publish = PublicationProbe.publish,
+    });
+    try resumed.restore(alloc, decoded, 1);
+
+    var recovered = try resumed.snapshot(alloc);
+    defer recovered.deinit(alloc);
+    try std.testing.expectEqual(Availability.incomplete, recovered.billing);
+    try std.testing.expectEqual(@as(usize, 0), recovered.incidents.len);
+    try std.testing.expect(!needsProfileRecovery(recovered));
+    try std.testing.expectEqual(@as(usize, 1), publication.incidents);
+
+    resumed.configurePublicationSink(.{
+        .context = &publication,
+        .allocator = alloc,
+        .publish = PublicationProbe.publish,
+    });
+    try std.testing.expectEqual(@as(usize, 1), publication.incidents);
+}
+
+test "direct Responses profile fact is durable before exact recovery replay" {
+    const alloc = std.testing.allocator;
+    const PersistenceProbe = struct {
+        checkpoint_calls: usize = 0,
+        publication_calls: usize = 0,
+        successful_publications: usize = 0,
+        checkpoint_has_fact: bool = false,
+        checkpoint_cleared: bool = false,
+        fail_publication: bool = true,
+        fact_id: [30]u8 = undefined,
+        fact_created_at_ms: i64 = -1,
+
+        fn persist(raw: *anyopaque, snapshot: Snapshot) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.checkpoint_calls += 1;
+            if (snapshot.publication_backlog.len == 0) {
+                if (self.checkpoint_has_fact) self.checkpoint_cleared = true;
+                return;
+            }
+            if (snapshot.publication_backlog.len != 1) {
+                return error.UnexpectedPublicationBacklog;
+            }
+            const fact = snapshot.publication_backlog[0];
+            if (!self.checkpoint_has_fact) {
+                std.mem.copyForwards(u8, &self.fact_id, fact.id);
+                self.fact_created_at_ms = fact.created_at_ms;
+                self.checkpoint_has_fact = true;
+                return;
+            }
+            if (!std.mem.eql(u8, &self.fact_id, fact.id) or
+                self.fact_created_at_ms != fact.created_at_ms)
+            {
+                return error.ChangedDirectGenerationFact;
+            }
+        }
+
+        fn publish(
+            raw: *anyopaque,
+            event: usage_report.ProfileEvent,
+        ) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            const fact = switch (event) {
+                .generation => |value| value,
+                .pending, .incident => return error.UnexpectedProfileEvent,
+            };
+            if (!self.checkpoint_has_fact) return error.PublicationBeforeCheckpoint;
+            if (!std.mem.eql(u8, &self.fact_id, fact.id) or
+                self.fact_created_at_ms != fact.created_at_ms or
+                !std.mem.eql(u8, fact.model, "gpt-5.4") or
+                fact.input_tokens != 21 or
+                fact.output_tokens != 8 or
+                fact.cache_read_tokens != 3 or
+                fact.cache_write_tokens != 2 or
+                fact.reasoning_tokens != 4 or
+                fact.total_cost != 0)
+            {
+                return error.ChangedDirectGenerationFact;
+            }
+            self.publication_calls += 1;
+            if (self.fail_publication) return error.InjectedPublicationFailure;
+            self.successful_publications += 1;
+        }
+    };
+
+    var probe = PersistenceProbe{};
+    var source = Usage.initFresh();
+    defer source.deinit(alloc);
+    source.configureCheckpointSink(.{
+        .context = &probe,
+        .allocator = alloc,
+        .persist = PersistenceProbe.persist,
+    });
+    source.configurePublicationSink(.{
+        .context = &probe,
+        .allocator = alloc,
+        .publish = PersistenceProbe.publish,
+    });
+
+    const observation = try GatewayObservation.begin(&source);
+    try observation.completeDirect(alloc, "gpt-5.4", .{
+        .input_tokens = 21,
+        .output_tokens = 8,
+        .cached_input_tokens = 3,
+        .cache_write_input_tokens = 2,
+        .reasoning_output_tokens = 4,
+    }, .{ .http_ok = true, .terminal_finish_reason = .stop });
+
+    var saved = try source.snapshot(alloc);
+    defer saved.deinit(alloc);
+    try std.testing.expect(probe.checkpoint_has_fact);
+    try std.testing.expect(probe.checkpoint_calls >= 2);
+    try std.testing.expectEqual(@as(usize, 1), probe.publication_calls);
+    try std.testing.expectEqual(@as(usize, 1), saved.publication_backlog.len);
+    try std.testing.expect(usage_report.GenerationFact.eql(
+        saved.publication_backlog[0],
+        generationFactBorrowed(.{
+            .id = &probe.fact_id,
+            .created_at_ms = probe.fact_created_at_ms,
+            .model = "gpt-5.4",
+            .input_tokens = 21,
+            .output_tokens = 8,
+            .cache_read_tokens = 3,
+            .cache_write_tokens = 2,
+            .reasoning_tokens = 4,
+            .billable_web_search_calls = 0,
+            .total_cost = 0,
+        }),
+    ));
+    try std.testing.expect(types.validGatewayGenerationId(&probe.fact_id));
+    try std.testing.expect(std.mem.startsWith(u8, &probe.fact_id, "gen_D"));
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        &probe.fact_id,
+        "gen_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    ));
+    try std.testing.expect(needsProfileRecovery(saved));
+
+    source.configurePublicationSink(null);
+    probe.fail_publication = false;
+    var resumed = Usage.initFresh();
+    defer resumed.deinit(alloc);
+    resumed.configureCheckpointSink(.{
+        .context = &probe,
+        .allocator = alloc,
+        .persist = PersistenceProbe.persist,
+    });
+    resumed.configurePublicationSink(.{
+        .context = &probe,
+        .allocator = alloc,
+        .publish = PersistenceProbe.publish,
+    });
+    try resumed.restore(alloc, saved, 1);
+
+    var recovered = try resumed.snapshot(alloc);
+    defer recovered.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 2), probe.publication_calls);
+    try std.testing.expectEqual(@as(usize, 1), probe.successful_publications);
+    try std.testing.expect(probe.checkpoint_cleared);
+    try std.testing.expectEqual(@as(usize, 0), recovered.publication_backlog.len);
+    try std.testing.expectEqual(@as(u64, 21), recovered.input_tokens);
+    try std.testing.expectEqual(@as(u64, 8), recovered.output_tokens);
+    try std.testing.expectEqual(@as(?u64, 1), recovered.request_count);
+    try std.testing.expect(!needsProfileRecovery(recovered));
+
+    resumed.configurePublicationSink(.{
+        .context = &probe,
+        .allocator = alloc,
+        .publish = PersistenceProbe.publish,
+    });
+    try std.testing.expectEqual(@as(usize, 2), probe.publication_calls);
 }
 
 test "successful retry after ambiguous delivery retains known generation" {

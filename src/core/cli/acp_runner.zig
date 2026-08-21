@@ -9,9 +9,15 @@ const host = @import("../hosts/host.zig");
 const mode_registry = @import("../modes/mode_registry.zig");
 const permission_auto_classifier = @import("../permissions/auto_classifier.zig");
 const prompt_policy = @import("../config/prompt_policy.zig");
+const types = @import("../shared/types.zig");
 const context_contract = @import("../workspace/context_contract.zig");
 
 const Allocator = std.mem.Allocator;
+
+pub const CredentialOverride = struct {
+    token: []const u8,
+    source: types.CredentialSource,
+};
 
 pub const Config = struct {
     default_model: []const u8,
@@ -37,7 +43,7 @@ pub const Config = struct {
     devbox_provider: ?devbox_executor.Provider = null,
     permission_reviewer_provider: ?permission_auto_classifier.Provider = null,
     model_override: ?[]const u8 = null,
-    credential_override: ?[]const u8 = null,
+    credential_override: ?CredentialOverride = null,
     home_override: ?[]const u8 = null,
     workspace_root_override: ?[]const u8 = null,
     log_file: ?[]const u8 = null,

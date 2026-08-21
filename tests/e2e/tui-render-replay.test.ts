@@ -308,7 +308,7 @@ describe("tui: render record/replay", () => {
         { length: 33 },
         (_, index) => `captured input line ${index + 1}: ${"x".repeat(32)}`,
       ).join("\n");
-      const authNotice = "● Auth: Fx needs access to Vercel AI Gateway. Run /login to sign in, /setup to use an API key, or set AI_GATEWAY_API_KEY.";
+      const authNotice = "● Auth: Fx needs a model credential. Use /login for Vercel, fx login --codex for ChatGPT Codex, set OPENAI_API_KEY for a Responses API, or use /setup or AI_GATEWAY_API_KEY for Vercel AI Gateway.";
       const launched = await launch({ recordInput: true });
       session = launched.session;
 
@@ -350,7 +350,7 @@ describe("tui: render record/replay", () => {
       session = launched.session;
 
       await session.sendText(marker);
-      await session.waitForText("Fx needs access to Vercel AI Gateway", 5_000);
+      await session.waitForText("Fx needs a model credential", 5_000);
       await session.sendKeys("C-u");
       await session.sendText("/status");
       await session.waitForText("permission_mode", 5_000);
@@ -403,7 +403,7 @@ describe("tui: render record/replay", () => {
 
       expect(launched.tapePath.startsWith(join(launched.home, ".fx", "recordings"))).toBe(true);
       await session.sendText(marker);
-      await session.waitForText("Fx needs access to Vercel AI Gateway", 5_000);
+      await session.waitForText("Fx needs a model credential", 5_000);
       await session.sendKeys(`-l '${inputTail}'`);
       await session.waitForText(inputTail, 5_000);
       await session.resizeWindow(120, 28);
@@ -437,7 +437,7 @@ describe("tui: render record/replay", () => {
       const forbiddenPrompt = "trace_secret_prompt_token_6179";
       const forbiddenTokens = [
         forbiddenPrompt,
-        "Fx needs access to Vercel AI Gateway",
+        "Fx needs a model credential",
         "footer row preview secret",
         "shimmer label secret",
         "command output secret",
@@ -448,7 +448,7 @@ describe("tui: render record/replay", () => {
       session = launched.session;
 
       await session.sendText(forbiddenPrompt);
-      await session.waitForText("Fx needs access to Vercel AI Gateway", 5_000);
+      await session.waitForText("Fx needs a model credential", 5_000);
       await session.resizeWindow(72, 24);
       await session.sendKeys("C-u");
       await session.sendText("/status");

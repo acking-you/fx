@@ -331,6 +331,7 @@ pub fn Handlers(comptime App: type) type {
                 .attach_image = commandAttachImage,
                 .manage_images = commandManageImages,
                 .handle_model = commandHandleModel,
+                .handle_effort = commandHandleEffort,
                 .show_models = commandShowModels,
                 .handle_permissions = commandHandlePermissions,
                 .handle_allowlist = commandHandleAllowlist,
@@ -630,6 +631,11 @@ pub fn Handlers(comptime App: type) type {
         fn commandHandleModel(ctx: *anyopaque, query: []const u8) !void {
             const app: *App = @ptrCast(@alignCast(ctx));
             try session_commands.Commands(App).handleModel(app, query);
+        }
+
+        fn commandHandleEffort(ctx: *anyopaque, effort: []const u8) !void {
+            const app: *App = @ptrCast(@alignCast(ctx));
+            try session_commands.Commands(App).handleEffort(app, effort);
         }
 
         fn commandShowModels(ctx: *anyopaque) !void {
@@ -1559,12 +1565,30 @@ pub fn Handlers(comptime App: type) type {
 
         fn commandCompactHistory(ctx: *anyopaque) !void {
             const app: *App = @ptrCast(@alignCast(ctx));
-            try app_session_runtime.Runtime(App).compactHistory(app);
-            try app.writeDomainNotice(.{
-                .topic = "context",
-                .tone = .neutral,
-                .body = "Context compacted.",
-            }, true);
+            const outcome = try app_session_runtime.Runtime(App).compactHistory(app);
+            const notice: types.SemanticNotice = switch (outcome) {
+                .unchanged, .compacted_locally => .{
+                    .topic = "context",
+                    .tone = .neutral,
+                    .body = "Context compacted.",
+                },
+                .remote_started => .{
+                    .topic = "context",
+                    .tone = .neutral,
+                    .body = "Compacting context with the active Responses provider.",
+                },
+                .remote_busy => .{
+                    .topic = "context",
+                    .tone = .neutral,
+                    .body = "Context compaction is already in progress.",
+                },
+                .local_after_remote_failure => .{
+                    .topic = "context",
+                    .tone = .warning,
+                    .body = "Remote context compaction could not start; context was compacted locally.",
+                },
+            };
+            try app.writeDomainNotice(notice, true);
         }
 
         fn commandHandleSettings(ctx: *anyopaque, rest: []const u8) !void {
@@ -1602,6 +1626,7 @@ pub fn Handlers(comptime App: type) type {
             var snapshot = app.creditsProvider().fetch(app.alloc, .{
                 .credential = app.auth.apiKey(),
                 .tenant = app.auth.gatewayTeam(),
+                .credential_source = app.auth.credentialSource(),
             });
             defer snapshot.deinit(app.alloc);
             const text = snapshot.renderInteractiveBody(app.alloc) catch {
@@ -3575,6 +3600,10 @@ const CreditsCommandFakeApp = struct {
 
         fn gatewayTeam(_: *const FakeAuth) ?[]const u8 {
             return "tenant";
+        }
+
+        fn credentialSource(_: *const FakeAuth) ?types.CredentialSource {
+            return .ai_gateway_api_key;
         }
     };
 

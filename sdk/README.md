@@ -15,7 +15,8 @@ Requirements:
 - Node.js 20 or later
 - Chrome or Edge 137 or later for browser WebAssembly
 - JSPI when using the WebAssembly backend
-- A Vercel AI Gateway credential or a host-provided authenticated `fetch`
+- A Vercel AI Gateway credential, an OpenAI-compatible Responses API key, or
+  a host-provided authenticated `fetch`
 
 The package includes:
 
@@ -76,6 +77,26 @@ await session.close();
 await agent.close();
 ```
 
+To use an OpenAI-compatible Responses API, provide `OPENAI_API_KEY`. The
+optional `FX_RESPONSES_BASE_URL` selects a custom API root for that agent and
+takes precedence over `OPENAI_BASE_URL`. Custom roots must use HTTPS, except
+for explicit loopback HTTP URLs with a port.
+
+```js
+const agent = await createFxAgent({
+  env: {
+    OPENAI_API_KEY: process.env.OPENAI_API_KEY,
+    FX_RESPONSES_BASE_URL: "https://api.openai.com/v1",
+    FX_MODEL: "gpt-5.4",
+  },
+});
+```
+
+When both `AI_GATEWAY_API_KEY` and `OPENAI_API_KEY` are non-empty, the Vercel
+AI Gateway credential keeps precedence. Credentials and base URL overrides are
+scoped to one agent runtime and are not copied into the Node process
+environment.
+
 A prompt may be a string or an array of text and resource blocks:
 
 ```js
@@ -112,12 +133,18 @@ A session provides:
 | --- | --- |
 | `prompt(input, options?)` | Starts an async iterable turn |
 | `setModel(model)` | Changes the active model |
+| `setEffort(effort)` | Changes the model reasoning effort when supported |
+| `setFastMode(enabled)` | Enables or disables the provider's Fast service tier |
 | `setMode(mode)` | Changes the active mode |
 | `setConfig(config)` | Applies multiple configuration values |
 | `close()` | Closes the active session |
 | `remove()` | Removes the stored session |
 | `history` | Previously loaded session updates |
 | `configOptions` | Current configurable values |
+
+Model changes also reconcile stored effort and Fast values with the selected
+model's advertised capabilities, so later sessions do not restore stale
+controls that the model cannot accept.
 
 Each session allows one active prompt at a time. Cancel a turn directly or
 with an `AbortSignal`:

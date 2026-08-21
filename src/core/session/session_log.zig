@@ -6774,8 +6774,20 @@ test "typed history above the context limit survives checkpoint and canonical co
             .output_bytes = 18,
             .stored_output_bytes = 18,
         }};
+        var tool_reasoning_items = [_]types.ResponsesReasoningItem{
+            .{ .id = "rs_tool_1", .summary = "tool first", .encrypted_content = "tool opaque 1" },
+            .{ .id = "rs_tool_2", .summary = "tool second", .encrypted_content = "tool opaque 2" },
+        };
+        var terminal_reasoning_items = [_]types.ResponsesReasoningItem{
+            .{ .id = "rs_terminal_1", .summary = "terminal first", .encrypted_content = "terminal opaque 1" },
+            .{ .id = "rs_terminal_2", .summary = "terminal second", .encrypted_content = "terminal opaque 2" },
+        };
         var steps = [_]session.ToolExecutionStep{.{
             .assistant = @constCast("Inspecting the entry point."),
+            .reasoning = @constCast("I should inspect the file."),
+            .reasoning_item_id = @constCast("rs_tool_step"),
+            .reasoning_encrypted_content = @constCast("opaque-tool-state"),
+            .reasoning_items = &tool_reasoning_items,
             .tool_calls = calls[0..],
             .tool_results = results[0..],
         }};
@@ -6790,6 +6802,10 @@ test "typed history above the context limit survives checkpoint and canonical co
         const typed_turn = session.HistoryTurn{ .assistant = .{
             .user = .{ .text = @constCast("inspect the entry point") },
             .assistant = @constCast("The entry point is intact."),
+            .reasoning = @constCast("The entry point matches the expected shape."),
+            .reasoning_item_id = @constCast("rs_log_replay"),
+            .reasoning_encrypted_content = @constCast("opaque-log-state"),
+            .reasoning_items = &terminal_reasoning_items,
             .execution = .{
                 .tool_steps = steps[0..],
                 .files = files[0..],
@@ -6834,6 +6850,15 @@ test "typed history above the context limit survives checkpoint and canonical co
             first.execution.tool_steps[0].tool_results[0].output,
         );
         try std.testing.expectEqualStrings("src/main.zig", first.execution.files[0].path);
+        try std.testing.expectEqualStrings(
+            "rs_tool_step",
+            first.execution.tool_steps[0].reasoning_item_id.?,
+        );
+        try std.testing.expectEqualStrings("rs_log_replay", first.reasoning_item_id.?);
+        try std.testing.expectEqualStrings("opaque-log-state", first.reasoning_encrypted_content.?);
+        try std.testing.expectEqual(@as(usize, 2), first.reasoning_items.len);
+        try std.testing.expectEqualStrings("rs_terminal_1", first.reasoning_items[0].id.?);
+        try std.testing.expectEqualStrings("terminal opaque 2", first.reasoning_items[1].encrypted_content.?);
 
         try loaded.writeCheckpointIfDue(alloc, true, .{});
         try loaded.compactCanonicalLogIfDue(alloc, .{
@@ -6855,6 +6880,33 @@ test "typed history above the context limit survives checkpoint and canonical co
     );
     try std.testing.expectEqualStrings("src/main.zig", first.execution.files[0].path);
     try std.testing.expect(first.execution.files[0].model_view_covers_full_file);
+    try std.testing.expectEqualStrings(
+        "I should inspect the file.",
+        first.execution.tool_steps[0].reasoning.?,
+    );
+    try std.testing.expectEqualStrings(
+        "rs_tool_step",
+        first.execution.tool_steps[0].reasoning_item_id.?,
+    );
+    try std.testing.expectEqualStrings(
+        "opaque-tool-state",
+        first.execution.tool_steps[0].reasoning_encrypted_content.?,
+    );
+    try std.testing.expectEqualStrings(
+        "The entry point matches the expected shape.",
+        first.reasoning.?,
+    );
+    try std.testing.expectEqualStrings("rs_log_replay", first.reasoning_item_id.?);
+    try std.testing.expectEqualStrings("opaque-log-state", first.reasoning_encrypted_content.?);
+    try std.testing.expectEqual(@as(usize, 2), first.reasoning_items.len);
+    try std.testing.expectEqualStrings("rs_terminal_1", first.reasoning_items[0].id.?);
+    try std.testing.expectEqualStrings("terminal opaque 2", first.reasoning_items[1].encrypted_content.?);
+    try std.testing.expectEqual(@as(usize, 2), first.execution.tool_steps[0].reasoning_items.len);
+    try std.testing.expectEqualStrings("rs_tool_1", first.execution.tool_steps[0].reasoning_items[0].id.?);
+    try std.testing.expectEqualStrings(
+        "tool opaque 2",
+        first.execution.tool_steps[0].reasoning_items[1].encrypted_content.?,
+    );
 }
 
 test "successful semantic commit automatically compacts when due" {

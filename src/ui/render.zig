@@ -374,7 +374,6 @@ pub fn buildHintLine(
     fast_mode: bool,
     model_supports_fast: bool,
     effort: types.ReasoningEffort,
-    model_supports_effort: bool,
     statusline: StatuslineItems,
     width: u16,
     out: []u8,
@@ -396,7 +395,10 @@ pub fn buildHintLine(
         appendStatusSegment(out, &end, std.fmt.bufPrint(&queued_buf, "queued {d}", .{queued_count}) catch "");
     }
     const status_limit = @min(@as(usize, width), out.len);
-    const show_effort = model_supports_effort and !effort.isDefault();
+    // Effort is a user-visible session setting. Model capability metadata may
+    // arrive asynchronously or come from any provider, so it must not decide
+    // whether the footer can present the selected non-default value.
+    const show_effort = !effort.isDefault();
     const show_fast = model_supports_fast and fast_mode;
     if (leadingPermissionModeFits(status_limit, permission_label, model_label)) {
         appendStatusSegment(out, &end, permission_label);
@@ -883,13 +885,13 @@ test "welcomeMessage keeps only the app name bright" {
 
 test "buildHintLine hides effort when it is auto" {
     var buf: [128]u8 = undefined;
-    const line = buildHintLine(false, false, true, "anthropic/claude-opus-4.7", .ask, 0, null, false, true, .auto, true, .{}, 80, &buf);
+    const line = buildHintLine(false, false, true, "anthropic/claude-opus-4.7", .ask, 0, null, false, true, .auto, .{}, 80, &buf);
     try std.testing.expectEqualStrings("ask · opus 4.7", line);
 }
 
-test "buildHintLine hides effort for models without effort support" {
+test "buildHintLine hides the default effort" {
     var buf: [128]u8 = undefined;
-    const line = buildHintLine(false, false, true, "openai/gpt-4o", .ask, 0, null, false, false, .auto, false, .{}, 80, &buf);
+    const line = buildHintLine(false, false, true, "openai/gpt-4o", .ask, 0, null, false, false, .auto, .{}, 80, &buf);
     try std.testing.expectEqualStrings("ask · gpt-4o", line);
 }
 
@@ -898,20 +900,20 @@ test "buildHintLine uses a monochrome lightning marker for fast mode" {
     defer initTheme(false, null);
 
     var buf: [128]u8 = undefined;
-    const line = buildHintLine(false, false, true, "anthropic/claude-opus-4.8", .ask, 0, null, true, true, types.ReasoningEffort.literal("low"), true, .{}, 80, &buf);
+    const line = buildHintLine(false, false, true, "anthropic/claude-opus-4.8", .ask, 0, null, true, true, types.ReasoningEffort.literal("low"), .{}, 80, &buf);
     try std.testing.expectEqualStrings("ask · opus 4.8 · low · ⚡︎", line);
     try std.testing.expectEqual(@as(usize, 25), display_width.visibleWidthIgnoringAnsi(line));
 }
 
-test "buildHintLine shows effort when active" {
+test "buildHintLine shows effort without model capability metadata" {
     var buf: [128]u8 = undefined;
-    const line = buildHintLine(false, false, true, "openai/gpt-5", .ask, 0, null, false, false, types.ReasoningEffort.literal("high"), true, .{}, 80, &buf);
+    const line = buildHintLine(false, false, true, "gpt-5", .ask, 0, null, false, false, types.ReasoningEffort.literal("high"), .{}, 80, &buf);
     try std.testing.expectEqualStrings("ask · gpt-5 · high", line);
 }
 
 test "buildHintLine shows full context usage" {
     var buf: [128]u8 = undefined;
-    const line = buildHintLine(false, false, true, "anthropic/claude-opus-4.8", .ask, 0, null, false, true, .auto, true, .{
+    const line = buildHintLine(false, false, true, "anthropic/claude-opus-4.8", .ask, 0, null, false, true, .auto, .{
         .context_used = 43_000,
         .context_total = 1_000_000,
     }, 80, &buf);
@@ -920,7 +922,7 @@ test "buildHintLine shows full context usage" {
 
 test "buildHintLine shows the session title before sandbox and context" {
     var buf: [256]u8 = undefined;
-    const line = buildHintLine(false, false, true, "openai/gpt-5", .ask, 0, null, false, false, .auto, false, .{
+    const line = buildHintLine(false, false, true, "openai/gpt-5", .ask, 0, null, false, false, .auto, .{
         .session_title = "add a session name display",
         .sandbox_label = "none",
     }, 200, &buf);
@@ -932,7 +934,7 @@ test "buildHintLine shows the session title before sandbox and context" {
 
 test "buildHintLine clips an overlong session title on a character boundary" {
     var buf: [256]u8 = undefined;
-    const line = buildHintLine(false, false, true, "openai/gpt-5", .ask, 0, null, false, false, .auto, false, .{
+    const line = buildHintLine(false, false, true, "openai/gpt-5", .ask, 0, null, false, false, .auto, .{
         .session_title = "ααααααααααααααααααααααααααααααααααααααααα",
     }, 200, &buf);
     try std.testing.expect(std.mem.startsWith(u8, line, "ask · gpt-5 · "));
@@ -943,7 +945,7 @@ test "buildHintLine clips an overlong session title on a character boundary" {
 
 test "buildHintLine omits the session segment when no title is cached" {
     var buf: [128]u8 = undefined;
-    const line = buildHintLine(false, false, true, "openai/gpt-5", .ask, 0, null, false, false, .auto, false, .{
+    const line = buildHintLine(false, false, true, "openai/gpt-5", .ask, 0, null, false, false, .auto, .{
         .session_title = null,
     }, 80, &buf);
     try std.testing.expectEqualStrings("ask · gpt-5", line);
@@ -951,7 +953,7 @@ test "buildHintLine omits the session segment when no title is cached" {
 
 test "buildHintLine shows the workspace and Git branch" {
     var buf: [256]u8 = undefined;
-    const line = buildHintLine(false, false, true, "openai/gpt-5", .ask, 0, null, false, false, .auto, false, .{
+    const line = buildHintLine(false, false, true, "openai/gpt-5", .ask, 0, null, false, false, .auto, .{
         .workspace_label = "/workspace/code/fx",
         .git_branch = "feature/statusline",
     }, 100, &buf);
@@ -963,7 +965,7 @@ test "buildHintLine shows the workspace and Git branch" {
 
 test "buildHintLine keeps workspace and branch readable at narrow widths" {
     var buf: [256]u8 = undefined;
-    const line = buildHintLine(false, false, true, "openai/gpt-5", .ask, 0, null, false, false, .auto, false, .{
+    const line = buildHintLine(false, false, true, "openai/gpt-5", .ask, 0, null, false, false, .auto, .{
         .workspace_label = "/a/very/long/path/to/fx-repo",
         .git_branch = "feature/statusline",
     }, 36, &buf);
@@ -976,7 +978,7 @@ test "buildHintLine keeps workspace and branch readable at narrow widths" {
 
 test "buildHintLine workspace identity does not displace existing status segments" {
     var buf: [256]u8 = undefined;
-    const line = buildHintLine(false, false, true, "anthropic/claude-opus-4.8", .auto, 0, null, true, true, types.ReasoningEffort.literal("xhigh"), true, .{
+    const line = buildHintLine(false, false, true, "anthropic/claude-opus-4.8", .auto, 0, null, true, true, types.ReasoningEffort.literal("xhigh"), .{
         .workspace_label = "/a/very/long/path/to/the/active/workspace",
         .git_branch = "feature/statusline",
         .context_used = 1_000,
@@ -989,7 +991,7 @@ test "buildHintLine workspace identity does not displace existing status segment
 
 test "buildHintLine shows a non-Git workspace without branch punctuation" {
     var buf: [128]u8 = undefined;
-    const line = buildHintLine(false, false, true, "openai/gpt-5", .ask, 0, null, false, false, .auto, false, .{
+    const line = buildHintLine(false, false, true, "openai/gpt-5", .ask, 0, null, false, false, .auto, .{
         .workspace_label = "/tmp/plain-workspace",
     }, 80, &buf);
     try std.testing.expectEqualStrings(
@@ -1000,7 +1002,7 @@ test "buildHintLine shows a non-Git workspace without branch punctuation" {
 
 test "buildHintLine labels detached HEAD" {
     var buf: [128]u8 = undefined;
-    const line = buildHintLine(false, false, true, "openai/gpt-5", .ask, 0, null, false, false, .auto, false, .{
+    const line = buildHintLine(false, false, true, "openai/gpt-5", .ask, 0, null, false, false, .auto, .{
         .workspace_label = "/tmp/fx",
         .git_branch = "detached:0123456789ab",
     }, 80, &buf);
@@ -1012,7 +1014,7 @@ test "buildHintLine labels detached HEAD" {
 
 test "buildHintLine keeps system labels and dot separators" {
     var buf: [256]u8 = undefined;
-    const line = buildHintLine(false, false, false, "anthropic/claude-opus-4.8", .auto, 2, null, true, true, types.ReasoningEffort.literal("low"), true, .{
+    const line = buildHintLine(false, false, false, "anthropic/claude-opus-4.8", .auto, 2, null, true, true, types.ReasoningEffort.literal("low"), .{
         .sandbox_label = "none",
         .context_used = 43_000,
         .context_total = 1_000_000,
@@ -1031,7 +1033,7 @@ test "buildHintLine keeps system labels and dot separators" {
 
 test "buildHintLine skips an over-capacity segment without a dangling dot" {
     var buf: [16]u8 = undefined;
-    const line = buildHintLine(false, false, true, "anthropic/claude-opus-4.7", .ask, 0, null, true, true, .auto, true, .{}, 80, &buf);
+    const line = buildHintLine(false, false, true, "anthropic/claude-opus-4.7", .ask, 0, null, true, true, .auto, .{}, 80, &buf);
     try std.testing.expectEqualStrings("ask · opus 4.7", line);
 }
 
@@ -1040,7 +1042,7 @@ test "buildHintLine colors auto mode with theme accent" {
     const dark_accent = permission_auto_style;
     const dark_status = statusline_style;
     var dark_buf: [128]u8 = undefined;
-    const dark_line = buildHintLine(false, false, true, "openai/gpt-4o", .auto, 0, null, false, false, .auto, false, .{}, 80, &dark_buf);
+    const dark_line = buildHintLine(false, false, true, "openai/gpt-4o", .auto, 0, null, false, false, .auto, .{}, 80, &dark_buf);
     const dark_expected = try std.fmt.allocPrint(std.testing.allocator, "{s}auto{s} · gpt-4o", .{ dark_accent, dark_status });
     defer std.testing.allocator.free(dark_expected);
     try std.testing.expectEqualStrings(dark_expected, dark_line);
@@ -1049,7 +1051,7 @@ test "buildHintLine colors auto mode with theme accent" {
     defer initTheme(false, null);
     try std.testing.expect(!std.mem.eql(u8, permission_auto_style, dark_accent));
     var light_buf: [128]u8 = undefined;
-    const light_line = buildHintLine(false, false, true, "openai/gpt-4o", .auto, 0, null, false, false, .auto, false, .{}, 80, &light_buf);
+    const light_line = buildHintLine(false, false, true, "openai/gpt-4o", .auto, 0, null, false, false, .auto, .{}, 80, &light_buf);
     const light_expected = try std.fmt.allocPrint(std.testing.allocator, "{s}auto{s} · gpt-4o", .{ permission_auto_style, statusline_style });
     defer std.testing.allocator.free(light_expected);
     try std.testing.expectEqualStrings(light_expected, light_line);
@@ -1058,7 +1060,7 @@ test "buildHintLine colors auto mode with theme accent" {
 test "buildHintLine renders yolo uppercase with subdued permission styling" {
     initTheme(false, null);
     var buf: [128]u8 = undefined;
-    const line = buildHintLine(false, false, true, "openai/gpt-4o", .yolo, 0, null, false, false, .auto, false, .{}, 80, &buf);
+    const line = buildHintLine(false, false, true, "openai/gpt-4o", .yolo, 0, null, false, false, .auto, .{}, 80, &buf);
     const expected = try std.fmt.allocPrint(
         std.testing.allocator,
         "{s}YOLO{s} · gpt-4o",
@@ -1074,7 +1076,7 @@ test "buildHintLine clips styled auto mode by visible width" {
     defer initTheme(false, null);
 
     var buf: [128]u8 = undefined;
-    const line = buildHintLine(false, false, true, "openai/gpt-4o", .auto, 0, null, false, false, .auto, false, .{}, 13, &buf);
+    const line = buildHintLine(false, false, true, "openai/gpt-4o", .auto, 0, null, false, false, .auto, .{}, 13, &buf);
     const expected = try std.fmt.allocPrint(std.testing.allocator, "{s}auto{s} · gpt-4o", .{ permission_auto_style, statusline_style });
     defer std.testing.allocator.free(expected);
 

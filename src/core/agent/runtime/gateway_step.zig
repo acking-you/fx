@@ -29,6 +29,8 @@ pub fn streamGatewayCompletion(
     alloc: Allocator,
     api_key: []const u8,
     team: ?[]const u8,
+    credential_source: ?types.CredentialSource,
+    responses_compaction_binding: ?types.ResponsesCompactionProviderBindingView,
     session_id: ?[]const u8,
     model: []const u8,
     retry_count: usize,
@@ -56,6 +58,8 @@ pub fn streamGatewayCompletion(
     var result = provider.stream(alloc, .{
         .api_key = api_key,
         .team = team,
+        .credential_source = credential_source,
+        .responses_compaction_binding = responses_compaction_binding,
         .session_id = session_id,
         .model = model,
         .retry_count = retry_count,
@@ -93,13 +97,25 @@ pub fn streamGatewayCompletion(
         result.failure_request_shape,
         trace_ctx,
     );
-    try usage_observation.complete(
-        usage_allocator,
-        result.status,
-        result.completion,
-        result.generation_origin,
-        team,
-    );
+    switch (result.accounting) {
+        .gateway_generation => try usage_observation.complete(
+            usage_allocator,
+            result.status,
+            result.completion,
+            result.generation_origin,
+            team,
+        ),
+        .direct_usage => try usage_observation.completeDirect(
+            usage_allocator,
+            model,
+            result.completion.usage,
+            .{
+                .http_ok = result.status == .ok,
+                .terminal_finish_reason = result.completion.finish_reason,
+            },
+        ),
+        .none => try usage_observation.fail(.unbilled),
+    }
     if (comptime @import("builtin").os.tag != .wasi) {
         if (result.reconcile_generation_usage) {
             if (usage) |ledger| {
@@ -131,6 +147,25 @@ pub fn streamGatewayCompletion(
     else
         null;
     errdefer if (reasoning_signature) |owned| alloc.free(owned);
+    const reasoning_item_id = if (result.completion.reasoning_item_id) |id|
+        try alloc.dupe(u8, id)
+    else
+        null;
+    errdefer if (reasoning_item_id) |owned| alloc.free(owned);
+    const reasoning_encrypted_content = if (result.completion.reasoning_encrypted_content) |content_value|
+        try alloc.dupe(u8, content_value)
+    else
+        null;
+    errdefer if (reasoning_encrypted_content) |owned| alloc.free(owned);
+    const reasoning_items = try types.dupeResponsesReasoningItems(alloc, result.completion.reasoning_items);
+    errdefer types.freeResponsesReasoningItems(alloc, reasoning_items);
+    const provider_output_items = try types.dupeResponsesProviderOutputItems(
+        alloc,
+        result.completion.responses_provider_output_items,
+    );
+    errdefer types.freeResponsesProviderOutputItems(alloc, provider_output_items);
+    const url_citations = try types.dupeResponsesUrlCitations(alloc, result.completion.url_citations);
+    errdefer types.freeResponsesUrlCitations(alloc, url_citations);
     const generation_id = if (result.completion.generation_id) |id| try alloc.dupe(u8, id) else null;
     errdefer if (generation_id) |owned| alloc.free(owned);
     const provider_failure_detail = if (result.completion.provider_failure_detail) |detail| try alloc.dupe(u8, detail) else null;
@@ -149,14 +184,22 @@ pub fn streamGatewayCompletion(
         .status = status,
         .completion = .{
             .content = content,
+            .responses_message_output_index = result.completion.responses_message_output_index,
             .reasoning = reasoning,
             .reasoning_signature = reasoning_signature,
+            .reasoning_item_id = reasoning_item_id,
+            .reasoning_encrypted_content = reasoning_encrypted_content,
+            .reasoning_items = reasoning_items,
+            .responses_provider_output_items = provider_output_items,
+            .responses_output_sequence_complete = result.completion.responses_output_sequence_complete,
+            .url_citations = url_citations,
             .tool_calls = tool_calls,
             .generation_id = generation_id,
             .generation_metadata_invalid = generation_metadata_invalid,
             .delivery_ambiguous = delivery_ambiguous,
             .provider_result_identity_failure = provider_result_identity_failure,
             .provider_failure_detail = provider_failure_detail,
+            .provider_failure_metadata = result.completion.provider_failure_metadata,
             .finish_reason = finish_reason,
             .usage = completion_usage,
         },
@@ -180,6 +223,7 @@ fn recordGatewayResultMetric(
     for (completion.tool_calls) |call| {
         response_bytes += call.id.len + call.name.len + call.arguments_json.len;
         if (call.provider_result) |pr| response_bytes += pr.len;
+        if (call.responses_item_id) |item_id| response_bytes += item_id.len;
     }
     if (err_body) |body| response_bytes += body.len;
     const truncated_bytes: u32 = @intCast(@min(response_bytes, std.math.maxInt(u32)));
@@ -228,6 +272,7 @@ fn dupeGatewayToolCalls(alloc: Allocator, source: anytype) ![]types.ToolCall {
             alloc.free(copy[i].arguments_json);
             if (copy[i].provisional_id) |provisional_id| alloc.free(provisional_id);
             if (copy[i].provider_result) |provider_result| alloc.free(provider_result);
+            if (copy[i].responses_item_id) |responses_item_id| alloc.free(responses_item_id);
         }
     }
 
@@ -242,6 +287,8 @@ fn dupeGatewayToolCalls(alloc: Allocator, source: anytype) ![]types.ToolCall {
         errdefer if (provisional_id) |value| alloc.free(value);
         const provider_result = if (call.provider_result) |result| try alloc.dupe(u8, result) else null;
         errdefer if (provider_result) |result| alloc.free(result);
+        const responses_item_id = if (call.responses_item_id) |value| try alloc.dupe(u8, value) else null;
+        errdefer if (responses_item_id) |value| alloc.free(value);
         copy[i] = .{
             .id = id,
             .name = name,
@@ -251,6 +298,8 @@ fn dupeGatewayToolCalls(alloc: Allocator, source: anytype) ![]types.ToolCall {
             .provider_result = provider_result,
             .final_identity = call.final_identity,
             .provenance = call.provenance,
+            .responses_item_id = responses_item_id,
+            .responses_output_index = call.responses_output_index,
         };
         copied += 1;
     }
@@ -358,6 +407,8 @@ test "pre-send gateway failure settles usage as unbilled" {
         "test-key",
         null,
         null,
+        null,
+        null,
         "test/model",
         1,
         "not a valid URL",
@@ -384,6 +435,210 @@ test "pre-send gateway failure settles usage as unbilled" {
     try std.testing.expectEqual(session_usage.Availability.complete, snapshot.billing);
     try std.testing.expect(snapshot.api_duration_complete);
     try std.testing.expectEqual(@as(u64, 1), snapshot.settled_through_sequence);
+}
+
+test "direct Responses accounting records terminal usage without reconciliation" {
+    const Gateway = struct {
+        const citations = [_]types.ResponsesUrlCitation{.{
+            .url = "https://example.com/source",
+            .title = "Source",
+            .start_index = 0,
+            .end_index = 6,
+        }};
+
+        fn stream(
+            _: ?*anyopaque,
+            alloc: Allocator,
+            _: agent_stream_provider.Request,
+        ) anyerror!agent_stream_provider.Result {
+            const owned_citations = try types.dupeResponsesUrlCitations(alloc, &citations);
+            return .{
+                .status = .ok,
+                .accounting = .direct_usage,
+                .reconcile_generation_usage = false,
+                .ownership = .owned,
+                .completion = .{
+                    .url_citations = owned_citations,
+                    .usage = .{
+                        .input_tokens = 42,
+                        .output_tokens = 7,
+                        .cached_input_tokens = 5,
+                        .reasoning_output_tokens = 3,
+                    },
+                },
+            };
+        }
+    };
+    const Callbacks = struct {
+        fn content(_: *anyopaque, _: []const u8) void {}
+    };
+
+    const alloc = std.testing.allocator;
+    var usage = session_usage.Usage.initFresh();
+    defer usage.deinit(alloc);
+    var cancel_flag = std.atomic.Value(bool).init(false);
+    var delivery = DeliveryCertainty.init();
+    var attempt_evidence: agent_stream_provider.AttemptEvidence = .{};
+    var callback_ctx: u8 = 0;
+    const result = try streamGatewayCompletion(
+        .{ .stream_fn = Gateway.stream },
+        alloc,
+        "openai-test-key",
+        null,
+        .openai_api_key,
+        null,
+        null,
+        "gpt-5.4",
+        1,
+        "https://api.openai.com/v1/responses",
+        "{}",
+        null,
+        &delivery,
+        &attempt_evidence,
+        &callback_ctx,
+        Callbacks.content,
+        null,
+        null,
+        null,
+        &cancel_flag,
+        &usage,
+        alloc,
+        .{},
+        null,
+        .agent,
+    );
+    defer {
+        if (result.err_body) |body| alloc.free(body);
+        if (result.completion.content) |content| alloc.free(@constCast(content));
+        if (result.completion.reasoning) |reasoning| alloc.free(@constCast(reasoning));
+        if (result.completion.reasoning_signature) |signature| alloc.free(@constCast(signature));
+        if (result.completion.reasoning_item_id) |id| alloc.free(@constCast(id));
+        if (result.completion.reasoning_encrypted_content) |content| alloc.free(@constCast(content));
+        types.freeResponsesReasoningItems(alloc, result.completion.reasoning_items);
+        types.freeResponsesProviderOutputItems(alloc, result.completion.responses_provider_output_items);
+        types.freeResponsesUrlCitations(alloc, result.completion.url_citations);
+        if (result.completion.provider_failure_detail) |detail| alloc.free(@constCast(detail));
+        message.freeToolCalls(alloc, @constCast(result.completion.tool_calls));
+    }
+
+    var snapshot = try usage.snapshot(alloc);
+    defer snapshot.deinit(alloc);
+    try std.testing.expectEqual(session_usage.Availability.complete, snapshot.billing);
+    try std.testing.expectEqual(@as(usize, 0), snapshot.pending.len);
+    try std.testing.expectEqual(@as(u64, 42), snapshot.input_tokens);
+    try std.testing.expectEqual(@as(u64, 7), snapshot.output_tokens);
+    try std.testing.expectEqual(@as(usize, 1), snapshot.models.len);
+    try std.testing.expectEqualStrings("gpt-5.4", snapshot.models[0].model);
+    try std.testing.expectEqual(@as(usize, 1), result.completion.url_citations.len);
+    try std.testing.expectEqualStrings("https://example.com/source", result.completion.url_citations[0].url);
+    try std.testing.expect(result.completion.url_citations.ptr != Gateway.citations[0..].ptr);
+}
+
+const DirectAccountingTestFixture = struct {
+    result: agent_stream_provider.Result,
+
+    fn stream(
+        raw: ?*anyopaque,
+        _: Allocator,
+        _: agent_stream_provider.Request,
+    ) anyerror!agent_stream_provider.Result {
+        const self: *@This() = @ptrCast(@alignCast(raw.?));
+        return self.result;
+    }
+};
+
+fn directAccountingSnapshotForTest(
+    result: agent_stream_provider.Result,
+) !session_usage.Snapshot {
+    const Callbacks = struct {
+        fn content(_: *anyopaque, _: []const u8) void {}
+    };
+
+    const alloc = std.testing.allocator;
+    var fixture = DirectAccountingTestFixture{ .result = result };
+    var usage = session_usage.Usage.initFresh();
+    defer usage.deinit(alloc);
+    var cancel_flag = std.atomic.Value(bool).init(false);
+    var delivery = DeliveryCertainty.init();
+    var attempt_evidence: agent_stream_provider.AttemptEvidence = .{};
+    var callback_ctx: u8 = 0;
+    _ = try streamGatewayCompletion(
+        .{ .context = &fixture, .stream_fn = DirectAccountingTestFixture.stream },
+        alloc,
+        "openai-test-key",
+        null,
+        .openai_api_key,
+        null,
+        null,
+        "gpt-5.4",
+        1,
+        "https://api.openai.com/v1/responses",
+        "{}",
+        null,
+        &delivery,
+        &attempt_evidence,
+        &callback_ctx,
+        Callbacks.content,
+        null,
+        null,
+        null,
+        &cancel_flag,
+        &usage,
+        alloc,
+        .{},
+        null,
+        .agent,
+    );
+    return usage.snapshot(alloc);
+}
+
+test "direct HTTP 200 terminal without usage marks coverage incomplete" {
+    var snapshot = try directAccountingSnapshotForTest(.{
+        .status = .ok,
+        .accounting = .direct_usage,
+        .completion = .{ .finish_reason = .stop },
+    });
+    defer snapshot.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(session_usage.Availability.incomplete, snapshot.billing);
+    try std.testing.expect(snapshot.api_duration_complete);
+    try std.testing.expectEqual(@as(u64, 1), snapshot.settled_through_sequence);
+    try std.testing.expectEqual(@as(usize, 0), snapshot.pending.len);
+    try std.testing.expectEqual(@as(usize, 1), snapshot.incidents.len);
+    try std.testing.expectEqual(@as(usize, 0), snapshot.models.len);
+    try std.testing.expectEqual(@as(u64, 0), snapshot.input_tokens);
+    try std.testing.expectEqual(@as(u64, 0), snapshot.output_tokens);
+}
+
+test "direct HTTP 200 semantic failure or incomplete without usage marks coverage incomplete" {
+    for ([_]types.ProviderFinishReason{ .provider_error, .length }) |finish_reason| {
+        var snapshot = try directAccountingSnapshotForTest(.{
+            .status = .ok,
+            .accounting = .direct_usage,
+            .completion = .{ .finish_reason = finish_reason },
+        });
+        defer snapshot.deinit(std.testing.allocator);
+
+        try std.testing.expectEqual(session_usage.Availability.incomplete, snapshot.billing);
+        try std.testing.expectEqual(@as(u64, 1), snapshot.settled_through_sequence);
+        try std.testing.expectEqual(@as(usize, 1), snapshot.incidents.len);
+        try std.testing.expectEqual(@as(usize, 0), snapshot.models.len);
+    }
+}
+
+test "direct HTTP failure without terminal usage remains unbilled" {
+    var snapshot = try directAccountingSnapshotForTest(.{
+        .status = .bad_request,
+        .accounting = .direct_usage,
+    });
+    defer snapshot.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(session_usage.Availability.complete, snapshot.billing);
+    try std.testing.expect(snapshot.api_duration_complete);
+    try std.testing.expectEqual(@as(u64, 1), snapshot.settled_through_sequence);
+    try std.testing.expectEqual(@as(usize, 0), snapshot.pending.len);
+    try std.testing.expectEqual(@as(usize, 0), snapshot.incidents.len);
+    try std.testing.expectEqual(@as(usize, 0), snapshot.models.len);
 }
 
 test "possibly sent gateway failure marks billing incomplete" {
@@ -413,6 +668,8 @@ test "possibly sent gateway failure marks billing incomplete" {
         .{ .stream_fn = Gateway.stream },
         alloc,
         "test-key",
+        null,
+        null,
         null,
         null,
         "test/model",

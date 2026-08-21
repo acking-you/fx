@@ -8,7 +8,6 @@ const gateway_provider = @import("core/gateway/gateway_provider.zig");
 const generation_usage_provider = @import("core/session/generation_usage_provider.zig");
 const host = @import("core/hosts/host.zig");
 const io_mod = @import("core/shared/io.zig");
-const model_catalog = @import("core/gateway/model_catalog.zig");
 const js_host_model_catalog = @import("gateway/js_host_model_catalog.zig");
 const oauth_transport = @import("core/auth/oauth_transport.zig");
 const output_contracts = @import("core/output/output_contracts.zig");
@@ -59,7 +58,7 @@ const js_host_gateway_provider = gateway_provider.Provider{
     .agent_stream = js_host_stream_provider.provider(),
     .oauth_transport = oauth_transport.unavailable_provider,
     .chat_url = .{ .resolve_fn = resolveChatUrl },
-    .cli_model_catalog = .{ .fetch_fn = fetchCliModelCatalog },
+    .cli_model_catalog = js_host_model_catalog.cli_provider,
     .credits = .{ .fetch_fn = fetchCredits },
     .generation_usage = generation_usage_provider.unavailable_provider,
     .web_search = unavailable_web_search_provider,
@@ -68,35 +67,6 @@ const js_host_gateway_provider = gateway_provider.Provider{
 
 fn resolveChatUrl(_: ?*anyopaque, fallback: []const u8) []const u8 {
     return fallback;
-}
-
-fn fetchCliModelCatalog(
-    _: ?*anyopaque,
-    alloc: Allocator,
-    input: gateway_provider.CliModelCatalogInput,
-) gateway_provider.CliModelCatalogResult {
-    const result = model_catalog.fetchWithPublicFallback(js_host_model_catalog.provider, alloc, .{
-        .access = input.access,
-        .endpoint = input.endpoint,
-        .cancel_flag = input.cancel_flag,
-        .view = .full,
-    });
-    return switch (result) {
-        .loaded => |loaded| project: {
-            var catalog = loaded.catalog;
-            defer model_catalog.freeModelCatalog(alloc, &catalog);
-            const ids = model_catalog.projectModelIds(alloc, catalog.items) catch return .{ .failure = .{
-                .access = loaded.provenance.access,
-                .anonymous_fallback_used = loaded.provenance.anonymous_fallback_used,
-                .failure = .{ .category = .resource_exhausted },
-            } };
-            break :project .{ .loaded = .{
-                .ids = ids,
-                .provenance = loaded.provenance,
-            } };
-        },
-        .failed => |failed| .{ .failure = failed },
-    };
 }
 
 fn fetchCredits(
@@ -118,7 +88,10 @@ const unavailable_web_search_provider = web_search_provider.Provider{
     .execute_fn = executeWebSearch,
 };
 
-fn preferredWebSearchBackends(_: ?*anyopaque) anyerror!?[]const web_search_contract.SearchBackendId {
+fn preferredWebSearchBackends(
+    _: ?*anyopaque,
+    _: web_search_provider.Inputs,
+) anyerror!?[]const web_search_contract.SearchBackendId {
     return null;
 }
 

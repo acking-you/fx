@@ -6,6 +6,7 @@ const session_codec = @import("../../session/session_codec.zig");
 const command_admission = @import("../../permissions/command_admission.zig");
 const permission_auto_classifier = @import("../../permissions/auto_classifier.zig");
 const model_capabilities = @import("../../config/model_capabilities.zig");
+const responses_compaction_provider = @import("../../gateway/responses_compaction_provider.zig");
 const types = @import("../../shared/types.zig");
 const worker_runtime = @import("../worker_runtime.zig");
 const file_mutation = @import("../../tooling/file_mutation.zig");
@@ -167,6 +168,7 @@ pub const RouteRecoveryRequest = struct {
 };
 
 pub const CredentialRefreshMode = auth_runtime.CredentialRefreshMode;
+pub const RefreshedCredential = auth_runtime.RefreshedCredential;
 
 /// Ordered text emitted by the agent runtime. Payloads are borrowed for the
 /// duration of the callback.
@@ -190,6 +192,7 @@ pub const DiffMarkerStyles = struct {
 pub const AgentRuntimeDeps = struct {
     ctx: *anyopaque,
     agent_stream_provider: agent_stream_provider.Provider = agent_stream_provider.unavailable_provider,
+    responses_compaction_provider: ?responses_compaction_provider.Provider = null,
     flush_assistant_stream_per_content_chunk: bool = false,
     cooperative_transport_pulse: ?agent_stream_provider.CooperativePulse = null,
     tool_registry: tool_dispatch.Registry = .{},
@@ -230,7 +233,7 @@ pub const AgentRuntimeDeps = struct {
     push_route_recovery_status: *const fn (ctx: *anyopaque, status: types.RouteRecoveryStatus) anyerror!void = discardRouteRecoveryStatus,
     push_command_output_complete: *const fn (ctx: *anyopaque, lifecycle_id: ?types.ToolLifecycleId) anyerror!void,
     push_http_error: *const fn (ctx: *anyopaque, status: std.http.Status, detail: []const u8, credential_source: ?types.CredentialSource) anyerror!void,
-    refresh_gateway_credential: ?*const fn (ctx: *anyopaque, alloc: Allocator, source: types.CredentialSource, mode: CredentialRefreshMode) anyerror!?[]u8 = null,
+    refresh_gateway_credential: ?*const fn (ctx: *anyopaque, alloc: Allocator, source: types.CredentialSource, mode: CredentialRefreshMode) anyerror!?RefreshedCredential = null,
     request_route_recovery: ?*const fn (ctx: *anyopaque, arena: Allocator, request: RouteRecoveryRequest) anyerror!RouteRecoveryDecision = null,
     available_model_capabilities: *const fn (ctx: *anyopaque, model: []const u8) model_capabilities.Capabilities = localAvailableModelCapabilities,
     resolve_model_capabilities: *const fn (ctx: *anyopaque, arena: Allocator, model: []const u8) anyerror!model_capabilities.Capabilities = localModelCapabilities,

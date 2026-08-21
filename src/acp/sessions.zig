@@ -13,6 +13,7 @@ const js_host_session_store = @import("../core/session/js_host_session_store.zig
 const session_runtime = @import("../core/session/session.zig");
 const mcp_runtime = @import("../core/mcp/mcp_runtime.zig");
 const model_catalog = @import("../core/gateway/model_catalog.zig");
+const model_capabilities = @import("../core/config/model_capabilities.zig");
 const host = @import("../core/hosts/host.zig");
 const mode_registry = @import("../core/modes/mode_registry.zig");
 const subagent_resume_admission = @import("../core/subagent/resume_admission.zig");
@@ -63,6 +64,7 @@ pub fn handleNewWasmSession(state: *server.ServerState, alloc: Allocator, msg: *
         .workspace_root = state.workspace_root,
         .api_key = state.api_key,
         .credential_source = state.credential_source,
+        .credential_account_id = state.credential_account_id,
         .agent_step_limit = state.agent_step_limit,
         .max_tool_result_bytes = state.max_tool_result_bytes,
         .fast_mode = state.fast_mode,
@@ -252,6 +254,11 @@ fn writeNewSessionResponse(
         state.capability_resolver.catalogEntries(),
     );
     try out.writer.writeAll(",");
+    const active_capabilities = state.capability_resolver.available(state.active_session.?.model);
+    try writeEffortConfigOption(&out.writer, state.active_session.?.effort, active_capabilities);
+    try out.writer.writeAll(",");
+    try writeFastModeConfigOption(&out.writer, state.active_session.?.fast_mode, active_capabilities.supports_fast_mode);
+    try out.writer.writeAll(",");
     try writeModeConfigOption(
         &out.writer,
         state.cfg.mode_registry,
@@ -326,6 +333,7 @@ pub fn handleLoadWasmSession(state: *server.ServerState, alloc: Allocator, msg: 
         .workspace_root = state.workspace_root,
         .api_key = state.api_key,
         .credential_source = state.credential_source,
+        .credential_account_id = state.credential_account_id,
         .agent_step_limit = state.agent_step_limit,
         .max_tool_result_bytes = state.max_tool_result_bytes,
         .fast_mode = loaded.state.preferences.fast_mode,
@@ -667,6 +675,12 @@ fn writeLoadSessionResponse(
         state.capability_resolver.catalogEntries(),
     );
     try out.writer.writeAll(",");
+    const active = &state.active_session.?;
+    const active_capabilities = state.capability_resolver.available(model);
+    try writeEffortConfigOption(&out.writer, active.effort, active_capabilities);
+    try out.writer.writeAll(",");
+    try writeFastModeConfigOption(&out.writer, active.fast_mode, active_capabilities.supports_fast_mode);
+    try out.writer.writeAll(",");
     try writeModeConfigOption(
         &out.writer,
         state.cfg.mode_registry,
@@ -739,6 +753,7 @@ fn activateSession(
         .workspace_root = state.workspace_root,
         .api_key = state.api_key,
         .credential_source = state.credential_source,
+        .credential_account_id = state.credential_account_id,
         .agent_step_limit = state.agent_step_limit,
         .max_tool_result_bytes = state.max_tool_result_bytes,
         .fast_mode = activation.fast_mode,
@@ -982,6 +997,7 @@ fn buildSlashCommandsJson(alloc: Allocator) ![]u8 {
         .{ .name = "help", .description = "Show available commands", .hint = null },
         .{ .name = "status", .description = "Show current status", .hint = null },
         .{ .name = "model", .description = "Switch model", .hint = "model name" },
+        .{ .name = "effort", .description = "Show or set reasoning effort", .hint = "auto or supported level" },
         .{ .name = "permissions", .description = "Show permission settings", .hint = null },
         .{ .name = "allowlist", .description = "Manage persistent allow rules", .hint = "add command \"git *\"" },
         .{ .name = "rules", .description = "Show active rules", .hint = null },
@@ -989,7 +1005,7 @@ fn buildSlashCommandsJson(alloc: Allocator) ![]u8 {
         .{ .name = "credits", .description = "Show credit balance", .hint = null },
         .{ .name = "mcp", .description = "Show MCP server status", .hint = null },
         .{ .name = "skills", .description = "Show installed skills", .hint = null },
-        .{ .name = "fast", .description = "Toggle fast mode for supported models", .hint = null },
+        .{ .name = "fast", .description = "Toggle Fast mode for supported models", .hint = null },
     };
 
     try out.writer.writeAll("[");
@@ -1059,6 +1075,40 @@ pub fn writeModelConfigOption(
     try w.writeAll("]}");
 }
 
+pub fn writeEffortConfigOption(
+    w: *std.Io.Writer,
+    current: types.ReasoningEffort,
+    capabilities: model_capabilities.Capabilities,
+) !void {
+    const effective_current = if (model_capabilities.reasoningEffortSupported(capabilities, current)) current else types.ReasoningEffort.auto;
+    try w.writeAll("{\"id\":\"effort\",\"name\":\"Reasoning Effort\",\"description\":\"Controls how deeply the selected model reasons\",\"category\":\"model\",\"type\":\"select\",\"currentValue\":");
+    try writeJsonStr(effective_current.label(), w);
+    try w.writeAll(",\"options\":[{\"value\":\"auto\",\"name\":\"Default\"}");
+    for (capabilities.reasoning_efforts.slice()) |effort| {
+        if (effort.isDefault()) continue;
+        try w.writeAll(",{\"value\":");
+        try writeJsonStr(effort.label(), w);
+        try w.writeAll(",\"name\":");
+        try writeJsonStr(effort.displayLabel(), w);
+        try w.writeAll("}");
+    }
+    try w.writeAll("]}");
+}
+
+pub fn writeFastModeConfigOption(
+    w: *std.Io.Writer,
+    current: bool,
+    supports_fast_mode: bool,
+) !void {
+    try w.writeAll("{\"id\":\"fast_mode\",\"name\":\"Fast Mode\",\"description\":\"Uses the provider's lower-latency service tier when supported\",\"category\":\"model\",\"type\":\"select\",\"currentValue\":");
+    try writeJsonStr(if (current and supports_fast_mode) "fast" else "normal", w);
+    try w.writeAll(",\"options\":[{\"value\":\"normal\",\"name\":\"Normal\"}");
+    if (supports_fast_mode) {
+        try w.writeAll(",{\"value\":\"fast\",\"name\":\"Fast\"}");
+    }
+    try w.writeAll("]}");
+}
+
 pub fn writeModeConfigOption(
     w: *std.Io.Writer,
     registry: mode_registry.Registry,
@@ -1122,10 +1172,10 @@ test "buildSlashCommandsJson includes all expected commands" {
     defer alloc.free(json);
 
     const expected_commands = [_][]const u8{
-        "compact",   "undo",  "changes",  "review",  "clear",
-        "reset",     "help",  "status",   "model",   "permissions",
-        "allowlist", "rules", "settings", "credits", "mcp",
-        "skills",    "fast",
+        "compact",     "undo",      "changes", "review",   "clear",
+        "reset",       "help",      "status",  "model",    "effort",
+        "permissions", "allowlist", "rules",   "settings", "credits",
+        "mcp",         "skills",    "fast",
     };
     for (expected_commands) |cmd| {
         try std.testing.expect(std.mem.find(u8, json, cmd) != null);
@@ -1138,6 +1188,7 @@ test "buildSlashCommandsJson includes input hint for model" {
     const json = try buildSlashCommandsJson(alloc);
     defer alloc.free(json);
     try std.testing.expect(std.mem.find(u8, json, "\"input\":{\"hint\":\"model name\"}") != null);
+    try std.testing.expect(std.mem.find(u8, json, "\"input\":{\"hint\":\"auto or supported level\"}") != null);
 }
 
 test "formatIso8601 produces known timestamp" {

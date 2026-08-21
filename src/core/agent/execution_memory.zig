@@ -114,6 +114,99 @@ pub fn redactText(alloc: Allocator, text: []const u8) ![]u8 {
     return @constCast(masked);
 }
 
+/// Returns a durable copy only when every retained Responses output item is
+/// safe to persist verbatim. A secret in any item invalidates the whole
+/// authoritative sequence so callers can fall back to the already-redacted
+/// typed reasoning, assistant, and tool-call projections without corrupting
+/// cross-item identifiers or replay order.
+pub fn dupePersistableResponsesProviderOutputItems(
+    alloc: Allocator,
+    items: []const types.ResponsesProviderOutputItem,
+) !?[]types.ResponsesProviderOutputItem {
+    for (items) |item| {
+        if (!try responsesProviderOutputItemIsPersistenceSafe(alloc, item.json)) {
+            return null;
+        }
+    }
+    return try types.dupeResponsesProviderOutputItems(alloc, items);
+}
+
+fn responsesProviderOutputItemIsPersistenceSafe(
+    alloc: Allocator,
+    json: []const u8,
+) !bool {
+    const masked = text_utils.maskSecrets(alloc, json) catch
+        return error.OutOfMemory;
+    if (masked.ptr != json.ptr) {
+        alloc.free(@constCast(masked));
+        return false;
+    }
+
+    var parsed = std.json.parseFromSlice(std.json.Value, alloc, json, .{}) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return false,
+    };
+    defer parsed.deinit();
+    if (parsed.value != .object) return false;
+
+    const object = parsed.value.object;
+    const type_value = object.get("type") orelse return false;
+    if (type_value != .string) return false;
+    if (std.mem.eql(u8, type_value.string, "function_call") or
+        std.mem.eql(u8, type_value.string, "custom_tool_call"))
+    {
+        const payload_key = if (std.mem.eql(u8, type_value.string, "function_call"))
+            "arguments"
+        else
+            "input";
+        if (object.get(payload_key)) |payload| {
+            if (payload != .string) return false;
+            const tool_name = if (object.get("name")) |name|
+                if (name == .string) name.string else ""
+            else
+                "";
+            const redacted = try redactToolArgumentsJsonForTool(
+                alloc,
+                tool_name,
+                payload.string,
+            );
+            defer alloc.free(redacted);
+            if (!std.mem.eql(u8, redacted, payload.string)) return false;
+        }
+    }
+    return !(try jsonValueContainsCredentialField(alloc, parsed.value));
+}
+
+fn jsonValueContainsCredentialField(
+    alloc: Allocator,
+    value: std.json.Value,
+) !bool {
+    switch (value) {
+        .object => |object| {
+            var iter = object.iterator();
+            while (iter.next()) |entry| {
+                if (isCredentialArgumentKey(entry.key_ptr.*)) return true;
+                if (try jsonValueContainsCredentialField(alloc, entry.value_ptr.*)) return true;
+            }
+        },
+        .array => |array| {
+            for (array.items) |item| {
+                if (try jsonValueContainsCredentialField(alloc, item)) return true;
+            }
+        },
+        .string => |text| {
+            const masked = text_utils.maskSecrets(alloc, text) catch
+                return error.OutOfMemory;
+            if (masked.ptr != text.ptr) {
+                alloc.free(@constCast(masked));
+                return true;
+            }
+        },
+        else => {},
+    }
+    return false;
+}
+
 fn dupeRedactedCommittedFilePresentation(
     alloc: Allocator,
     presentation: types.CommittedFilePresentation,
@@ -274,6 +367,34 @@ const ChatMessageAdapter = struct {
     fn content(value: Message) ?[]const u8 {
         return value.content;
     }
+
+    fn reasoning(value: Message) ?[]const u8 {
+        return value.reasoning;
+    }
+
+    fn reasoningItemId(value: Message) ?[]const u8 {
+        return value.reasoning_item_id;
+    }
+
+    fn reasoningEncryptedContent(value: Message) ?[]const u8 {
+        return value.reasoning_encrypted_content;
+    }
+
+    fn reasoningItems(value: Message) []const types.ResponsesReasoningItem {
+        return value.reasoning_items;
+    }
+
+    fn responsesProviderOutputItems(value: Message) []const types.ResponsesProviderOutputItem {
+        return value.responses_provider_output_items;
+    }
+
+    fn responsesMessageOutputIndex(value: Message) ?u32 {
+        return value.responses_message_output_index;
+    }
+
+    fn responsesOutputSequenceComplete(value: Message) bool {
+        return value.responses_output_sequence_complete;
+    }
 };
 
 const MessageAdapter = struct {
@@ -317,6 +438,34 @@ const MessageAdapter = struct {
 
     fn content(value: Message) ?[]const u8 {
         return if (value.content) |content_value| content_value.asText() else null;
+    }
+
+    fn reasoning(_: Message) ?[]const u8 {
+        return null;
+    }
+
+    fn reasoningItemId(_: Message) ?[]const u8 {
+        return null;
+    }
+
+    fn reasoningEncryptedContent(_: Message) ?[]const u8 {
+        return null;
+    }
+
+    fn reasoningItems(_: Message) []const types.ResponsesReasoningItem {
+        return &.{};
+    }
+
+    fn responsesProviderOutputItems(_: Message) []const types.ResponsesProviderOutputItem {
+        return &.{};
+    }
+
+    fn responsesMessageOutputIndex(_: Message) ?u32 {
+        return null;
+    }
+
+    fn responsesOutputSequenceComplete(_: Message) bool {
+        return false;
     }
 };
 
@@ -417,6 +566,39 @@ fn buildNormalExecutionMemory(
         else
             null;
         errdefer if (assistant) |text| alloc.free(text);
+        const reasoning_source = Adapter.reasoning(msg);
+        const reasoning_item_id_source = Adapter.reasoningItemId(msg);
+        const reasoning_encrypted_content_source = Adapter.reasoningEncryptedContent(msg);
+        const reasoning_items_source = Adapter.reasoningItems(msg);
+        const provider_output_items_source = Adapter.responsesProviderOutputItems(msg);
+        const has_responses_identity =
+            reasoning_items_source.len > 0 or
+            (reasoning_item_id_source != null and reasoning_item_id_source.?.len > 0) or
+            (reasoning_encrypted_content_source != null and
+                reasoning_encrypted_content_source.?.len > 0);
+        const reasoning = if (has_responses_identity)
+            if (reasoning_source) |value| try alloc.dupe(u8, value) else null
+        else
+            null;
+        errdefer if (reasoning) |value| alloc.free(value);
+        const reasoning_item_id = if (has_responses_identity)
+            if (reasoning_item_id_source) |value| try alloc.dupe(u8, value) else null
+        else
+            null;
+        errdefer if (reasoning_item_id) |value| alloc.free(value);
+        const reasoning_encrypted_content = if (has_responses_identity)
+            if (reasoning_encrypted_content_source) |value| try alloc.dupe(u8, value) else null
+        else
+            null;
+        errdefer if (reasoning_encrypted_content) |value| alloc.free(value);
+        const reasoning_items = try types.dupeResponsesReasoningItems(alloc, reasoning_items_source);
+        errdefer types.freeResponsesReasoningItems(alloc, reasoning_items);
+        const maybe_provider_output_items = try dupePersistableResponsesProviderOutputItems(
+            alloc,
+            provider_output_items_source,
+        );
+        const provider_output_items = maybe_provider_output_items orelse @constCast(&.{});
+        errdefer types.freeResponsesProviderOutputItems(alloc, provider_output_items);
         const persisted_calls = try dupeCompletedRedactedToolCalls(
             alloc,
             tool_calls,
@@ -427,6 +609,14 @@ fn buildNormalExecutionMemory(
         errdefer types.freePersistedToolResults(alloc, owned_results);
         const step = types.ToolExecutionStep{
             .assistant = assistant,
+            .responses_message_output_index = Adapter.responsesMessageOutputIndex(msg),
+            .reasoning = reasoning,
+            .reasoning_item_id = reasoning_item_id,
+            .reasoning_encrypted_content = reasoning_encrypted_content,
+            .reasoning_items = reasoning_items,
+            .responses_provider_output_items = provider_output_items,
+            .responses_output_sequence_complete = Adapter.responsesOutputSequenceComplete(msg) and
+                maybe_provider_output_items != null,
             .tool_calls = persisted_calls,
             .tool_results = owned_results,
         };
@@ -468,6 +658,11 @@ pub fn freeTransientToolExecutionStep(
     step: types.ToolExecutionStep,
 ) void {
     if (step.assistant) |assistant| alloc.free(assistant);
+    if (step.reasoning) |reasoning| alloc.free(reasoning);
+    if (step.reasoning_item_id) |item_id| alloc.free(item_id);
+    if (step.reasoning_encrypted_content) |content| alloc.free(content);
+    types.freeResponsesReasoningItems(alloc, step.reasoning_items);
+    types.freeResponsesProviderOutputItems(alloc, step.responses_provider_output_items);
     types.freeToolCallSlice(alloc, step.tool_calls);
     types.freePersistedToolResults(alloc, step.tool_results);
 }
@@ -532,6 +727,8 @@ pub fn dupeRedactedToolCall(alloc: Allocator, call: ToolCall) !ToolCall {
     errdefer if (provisional_id) |value| alloc.free(value);
     const provider_result = if (call.provider_result) |result| try redactText(alloc, result) else null;
     errdefer if (provider_result) |result| alloc.free(result);
+    const responses_item_id = if (call.responses_item_id) |value| try alloc.dupe(u8, value) else null;
+    errdefer if (responses_item_id) |value| alloc.free(value);
     return .{
         .id = id,
         .name = name,
@@ -540,6 +737,8 @@ pub fn dupeRedactedToolCall(alloc: Allocator, call: ToolCall) !ToolCall {
         .provider_result = provider_result,
         .final_identity = call.final_identity,
         .provenance = call.provenance,
+        .responses_item_id = responses_item_id,
+        .responses_output_index = call.responses_output_index,
     };
 }
 
@@ -751,8 +950,39 @@ fn durableIdentifier(alloc: Allocator, value: []const u8) ![]u8 {
     return std.fmt.allocPrint(alloc, "redacted-{s}", .{&hex});
 }
 
+test "Responses output persistence rejects secret custom and unknown payloads" {
+    const alloc = std.testing.allocator;
+    const safe_items = [_]types.ResponsesProviderOutputItem{.{
+        .output_index = 0,
+        .json = "{\"type\":\"web_search_call\",\"id\":\"ws_safe\",\"status\":\"completed\"}",
+    }};
+    const safe = (try dupePersistableResponsesProviderOutputItems(alloc, &safe_items)).?;
+    defer types.freeResponsesProviderOutputItems(alloc, safe);
+    try std.testing.expectEqual(@as(usize, 1), safe.len);
+    try std.testing.expect(safe.ptr != safe_items[0..].ptr);
+
+    const custom_secret = [_]types.ResponsesProviderOutputItem{.{
+        .output_index = 0,
+        .json = "{\"type\":\"custom_tool_call\",\"call_id\":\"call_1\",\"name\":\"shell\",\"input\":\"Authorization: Bearer abcdefghijklmnop\"}",
+    }};
+    try std.testing.expect(
+        try dupePersistableResponsesProviderOutputItems(alloc, &custom_secret) == null,
+    );
+
+    const unknown_secret = [_]types.ResponsesProviderOutputItem{.{
+        .output_index = 0,
+        .json = "{\"type\":\"future_item\",\"payload\":{\"authorization\":\"short-secret\"}}",
+    }};
+    try std.testing.expect(
+        try dupePersistableResponsesProviderOutputItems(alloc, &unknown_secret) == null,
+    );
+}
+
 test "execution memory redacts secret values from arguments results and provider output" {
     const runtime_execution_memory = @import("runtime/execution_memory.zig");
+    const responses_protocol = @import("../gateway/responses_protocol.zig");
+    const session_runtime = @import("../session/session.zig");
+    const testing_session_json = @import("../session/session_json.zig");
     const ChatMessage = types.ChatMessage;
     const alloc = std.testing.allocator;
     var calls = [_]ToolCall{.{
@@ -760,9 +990,29 @@ test "execution memory redacts secret values from arguments results and provider
         .name = "run_command",
         .arguments_json = "{\"command\":\"echo ok && AI_GATEWAY_API_KEY=abcdefghijklmnop && curl -H 'Authorization: Bearer abcdefghijklmnop' https://example.com\",\"api_key\":\"secret-value\"}",
         .provider_result = "github_pat_abcdefghijklmnop",
+        .responses_item_id = "fc_1",
+        .responses_output_index = 1,
     }};
+    const raw_secret_call =
+        \\{"type":"function_call","id":"fc_1","call_id":"call_secret","name":"run_command","arguments":"{\"command\":\"AI_GATEWAY_API_KEY=abcdefghijklmnop\",\"api_key\":\"secret-value\"}","status":"completed"}
+    ;
+    var raw_items = [_]types.ResponsesProviderOutputItem{
+        .{
+            .output_index = 0,
+            .json = "{\"type\":\"web_search_call\",\"id\":\"ws_safe\",\"status\":\"completed\"}",
+        },
+        .{
+            .output_index = 1,
+            .json = raw_secret_call,
+        },
+    };
     const messages = [_]ChatMessage{
-        .{ .role = .assistant, .tool_calls = calls[0..] },
+        .{
+            .role = .assistant,
+            .tool_calls = calls[0..],
+            .responses_provider_output_items = raw_items[0..],
+            .responses_output_sequence_complete = true,
+        },
         .{ .role = .tool, .content = "sk-abcdefghijklmnop xoxb-abcdefghijklmnop", .tool_call_id = "call_secret", .tool_name = "run_command", .tool_result_status = .success },
     };
 
@@ -771,6 +1021,11 @@ test "execution memory redacts secret values from arguments results and provider
     try std.testing.expectEqual(@as(usize, 1), memory.tool_steps.len);
     const persisted_call = memory.tool_steps[0].tool_calls[0];
     const persisted_result = memory.tool_steps[0].tool_results[0];
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        memory.tool_steps[0].responses_provider_output_items.len,
+    );
+    try std.testing.expect(!memory.tool_steps[0].responses_output_sequence_complete);
     const args = persisted_call.arguments_json;
     const secret_needles = [_][]const u8{
         "abcdefghijklmnop",
@@ -790,6 +1045,29 @@ test "execution memory redacts secret values from arguments results and provider
     try std.testing.expectEqualStrings("[REDACTED]", parsed.value.object.get("api_key").?.string);
     try std.testing.expect(std.mem.startsWith(u8, parsed.value.object.get("command").?.string, "echo ok"));
     try std.testing.expect(std.mem.find(u8, parsed.value.object.get("command").?.string, "[redacted]") != null);
+
+    var durable_json: std.Io.Writer.Allocating = .init(alloc);
+    defer durable_json.deinit();
+    try testing_session_json.writeExecutionMemoryJson(&durable_json.writer, memory);
+    var replay_messages: std.ArrayList(ChatMessage) = .empty;
+    defer replay_messages.deinit(alloc);
+    try session_runtime.appendExecutionMemoryChatMessages(
+        alloc,
+        &replay_messages,
+        memory,
+    );
+    const replay_body = try responses_protocol.buildRequest(alloc, .{
+        .model = "gpt-5.4",
+        .serialized_tools = "[]",
+        .messages = replay_messages.items,
+        .tool_choice = .auto,
+        .provider_options = .{},
+    }, .{});
+    defer alloc.free(replay_body);
+    for (secret_needles) |needle| {
+        try std.testing.expect(std.mem.find(u8, durable_json.written(), needle) == null);
+        try std.testing.expect(std.mem.find(u8, replay_body, needle) == null);
+    }
 }
 
 test "execution memory removes token-shaped call ids from JSON and replay" {
@@ -1227,6 +1505,94 @@ test "normal execution memory attaches marked permission feedback to its tool re
     );
 }
 
+test "normal execution memory owns Responses reasoning on completed tool steps" {
+    const alloc = std.testing.allocator;
+    var calls = [_]ToolCall{.{
+        .id = "call_read",
+        .name = "read_file",
+        .arguments_json = "{\"path\":\"note.txt\"}",
+    }};
+    var reasoning = [_]u8{ 'c', 'h', 'e', 'c', 'k' };
+    var first_id = [_]u8{ 'r', 's', '_', 'a' };
+    var first_summary = [_]u8{ 'f', 'i', 'r', 's', 't' };
+    var first_encrypted = [_]u8{ 'o', 'p', 'a', 'q', 'u', 'e', '-', 'a' };
+    var second_id = [_]u8{ 'r', 's', '_', 'b' };
+    var second_summary = [_]u8{ 's', 'e', 'c', 'o', 'n', 'd' };
+    var second_encrypted = [_]u8{ 'o', 'p', 'a', 'q', 'u', 'e', '-', 'b' };
+    var reasoning_items = [_]types.ResponsesReasoningItem{
+        .{ .id = &first_id, .summary = &first_summary, .encrypted_content = &first_encrypted },
+        .{ .id = &second_id, .summary = &second_summary, .encrypted_content = &second_encrypted },
+    };
+    const messages = [_]types.ChatMessage{
+        .{
+            .role = .assistant,
+            .reasoning = &reasoning,
+            .reasoning_items = &reasoning_items,
+            .tool_calls = calls[0..],
+        },
+        .{
+            .role = .tool,
+            .content = "contents",
+            .tool_call_id = "call_read",
+            .tool_name = "read_file",
+            .tool_result_status = .success,
+        },
+    };
+
+    const memory = try buildNormalChatExecutionMemory(alloc, &messages);
+    defer types.freeExecutionMemory(alloc, memory);
+    @memset(&reasoning, 'x');
+    @memset(&first_id, 'x');
+    @memset(&first_summary, 'x');
+    @memset(&first_encrypted, 'x');
+    @memset(&second_id, 'x');
+    @memset(&second_summary, 'x');
+    @memset(&second_encrypted, 'x');
+
+    const step = memory.tool_steps[0];
+    try std.testing.expectEqualStrings("check", step.reasoning.?);
+    try std.testing.expect(step.reasoning_item_id == null);
+    try std.testing.expect(step.reasoning_encrypted_content == null);
+    try std.testing.expectEqual(@as(usize, 2), step.reasoning_items.len);
+    try std.testing.expectEqualStrings("rs_a", step.reasoning_items[0].id.?);
+    try std.testing.expectEqualStrings("first", step.reasoning_items[0].summary.?);
+    try std.testing.expectEqualStrings("opaque-a", step.reasoning_items[0].encrypted_content.?);
+    try std.testing.expectEqualStrings("rs_b", step.reasoning_items[1].id.?);
+    try std.testing.expectEqualStrings("second", step.reasoning_items[1].summary.?);
+    try std.testing.expectEqualStrings("opaque-b", step.reasoning_items[1].encrypted_content.?);
+}
+
+test "normal execution memory ignores non-Responses reasoning on completed tool steps" {
+    const alloc = std.testing.allocator;
+    var calls = [_]ToolCall{.{
+        .id = "call_read",
+        .name = "read_file",
+        .arguments_json = "{\"path\":\"note.txt\"}",
+    }};
+    const messages = [_]types.ChatMessage{
+        .{
+            .role = .assistant,
+            .reasoning = "provider-local reasoning",
+            .tool_calls = calls[0..],
+        },
+        .{
+            .role = .tool,
+            .content = "contents",
+            .tool_call_id = "call_read",
+            .tool_name = "read_file",
+            .tool_result_status = .success,
+        },
+    };
+
+    const memory = try buildNormalChatExecutionMemory(alloc, &messages);
+    defer types.freeExecutionMemory(alloc, memory);
+    const step = memory.tool_steps[0];
+    try std.testing.expect(step.reasoning == null);
+    try std.testing.expect(step.reasoning_item_id == null);
+    try std.testing.expect(step.reasoning_encrypted_content == null);
+    try std.testing.expectEqual(@as(usize, 0), step.reasoning_items.len);
+}
+
 test "normal execution memory scans the deferred user tail by source call" {
     const alloc = std.testing.allocator;
     var calls = [_]ToolCall{
@@ -1493,11 +1859,16 @@ test "normal execution-memory builders clean every allocation failure" {
                     .arguments_json = "{\"path\":\"notes.txt\",\"content\":\"updated\"}",
                 },
             };
+            var provider_output_items = [_]types.ResponsesProviderOutputItem{.{
+                .output_index = 0,
+                .json = "{\"type\":\"web_search_call\",\"id\":\"ws_safe\",\"status\":\"completed\"}",
+            }};
             const messages = [_]types.ChatMessage{
                 .{
                     .role = .assistant,
                     .content = "assistant",
                     .tool_calls = calls[0..],
+                    .responses_provider_output_items = provider_output_items[0..],
                 },
                 .{
                     .role = .tool,
@@ -1533,6 +1904,10 @@ test "normal execution-memory builders clean every allocation failure" {
             defer types.freeExecutionMemory(alloc, memory);
             try std.testing.expectEqual(@as(usize, 2), memory.files.len);
             try std.testing.expect(memory.files[0].stale);
+            try std.testing.expectEqual(
+                @as(usize, 1),
+                memory.tool_steps[0].responses_provider_output_items.len,
+            );
         }
     };
     const MessageCheck = struct {

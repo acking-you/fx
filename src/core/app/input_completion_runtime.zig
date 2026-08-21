@@ -39,6 +39,10 @@ pub const file_picker_completion_cap: usize = 32;
 const file_picker_match_span_cap = file_picker_completion_cap * file_index.max_path_len;
 pub const file_picker_path_storage_cap = file_picker_completion_cap * file_index.max_path_len;
 
+fn initialModelPickerFastMode(current_fast_mode: bool, supports_fast_mode: bool) bool {
+    return current_fast_mode and supports_fast_mode;
+}
+
 pub const InlineSkillCompletion = struct {
     skill: skill_runtime.Skill,
     suffix: []const u8,
@@ -1011,7 +1015,7 @@ pub fn CompletionRuntime(comptime App: type) type {
                         app.alloc,
                         model,
                         model_capabilities.reasoningEffortIndex(capabilities, effort),
-                        capabilities.supports_fast_mode,
+                        initialModelPickerFastMode(app.fast_mode, capabilities.supports_fast_mode),
                         .effort,
                     );
                 },
@@ -1049,7 +1053,7 @@ pub fn CompletionRuntime(comptime App: type) type {
                     if (!capabilities.supports_fast_mode) return false;
 
                     try setModelComposerText(app, "/model {s} {s} ", .{ model, effort.label() });
-                    try app.input_runtime.picker.beginModelPickerFlow(app.alloc, model, model_capabilities.reasoningEffortIndex(capabilities, effort), true, .fast);
+                    try app.input_runtime.picker.beginModelPickerFlow(app.alloc, model, model_capabilities.reasoningEffortIndex(capabilities, effort), initialModelPickerFastMode(app.fast_mode, capabilities.supports_fast_mode), .fast);
                     return true;
                 },
                 .fast => return false,
@@ -1092,7 +1096,7 @@ pub fn CompletionRuntime(comptime App: type) type {
                     const capabilities = model_capabilities.resolveForApp(App, app, model);
                     if (capabilities.supports_fast_mode) {
                         try setModelComposerText(app, "/model {s} {s} ", .{ model, effort.label() });
-                        try app.input_runtime.picker.beginModelPickerFlow(app.alloc, model, model_capabilities.reasoningEffortIndex(capabilities, effort), true, .fast);
+                        try app.input_runtime.picker.beginModelPickerFlow(app.alloc, model, model_capabilities.reasoningEffortIndex(capabilities, effort), initialModelPickerFastMode(app.fast_mode, capabilities.supports_fast_mode), .fast);
                     } else {
                         try session_commands.Commands(App).selectModelFromPicker(app, model, effort, app.fast_mode);
                         app.input_runtime.inputResetState().clearCurrent(app.alloc);
@@ -1148,12 +1152,13 @@ pub fn CompletionRuntime(comptime App: type) type {
 
             const stage: ModelPickerStage = if (supports_effort) .effort else .fast;
             try setModelComposerText(app, "/model {s} ", .{model});
-            // Preselect the product effort default and enable Fast mode when supported.
+            // Preserve the user's current speed choice. Model capability only
+            // controls whether Fast is offered; it must never opt the user in.
             try app.input_runtime.picker.beginModelPickerFlow(
                 app.alloc,
                 model,
                 model_capabilities.reasoningEffortIndex(capabilities, .auto),
-                supports_fast,
+                initialModelPickerFastMode(app.fast_mode, supports_fast),
                 stage,
             );
             app.shell.render_requests.request(.footer);

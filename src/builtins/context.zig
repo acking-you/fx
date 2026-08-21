@@ -2858,7 +2858,7 @@ test "git worktree reports dirty for obvious metadata and tracked-file changes" 
         try writeTestFile(tmp.dir, "tracked/.git/HEAD", "ref: refs/heads/main\n");
         try writeTestFile(tmp.dir, "tracked/tracked.txt", "tracked\n");
         try writeSinglePathGitIndex(tmp.dir, "tracked/.git/index", "tracked/tracked.txt", "tracked.txt");
-        try writeTestFile(tmp.dir, "tracked/tracked.txt", "changed\n");
+        try writeTestFile(tmp.dir, "tracked/tracked.txt", "changed content\n");
         const workspace = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "tracked");
         defer alloc.free(workspace);
         const info = try collectGitInfo(arena_state.allocator(), workspace);

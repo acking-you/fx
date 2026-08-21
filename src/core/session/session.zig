@@ -79,6 +79,7 @@ pub const InterruptedHistoryTurn = core_types.InterruptedHistoryTurn;
 pub const InterruptedTerminalReason = core_types.InterruptedTerminalReason;
 /// Stored compacted context summary produced by core history compaction.
 pub const CompactedSummaryHistoryTurn = core_types.CompactedSummaryHistoryTurn;
+pub const ResponsesCompactionCheckpoint = core_types.ResponsesCompactionCheckpoint;
 /// One persisted session history record.
 pub const HistoryTurn = core_types.HistoryTurn;
 pub const freeUserTurn = core_types.freeUserTurn;
@@ -1592,6 +1593,9 @@ pub const SessionRuntime = struct {
     /// Count limit for owned model-context snapshots; canonical history is not truncated.
     max_history_turns: usize,
     context_history_start: usize = 0,
+    /// Monotonic live-session identity for asynchronous history operations.
+    /// It is runtime-only and deliberately does not persist across restores.
+    history_generation: u64 = 1,
 
     pub fn init(
         max_history_turns: usize,
@@ -1678,7 +1682,10 @@ pub const SessionRuntime = struct {
     ) !void {
         if (context_history_start > history.len) return error.InvalidContextHistoryStart;
         try self.restore(alloc, language, history);
-        self.context_history_start = context_history_start;
+        if (self.context_history_start != context_history_start) {
+            self.context_history_start = context_history_start;
+            self.advanceHistoryGeneration();
+        }
     }
 
     pub fn restoreWithPermissionState(
@@ -1816,6 +1823,7 @@ pub const SessionRuntime = struct {
         }
         self.history.clearRetainingCapacity();
         self.context_history_start = 0;
+        self.advanceHistoryGeneration();
     }
 
     pub fn historyLen(self: *const SessionRuntime) usize {
@@ -1824,6 +1832,20 @@ pub const SessionRuntime = struct {
 
     pub fn contextHistoryStart(self: *const SessionRuntime) usize {
         return self.context_history_start;
+    }
+
+    pub fn estimatedContextTokens(self: *const SessionRuntime) usize {
+        if (self.context_history_start >= self.history.items.len) return 0;
+        return estimateHistoryTokens(self.history.items[self.context_history_start..]);
+    }
+
+    pub fn historyGeneration(self: *const SessionRuntime) u64 {
+        return self.history_generation;
+    }
+
+    fn advanceHistoryGeneration(self: *SessionRuntime) void {
+        self.history_generation +%= 1;
+        if (self.history_generation == 0) self.history_generation = 1;
     }
 
     pub fn compactedTurnCount(self: *const SessionRuntime) usize {
@@ -1878,6 +1900,7 @@ pub const SessionRuntime = struct {
 
         try self.history.append(alloc, copy);
         owns_copy = false;
+        self.advanceHistoryGeneration();
     }
 
     pub fn appendAssistantHistoryTurn(self: *SessionRuntime, alloc: Allocator, user: []const u8, assistant: []const u8) !void {
@@ -1887,6 +1910,7 @@ pub const SessionRuntime = struct {
 
         try self.history.append(alloc, turn);
         owns_turn = false;
+        self.advanceHistoryGeneration();
     }
 
     pub fn appendBackgroundCommandHistoryTurn(self: *SessionRuntime, alloc: Allocator, user: []const u8, background: command_contract.BackgroundCommand) !void {
@@ -1920,6 +1944,7 @@ pub const SessionRuntime = struct {
 
         try self.history.append(alloc, turn);
         owns_turn = false;
+        self.advanceHistoryGeneration();
     }
 
     pub fn appendHistoryMessages(
@@ -1976,7 +2001,117 @@ pub const SessionRuntime = struct {
 
     pub fn forceCompaction(self: *SessionRuntime) void {
         if (self.history.items.len <= 1) return;
+        if (self.context_history_start == self.history.items.len - 1) return;
         self.context_history_start = self.history.items.len - 1;
+        self.advanceHistoryGeneration();
+    }
+
+    pub fn hasCompactionCandidate(self: *const SessionRuntime) bool {
+        return self.history.items.len > 1 and
+            self.context_history_start < self.history.items.len - 1;
+    }
+
+    /// Remote compaction accepts any non-empty active context, including the
+    /// first completed turn. An already-active opaque checkpoint alone is not
+    /// a new candidate; it needs at least one following turn before replacing
+    /// that checkpoint.
+    pub fn hasRemoteCompactionCandidate(self: *const SessionRuntime) bool {
+        if (self.context_history_start >= self.history.items.len) return false;
+        const first = self.history.items[self.context_history_start];
+        if (first == .compacted_summary and
+            first.compacted_summary.responses_compaction != null)
+        {
+            return self.context_history_start + 1 < self.history.items.len;
+        }
+        return true;
+    }
+
+    /// Installs one deterministic local summary for the complete active
+    /// context, including a single oversized latest turn. Canonical turns remain
+    /// in `history`; only the active context boundary moves to the new summary.
+    pub fn installLocalCompaction(
+        self: *SessionRuntime,
+        alloc: Allocator,
+    ) !bool {
+        if (self.context_history_start >= self.history.items.len) return false;
+
+        const context = try self.snapshotContextHistory(alloc);
+        defer freeHistoryTurnSlice(alloc, context);
+        if (context.len == 0) return false;
+
+        const has_existing_summary = context[0] == .compacted_summary;
+        const existing_summary = if (has_existing_summary)
+            context[0].compacted_summary
+        else
+            null;
+        const removed = context[@intFromBool(has_existing_summary)..];
+        if (removed.len == 0) return false;
+
+        const summary = try buildCompactedSummaryTurn(alloc, existing_summary, removed);
+        errdefer freeHistoryTurn(alloc, .{ .compacted_summary = summary });
+        const boundary = self.history.items.len;
+        try self.history.append(alloc, .{ .compacted_summary = summary });
+        self.context_history_start = boundary;
+        self.advanceHistoryGeneration();
+        return true;
+    }
+
+    /// Installs one fully validated remote compact result as the active
+    /// context boundary. Canonical turns remain in `history`; the appended
+    /// checkpoint owns both a portable local summary and the provider-opaque
+    /// Responses input used only by a matching route and wire model.
+    pub fn installResponsesCompaction(
+        self: *SessionRuntime,
+        alloc: Allocator,
+        credential_source: core_types.CredentialSource,
+        wire_model: []const u8,
+        input_json: []const u8,
+        provider_binding: core_types.ResponsesCompactionProviderBindingView,
+    ) !bool {
+        if (!self.hasRemoteCompactionCandidate()) return false;
+
+        const context = try self.snapshotContextHistory(alloc);
+        defer freeHistoryTurnSlice(alloc, context);
+        if (context.len == 0) return false;
+
+        const has_existing_summary = context[0] == .compacted_summary;
+        const existing_summary = if (has_existing_summary)
+            context[0].compacted_summary
+        else
+            null;
+        const removed = context[@intFromBool(has_existing_summary)..];
+        if (removed.len == 0) return false;
+
+        const model_copy = try alloc.dupe(u8, wire_model);
+        var checkpoint_assembled = false;
+        errdefer if (!checkpoint_assembled) alloc.free(model_copy);
+        const input_copy = try alloc.dupe(u8, input_json);
+        errdefer if (!checkpoint_assembled) alloc.free(input_copy);
+        const binding_copy = try core_types.dupeResponsesCompactionProviderBinding(
+            alloc,
+            provider_binding,
+        );
+        errdefer if (!checkpoint_assembled) {
+            core_types.freeResponsesCompactionProviderBinding(alloc, binding_copy);
+        };
+        var summary = try buildCompactedSummaryTurn(alloc, existing_summary, removed);
+        summary.responses_compaction = .{
+            .credential_source = credential_source,
+            .wire_model = model_copy,
+            .input_json = input_copy,
+            .provider_binding = binding_copy,
+        };
+        checkpoint_assembled = true;
+        errdefer if (checkpoint_assembled) {
+            freeHistoryTurn(alloc, .{ .compacted_summary = summary });
+        };
+
+        const boundary = self.history.items.len;
+        try self.history.append(alloc, .{ .compacted_summary = summary });
+        checkpoint_assembled = false;
+        self.context_history_start = boundary;
+        self.advanceHistoryGeneration();
+        return true;
     }
 
     fn setConversationLanguage(self: *SessionRuntime, language: ConversationLanguage) void {
@@ -2014,13 +2149,26 @@ pub fn snapshotOwnedContextHistory(
     }
 
     const start = @min(context_history_start, canonical_history.len);
-    try appendCompactedPrefix(
-        alloc,
-        &copy,
-        canonical_history[0..start],
-    );
+    const starts_at_persisted_summary = start < canonical_history.len and
+        canonical_history[start] == .compacted_summary;
+    const starts_at_remote_checkpoint = starts_at_persisted_summary and
+        canonical_history[start].compacted_summary.responses_compaction != null;
+    if (!starts_at_persisted_summary) {
+        try appendCompactedPrefix(
+            alloc,
+            &copy,
+            canonical_history[0..start],
+        );
+    }
     try appendHistoryCopies(alloc, &copy, canonical_history[start..]);
-    _ = try compactHistory(&copy, alloc, max_history_turns);
+    // The opaque checkpoint and every following turn form one provider input
+    // chain. Local turn-count compaction cannot summarize only the suffix
+    // without either dropping it from replay or duplicating the checkpoint's
+    // already-compacted prefix, so keep this atomic base intact until the next
+    // successful remote compaction replaces it.
+    if (!starts_at_remote_checkpoint) {
+        _ = try compactHistory(&copy, alloc, max_history_turns);
+    }
     return copy.toOwnedSlice(alloc);
 }
 
@@ -2111,6 +2259,26 @@ pub fn dupeHistoryTurn(alloc: Allocator, turn: HistoryTurn) !HistoryTurn {
                 alloc,
                 entry.permission_feedback,
             );
+            errdefer core_types.freePermissionFeedback(alloc, permission_feedback);
+            const responses_compaction = if (entry.responses_compaction) |checkpoint| blk: {
+                const model = try alloc.dupe(u8, checkpoint.wire_model);
+                errdefer alloc.free(model);
+                const input = try alloc.dupe(u8, checkpoint.input_json);
+                errdefer alloc.free(input);
+                const provider_binding = if (checkpoint.provider_binding) |binding|
+                    try core_types.dupeResponsesCompactionProviderBinding(
+                        alloc,
+                        binding.view(),
+                    )
+                else
+                    null;
+                break :blk ResponsesCompactionCheckpoint{
+                    .credential_source = checkpoint.credential_source,
+                    .wire_model = model,
+                    .input_json = input,
+                    .provider_binding = provider_binding,
+                };
+            } else null;
             return .{ .compacted_summary = .{
                 .summary = summary,
                 .removed_turn_count = entry.removed_turn_count,
@@ -2119,6 +2287,7 @@ pub fn dupeHistoryTurn(alloc: Allocator, turn: HistoryTurn) !HistoryTurn {
                 .root_user_messages_complete = entry.root_user_messages_complete,
                 .permission_feedback = permission_feedback,
                 .permission_feedback_complete = entry.permission_feedback_complete,
+                .responses_compaction = responses_compaction,
             } };
         },
         .assistant => |entry| {
@@ -2126,10 +2295,30 @@ pub fn dupeHistoryTurn(alloc: Allocator, turn: HistoryTurn) !HistoryTurn {
             errdefer freeUserTurn(alloc, user);
             const assistant_copy = try alloc.dupe(u8, entry.assistant);
             errdefer alloc.free(assistant_copy);
+            const reasoning = if (entry.reasoning) |value| try alloc.dupe(u8, value) else null;
+            errdefer if (reasoning) |value| alloc.free(value);
+            const reasoning_item_id = if (entry.reasoning_item_id) |value| try alloc.dupe(u8, value) else null;
+            errdefer if (reasoning_item_id) |value| alloc.free(value);
+            const reasoning_encrypted_content = if (entry.reasoning_encrypted_content) |value| try alloc.dupe(u8, value) else null;
+            errdefer if (reasoning_encrypted_content) |value| alloc.free(value);
+            const reasoning_items = try core_types.dupeResponsesReasoningItems(alloc, entry.reasoning_items);
+            errdefer core_types.freeResponsesReasoningItems(alloc, reasoning_items);
+            const provider_output_items = try core_types.dupeResponsesProviderOutputItems(
+                alloc,
+                entry.responses_provider_output_items,
+            );
+            errdefer core_types.freeResponsesProviderOutputItems(alloc, provider_output_items);
             const execution = try core_types.dupeExecutionMemory(alloc, entry.execution);
             return .{ .assistant = .{
                 .user = user,
                 .assistant = assistant_copy,
+                .responses_message_output_index = entry.responses_message_output_index,
+                .reasoning = reasoning,
+                .reasoning_item_id = reasoning_item_id,
+                .reasoning_encrypted_content = reasoning_encrypted_content,
+                .reasoning_items = reasoning_items,
+                .responses_provider_output_items = provider_output_items,
+                .responses_output_sequence_complete = entry.responses_output_sequence_complete,
                 .execution = execution,
             } };
         },
@@ -2248,6 +2437,113 @@ pub fn makeAssistantTurn(alloc: Allocator, user_text: []const u8, assistant_text
         .user = .{ .text = user_copy, .images = &.{} },
         .assistant = assistant_copy,
     } };
+}
+
+test "assistant Responses reasoning identity is owned and projected across user turns" {
+    const alloc = std.testing.allocator;
+    var reasoning = [_]u8{ 's', 'u', 'm', 'm', 'a', 'r', 'y' };
+    var item_id = [_]u8{ 'r', 's', '_', '1' };
+    var encrypted = [_]u8{ 'o', 'p', 'a', 'q', 'u', 'e' };
+    var first_item_id = [_]u8{ 'r', 's', '_', 'a' };
+    var first_item_summary = [_]u8{ 'f', 'i', 'r', 's', 't' };
+    var first_item_encrypted = [_]u8{ 'o', 'p', 'a', 'q', 'u', 'e', '-', 'a' };
+    var second_item_id = [_]u8{ 'r', 's', '_', 'b' };
+    var second_item_summary = [_]u8{ 's', 'e', 'c', 'o', 'n', 'd' };
+    var second_item_encrypted = [_]u8{ 'o', 'p', 'a', 'q', 'u', 'e', '-', 'b' };
+    var reasoning_items = [_]core_types.ResponsesReasoningItem{
+        .{ .output_index = 0, .id = &first_item_id, .summary = &first_item_summary, .encrypted_content = &first_item_encrypted },
+        .{ .output_index = 2, .id = &second_item_id, .summary = &second_item_summary, .encrypted_content = &second_item_encrypted },
+    };
+    var provider_json = "{\"type\":\"web_search_call\",\"id\":\"ws_owned\",\"status\":\"completed\"}".*;
+    var provider_output_items = [_]core_types.ResponsesProviderOutputItem{.{
+        .output_index = 1,
+        .json = &provider_json,
+    }};
+
+    var runtime: SessionRuntime = .{ .max_history_turns = 8 };
+    defer runtime.deinit(alloc);
+    try runtime.appendHistoryEntry(alloc, .{ .assistant = .{
+        .user = .{ .text = @constCast("first question") },
+        .assistant = @constCast("first answer"),
+        .responses_message_output_index = 3,
+        .reasoning = &reasoning,
+        .reasoning_item_id = &item_id,
+        .reasoning_encrypted_content = &encrypted,
+        .reasoning_items = &reasoning_items,
+        .responses_provider_output_items = &provider_output_items,
+    } });
+    @memset(&reasoning, 'x');
+    @memset(&item_id, 'x');
+    @memset(&encrypted, 'x');
+    @memset(&first_item_id, 'x');
+    @memset(&first_item_summary, 'x');
+    @memset(&first_item_encrypted, 'x');
+    @memset(&second_item_id, 'x');
+    @memset(&second_item_summary, 'x');
+    @memset(&second_item_encrypted, 'x');
+    @memset(&provider_json, 'x');
+
+    var messages: std.ArrayList(core_types.ChatMessage) = .empty;
+    defer messages.deinit(alloc);
+    try appendHistoryChatMessages(alloc, &messages, runtime.history.items);
+
+    try std.testing.expectEqual(@as(usize, 2), messages.items.len);
+    const assistant = messages.items[1];
+    try std.testing.expectEqualStrings("summary", assistant.reasoning.?);
+    try std.testing.expectEqualStrings("rs_1", assistant.reasoning_item_id.?);
+    try std.testing.expectEqualStrings("opaque", assistant.reasoning_encrypted_content.?);
+    try std.testing.expectEqual(@as(usize, 2), assistant.reasoning_items.len);
+    try std.testing.expectEqualStrings("rs_a", assistant.reasoning_items[0].id.?);
+    try std.testing.expectEqualStrings("first", assistant.reasoning_items[0].summary.?);
+    try std.testing.expectEqualStrings("opaque-a", assistant.reasoning_items[0].encrypted_content.?);
+    try std.testing.expectEqualStrings("rs_b", assistant.reasoning_items[1].id.?);
+    try std.testing.expectEqualStrings("second", assistant.reasoning_items[1].summary.?);
+    try std.testing.expectEqualStrings("opaque-b", assistant.reasoning_items[1].encrypted_content.?);
+    try std.testing.expectEqual(@as(?u32, 0), assistant.reasoning_items[0].output_index);
+    try std.testing.expectEqual(@as(?u32, 2), assistant.reasoning_items[1].output_index);
+    try std.testing.expectEqual(@as(?u32, 3), assistant.responses_message_output_index);
+    try std.testing.expectEqual(@as(usize, 1), assistant.responses_provider_output_items.len);
+    try std.testing.expectEqual(@as(u32, 1), assistant.responses_provider_output_items[0].output_index);
+    try std.testing.expect(std.mem.find(
+        u8,
+        assistant.responses_provider_output_items[0].json,
+        "ws_owned",
+    ) != null);
+    try std.testing.expect(!assistant.responses_output_sequence_complete);
+
+    var calls = [_]core_types.ToolCall{.{
+        .id = @constCast("call_1"),
+        .name = @constCast("read_file"),
+        .arguments_json = @constCast("{\"path\":\"a.txt\"}"),
+    }};
+    var results = [_]core_types.PersistedToolResult{.{
+        .tool_call_id = @constCast("call_1"),
+        .tool_name = @constCast("read_file"),
+        .status = .success,
+        .output = @constCast("contents"),
+        .output_bytes = 8,
+        .stored_output_bytes = 8,
+    }};
+    var steps = [_]core_types.ToolExecutionStep{.{
+        .reasoning = @constCast("tool summary"),
+        .reasoning_item_id = @constCast("rs_tool"),
+        .reasoning_encrypted_content = @constCast("opaque-tool"),
+        .reasoning_items = &reasoning_items,
+        .tool_calls = &calls,
+        .tool_results = &results,
+    }};
+    var execution_messages: std.ArrayList(core_types.ChatMessage) = .empty;
+    defer execution_messages.deinit(alloc);
+    try appendExecutionMemoryChatMessages(
+        alloc,
+        &execution_messages,
+        .{ .tool_steps = &steps },
+    );
+    const tool_assistant = execution_messages.items[0];
+    try std.testing.expectEqualStrings("tool summary", tool_assistant.reasoning.?);
+    try std.testing.expectEqualStrings("rs_tool", tool_assistant.reasoning_item_id.?);
+    try std.testing.expectEqualStrings("opaque-tool", tool_assistant.reasoning_encrypted_content.?);
+    try std.testing.expectEqual(@as(usize, 2), tool_assistant.reasoning_items.len);
 }
 
 test "unavailable profile usage keeps reconciled generation pending in host runtime" {
@@ -2539,14 +2835,28 @@ fn selectBudgetedHistoryTurns(
 
     var used_tokens: usize = 0;
     var kept_count: usize = 0;
+    for (history, 0..) |turn, idx| {
+        const checkpoint = switch (turn) {
+            .compacted_summary => |entry| entry.responses_compaction,
+            else => null,
+        };
+        if (checkpoint == null) continue;
+        keep[idx] = true;
+        used_tokens +|= estimateHistoryTurnTokens(turn);
+        kept_count += 1;
+    }
+
+    var kept_non_checkpoint: usize = 0;
     var i = history.len;
     while (i > 0) {
         i -= 1;
+        if (keep[i]) continue;
         const cost = estimateHistoryTurnTokens(history[i]);
-        if (kept_count == 0 or used_tokens + cost <= opts.max_tokens) {
+        if (kept_non_checkpoint == 0 or used_tokens +| cost <= opts.max_tokens) {
             keep[i] = true;
-            used_tokens += cost;
+            used_tokens +|= cost;
             kept_count += 1;
+            kept_non_checkpoint += 1;
         }
     }
 
@@ -2704,6 +3014,13 @@ pub fn appendExecutionMemoryChatMessages(
         try messages.append(alloc, .{
             .role = .assistant,
             .content = step.assistant,
+            .responses_message_output_index = step.responses_message_output_index,
+            .reasoning = step.reasoning,
+            .reasoning_item_id = step.reasoning_item_id,
+            .reasoning_encrypted_content = step.reasoning_encrypted_content,
+            .reasoning_items = step.reasoning_items,
+            .responses_provider_output_items = step.responses_provider_output_items,
+            .responses_output_sequence_complete = step.responses_output_sequence_complete,
             .tool_calls = step.tool_calls,
         });
         for (step.tool_results) |result| {
@@ -2745,13 +3062,36 @@ fn appendHistoryChatMessagesImpl(
                 try messages.append(alloc, .{
                     .role = if (summary_is_system) .system else .user,
                     .content = text,
+                    .responses_compaction = if (entry.responses_compaction) |checkpoint| .{
+                        .credential_source = checkpoint.credential_source,
+                        .wire_model = checkpoint.wire_model,
+                        .input_json = checkpoint.input_json,
+                        .provider_binding = if (checkpoint.provider_binding) |binding|
+                            binding.view()
+                        else
+                            null,
+                    } else null,
                 });
             },
             .assistant => |entry| {
                 try messages.append(alloc, .{ .role = .user, .content = entry.user.text, .images = entry.user.images });
                 try appendExecutionMemoryChatMessages(alloc, messages, entry.execution);
-                if (entry.assistant.len > 0) {
-                    try messages.append(alloc, .{ .role = .assistant, .content = entry.assistant });
+                if (entry.assistant.len > 0 or entry.reasoning_items.len > 0 or
+                    entry.responses_provider_output_items.len > 0 or
+                    entry.reasoning_item_id != null or
+                    entry.reasoning_encrypted_content != null)
+                {
+                    try messages.append(alloc, .{
+                        .role = .assistant,
+                        .content = entry.assistant,
+                        .responses_message_output_index = entry.responses_message_output_index,
+                        .reasoning = entry.reasoning,
+                        .reasoning_item_id = entry.reasoning_item_id,
+                        .reasoning_encrypted_content = entry.reasoning_encrypted_content,
+                        .reasoning_items = entry.reasoning_items,
+                        .responses_provider_output_items = entry.responses_provider_output_items,
+                        .responses_output_sequence_complete = entry.responses_output_sequence_complete,
+                    });
                 }
             },
             .background_command => |entry| {
@@ -3336,10 +3676,31 @@ fn formatToolResultEvidenceLine(arena: Allocator, result: core_types.PersistedTo
     return std.fmt.allocPrint(arena, "- {s} {s} ({d} stored bytes)", .{ result.tool_name, @tagName(result.status), result.stored_output_bytes });
 }
 
+pub fn estimateHistoryTokens(history: []const HistoryTurn) usize {
+    var total: usize = 0;
+    for (history) |turn| total +|= estimateHistoryTurnTokens(turn);
+    return total;
+}
+
 fn estimateHistoryTurnTokens(turn: HistoryTurn) usize {
     return switch (turn) {
-        .compacted_summary => |entry| estimateTextTokens(entry.summary),
-        .assistant => |entry| estimateTextTokens(entry.user.text) + estimateTextTokens(entry.assistant) + estimateExecutionTokens(entry.execution),
+        .compacted_summary => |entry| if (entry.responses_compaction) |checkpoint|
+            @max(
+                estimateTextTokens(entry.summary),
+                estimateTextTokens(checkpoint.input_json),
+            )
+        else
+            estimateTextTokens(entry.summary),
+        .assistant => |entry| estimateTextTokens(entry.user.text) +
+            estimateTextTokens(entry.assistant) +
+            estimateResponsesReasoningTokens(
+                entry.reasoning_items,
+                entry.reasoning,
+                entry.reasoning_item_id,
+                entry.reasoning_encrypted_content,
+            ) +
+            estimateResponsesProviderOutputTokens(entry.responses_provider_output_items) +
+            estimateExecutionTokens(entry.execution),
         .background_command => |entry| estimateTextTokens(entry.user.text) +
             (if (entry.assistant) |assistant| estimateTextTokens(assistant) else 0) +
             estimateExecutionTokens(entry.execution) +
@@ -3355,6 +3716,13 @@ fn estimateExecutionTokens(execution: core_types.ExecutionMemory) usize {
     var total: usize = 0;
     for (execution.tool_steps) |step| {
         if (step.assistant) |assistant| total += estimateTextTokens(assistant);
+        total += estimateResponsesReasoningTokens(
+            step.reasoning_items,
+            step.reasoning,
+            step.reasoning_item_id,
+            step.reasoning_encrypted_content,
+        );
+        total += estimateResponsesProviderOutputTokens(step.responses_provider_output_items);
         for (step.tool_calls) |call| {
             total += estimateTextTokens(call.name) + estimateTextTokens(call.arguments_json);
         }
@@ -3372,6 +3740,34 @@ fn estimateExecutionTokens(execution: core_types.ExecutionMemory) usize {
     }
     for (execution.files) |file| {
         total += estimateTextTokens(file.path) + estimateTextTokens(file.tool_name);
+    }
+    return total;
+}
+
+fn estimateResponsesProviderOutputTokens(
+    items: []const core_types.ResponsesProviderOutputItem,
+) usize {
+    var total: usize = 0;
+    for (items) |item| total +|= estimateTextTokens(item.json);
+    return total;
+}
+
+fn estimateResponsesReasoningTokens(
+    items: []const core_types.ResponsesReasoningItem,
+    legacy_reasoning: ?[]const u8,
+    legacy_item_id: ?[]const u8,
+    legacy_encrypted_content: ?[]const u8,
+) usize {
+    if (items.len == 0) {
+        return (if (legacy_reasoning) |value| estimateTextTokens(value) else 0) +
+            (if (legacy_item_id) |value| estimateTextTokens(value) else 0) +
+            (if (legacy_encrypted_content) |value| estimateTextTokens(value) else 0);
+    }
+    var total: usize = 0;
+    for (items) |item| {
+        if (item.id) |value| total += estimateTextTokens(value);
+        if (item.summary) |value| total += estimateTextTokens(value);
+        if (item.encrypted_content) |value| total += estimateTextTokens(value);
     }
     return total;
 }
@@ -6052,6 +6448,106 @@ test "SessionRuntime.forceCompaction advances context without deleting canonical
     try std.testing.expect(continued[0] == .compacted_summary);
     try std.testing.expectEqualStrings("three", continued[1].assistant.user.text);
     try std.testing.expectEqualStrings("four", continued[2].assistant.user.text);
+}
+
+test "full local compaction accepts one completed turn" {
+    const alloc = std.testing.allocator;
+    var runtime: SessionRuntime = .{ .max_history_turns = 8 };
+    defer runtime.deinit(alloc);
+
+    try runtime.appendAssistantHistoryTurn(alloc, "oversized request", "oversized reply");
+    try std.testing.expect(try runtime.installLocalCompaction(alloc));
+    try std.testing.expectEqual(@as(usize, 2), runtime.historyLen());
+    try std.testing.expectEqual(@as(usize, 1), runtime.contextHistoryStart());
+
+    const context = try runtime.snapshotContextHistory(alloc);
+    defer freeHistoryTurnSlice(alloc, context);
+    try std.testing.expectEqual(@as(usize, 1), context.len);
+    try std.testing.expect(context[0] == .compacted_summary);
+    try std.testing.expect(context[0].compacted_summary.responses_compaction == null);
+    try std.testing.expect(std.mem.find(
+        u8,
+        context[0].compacted_summary.summary,
+        "oversized request",
+    ) != null);
+}
+
+test "remote checkpoint remains atomic across turn and token budgets" {
+    const alloc = std.testing.allocator;
+    var runtime: SessionRuntime = .{ .max_history_turns = 1 };
+    defer runtime.deinit(alloc);
+
+    try runtime.appendAssistantHistoryTurn(alloc, "one", "reply one");
+    try runtime.appendAssistantHistoryTurn(alloc, "two", "reply two");
+    try runtime.appendAssistantHistoryTurn(alloc, "three", "reply three");
+    const replay_json =
+        "[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"summary\"}]}," ++
+        "{\"type\":\"compaction\",\"encrypted_content\":\"opaque-checkpoint\"}]";
+    try std.testing.expect(try runtime.installResponsesCompaction(
+        alloc,
+        .codex_oauth,
+        "gpt-5.6-sol",
+        replay_json,
+        .{
+            .normalized_origin = "https://chatgpt.com/backend-api/codex/responses",
+            .account_id = "account-a",
+        },
+    ));
+    try runtime.appendAssistantHistoryTurn(alloc, "four", "reply four");
+
+    const context = try runtime.snapshotContextHistory(alloc);
+    defer freeHistoryTurnSlice(alloc, context);
+    // max_history_turns=1 must not cut the suffix away from the opaque base.
+    try std.testing.expectEqual(@as(usize, 2), context.len);
+    try std.testing.expect(context[0] == .compacted_summary);
+    const checkpoint = context[0].compacted_summary.responses_compaction.?;
+    try std.testing.expectEqual(core_types.CredentialSource.codex_oauth, checkpoint.credential_source);
+    try std.testing.expectEqualStrings("gpt-5.6-sol", checkpoint.wire_model);
+    try std.testing.expectEqualStrings(replay_json, checkpoint.input_json);
+    try std.testing.expectEqualStrings("four", context[1].assistant.user.text);
+
+    var arena_state = std.heap.ArenaAllocator.init(alloc);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var messages: std.ArrayList(core_types.ChatMessage) = .empty;
+    defer messages.deinit(arena);
+    try appendHistoryChatMessagesBudgeted(
+        arena,
+        &messages,
+        context,
+        .{ .max_tokens = 1 },
+    );
+    var saw_checkpoint = false;
+    for (messages.items) |message_entry| {
+        if (message_entry.responses_compaction) |projected| {
+            try std.testing.expect(!saw_checkpoint);
+            saw_checkpoint = true;
+            try std.testing.expectEqualStrings(replay_json, projected.input_json);
+        }
+    }
+    try std.testing.expect(saw_checkpoint);
+}
+
+test "remote compaction accepts one completed turn and not an idle checkpoint" {
+    const alloc = std.testing.allocator;
+    var runtime: SessionRuntime = .{ .max_history_turns = 8 };
+    defer runtime.deinit(alloc);
+    try runtime.appendAssistantHistoryTurn(alloc, "one", "reply one");
+    try std.testing.expect(!runtime.hasCompactionCandidate());
+    try std.testing.expect(runtime.hasRemoteCompactionCandidate());
+    try std.testing.expect(try runtime.installResponsesCompaction(
+        alloc,
+        .codex_oauth,
+        "gpt-5.6-sol",
+        "[{\"type\":\"compaction\",\"encrypted_content\":\"opaque\"}]",
+        .{
+            .normalized_origin = "https://chatgpt.com/backend-api/codex/responses",
+            .account_id = "account-a",
+        },
+    ));
+    try std.testing.expect(!runtime.hasRemoteCompactionCandidate());
+    try runtime.appendAssistantHistoryTurn(alloc, "two", "reply two");
+    try std.testing.expect(runtime.hasRemoteCompactionCandidate());
 }
 
 test "SessionRuntime restores a durable context boundary without deleting canonical history" {

@@ -42,6 +42,7 @@ const collections = @import("core/shared/collections.zig");
 const agent_steps = @import("core/config/agent_steps.zig");
 const config_runtime = @import("core/config/config_runtime.zig");
 const js_host_prompt_history = @import("core/session/js_host_prompt_history.zig");
+const session_commands = @import("core/session/session_commands.zig");
 const model_capabilities = @import("core/config/model_capabilities.zig");
 const prompt_policy = @import("core/config/prompt_policy.zig");
 const builtin_commands = @import("builtins/commands.zig");
@@ -50,6 +51,8 @@ const builtin_context = @import("builtins/context.zig");
 const builtin_devbox = @import("builtins/devbox.zig");
 const builtin_gateway = @import("builtins/gateway.zig");
 const gateway_provider = @import("core/gateway/gateway_provider.zig");
+const provider_route = @import("core/gateway/provider_route.zig");
+const responses_compaction_provider = @import("core/gateway/responses_compaction_provider.zig");
 const generation_usage_provider = @import("core/session/generation_usage_provider.zig");
 const agent_stream_provider = @import("core/agent/stream_provider.zig");
 const builtin_hooks = @import("builtins/hooks.zig");
@@ -378,6 +381,7 @@ const App = struct {
     const HerdrAppRuntime = builtin_hooks.Runtime(Self);
     const RenderAppRuntime = app_render_runtime.Runtime(Self);
     const SessionAppRuntime = app_session_runtime.Runtime(Self);
+    const SessionCommands = session_commands.Commands(Self);
     const UpgradeAppRuntime = app_upgrade_runtime.Runtime(Self);
     const WorkerAppRuntime = app_worker_runtime.Runtime(Self);
     const WorkspaceAppRuntime = app_workspace_runtime.Runtime(Self);
@@ -434,6 +438,22 @@ const App = struct {
             js_host_stream_provider.provider()
         else
             builtin_gateway.agent_stream_provider;
+    }
+
+    pub fn responsesCompactionProvider(
+        _: *const Self,
+    ) ?responses_compaction_provider.Provider {
+        return if (comptime host_target.is_wasm)
+            null
+        else
+            builtin_gateway.responses_compaction_provider_impl;
+    }
+
+    pub fn applyResponsesCompactionEvent(
+        self: *Self,
+        event: types.ResponsesCompactionWorkerEvent,
+    ) !void {
+        SessionAppRuntime.applyResponsesCompactionEvent(self, event);
     }
 
     pub fn cooperativeTransportPulse(self: *Self) !void {
@@ -644,8 +664,25 @@ const App = struct {
         }
         if (comptime !host_profile.auto_upgrade) app.auto_upgrade_enabled = false;
         try HostConfigAppRuntime.restore(&app, builtin_modes.registry);
+        app.reconcileModelForCredentialSource(false);
         SessionAppRuntime.syncTerminalTitle(&app);
         return app;
+    }
+
+    pub fn reconcileModelForCredentialSource(self: *App, announce: bool) void {
+        const source = self.auth.credentialSource() orelse return;
+        const model = provider_route.reconciledDefaultModel(
+            source,
+            self.selected_model.items,
+            self.session_persistence.process_model_override != null,
+        ) orelse return;
+        SessionCommands.reconcileRouteDefaultModel(self, model, announce) catch |err| {
+            debug_trace.logf(
+                "gateway",
+                "route default model reconciliation failed source={t} model={s} err={s}",
+                .{ source, model, @errorName(err) },
+            );
+        };
     }
 
     pub fn persistAcceptedModel(self: *App, model: []const u8) !void {
@@ -1212,12 +1249,16 @@ const App = struct {
         skill_tokens: []const registered_entities.SkillTokenSpan,
         review_draft: ?worker_runtime.QueueReviewDraft,
     ) !bool {
-        return self.snapshotAndQueuePrompt(
+        const automatic_compaction_started = try SessionAppRuntime.beginAutomaticCompactionIfNeeded(self);
+        errdefer if (automatic_compaction_started) self.worker.releaseTurnStartHold();
+        const queued = try self.snapshotAndQueuePrompt(
             prompt,
             skill_tokens,
             review_draft,
             null,
         );
+        if (!queued and automatic_compaction_started) self.worker.releaseTurnStartHold();
+        return queued;
     }
 
     pub fn continuePausedRecovery(self: *App) !bool {
@@ -1265,6 +1306,12 @@ const App = struct {
         else
             null;
         errdefer if (gateway_team_copy) |team| std.heap.c_allocator.free(team);
+
+        const credential_account_id_copy = if (gateway_credential.account_id) |account_id|
+            try std.heap.c_allocator.dupe(u8, account_id)
+        else
+            null;
+        errdefer if (credential_account_id_copy) |account_id| std.heap.c_allocator.free(account_id);
 
         const authorized_image_catalog = try self.session.snapshotImageCatalog(
             std.heap.c_allocator,
@@ -1337,6 +1384,7 @@ const App = struct {
             .api_key = api_key_copy,
             .gateway_team = gateway_team_copy,
             .credential_source = gateway_credential.source,
+            .credential_account_id = credential_account_id_copy,
             .permission_mode = self.permission_engine.mode,
             .sandbox_backend = sandbox.effectiveBackend(
                 self.permission_engine.mode,
@@ -3154,7 +3202,9 @@ fn needsEarlyThreadedIo(args: []const [:0]const u8) bool {
         std.mem.eql(u8, command, "status") or
         std.mem.eql(u8, command, "doctor") or
         std.mem.eql(u8, command, "models") or
-        std.mem.eql(u8, command, "credits");
+        std.mem.eql(u8, command, "credits") or
+        // `usage --codex` performs two bounded account API requests.
+        std.mem.eql(u8, command, "usage");
 }
 
 test "auth and upgrade commands use early threaded io without full entry config" {
@@ -3168,7 +3218,7 @@ test "auth and upgrade commands use early threaded io without full entry config"
 }
 
 test "credential-reading commands use early threaded io without full entry config" {
-    for ([_][:0]const u8{ "status", "doctor", "models", "credits" }) |command| {
+    for ([_][:0]const u8{ "status", "doctor", "models", "credits", "usage" }) |command| {
         const args = &.{command};
         try std.testing.expect(!needsFullEntryConfig(args));
         try std.testing.expect(needsEarlyThreadedIo(args));
@@ -3767,6 +3817,8 @@ test "semantic code block preserves indentation on wrapped continuation rows" {
 test {
     _ = @import("napi_fetch_state.zig");
     _ = @import("acp/prompt.zig");
+    _ = @import("acp/server.zig");
+    _ = @import("core/auth/auth_runtime.zig");
     _ = @import("core/output/activity_status.zig");
     _ = @import("core/output/thought_presentation.zig");
     _ = @import("core/agent/agent_runtime.zig");
@@ -3795,6 +3847,7 @@ test {
     _ = @import("core/app/app_session_runtime.zig");
     _ = @import("core/app/app_upgrade_runtime.zig");
     _ = @import("core/app/app_worker_runtime.zig");
+    _ = @import("core/app/input_completion_runtime.zig");
     _ = @import("ui/event_loop.zig");
     _ = @import("ui/resize_tests.zig");
     _ = @import("ui/render_engine/assistant_wrap.zig");
@@ -3822,15 +3875,25 @@ test {
     _ = @import("ui/settings_screen.zig");
     _ = @import("builtins/context.zig");
     _ = @import("builtins/gateway.zig");
+    _ = @import("builtins/gateway/permission_reviewer.zig");
     _ = @import("core/shared/debug_trace.zig");
     _ = @import("core/output/diff.zig");
     _ = @import("core/shared/display_width.zig");
     _ = @import("core/cli/doctor_runtime.zig");
     _ = @import("core/auth/login_flow.zig");
+    _ = @import("core/auth/codex_auth.zig");
+    _ = @import("core/auth/codex_login.zig");
     _ = @import("core/auth/oauth.zig");
     _ = @import("core/auth/oauth_session.zig");
     _ = @import("core/workspace/file_index.zig");
     _ = @import("core/gateway/gateway_json.zig");
+    _ = @import("core/gateway/codex_usage.zig");
+    _ = @import("core/gateway/provider_route.zig");
+    _ = @import("core/gateway/responses_compaction.zig");
+    _ = @import("core/gateway/responses_compaction_binding.zig");
+    _ = @import("core/gateway/responses_compaction_provider.zig");
+    _ = @import("core/gateway/responses_protocol.zig");
+    _ = @import("core/gateway/responses_search.zig");
     _ = @import("core/github/git_context.zig");
     _ = @import("core/github/github_publish.zig");
     _ = @import("core/github/github_workflows.zig");
@@ -3930,6 +3993,7 @@ test {
     _ = @import("gateway/web_search_types.zig");
     _ = @import("tools/web/content.zig");
     _ = @import("tools/web/html_to_markdown.zig");
+    _ = @import("tools/web/search.zig");
     _ = @import("tools/filesystem/read_file.zig");
     _ = @import("tools/filesystem/semantic_search.zig");
     _ = @import("tools/skills/install_skill.zig");
@@ -3956,6 +4020,10 @@ test {
     _ = @import("ui/transcript/runtime.zig");
     _ = @import("ui/transcript/runtime_tests.zig");
     _ = @import("core/agent/worker_runtime.zig");
+    _ = @import("core/agent/runtime/gateway_step.zig");
     _ = @import("gateway/client.zig");
+    _ = @import("gateway/responses_stream.zig");
     _ = @import("gateway/host_stream_provider.zig");
+    _ = @import("gateway/host_model_catalog.zig");
+    _ = @import("gateway/js_host_model_catalog.zig");
 }

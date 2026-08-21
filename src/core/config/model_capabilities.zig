@@ -36,6 +36,8 @@ pub const GatewayMetadata = struct {
     supports_implicit_caching: bool = false,
     context_window: ?u32 = null,
     max_output_tokens: ?u32 = null,
+    auto_compact_token_limit: ?u32 = null,
+    effective_context_window_percent: ?u8 = null,
 };
 
 pub const Capabilities = struct {
@@ -52,6 +54,8 @@ pub const Capabilities = struct {
     parallel_tool_calls: ?bool = null,
     context_window: ?u32 = null,
     max_output_tokens: ?u32 = null,
+    auto_compact_token_limit: ?u32 = null,
+    effective_context_window_percent: ?u8 = null,
 };
 
 pub const ResolveError = error{Cancelled};
@@ -106,6 +110,8 @@ pub fn resolveCapabilities(model: []const u8, gateway_metadata: ?GatewayMetadata
         capabilities.supports_implicit_caching = metadata.supports_implicit_caching;
         if (metadata.context_window) |window| capabilities.context_window = window;
         if (metadata.max_output_tokens) |tokens| capabilities.max_output_tokens = tokens;
+        if (metadata.auto_compact_token_limit) |tokens| capabilities.auto_compact_token_limit = tokens;
+        if (metadata.effective_context_window_percent) |percent| capabilities.effective_context_window_percent = percent;
     }
     return capabilities;
 }
@@ -170,9 +176,17 @@ fn localContextWindowSize(model: []const u8) ?u32 {
         }
         return 200_000;
     }
-    if (std.mem.startsWith(u8, model, "openai/")) {
-        if (containsIgnoreCase(model, "gpt-5")) return 256_000;
-        if (containsIgnoreCase(model, "o3") or containsIgnoreCase(model, "o4") or containsIgnoreCase(model, "o1"))
+    const openai_model = if (std.mem.startsWith(u8, model, "openai/"))
+        model["openai/".len..]
+    else
+        model;
+    if (std.mem.startsWith(u8, openai_model, "gpt-") or
+        std.mem.startsWith(u8, openai_model, "o1") or
+        std.mem.startsWith(u8, openai_model, "o3") or
+        std.mem.startsWith(u8, openai_model, "o4"))
+    {
+        if (containsIgnoreCase(openai_model, "gpt-5")) return 256_000;
+        if (containsIgnoreCase(openai_model, "o3") or containsIgnoreCase(openai_model, "o4") or containsIgnoreCase(openai_model, "o1"))
             return 200_000;
         return 128_000;
     }
@@ -183,6 +197,38 @@ fn localContextWindowSize(model: []const u8) ?u32 {
 
 pub fn contextWindowSize(model: []const u8) ?u32 {
     return capabilitiesForModel(model).context_window;
+}
+
+pub fn effectiveContextWindowTokens(capabilities: Capabilities) ?u32 {
+    const context_window = capabilities.context_window orelse return null;
+    const percent = capabilities.effective_context_window_percent orelse return context_window;
+    return @intCast((@as(u64, context_window) * @min(@as(u64, percent), 100)) / 100);
+}
+
+pub fn autoCompactTokenLimit(capabilities: Capabilities) ?u32 {
+    const configured = capabilities.auto_compact_token_limit;
+    const context_limit = if (capabilities.context_window) |context_window|
+        @as(u32, @intCast((@as(u64, context_window) * 9) / 10))
+    else
+        null;
+    if (context_limit) |limit| {
+        return if (configured) |value| @min(value, limit) else limit;
+    }
+    return configured;
+}
+
+test "Codex context budget reserves five percent and compacts at ninety percent" {
+    const capabilities: Capabilities = .{
+        .context_window = 272_000,
+        .auto_compact_token_limit = 250_000,
+        .effective_context_window_percent = 95,
+    };
+    try std.testing.expectEqual(@as(?u32, 258_400), effectiveContextWindowTokens(capabilities));
+    try std.testing.expectEqual(@as(?u32, 244_800), autoCompactTokenLimit(capabilities));
+    try std.testing.expectEqual(@as(?u32, 230_000), autoCompactTokenLimit(.{
+        .context_window = 272_000,
+        .auto_compact_token_limit = 230_000,
+    }));
 }
 
 pub fn resolveProviderOptions(model: []const u8, effort: types.ReasoningEffort, fast_mode: bool) ResolvedProviderOptions {
@@ -335,4 +381,13 @@ test "local non-control capabilities remain available" {
     const xai = capabilitiesForModel("xai/grok-any");
     try std.testing.expectEqual(@as(?bool, true), xai.parallel_tool_calls);
     try std.testing.expectEqual(@as(?u32, 131_072), xai.context_window);
+
+    try std.testing.expectEqual(
+        @as(?u32, 256_000),
+        capabilitiesForModel("gpt-5.4").context_window,
+    );
+    try std.testing.expectEqual(
+        @as(?u32, 200_000),
+        capabilitiesForModel("o4-mini").context_window,
+    );
 }

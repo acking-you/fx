@@ -35,6 +35,15 @@ pub const Request = struct {
     query: []const u8,
     allowed_domains: ?[]const []const u8 = null,
     blocked_domains: ?[]const []const u8 = null,
+    /// Exact latest Codex `web.run` command object. When absent, providers
+    /// project the legacy query/domain fields into one search command.
+    commands_json: ?[]const u8 = null,
+    /// Bounded latest-Codex `SearchInput` projection. The slice is borrowed for
+    /// the synchronous backend call and is either a JSON string or item array.
+    input_json: ?[]const u8 = null,
+    /// Provider search-session identity. This is distinct from the model tool
+    /// call id so follow-up open/click/find commands share server-side state.
+    request_id: ?[]const u8 = null,
 };
 
 pub const ProviderRequest = struct {
@@ -42,6 +51,9 @@ pub const ProviderRequest = struct {
     query: []const u8,
     allowed_domains: ?[]const []const u8 = null,
     blocked_domains: ?[]const []const u8 = null,
+    commands_json: ?[]const u8 = null,
+    input_json: ?[]const u8 = null,
+    request_id: ?[]const u8 = null,
     max_uses: u8 = 8,
     max_results: u8 = 10,
     max_output_tokens: u32 = 4096,

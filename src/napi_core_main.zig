@@ -4,14 +4,18 @@ const acp_server = @import("acp/server.zig");
 const jsonrpc = @import("acp/jsonrpc.zig");
 const background_process_provider = @import("core/execution/background_process_provider.zig");
 const gateway_provider = @import("core/gateway/gateway_provider.zig");
+const provider_route = @import("core/gateway/provider_route.zig");
 const generation_usage_provider = @import("core/session/generation_usage_provider.zig");
 const host = @import("core/hosts/host.zig");
 const debug_trace = @import("core/shared/debug_trace.zig");
 const io_mod = @import("core/shared/io.zig");
+const types = @import("core/shared/types.zig");
 const fetch_state = @import("napi_fetch_state.zig");
 const streamable_http = @import("core/mcp/streamable_http.zig");
+const host_model_catalog = @import("gateway/host_model_catalog.zig");
 const host_stream_provider = @import("gateway/host_stream_provider.zig");
 const oauth_transport = @import("core/auth/oauth_transport.zig");
+const secret = @import("core/auth/secret.zig");
 const builtin_context = @import("builtins/context.zig");
 const builtin_gateway = @import("builtins/gateway.zig");
 const builtin_modes = @import("builtins/modes.zig");
@@ -406,13 +410,16 @@ const Runtime = struct {
     alloc: Allocator,
     fetch: FetchBridge = .{},
     stream_context: host_stream_provider.ProviderContext = undefined,
+    catalog_context: host_model_catalog.ProviderContext = undefined,
     input: InputQueue = .{},
     output: OutputQueue = .{},
     credential: []u8,
+    credential_source: types.CredentialSource,
     model: ?[]u8,
     home: []u8,
     workspace_root: []u8,
     gateway_chat_url: []u8,
+    responses_base_url: ?[]u8,
     thread: std.Thread,
     exited: std.atomic.Value(bool) = .init(false),
     exit_code: std.atomic.Value(u8) = .init(0),
@@ -436,16 +443,25 @@ const Runtime = struct {
             .agent_stream = host_stream_provider.provider(&self.stream_context),
             .oauth_transport = oauth_transport.unavailable_provider,
             .chat_url = builtin_gateway.provider.chat_url,
-            .cli_model_catalog = builtin_gateway.provider.cli_model_catalog,
+            .cli_model_catalog = if (self.credential_source == .openai_api_key)
+                host_model_catalog.cliProvider(&self.catalog_context)
+            else
+                builtin_gateway.provider.cli_model_catalog,
             .credits = builtin_gateway.provider.credits,
             .generation_usage = generation_usage_provider.unavailable_provider,
             .web_search = builtin_gateway.provider.web_search,
-            .model_catalog = builtin_gateway.provider.model_catalog,
+            .model_catalog = if (self.credential_source == .openai_api_key)
+                host_model_catalog.provider(&self.catalog_context)
+            else
+                builtin_gateway.provider.model_catalog,
         };
         acp_server.runWithTransport(
             self.alloc,
             .{
-                .default_model = builtin_gateway.default_model,
+                .default_model = switch (self.credential_source) {
+                    .openai_api_key => provider_route.openai_default_model,
+                    else => builtin_gateway.default_model,
+                },
                 .default_agent_step_limit = 64,
                 .gateway_retry_count = 0,
                 .gateway_chat_url = self.gateway_chat_url,
@@ -464,7 +480,10 @@ const Runtime = struct {
                 .max_history_turns = 100,
                 .context_registry = .{ .default_provider = builtin_context.provider },
                 .mode_registry = builtin_modes.registry,
-                .credential_override = self.credential,
+                .credential_override = .{
+                    .token = self.credential,
+                    .source = self.credential_source,
+                },
                 .model_override = self.model,
                 .home_override = self.home,
                 .workspace_root_override = self.workspace_root,
@@ -495,11 +514,12 @@ const Runtime = struct {
         self.fetch.deinit();
         self.input.deinit(self.alloc);
         self.output.deinit(self.alloc);
-        self.alloc.free(self.credential);
+        secret.zeroAndFree(self.alloc, self.credential);
         if (self.model) |model| self.alloc.free(model);
         self.alloc.free(self.home);
         self.alloc.free(self.workspace_root);
         self.alloc.free(self.gateway_chat_url);
+        if (self.responses_base_url) |base_url| self.alloc.free(base_url);
         self.alloc.destroy(self);
         releaseRuntimeSlot();
     }
@@ -601,10 +621,12 @@ fn getNamedString(
 const CreateError = error{
     TooManyRuntimes,
     InvalidApiKey,
+    InvalidCredentialSource,
     InvalidModel,
     InvalidHome,
     InvalidWorkspaceRoot,
     InvalidGatewayUrl,
+    InvalidResponsesBaseUrl,
     OutOfMemory,
     ThreadFailed,
 };
@@ -618,7 +640,20 @@ fn createRuntime(env: c.napi_env, options: c.napi_value) CreateError!*Runtime {
         else => return error.InvalidApiKey,
     };
     const api_key = credential orelse return error.InvalidApiKey;
-    errdefer alloc.free(api_key);
+    errdefer secret.zeroAndFree(alloc, api_key);
+    const credential_source_name = getNamedString(env, options, "credentialSource", alloc, max_model_bytes) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidCredentialSource,
+    };
+    defer if (credential_source_name) |value| alloc.free(value);
+    const credential_source = if (credential_source_name) |value|
+        types.parseCredentialSource(value) orelse return error.InvalidCredentialSource
+    else
+        types.CredentialSource.ai_gateway_api_key;
+    switch (credential_source) {
+        .ai_gateway_api_key, .openai_api_key => {},
+        else => return error.InvalidCredentialSource,
+    }
     const model = getNamedString(env, options, "model", alloc, max_model_bytes) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.InvalidModel,
@@ -644,16 +679,31 @@ fn createRuntime(env: c.napi_env, options: c.napi_value) CreateError!*Runtime {
         const uri = std.Uri.parse(gateway_chat_url) catch return error.InvalidGatewayUrl;
         if (!std.ascii.eqlIgnoreCase(uri.scheme, "http")) return error.InvalidGatewayUrl;
     }
+    const responses_base_url = getNamedString(env, options, "responsesBaseUrl", alloc, max_url_bytes) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidResponsesBaseUrl,
+    };
+    errdefer if (responses_base_url) |value| alloc.free(value);
+    if (responses_base_url) |value| {
+        const endpoint = provider_route.resolveEndpointAlloc(
+            alloc,
+            .openai_responses_byok,
+            .{ .responses_base_url = value },
+        ) catch return error.InvalidResponsesBaseUrl;
+        alloc.free(endpoint);
+    }
 
     const runtime = alloc.create(Runtime) catch return error.OutOfMemory;
     errdefer alloc.destroy(runtime);
     runtime.* = .{
         .alloc = alloc,
         .credential = api_key,
+        .credential_source = credential_source,
         .model = model,
         .home = home,
         .workspace_root = workspace_root,
         .gateway_chat_url = gateway_chat_url,
+        .responses_base_url = responses_base_url,
         .thread = undefined,
     };
     runtime.stream_context = host_stream_provider.initContext(builtin_gateway.buildAgentRequest, .{
@@ -663,6 +713,13 @@ fn createRuntime(env: c.napi_env, options: c.napi_value) CreateError!*Runtime {
         .next_fn = FetchBridge.next,
         .close_fn = FetchBridge.close,
     });
+    runtime.stream_context.endpoint_overrides = .{
+        .responses_base_url = runtime.responses_base_url,
+    };
+    runtime.catalog_context = host_model_catalog.initContext(runtime.stream_context.transport);
+    runtime.catalog_context.endpoint_overrides = .{
+        .responses_base_url = runtime.responses_base_url,
+    };
     runtime.thread = std.Thread.spawn(.{}, Runtime.run, .{runtime}) catch return error.ThreadFailed;
     return runtime;
 }
@@ -671,10 +728,12 @@ fn throwCreateError(env: c.napi_env, err: CreateError) c.napi_value {
     return switch (err) {
         error.TooManyRuntimes => throw(env, "LIBFX_NATIVE_LIMIT", "too many active native runtimes"),
         error.InvalidApiKey => throw(env, "LIBFX_INVALID_ARGUMENT", "apiKey is required and must be a bounded string"),
+        error.InvalidCredentialSource => throw(env, "LIBFX_INVALID_ARGUMENT", "credentialSource must be ai_gateway_api_key or openai_api_key"),
         error.InvalidModel => throw(env, "LIBFX_INVALID_ARGUMENT", "model must be a bounded string"),
         error.InvalidHome => throw(env, "LIBFX_INVALID_ARGUMENT", "home is required and must be a bounded string"),
         error.InvalidWorkspaceRoot => throw(env, "LIBFX_INVALID_ARGUMENT", "workspaceRoot is required and must be a bounded string"),
         error.InvalidGatewayUrl => throw(env, "LIBFX_INVALID_ARGUMENT", "gatewayChatUrl must be a bounded string"),
+        error.InvalidResponsesBaseUrl => throw(env, "LIBFX_INVALID_ARGUMENT", "responsesBaseUrl must be a bounded secure or loopback base URL"),
         error.OutOfMemory => throw(env, "LIBFX_NATIVE_OOM", "could not allocate native runtime"),
         error.ThreadFailed => throw(env, "LIBFX_NATIVE_THREAD", "could not start native runtime thread"),
     };

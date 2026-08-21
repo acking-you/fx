@@ -23,7 +23,14 @@ import {
 const tmuxTest = test.skipIf(!tmuxAvailable());
 const ISOLATED_KEYS = [
   "AI_GATEWAY_API_KEY",
+  "OPENAI_API_KEY",
   "VERCEL_OIDC_TOKEN",
+  "FX_CREDENTIAL_SOURCE",
+  "FX_RESPONSES_BASE_URL",
+  "OPENAI_BASE_URL",
+  "FX_CODEX_BASE_URL",
+  "FX_CODEX_AUTH_FILE",
+  "FX_CODEX_ISSUER",
   "FX_E2E_GATEWAY_CHAT_URL",
   "FX_E2E_GATEWAY_MODELS_URL",
   "FX_E2E_GATEWAY_CREDITS_URL",
@@ -171,7 +178,14 @@ tmuxTest("tmux launch scrubs stale overrides without storing explicit credential
     expect(existsSync(resultPath)).toBe(true);
     const observed = JSON.parse(readFileSync(resultPath, "utf8"));
     expect(observed.AI_GATEWAY_API_KEY).toBe(explicitCredential);
+    expect(observed.OPENAI_API_KEY).toBeNull();
     expect(observed.VERCEL_OIDC_TOKEN).toBeNull();
+    expect(observed.FX_CREDENTIAL_SOURCE).toBeNull();
+    expect(observed.FX_RESPONSES_BASE_URL).toBeNull();
+    expect(observed.OPENAI_BASE_URL).toBeNull();
+    expect(observed.FX_CODEX_BASE_URL).toBeNull();
+    expect(observed.FX_CODEX_AUTH_FILE).toBeNull();
+    expect(observed.FX_CODEX_ISSUER).toBeNull();
     expect(observed.FX_E2E_GATEWAY_CHAT_URL).toBeNull();
     expect(observed.FX_E2E_GATEWAY_MODELS_URL).toBeNull();
     expect(observed.FX_E2E_GATEWAY_CREDITS_URL).toBeNull();

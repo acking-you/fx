@@ -4,6 +4,7 @@ const agent_stream_provider = @import("../../stream_provider.zig");
 const command_admission = @import("../../../permissions/command_admission.zig");
 const permission_auto_classifier = @import("../../../permissions/auto_classifier.zig");
 const types = @import("../../../shared/types.zig");
+const secret = @import("../../../auth/secret.zig");
 const permissions = @import("../../../permissions/permissions.zig");
 const worker_runtime = @import("../../worker_runtime.zig");
 const background_runtime = @import("../../../background/background_runtime.zig");
@@ -220,10 +221,18 @@ pub const FakeCompletion = struct {
     chunks: []const []const u8 = &.{},
     reasoning_chunks: []const []const u8 = &.{},
     content: ?[]const u8 = null,
+    responses_message_output_index: ?u32 = null,
+    reasoning: ?[]const u8 = null,
+    reasoning_item_id: ?[]const u8 = null,
+    reasoning_encrypted_content: ?[]const u8 = null,
+    reasoning_items: []const types.ResponsesReasoningItem = &.{},
+    responses_provider_output_items: []const types.ResponsesProviderOutputItem = &.{},
+    responses_output_sequence_complete: bool = false,
     tool_calls: []const ToolCall = &.{},
     streamed_tool_starts: []const ToolCall = &.{},
     provider_result_identity_failure: ?types.ProviderResultIdentityFailure = null,
     provider_failure_detail: ?[]const u8 = null,
+    provider_failure_metadata: ?types.ProviderFailureMetadata = null,
     finish_reason: ?types.ProviderFinishReason = null,
     omit_finish: bool = false,
     usage: types.Usage = .{},
@@ -345,9 +354,17 @@ pub const FakeGateway = struct {
             .status = .ok,
             .completion = .{
                 .content = completion.content,
+                .responses_message_output_index = completion.responses_message_output_index,
+                .reasoning = completion.reasoning,
+                .reasoning_item_id = completion.reasoning_item_id,
+                .reasoning_encrypted_content = completion.reasoning_encrypted_content,
+                .reasoning_items = completion.reasoning_items,
+                .responses_provider_output_items = completion.responses_provider_output_items,
+                .responses_output_sequence_complete = completion.responses_output_sequence_complete,
                 .tool_calls = completion.tool_calls,
                 .provider_result_identity_failure = completion.provider_result_identity_failure,
                 .provider_failure_detail = completion.provider_failure_detail,
+                .provider_failure_metadata = completion.provider_failure_metadata,
                 .delivery_ambiguous = completion.delivery_ambiguous,
                 .finish_reason = if (completion.omit_finish)
                     null
@@ -619,6 +636,7 @@ pub const FakeAgentRuntimeDeps = struct {
     cancel_on_capability_resolution: ?*std.atomic.Value(bool) = null,
     cancel_after_capability_resolution: ?*std.atomic.Value(bool) = null,
     credential_refresh_tokens: []const []const u8 = &.{},
+    credential_refresh_account_ids: []const ?[]const u8 = &.{},
     credential_refresh_index: usize = 0,
     credential_refresh_sources: std.ArrayList(types.CredentialSource) = .empty,
     credential_refresh_modes: std.ArrayList(runtime_deps.CredentialRefreshMode) = .empty,
@@ -788,15 +806,24 @@ pub const FakeAgentRuntimeDeps = struct {
         return model_capabilities.capabilitiesForModel(model);
     }
 
-    fn refreshGatewayCredential(raw: *anyopaque, alloc: Allocator, source: types.CredentialSource, mode: runtime_deps.CredentialRefreshMode) !?[]u8 {
+    fn refreshGatewayCredential(raw: *anyopaque, alloc: Allocator, source: types.CredentialSource, mode: runtime_deps.CredentialRefreshMode) !?runtime_deps.RefreshedCredential {
         const self: *FakeAgentRuntimeDeps = @ptrCast(@alignCast(raw));
         try self.credential_refresh_sources.append(self.alloc, source);
         try self.credential_refresh_modes.append(self.alloc, mode);
         if (self.credential_refresh_error) |err| return err;
         if (self.credential_refresh_index >= self.credential_refresh_tokens.len) return null;
-        const token = self.credential_refresh_tokens[self.credential_refresh_index];
+        const index = self.credential_refresh_index;
+        const token = try alloc.dupe(u8, self.credential_refresh_tokens[index]);
+        errdefer secret.zeroAndFree(alloc, token);
+        const account_id = if (index < self.credential_refresh_account_ids.len)
+            if (self.credential_refresh_account_ids[index]) |value|
+                try alloc.dupe(u8, value)
+            else
+                null
+        else
+            null;
         self.credential_refresh_index += 1;
-        return try alloc.dupe(u8, token);
+        return .{ .token = token, .account_id = account_id };
     }
 
     fn requestRouteRecovery(raw: *anyopaque, _: Allocator, request: runtime_deps.RouteRecoveryRequest) !runtime_deps.RouteRecoveryDecision {

@@ -493,8 +493,8 @@ pub fn Runtime(comptime App: type) type {
             return true;
         }
 
-        fn refreshFxLoginCredentialIfNeeded(app: *App) !void {
-            if (!try app.auth.refreshFxLoginIfNeeded(app.alloc)) return;
+        fn refreshSelectedCredentialIfNeeded(app: *App) !void {
+            if (!try app.auth.refreshSelectedCredentialIfNeeded(app.alloc)) return;
             reconcileGatewayCredential(app);
             if (app.auth.modelCatalogAccess().authorizationCredential() == null) return;
             app.model_cache.reset();
@@ -519,7 +519,7 @@ pub fn Runtime(comptime App: type) type {
 
         fn preparePromptCredential(app: *App) !bool {
             for (0..2) |_| {
-                refreshFxLoginCredentialIfNeeded(app) catch |err| switch (err) {
+                refreshSelectedCredentialIfNeeded(app) catch |err| switch (err) {
                     error.OutOfMemory => return err,
                     else => return recoverPromptCredentialRefreshFailure(app, err),
                 };
@@ -529,12 +529,13 @@ pub fn Runtime(comptime App: type) type {
         }
 
         fn recoverPromptCredentialRefreshFailure(app: *App, err: anyerror) !bool {
-            debug_trace.logf("auth", "prompt credential refresh failed source=fx_login err={s}", .{@errorName(err)});
-            app.auth.recordCredentialRefreshFailure(.fx_login);
+            const source = app.auth.credentialSource() orelse .fx_login;
+            debug_trace.logf("auth", "prompt credential refresh failed source={t} err={s}", .{ source, @errorName(err) });
+            app.auth.recordCredentialRefreshFailure(source);
             try app.auth.refreshSourceInventory(app.alloc);
             app.auth.openPicker(app.alloc);
             const failure = auth_runtime.FailureSnapshot{
-                .source = .fx_login,
+                .source = source,
                 .reason = .credential_refresh_failed,
             };
             const failure_text = try failure.renderText(app.alloc);
@@ -560,6 +561,9 @@ pub fn Runtime(comptime App: type) type {
             app.model_cache.reset();
             if (comptime @hasDecl(App, "startModelCacheWarmup")) {
                 app.startModelCacheWarmup();
+            }
+            if (comptime @hasDecl(App, "reconcileModelForCredentialSource")) {
+                app.reconcileModelForCredentialSource(true);
             }
         }
 
@@ -683,7 +687,7 @@ const TestAuth = struct {
 
     fn openTeamPicker(_: *TestAuth, _: std.mem.Allocator, _: *login_flow.TeamSelection) void {}
 
-    fn refreshFxLoginIfNeeded(self: *TestAuth, _: std.mem.Allocator) !bool {
+    fn refreshSelectedCredentialIfNeeded(self: *TestAuth, _: std.mem.Allocator) !bool {
         self.refresh_count += 1;
         if (self.refresh_error) |err| return err;
         if (self.gateway_ready_after_refresh_count == self.refresh_count) self.gateway_ready = true;
@@ -816,6 +820,7 @@ const TestApp = struct {
     preference_write_count: usize = 0,
     last_preference_source: ?credentials.Source = null,
     preference_write_succeeds: bool = true,
+    model_reconcile_count: usize = 0,
     shell: struct {
         render_requests: TestRenderRequests = .{},
     } = .{},
@@ -847,6 +852,11 @@ const TestApp = struct {
     fn persistCredentialSourcePreference(self: *TestApp, source: credentials.Source) void {
         self.preference_write_count += 1;
         if (self.preference_write_succeeds) self.last_preference_source = source;
+    }
+
+    fn reconcileModelForCredentialSource(self: *TestApp, announce: bool) void {
+        std.debug.assert(announce);
+        self.model_reconcile_count += 1;
     }
 };
 
@@ -1105,12 +1115,12 @@ test "prompt credential refresh reloads the catalog after the credential changes
     defer app.deinit();
     const runtime = Runtime(TestApp);
 
-    try runtime.refreshFxLoginCredentialIfNeeded(&app);
+    try runtime.refreshSelectedCredentialIfNeeded(&app);
     try std.testing.expectEqual(@as(usize, 1), app.auth.refresh_count);
     try std.testing.expectEqual(@as(usize, 0), app.model_cache.reset_count);
 
     app.auth.refresh_changed = true;
-    try runtime.refreshFxLoginCredentialIfNeeded(&app);
+    try runtime.refreshSelectedCredentialIfNeeded(&app);
     try std.testing.expectEqual(@as(usize, 2), app.auth.refresh_count);
     try std.testing.expectEqual(@as(usize, 1), app.model_cache.reset_count);
     try std.testing.expectEqual(@as(usize, 1), app.model_cache_warmup_count);
@@ -1125,6 +1135,7 @@ test "credential removal clears the reconciliation credential" {
 
     try std.testing.expectEqual(@as(usize, 1), app.session.usage.clear_count);
     try std.testing.expectEqual(@as(usize, 0), app.session.usage.refresh_count);
+    try std.testing.expectEqual(@as(usize, 1), app.model_reconcile_count);
 }
 
 test "logout result reconciles live auth and renders only sanitized notices" {
@@ -1168,6 +1179,7 @@ test "logout durability failure still reconciles live auth" {
 test "prompt credential refresh failure is recoverable and detail-free" {
     var app: TestApp = .{};
     defer app.deinit();
+    app.auth.active_source = .fx_login;
     app.auth.refresh_error = error.OAuthRequestFailed;
 
     try std.testing.expect(!try Runtime(TestApp).preparePromptCredential(&app));
@@ -1196,6 +1208,7 @@ test "prompt credential admission retries a crossed readiness deadline" {
 test "prompt credential admission rejects a credential that remains unavailable" {
     var app: TestApp = .{};
     defer app.deinit();
+    app.auth.active_source = .fx_login;
     app.auth.gateway_ready = false;
 
     try std.testing.expect(!try Runtime(TestApp).preparePromptCredential(&app));

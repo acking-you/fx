@@ -1114,7 +1114,7 @@ tmuxTest(
     await session.sendText(" preserve this exact prompt");
     const blocked = await session.waitForPane(
       (pane) =>
-        pane.includes("Fx needs access to Vercel AI Gateway") &&
+        pane.includes("Fx needs a model credential") &&
         pane.includes("preserve this exact prompt") &&
         pane.includes("Image 1"),
       TIMEOUT,

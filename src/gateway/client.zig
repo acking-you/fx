@@ -1,11 +1,18 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const build_options = @import("build_options");
+const codex_auth = @import("../core/auth/codex_auth.zig");
 const secret = @import("../core/auth/secret.zig");
 const agent_stream_provider = @import("../core/agent/stream_provider.zig");
 const debug_trace = @import("../core/shared/debug_trace.zig");
 const io_mod = @import("../core/shared/io.zig");
 const types = @import("../core/shared/types.zig");
+const provider_route = @import("../core/gateway/provider_route.zig");
+const responses_compaction_binding = @import("../core/gateway/responses_compaction_binding.zig");
+const responses_protocol = @import("../core/gateway/responses_protocol.zig");
+const responses_stream = @import("responses_stream.zig");
+
+const max_provider_error_body_bytes: usize = 1024 * 1024;
 
 pub fn isRetryableGatewayError(err: anyerror) bool {
     return err == error.HttpConnectionClosing or
@@ -160,6 +167,43 @@ const HttpResult = struct {
 pub const PostResult = HttpResult;
 pub const GetResult = HttpResult;
 
+pub const CodexJsonMethod = enum {
+    get,
+    post_json,
+};
+
+/// One bounded JSON request against the ChatGPT Codex account origin. The
+/// access token and account id are checked against the same stored credential
+/// before any bytes are sent; FedRAMP and originator headers are derived from
+/// that exact identity inside the transport.
+pub const CodexJsonRequest = struct {
+    method: CodexJsonMethod,
+    url: []const u8,
+    access_token: []const u8,
+    account_id: []const u8,
+    payload: ?[]const u8 = null,
+    cancel_flag: ?*std.atomic.Value(bool) = null,
+    deadline: ?std.Io.Clock.Timestamp = null,
+    max_response_bytes: usize = 512 * 1024,
+};
+
+/// One bounded JSON POST against an OpenAI Responses endpoint. Organization
+/// and project headers are derived inside the transport from the same route
+/// policy used by streaming requests.
+pub const OpenAIJsonRequest = struct {
+    url: []const u8,
+    api_key: []const u8,
+    payload: []const u8,
+    /// Exact identity snapshot paired with the request body. Explicit nulls
+    /// mean no header; compact transport must not reread mutable environment
+    /// state after its checkpoint binding was constructed.
+    organization: ?[]const u8 = null,
+    project: ?[]const u8 = null,
+    cancel_flag: ?*std.atomic.Value(bool) = null,
+    deadline: ?std.Io.Clock.Timestamp = null,
+    max_response_bytes: usize = 512 * 1024,
+};
+
 pub const GatewayJsonResult = union(enum) {
     /// Owned response body; the caller frees it with the request allocator.
     success: []u8,
@@ -184,6 +228,7 @@ const gateway_transfer_buffer_bytes: usize = 256 * 1024;
 const provider_failure_detail_max_bytes: usize = 600;
 const generation_response_max_bytes: usize = 128 * 1024;
 const generation_lookup_timeout_ms: i64 = 30_000;
+const codex_json_request_timeout_ms: i64 = 15_000;
 // Covers a 4 MiB string at worst-case JSON escaping plus SSE framing.
 const max_sse_event_line_bytes: usize = 32 * 1024 * 1024;
 const e2e_gateway_chat_url_env = "FX_E2E_GATEWAY_CHAT_URL";
@@ -209,6 +254,11 @@ pub const StreamResult = struct {
         if (self.completion.content) |content| alloc.free(content);
         if (self.completion.reasoning) |reasoning| alloc.free(@constCast(reasoning));
         if (self.completion.reasoning_signature) |signature| alloc.free(@constCast(signature));
+        if (self.completion.reasoning_item_id) |id| alloc.free(@constCast(id));
+        if (self.completion.reasoning_encrypted_content) |content| alloc.free(@constCast(content));
+        types.freeResponsesReasoningItems(alloc, self.completion.reasoning_items);
+        types.freeResponsesProviderOutputItems(alloc, self.completion.responses_provider_output_items);
+        types.freeResponsesUrlCitations(alloc, self.completion.url_citations);
         if (self.completion.generation_id) |id| alloc.free(id);
         if (self.completion.billing) |billing| alloc.free(@constCast(billing.model));
         for (self.completion.tool_calls) |call| {
@@ -278,6 +328,200 @@ pub fn fetchGatewayGenerationResult(
         }),
         &operation,
     );
+}
+
+pub fn fetchCodexJsonBounded(
+    alloc: std.mem.Allocator,
+    request: CodexJsonRequest,
+) !GetResult {
+    switch (request.method) {
+        .get => if (request.payload != null) return error.UnexpectedCodexJsonPayload,
+        .post_json => if (request.payload == null) return error.MissingCodexJsonPayload,
+    }
+    if (request.account_id.len == 0) return error.CodexCredentialChanged;
+
+    var local_cancel = std.atomic.Value(bool).init(false);
+    const cancel_flag = request.cancel_flag orelse &local_cancel;
+    var operation = CodexJsonOperation{
+        .alloc = alloc,
+        .request = request,
+        .cancel_flag = cancel_flag,
+    };
+    return runBoundedHttpOperation(
+        GetResult,
+        alloc,
+        cancel_flag,
+        request.deadline orelse std.Io.Clock.Timestamp.fromNow(io_mod.getIo(), .{
+            .clock = .awake,
+            .raw = .fromMilliseconds(codex_json_request_timeout_ms),
+        }),
+        &operation,
+    );
+}
+
+pub fn fetchOpenAIJsonBounded(
+    alloc: std.mem.Allocator,
+    request: OpenAIJsonRequest,
+) !GetResult {
+    if (request.api_key.len == 0) return error.MissingOpenAIApiKey;
+    var local_cancel = std.atomic.Value(bool).init(false);
+    const cancel_flag = request.cancel_flag orelse &local_cancel;
+    var operation = OpenAIJsonOperation{
+        .alloc = alloc,
+        .request = request,
+        .cancel_flag = cancel_flag,
+    };
+    return runBoundedHttpOperation(
+        GetResult,
+        alloc,
+        cancel_flag,
+        request.deadline orelse std.Io.Clock.Timestamp.fromNow(io_mod.getIo(), .{
+            .clock = .awake,
+            .raw = .fromMilliseconds(codex_json_request_timeout_ms),
+        }),
+        &operation,
+    );
+}
+
+const CodexJsonOperation = struct {
+    alloc: std.mem.Allocator,
+    request: CodexJsonRequest,
+    cancel_flag: *std.atomic.Value(bool),
+
+    fn run(self: *@This()) !GetResult {
+        if (self.cancel_flag.load(.seq_cst)) return error.Cancelled;
+        var identity = try loadCodexRequestIdentity(
+            self.alloc,
+            self.request.access_token,
+            self.request.account_id,
+        );
+        defer identity.deinit(self.alloc);
+
+        return executeProviderJsonBounded(self.alloc, .{
+            .route = .codex_responses_oauth,
+            .method = self.request.method,
+            .url = self.request.url,
+            .credential = self.request.access_token,
+            .account_id = identity.account_id,
+            .fedramp = identity.fedramp,
+            .payload = self.request.payload,
+            .cancel_flag = self.cancel_flag,
+            .max_response_bytes = self.request.max_response_bytes,
+            .response_too_large_error = error.CodexJsonResponseTooLarge,
+        });
+    }
+};
+
+const OpenAIJsonOperation = struct {
+    alloc: std.mem.Allocator,
+    request: OpenAIJsonRequest,
+    cancel_flag: *std.atomic.Value(bool),
+
+    fn run(self: *@This()) !GetResult {
+        return executeProviderJsonBounded(self.alloc, .{
+            .route = .openai_responses_byok,
+            .method = .post_json,
+            .url = self.request.url,
+            .credential = self.request.api_key,
+            .payload = self.request.payload,
+            .openai_identity = .{
+                .organization = self.request.organization,
+                .project = self.request.project,
+            },
+            .cancel_flag = self.cancel_flag,
+            .max_response_bytes = self.request.max_response_bytes,
+            .response_too_large_error = error.OpenAIJsonResponseTooLarge,
+        });
+    }
+};
+
+const ProviderJsonOperationInput = struct {
+    route: provider_route.ProviderRoute,
+    method: CodexJsonMethod,
+    url: []const u8,
+    credential: []const u8,
+    account_id: ?[]const u8 = null,
+    fedramp: bool = false,
+    openai_identity: ?OpenAIIdentityHeaders = null,
+    payload: ?[]const u8 = null,
+    cancel_flag: *std.atomic.Value(bool),
+    max_response_bytes: usize,
+    response_too_large_error: anyerror,
+};
+
+fn executeProviderJsonBounded(
+    alloc: std.mem.Allocator,
+    input: ProviderJsonOperationInput,
+) !GetResult {
+    if (input.cancel_flag.load(.seq_cst)) return error.Cancelled;
+
+    try provider_route.validateBaseUrl(input.url);
+    const uri = try std.Uri.parse(input.url);
+    const auth_header = try std.fmt.allocPrint(
+        alloc,
+        "Bearer {s}",
+        .{input.credential},
+    );
+    defer secret.zeroAndFree(alloc, auth_header);
+
+    var client: std.http.Client = .{
+        .allocator = alloc,
+        .io = io_mod.getIo(),
+    };
+    defer client.deinit();
+
+    var extra_headers_buf: [8]std.http.Header = undefined;
+    const extra_headers = providerJsonExtraHeaders(
+        &extra_headers_buf,
+        input.route,
+        null,
+        input.account_id,
+        input.fedramp,
+        input.openai_identity,
+    );
+    var req = try client.request(switch (input.method) {
+        .get => .GET,
+        .post_json => .POST,
+    }, uri, .{
+        .headers = .{
+            .authorization = .{ .override = auth_header },
+            .content_type = switch (input.method) {
+                .get => .default,
+                .post_json => .{ .override = "application/json" },
+            },
+            .accept_encoding = .omit,
+            .user_agent = .{ .override = user_agent },
+        },
+        .extra_headers = extra_headers,
+        .redirect_behavior = .unhandled,
+    });
+    defer req.deinit();
+    if (input.cancel_flag.load(.seq_cst)) return error.Cancelled;
+
+    switch (input.method) {
+        .get => {
+            try req.sendBodiless();
+            if (req.connection) |conn| try conn.flush();
+        },
+        .post_json => try req.sendBodyComplete(@constCast(input.payload.?)),
+    }
+    if (input.cancel_flag.load(.seq_cst)) return error.Cancelled;
+
+    var response = try req.receiveHead(&.{});
+    if (input.cancel_flag.load(.seq_cst)) return error.Cancelled;
+    var transfer_buffer: [16 * 1024]u8 = undefined;
+    const body = response.reader(&transfer_buffer).allocRemaining(
+        alloc,
+        .limited(input.max_response_bytes),
+    ) catch |err| switch (err) {
+        error.StreamTooLong => return input.response_too_large_error,
+        else => return err,
+    };
+    if (input.cancel_flag.load(.seq_cst)) {
+        alloc.free(body);
+        return error.Cancelled;
+    }
+    return .{ .status = response.head.status, .body = body };
 }
 
 const GenerationLookupOperation = struct {
@@ -401,6 +645,35 @@ pub fn fetchGatewayJsonCancellable(
     return fetchGatewayJsonAtUrlCancellable(alloc, api_key, gateway_team, request_url, cancel_flag);
 }
 
+pub fn fetchProviderJson(
+    alloc: std.mem.Allocator,
+    source: types.CredentialSource,
+    api_key: []const u8,
+    url: []const u8,
+) !GatewayJsonResult {
+    var cancel_flag = std.atomic.Value(bool).init(false);
+    return fetchGatewayJsonAtUrlCore(alloc, api_key, null, source, url, &cancel_flag);
+}
+
+pub fn fetchProviderJsonCancellable(
+    alloc: std.mem.Allocator,
+    source: types.CredentialSource,
+    api_key: []const u8,
+    url: []const u8,
+    cancel_flag: *std.atomic.Value(bool),
+) !GatewayJsonResult {
+    if (cancel_flag.load(.seq_cst)) return error.Cancelled;
+    var operation = GatewayJsonFetchOperation{
+        .alloc = alloc,
+        .api_key = api_key,
+        .gateway_team = null,
+        .credential_source = source,
+        .url = url,
+        .cancel_flag = cancel_flag,
+    };
+    return runCancellableGatewayJsonFetch(alloc, cancel_flag, &operation);
+}
+
 fn fetchGatewayJsonAtUrlCancellable(
     alloc: std.mem.Allocator,
     api_key: ?[]const u8,
@@ -422,6 +695,7 @@ const GatewayJsonFetchOperation = struct {
     alloc: std.mem.Allocator,
     api_key: ?[]const u8,
     gateway_team: ?[]const u8,
+    credential_source: ?types.CredentialSource = null,
     url: []const u8,
     cancel_flag: *std.atomic.Value(bool),
 
@@ -430,6 +704,7 @@ const GatewayJsonFetchOperation = struct {
             self.alloc,
             self.api_key,
             self.gateway_team,
+            self.credential_source,
             self.url,
             self.cancel_flag,
         );
@@ -501,6 +776,7 @@ fn fetchGatewayJsonAtUrlCore(
     alloc: std.mem.Allocator,
     api_key: ?[]const u8,
     gateway_team: ?[]const u8,
+    credential_source: ?types.CredentialSource,
     url: []const u8,
     cancel_flag: *std.atomic.Value(bool),
 ) !GatewayJsonResult {
@@ -510,6 +786,20 @@ fn fetchGatewayJsonAtUrlCore(
     defer client.deinit();
 
     const uri = try std.Uri.parse(url);
+
+    const route = if (credential_source) |source|
+        provider_route.fromCredentialSource(source) orelse return error.UnsupportedCredentialSource
+    else
+        provider_route.ProviderRoute.vercel_gateway;
+    var codex_identity: ?codex_auth.Loaded = null;
+    defer if (codex_identity) |*identity| identity.deinit(alloc);
+    if (route == .codex_responses_oauth) {
+        codex_identity = try loadCodexRequestIdentity(
+            alloc,
+            api_key orelse return error.CodexCredentialChanged,
+            null,
+        );
+    }
 
     var auth_header: ?[]u8 = null;
     defer if (auth_header) |value| secret.zeroAndFree(alloc, value);
@@ -521,8 +811,15 @@ fn fetchGatewayJsonAtUrlCore(
         auth_header = try std.fmt.allocPrint(alloc, "Bearer {s}", .{key});
         headers.authorization = .{ .override = auth_header.? };
     }
-    var extra_headers_buf: [1]std.http.Header = undefined;
-    const extra_headers = gatewayModelCatalogExtraHeaders(&extra_headers_buf, gateway_team);
+    var extra_headers_buf: [8]std.http.Header = undefined;
+    const extra_headers = providerJsonExtraHeaders(
+        &extra_headers_buf,
+        route,
+        gateway_team,
+        if (codex_identity) |identity| identity.account_id else null,
+        if (codex_identity) |identity| identity.fedramp else false,
+        null,
+    );
 
     var req = client.request(.GET, uri, .{
         .headers = headers,
@@ -578,6 +875,25 @@ fn fetchGatewayJsonAtUrlCore(
     return .{ .success = try out.toOwnedSlice() };
 }
 
+fn loadCodexRequestIdentity(
+    alloc: std.mem.Allocator,
+    expected_access_token: []const u8,
+    expected_account_id: ?[]const u8,
+) !codex_auth.Loaded {
+    var identity = (try codex_auth.loadStored(alloc, .{})) orelse
+        return error.CodexCredentialUnavailable;
+    errdefer identity.deinit(alloc);
+    if (!std.mem.eql(u8, identity.access_token, expected_access_token)) {
+        return error.CodexCredentialChanged;
+    }
+    if (expected_account_id) |account_id| {
+        if (account_id.len == 0 or !std.mem.eql(u8, identity.account_id, account_id)) {
+            return error.CodexCredentialChanged;
+        }
+    }
+    return identity;
+}
+
 fn failedGatewayJsonStatus(status: std.http.Status) ?std.http.Status {
     return if (status == .ok) null else status;
 }
@@ -587,6 +903,28 @@ test "gateway JSON transport preserves non-success HTTP status" {
     try std.testing.expectEqual(std.http.Status.unauthorized, failedGatewayJsonStatus(.unauthorized).?);
     try std.testing.expectEqual(std.http.Status.too_many_requests, failedGatewayJsonStatus(.too_many_requests).?);
     try std.testing.expectEqual(std.http.Status.service_unavailable, failedGatewayJsonStatus(.service_unavailable).?);
+}
+
+test "bounded Codex JSON transport validates method and payload before auth" {
+    try std.testing.expectError(error.UnexpectedCodexJsonPayload, fetchCodexJsonBounded(
+        std.testing.allocator,
+        .{
+            .method = .get,
+            .url = "https://chatgpt.com/backend-api/wham/usage",
+            .access_token = "access",
+            .account_id = "account",
+            .payload = "{}",
+        },
+    ));
+    try std.testing.expectError(error.MissingCodexJsonPayload, fetchCodexJsonBounded(
+        std.testing.allocator,
+        .{
+            .method = .post_json,
+            .url = "https://chatgpt.com/backend-api/codex/responses/compact",
+            .access_token = "access",
+            .account_id = "account",
+        },
+    ));
 }
 
 fn gatewayBaseUrl() []const u8 {
@@ -992,6 +1330,11 @@ test "connection setup policy bounds retry by deadline attempts and delivery" {
 
 pub const StreamRequest = struct {
     api_key: []const u8,
+    credential_source: ?types.CredentialSource = null,
+    /// Exact non-secret provider identity paired with `payload`. When set,
+    /// direct Responses transport must not reread endpoint or OpenAI identity
+    /// headers from mutable environment state.
+    responses_compaction_binding: ?types.ResponsesCompactionProviderBindingView = null,
     model: []const u8,
     retry_count: usize,
     chat_url: []const u8,
@@ -1004,6 +1347,10 @@ pub const StreamRequest = struct {
     delivery: ?*DeliveryCertainty = null,
     on_reasoning_chunk: ?StreamCallback = null,
     on_tool_input_chunk: ?StreamCallback = null,
+    /// Receives exact raw JSON for Responses events that the semantic fx
+    /// completion contract does not consume. Slices are borrowed for the
+    /// duration of the callback.
+    on_responses_unhandled_event: ?responses_stream.UnknownEventCallback = null,
     provider_attempt_owner: ProviderAttemptOwner = .transport,
 };
 
@@ -1168,24 +1515,55 @@ fn streamGatewayCompletionCoreWithOptions(
 ) !StreamResult {
     const model = request.model;
     const payload = request.payload;
+    const route = if (request.credential_source) |source|
+        provider_route.fromCredentialSource(source) orelse return error.UnsupportedCredentialSource
+    else
+        provider_route.ProviderRoute.vercel_gateway;
+    const responses_api = route.contract().wire_api == .openai_responses;
+    const provider_binding = try validatedStreamProviderBinding(request, route);
     const retry_count = switch (request.provider_attempt_owner) {
         .agent => 1,
         .transport => request.retry_count,
     };
     const trace_ctx = request.trace_ctx;
-    const request_url = try resolveE2eGatewayUrl(e2e_gateway_chat_url_env, request.chat_url);
+    var owned_request_url: ?[]u8 = null;
+    defer if (owned_request_url) |url| alloc.free(url);
+    const request_url = if (provider_binding) |binding|
+        binding.normalized_origin
+    else if (responses_api) blk: {
+        owned_request_url = try provider_route.resolveEndpointFromEnvironmentAlloc(alloc, route);
+        break :blk owned_request_url.?;
+    } else try resolveE2eGatewayUrl(e2e_gateway_chat_url_env, request.chat_url);
     const uri = try std.Uri.parse(request_url);
 
-    const auth_header = try std.fmt.allocPrint(alloc, "Bearer {s}", .{request.api_key});
-    defer alloc.free(auth_header);
+    var codex_identity: ?codex_auth.Loaded = null;
+    defer if (codex_identity) |*identity| identity.deinit(alloc);
+    if (route == .codex_responses_oauth) {
+        codex_identity = try loadCodexRequestIdentity(
+            alloc,
+            request.api_key,
+            if (provider_binding) |binding| binding.account_id else null,
+        );
+    }
 
-    var extra_headers_buf: [9]std.http.Header = undefined;
-    const extra_headers = gatewayExtraHeaders(
-        &extra_headers_buf,
-        model,
-        request.team,
-        request.session_id,
-    );
+    const auth_header = try std.fmt.allocPrint(alloc, "Bearer {s}", .{request.api_key});
+    defer secret.zeroAndFree(alloc, auth_header);
+
+    var extra_headers_buf: [12]std.http.Header = undefined;
+    const extra_headers = if (responses_api)
+        responsesExtraHeaders(
+            &extra_headers_buf,
+            route,
+            if (codex_identity) |identity| identity.account_id else null,
+            if (codex_identity) |identity| identity.fedramp else false,
+            request.session_id,
+            if (provider_binding) |binding| .{
+                .organization = binding.organization,
+                .project = binding.project,
+            } else null,
+        )
+    else
+        gatewayExtraHeaders(extra_headers_buf[0..9], model, request.team, request.session_id);
 
     var attempt: usize = 0;
     var delivery_ambiguous = false;
@@ -1349,24 +1727,41 @@ fn streamGatewayCompletionCoreWithOptions(
             return @as(anyerror!StreamResult, mapped);
         };
         debug_trace.eventf("gateway", "after_receive_head", trace_ctx, "attempt={d} status={d}", .{ attempt + 1, @intFromEnum(response.head.status) });
-        const resolved_model_seen_in_head = traceResolvedModelHeader(response.head, model, trace_ctx);
+        const resolved_model_seen_in_head = if (responses_api)
+            true
+        else
+            traceResolvedModelHeader(response.head, model, trace_ctx);
 
         if (response.head.status != .ok) {
             const status = response.head.status;
             if (@intFromEnum(status) >= 500) delivery_ambiguous = true;
-            const retry_after_seconds = retryAfterSeconds(response.head);
-            const retry_delay_ns = if (request.provider_attempt_owner == .transport and
-                isRetryableGatewayStatus(status) and attempt + 1 < retry_count)
-                retryDelayNsForResponse(response.head, attempt)
-            else
-                null;
+            var retry_after_seconds = retryAfterSeconds(response.head);
             debug_trace.logf("stream", "http status={d} attempt={d}", .{ @intFromEnum(status), attempt + 1 });
-            var err_out: std.Io.Writer.Allocating = .init(alloc);
-            defer err_out.deinit();
             var err_buf: [4096]u8 = undefined;
             const err_reader = response.reader(&err_buf);
-            _ = err_reader.streamRemaining(&err_out.writer) catch {};
+            const err_body = readProviderErrorBodyBounded(alloc, err_reader) catch null;
             if (cancel_flag.load(.seq_cst)) return error.Cancelled;
+
+            var owns_err_body = true;
+            defer if (owns_err_body) if (err_body) |body| alloc.free(body);
+            if (responses_api and retry_after_seconds == null) {
+                if (err_body) |body| {
+                    retry_after_seconds = responsesRetryAfterFromBody(
+                        alloc,
+                        @intCast(@intFromEnum(status)),
+                        body,
+                    ) catch null;
+                }
+            }
+
+            const retry_delay_ns = if (request.provider_attempt_owner == .transport and
+                isRetryableGatewayStatus(status) and attempt + 1 < retry_count)
+                if (retry_after_seconds) |seconds|
+                    retryAfterSecondsDelayNs(seconds)
+                else
+                    retryBackoffDelayNs(attempt)
+            else
+                null;
             if (retry_delay_ns) |delay_ns| {
                 debug_trace.eventf("gateway", "http_status_retry", trace_ctx, "attempt={d} status={d} delay_ms={d}", .{
                     attempt + 1,
@@ -1376,9 +1771,10 @@ fn streamGatewayCompletionCoreWithOptions(
                 try sleepGatewayRetry(delay_ns, cancel_flag);
                 continue;
             }
+            owns_err_body = false;
             return .{
                 .status = status,
-                .err_body = err_out.toOwnedSlice() catch null,
+                .err_body = err_body,
                 .retry_after_seconds = retry_after_seconds,
                 .completion = .{
                     .delivery_ambiguous = delivery_ambiguous,
@@ -1389,19 +1785,30 @@ fn streamGatewayCompletionCoreWithOptions(
         var transfer_buf: [gateway_transfer_buffer_bytes]u8 = undefined;
         const body_reader = response.reader(&transfer_buf);
         debug_trace.eventf("gateway", "before_sse_consume", trace_ctx, "attempt={d}", .{attempt + 1});
-        var completion = consumeSseStreamTraced(
-            alloc,
-            body_reader,
-            callback_ctx,
-            on_content_chunk,
-            on_tool_start,
-            request.on_reasoning_chunk,
-            request.on_tool_input_chunk,
-            cancel_flag,
-            .{ .requested_model = model, .ctx = trace_ctx },
-            expected_provider_tool_name,
-            request.content_capture_limit,
-        ) catch |err| {
+        var completion = (if (responses_api)
+            responses_stream.consume(alloc, body_reader, .{
+                .context = callback_ctx,
+                .on_content_chunk = on_content_chunk,
+                .on_tool_start = on_tool_start,
+                .on_reasoning_chunk = request.on_reasoning_chunk,
+                .on_tool_input_chunk = request.on_tool_input_chunk,
+                .on_unknown_event = request.on_responses_unhandled_event,
+                .content_capture_limit = request.content_capture_limit,
+            }, cancel_flag)
+        else
+            consumeSseStreamTraced(
+                alloc,
+                body_reader,
+                callback_ctx,
+                on_content_chunk,
+                on_tool_start,
+                request.on_reasoning_chunk,
+                request.on_tool_input_chunk,
+                cancel_flag,
+                .{ .requested_model = model, .ctx = trace_ctx },
+                expected_provider_tool_name,
+                request.content_capture_limit,
+            )) catch |err| {
             debug_trace.eventf("gateway", "sse_consume_error", trace_ctx, "attempt={d} err={s}", .{ attempt + 1, @errorName(err) });
             return @as(anyerror!StreamResult, connectedIoFailure(
                 cancel_flag.load(.seq_cst),
@@ -1458,6 +1865,32 @@ fn streamGatewayCompletionCoreWithOptions(
     return error.HttpConnectionClosing;
 }
 
+fn readProviderErrorBodyBounded(alloc: std.mem.Allocator, reader: anytype) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    errdefer out.deinit();
+
+    while (out.written().len <= max_provider_error_body_bytes) {
+        const remaining = max_provider_error_body_bytes + 1 - out.written().len;
+        const count = reader.stream(&out.writer, .limited(remaining)) catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => break,
+        };
+        if (count == 0) break;
+    }
+    if (out.written().len <= max_provider_error_body_bytes) {
+        return out.toOwnedSlice();
+    }
+
+    const clipped = try alloc.dupe(u8, out.written()[0..max_provider_error_body_bytes]);
+    out.deinit();
+    debug_trace.logf(
+        "responses",
+        "provider error body truncated bytes={d}",
+        .{max_provider_error_body_bytes},
+    );
+    return clipped;
+}
+
 fn gatewayExtraHeaders(
     buf: []std.http.Header,
     model: []const u8,
@@ -1495,6 +1928,34 @@ fn gatewayExtraHeaders(
     return buf[0..len];
 }
 
+fn responsesExtraHeaders(
+    buf: []std.http.Header,
+    route: provider_route.ProviderRoute,
+    account_id: ?[]const u8,
+    fedramp: bool,
+    session_id: ?[]const u8,
+    openai_identity: ?OpenAIIdentityHeaders,
+) []const std.http.Header {
+    std.debug.assert(buf.len >= 12);
+    var len: usize = 0;
+    buf[len] = .{ .name = "Accept", .value = "text/event-stream" };
+    len += 1;
+    len = appendDirectProviderIdentityHeaders(buf, len, route, account_id, fedramp, openai_identity);
+    if (route == .codex_responses_oauth) {
+        if (session_id) |id| {
+            if (id.len > 0) {
+                buf[len] = .{ .name = "session-id", .value = id };
+                len += 1;
+                buf[len] = .{ .name = "thread-id", .value = id };
+                len += 1;
+                buf[len] = .{ .name = "x-client-request-id", .value = id };
+                len += 1;
+            }
+        }
+    }
+    return buf[0..len];
+}
+
 fn gatewayModelCatalogExtraHeaders(buf: []std.http.Header, team: ?[]const u8) []const std.http.Header {
     std.debug.assert(buf.len >= 1);
     var len: usize = 0;
@@ -1505,6 +1966,84 @@ fn gatewayModelCatalogExtraHeaders(buf: []std.http.Header, team: ?[]const u8) []
         }
     }
     return buf[0..len];
+}
+
+fn providerJsonExtraHeaders(
+    buf: []std.http.Header,
+    route: provider_route.ProviderRoute,
+    team: ?[]const u8,
+    account_id: ?[]const u8,
+    fedramp: bool,
+    openai_identity: ?OpenAIIdentityHeaders,
+) []const std.http.Header {
+    if (route == .vercel_gateway) return gatewayModelCatalogExtraHeaders(buf, team);
+
+    std.debug.assert(buf.len >= 4);
+    var len: usize = 0;
+    buf[len] = .{ .name = "Accept", .value = "application/json" };
+    len += 1;
+    len = appendDirectProviderIdentityHeaders(
+        buf,
+        len,
+        route,
+        account_id,
+        fedramp,
+        openai_identity,
+    );
+    return buf[0..len];
+}
+
+const OpenAIIdentityHeaders = struct {
+    organization: ?[]const u8 = null,
+    project: ?[]const u8 = null,
+};
+
+fn appendDirectProviderIdentityHeaders(
+    buf: []std.http.Header,
+    start: usize,
+    route: provider_route.ProviderRoute,
+    account_id: ?[]const u8,
+    fedramp: bool,
+    openai_identity: ?OpenAIIdentityHeaders,
+) usize {
+    std.debug.assert(buf.len >= start + 3);
+    var len = start;
+    switch (route) {
+        .vercel_gateway => unreachable,
+        .openai_responses_byok => {
+            const identity = openai_identity orelse OpenAIIdentityHeaders{
+                .organization = io_mod.getenv("OPENAI_ORG_ID"),
+                .project = io_mod.getenv("OPENAI_PROJECT_ID"),
+            };
+            if (identity.organization) |organization| {
+                if (organization.len > 0) {
+                    buf[len] = .{ .name = "OpenAI-Organization", .value = organization };
+                    len += 1;
+                }
+            }
+            if (identity.project) |project| {
+                if (project.len > 0) {
+                    buf[len] = .{ .name = "OpenAI-Project", .value = project };
+                    len += 1;
+                }
+            }
+        },
+        .codex_responses_oauth => {
+            if (account_id) |account| {
+                if (account.len > 0) {
+                    buf[len] = .{ .name = "ChatGPT-Account-ID", .value = account };
+                    len += 1;
+                }
+            }
+            if (fedramp) {
+                buf[len] = .{ .name = "X-OpenAI-Fedramp", .value = "true" };
+                len += 1;
+            }
+            buf[len] = .{ .name = "originator", .value = "fx" };
+            len += 1;
+        },
+    }
+    return len;
 }
 
 test "gateway extra headers include selected team" {
@@ -1547,6 +2086,195 @@ test "gateway extra headers derive session identity and affinity together" {
             try std.testing.expect(headerValue(headers, "x-session-affinity") == null);
         }
     }
+}
+
+fn validatedStreamProviderBinding(
+    request: StreamRequest,
+    route: provider_route.ProviderRoute,
+) !?types.ResponsesCompactionProviderBindingView {
+    const binding = request.responses_compaction_binding orelse return null;
+    if (route.contract().wire_api != .openai_responses) {
+        return error.InvalidResponsesCompactionProviderBinding;
+    }
+    const source = request.credential_source orelse
+        return error.InvalidResponsesCompactionProviderBinding;
+    try responses_compaction_binding.validate(source, binding);
+    if (!responses_compaction_binding.credentialMatches(
+        source,
+        request.api_key,
+        binding.account_id,
+        binding,
+    )) return error.ResponsesCompactionProviderBindingMismatch;
+    return binding;
+}
+
+test "direct Responses stream pins provider binding to request credential and endpoint" {
+    const alloc = std.testing.allocator;
+    const binding = try responses_compaction_binding.buildAlloc(
+        alloc,
+        .openai_api_key,
+        "sk-snapshot",
+        null,
+        .{
+            .endpoint_overrides = .{ .responses_base_url = "https://snapshot.example/v1" },
+            .organization = "org-snapshot",
+            .project = "project-snapshot",
+        },
+    );
+    defer types.freeResponsesCompactionProviderBinding(alloc, binding);
+
+    const request: StreamRequest = .{
+        .api_key = "sk-snapshot",
+        .credential_source = .openai_api_key,
+        .responses_compaction_binding = binding.view(),
+        .model = "gpt-5",
+        .retry_count = 1,
+        .chat_url = "unused",
+        .payload = "{}",
+    };
+    const validated = (try validatedStreamProviderBinding(
+        request,
+        .openai_responses_byok,
+    )).?;
+    try std.testing.expectEqualStrings(
+        "https://snapshot.example/v1/responses",
+        validated.normalized_origin,
+    );
+
+    var changed_key = request;
+    changed_key.api_key = "sk-changed";
+    try std.testing.expectError(
+        error.ResponsesCompactionProviderBindingMismatch,
+        validatedStreamProviderBinding(changed_key, .openai_responses_byok),
+    );
+
+    var wrong_source = request;
+    wrong_source.credential_source = .codex_oauth;
+    try std.testing.expectError(
+        error.InvalidResponsesCompactionProviderBinding,
+        validatedStreamProviderBinding(wrong_source, .codex_responses_oauth),
+    );
+
+    var vercel = request;
+    vercel.credential_source = null;
+    try std.testing.expectError(
+        error.InvalidResponsesCompactionProviderBinding,
+        validatedStreamProviderBinding(vercel, .vercel_gateway),
+    );
+}
+
+test "Codex provider JSON headers pair account identity without Vercel team" {
+    var buf: [8]std.http.Header = undefined;
+    const headers = providerJsonExtraHeaders(
+        &buf,
+        .codex_responses_oauth,
+        "team_must_not_cross",
+        "account_123",
+        true,
+        null,
+    );
+    try std.testing.expectEqualStrings("application/json", headerValue(headers, "accept").?);
+    try std.testing.expectEqualStrings("account_123", headerValue(headers, "ChatGPT-Account-ID").?);
+    try std.testing.expectEqualStrings("true", headerValue(headers, "X-OpenAI-Fedramp").?);
+    try std.testing.expectEqualStrings("fx", headerValue(headers, "originator").?);
+    try std.testing.expect(headerValue(headers, vercel_ai_gateway_team_header) == null);
+}
+
+test "OpenAI provider JSON headers preserve organization and project identity" {
+    _ = try stableModelsTestEnviron();
+    var environ = std.process.Environ.Map.init(std.testing.allocator);
+    defer environ.deinit();
+    try environ.put("OPENAI_ORG_ID", "org_123");
+    try environ.put("OPENAI_PROJECT_ID", "proj_123");
+    io_mod.setEnvironMap(&environ);
+    defer if (stable_models_test_environ) |map| io_mod.setEnvironMap(map);
+
+    var buf: [8]std.http.Header = undefined;
+    const headers = providerJsonExtraHeaders(
+        &buf,
+        .openai_responses_byok,
+        "team_must_not_cross",
+        "account_must_not_cross",
+        true,
+        null,
+    );
+    try std.testing.expectEqualStrings("application/json", headerValue(headers, "accept").?);
+    try std.testing.expectEqualStrings("org_123", headerValue(headers, "OpenAI-Organization").?);
+    try std.testing.expectEqualStrings("proj_123", headerValue(headers, "OpenAI-Project").?);
+    try std.testing.expect(headerValue(headers, "ChatGPT-Account-ID") == null);
+    try std.testing.expect(headerValue(headers, "X-OpenAI-Fedramp") == null);
+    try std.testing.expect(headerValue(headers, "originator") == null);
+    try std.testing.expect(headerValue(headers, vercel_ai_gateway_team_header) == null);
+
+    const snapshot_headers = providerJsonExtraHeaders(
+        &buf,
+        .openai_responses_byok,
+        null,
+        null,
+        false,
+        .{ .organization = "org-snapshot", .project = "project-snapshot" },
+    );
+    try std.testing.expectEqualStrings(
+        "org-snapshot",
+        headerValue(snapshot_headers, "OpenAI-Organization").?,
+    );
+    try std.testing.expectEqualStrings(
+        "project-snapshot",
+        headerValue(snapshot_headers, "OpenAI-Project").?,
+    );
+}
+
+test "Codex streaming headers share the same account identity fields" {
+    var buf: [12]std.http.Header = undefined;
+    const headers = responsesExtraHeaders(
+        &buf,
+        .codex_responses_oauth,
+        "account_123",
+        true,
+        "session_123",
+        null,
+    );
+    try std.testing.expectEqualStrings("text/event-stream", headerValue(headers, "accept").?);
+    try std.testing.expectEqualStrings("account_123", headerValue(headers, "ChatGPT-Account-ID").?);
+    try std.testing.expectEqualStrings("true", headerValue(headers, "X-OpenAI-Fedramp").?);
+    try std.testing.expectEqualStrings("fx", headerValue(headers, "originator").?);
+    try std.testing.expectEqualStrings("session_123", headerValue(headers, "session-id").?);
+}
+
+test "OpenAI streaming headers use the bound organization and project snapshot" {
+    var buf: [12]std.http.Header = undefined;
+    const headers = responsesExtraHeaders(
+        &buf,
+        .openai_responses_byok,
+        null,
+        false,
+        null,
+        .{ .organization = "org-snapshot", .project = "project-snapshot" },
+    );
+    try std.testing.expectEqualStrings(
+        "org-snapshot",
+        headerValue(headers, "OpenAI-Organization").?,
+    );
+    try std.testing.expectEqualStrings(
+        "project-snapshot",
+        headerValue(headers, "OpenAI-Project").?,
+    );
+}
+
+test "Vercel model catalog headers never inherit direct provider identity" {
+    var buf: [8]std.http.Header = undefined;
+    const headers = providerJsonExtraHeaders(
+        &buf,
+        .vercel_gateway,
+        "team_123",
+        "account_must_not_cross",
+        true,
+        null,
+    );
+    try std.testing.expectEqualStrings("team_123", headerValue(headers, vercel_ai_gateway_team_header).?);
+    try std.testing.expect(headerValue(headers, "ChatGPT-Account-ID") == null);
+    try std.testing.expect(headerValue(headers, "X-OpenAI-Fedramp") == null);
+    try std.testing.expect(headerValue(headers, "originator") == null);
 }
 
 fn headerValue(headers: []const std.http.Header, name: []const u8) ?[]const u8 {
@@ -1825,6 +2553,10 @@ fn retryBackoffDelayNs(attempt: usize) u64 {
 
 fn retryAfterDelayNs(head: std.http.Client.Response.Head) ?u64 {
     const seconds = retryAfterSeconds(head) orelse return null;
+    return retryAfterSecondsDelayNs(seconds);
+}
+
+fn retryAfterSecondsDelayNs(seconds: u64) u64 {
     const delay = std.math.mul(u64, seconds, std.time.ns_per_s) catch gateway_retry_after_max_ns;
     return @min(delay, gateway_retry_after_max_ns);
 }
@@ -1837,6 +2569,21 @@ fn retryAfterSeconds(head: std.http.Client.Response.Head) ?u64 {
         error.Overflow => std.math.maxInt(u64),
         error.InvalidCharacter => null,
     };
+}
+
+pub fn responsesRetryAfterFromBody(
+    alloc: std.mem.Allocator,
+    status_code: u16,
+    body: []const u8,
+) std.mem.Allocator.Error!?u64 {
+    var decoded = try responses_protocol.decodeErrorResponse(alloc, status_code, body);
+    defer decoded.deinit();
+    const seconds = decoded.info.retry_after_seconds orelse return null;
+    if (!std.math.isFinite(seconds) or seconds < 0) return null;
+    const rounded = @ceil(seconds);
+    const max_as_float: f64 = @floatFromInt(std.math.maxInt(u64));
+    if (rounded >= max_as_float) return std.math.maxInt(u64);
+    return @intFromFloat(rounded);
 }
 
 fn findHeaderValue(head: std.http.Client.Response.Head, name: []const u8) ?[]const u8 {
@@ -2227,6 +2974,11 @@ fn deinitGatewayCompletion(alloc: std.mem.Allocator, completion: *types.GatewayC
     if (completion.content) |content| alloc.free(content);
     if (completion.reasoning) |reasoning| alloc.free(@constCast(reasoning));
     if (completion.reasoning_signature) |signature| alloc.free(@constCast(signature));
+    if (completion.reasoning_item_id) |id| alloc.free(@constCast(id));
+    if (completion.reasoning_encrypted_content) |content| alloc.free(@constCast(content));
+    types.freeResponsesReasoningItems(alloc, completion.reasoning_items);
+    types.freeResponsesProviderOutputItems(alloc, completion.responses_provider_output_items);
+    types.freeResponsesUrlCitations(alloc, completion.url_citations);
     if (completion.generation_id) |id| alloc.free(id);
     if (completion.billing) |billing| alloc.free(@constCast(billing.model));
     for (completion.tool_calls) |call| {
@@ -4010,6 +4762,56 @@ test "gateway retry delay respects bounded retry-after seconds" {
         "\r\n";
     const invalid = try std.http.Client.Response.Head.parse(invalid_bytes);
     try std.testing.expectEqual(@as(u64, 2 * gateway_retry_base_delay_ns), retryDelayNsForResponse(invalid, 1));
+}
+
+test "Responses error body supplies bounded fractional retry-after metadata" {
+    try std.testing.expectEqual(
+        @as(?u64, 2),
+        try responsesRetryAfterFromBody(
+            std.testing.allocator,
+            429,
+            "{\"error\":{\"type\":\"rate_limit_error\",\"message\":\"slow down\",\"retry_after_seconds\":1.5}}",
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(?u64, 0),
+        try responsesRetryAfterFromBody(
+            std.testing.allocator,
+            429,
+            "{\"error\":{\"retry_after\":0}}",
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(?u64, null),
+        try responsesRetryAfterFromBody(
+            std.testing.allocator,
+            400,
+            "{\"error\":{\"message\":\"bad request\"}}",
+        ),
+    );
+    try std.testing.expectEqual(
+        gateway_retry_after_max_ns,
+        retryAfterSecondsDelayNs(std.math.maxInt(u64)),
+    );
+}
+
+test "Responses provider error bodies are capped without losing their prefix" {
+    const alloc = std.testing.allocator;
+    var small_reader = std.Io.Reader.fixed("small error");
+    const small = try readProviderErrorBodyBounded(alloc, &small_reader);
+    defer alloc.free(small);
+    try std.testing.expectEqualStrings("small error", small);
+
+    const oversized = try alloc.alloc(u8, max_provider_error_body_bytes + 17);
+    defer alloc.free(oversized);
+    @memset(oversized, 'x');
+    oversized[0] = 'E';
+    var large_reader = std.Io.Reader.fixed(oversized);
+    const clipped = try readProviderErrorBodyBounded(alloc, &large_reader);
+    defer alloc.free(clipped);
+    try std.testing.expectEqual(max_provider_error_body_bytes, clipped.len);
+    try std.testing.expectEqual(@as(u8, 'E'), clipped[0]);
+    try std.testing.expectEqual(@as(u8, 'x'), clipped[clipped.len - 1]);
 }
 
 // Gateway `tool-call` events may send `input` as parsed JSON instead of a

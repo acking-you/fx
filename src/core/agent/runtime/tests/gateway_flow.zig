@@ -49,6 +49,20 @@ const readTraceFile = test_support.readTraceFile;
 const logIndex = test_support.logIndex;
 const toolCall = test_support.toolCall;
 
+fn testCodexAccessToken(alloc: Allocator, account_id: []const u8) ![]u8 {
+    var payload: std.Io.Writer.Allocating = .init(alloc);
+    defer payload.deinit();
+    try payload.writer.writeAll("{\"https://api.openai.com/auth\":{\"chatgpt_account_id\":");
+    try std.json.Stringify.value(account_id, .{}, &payload.writer);
+    try payload.writer.writeAll("}}");
+
+    const encoder = std.base64.url_safe_no_pad.Encoder;
+    const encoded = try alloc.alloc(u8, encoder.calcSize(payload.written().len));
+    defer alloc.free(encoded);
+    _ = encoder.encode(encoded, payload.written());
+    return std.fmt.allocPrint(alloc, "e30.{s}.sig", .{encoded});
+}
+
 const vision_and_read_file_tools = [_]tool_dispatch.Tool{
     builtin_tools.vision,
     builtin_tools.read_file,
@@ -164,6 +178,58 @@ test "processQueuedPrompt projects lifecycle session identity to the provider" {
         "session-provider-123",
         gateway.request_session_ids.items[0].?,
     );
+}
+
+test "processQueuedPrompt persists terminal Responses reasoning for the next user turn" {
+    const alloc = std.testing.allocator;
+    const reasoning_items = [_]types.ResponsesReasoningItem{
+        .{ .id = "rs_terminal_1", .summary = "terminal first", .encrypted_content = "opaque-terminal-1" },
+        .{ .id = "rs_terminal_2", .summary = "terminal second", .encrypted_content = "opaque-terminal-2" },
+    };
+    const completions = [_]FakeCompletion{.{
+        .content = "answer",
+        .reasoning = "terminal firstterminal second",
+        .reasoning_items = &reasoning_items,
+    }};
+    var gateway = FakeGateway.init(alloc, &completions);
+    defer gateway.deinit();
+    var hooks = FakeAgentRuntimeDeps.init(alloc);
+    defer hooks.deinit();
+    var fixture = PromptFixture{};
+
+    try runFakePrompt(&gateway, &hooks, fixture.config(), fixture.job());
+
+    try std.testing.expectEqual(@as(usize, 1), hooks.history_turns.items.len);
+    const persisted = hooks.history_turns.items[0].assistant;
+    try std.testing.expectEqualStrings("terminal firstterminal second", persisted.reasoning.?);
+    try std.testing.expect(persisted.reasoning_item_id == null);
+    try std.testing.expect(persisted.reasoning_encrypted_content == null);
+    try std.testing.expectEqual(@as(usize, 2), persisted.reasoning_items.len);
+    try std.testing.expectEqualStrings("rs_terminal_1", persisted.reasoning_items[0].id.?);
+    try std.testing.expectEqualStrings("opaque-terminal-1", persisted.reasoning_items[0].encrypted_content.?);
+    try std.testing.expectEqualStrings("rs_terminal_2", persisted.reasoning_items[1].id.?);
+    try std.testing.expectEqualStrings("opaque-terminal-2", persisted.reasoning_items[1].encrypted_content.?);
+}
+
+test "processQueuedPrompt does not persist non-Responses reasoning without an item identity" {
+    const alloc = std.testing.allocator;
+    const completions = [_]FakeCompletion{.{
+        .content = "answer",
+        .reasoning = "provider-local reasoning",
+    }};
+    var gateway = FakeGateway.init(alloc, &completions);
+    defer gateway.deinit();
+    var hooks = FakeAgentRuntimeDeps.init(alloc);
+    defer hooks.deinit();
+    var fixture = PromptFixture{};
+
+    try runFakePrompt(&gateway, &hooks, fixture.config(), fixture.job());
+
+    const persisted = hooks.history_turns.items[0].assistant;
+    try std.testing.expect(persisted.reasoning == null);
+    try std.testing.expect(persisted.reasoning_item_id == null);
+    try std.testing.expect(persisted.reasoning_encrypted_content == null);
+    try std.testing.expectEqual(@as(usize, 0), persisted.reasoning_items.len);
 }
 
 fn makeOwnedProviderPrompt(alloc: Allocator, text: []const u8, model: []const u8) !QueuedPrompt {
@@ -5584,6 +5650,140 @@ test "processQueuedPrompt refreshes fx login credential before gateway request" 
     try std.testing.expectEqual(runtime_deps.CredentialRefreshMode.if_needed, hooks.credential_refresh_modes.items[0]);
 }
 
+test "processQueuedPrompt refreshes Codex OAuth credential before Responses request" {
+    const alloc = std.testing.allocator;
+    const completions = [_]FakeCompletion{.{ .content = "Done." }};
+    var gateway = FakeGateway.init(alloc, &completions);
+    defer gateway.deinit();
+    var hooks = FakeAgentRuntimeDeps.init(alloc);
+    hooks.credential_refresh_tokens = &.{"fresh-codex-token"};
+    hooks.credential_refresh_account_ids = &.{"acct-codex"};
+    defer hooks.deinit();
+    var fixture = PromptFixture{};
+    var job = fixture.job();
+    job.credential_source = .codex_oauth;
+    const selected_access_token = try testCodexAccessToken(alloc, "acct-codex");
+    defer alloc.free(selected_access_token);
+    job.api_key = selected_access_token;
+
+    try runFakePrompt(&gateway, &hooks, fixture.config(), job);
+
+    try std.testing.expectEqual(@as(usize, 1), gateway.request_api_keys.items.len);
+    try std.testing.expectEqualStrings("fresh-codex-token", gateway.request_api_keys.items[0]);
+    try std.testing.expectEqual(@as(usize, 1), hooks.credential_refresh_modes.items.len);
+    try std.testing.expectEqual(runtime_deps.CredentialRefreshMode.if_needed, hooks.credential_refresh_modes.items[0]);
+}
+
+test "processQueuedPrompt reloads a same-account Codex credential changed before send" {
+    const alloc = std.testing.allocator;
+    const completions = [_]FakeCompletion{
+        .{ .pre_send_error = error.CodexCredentialChanged },
+        .{ .content = "Done." },
+    };
+    var gateway = FakeGateway.init(alloc, &completions);
+    defer gateway.deinit();
+    var hooks = FakeAgentRuntimeDeps.init(alloc);
+    hooks.credential_refresh_tokens = &.{ "old-codex-token", "rotated-codex-token" };
+    hooks.credential_refresh_account_ids = &.{ "acct-codex", "acct-codex" };
+    defer hooks.deinit();
+    var fixture = PromptFixture{};
+    var job = fixture.job();
+    job.credential_source = .codex_oauth;
+    job.credential_account_id = @constCast("acct-codex");
+
+    try runFakePrompt(&gateway, &hooks, fixture.config(), job);
+
+    try std.testing.expectEqual(@as(usize, 2), gateway.request_api_keys.items.len);
+    try std.testing.expectEqualStrings("old-codex-token", gateway.request_api_keys.items[0]);
+    try std.testing.expectEqualStrings("rotated-codex-token", gateway.request_api_keys.items[1]);
+    try std.testing.expectEqual(@as(usize, 2), hooks.credential_refresh_modes.items.len);
+    try std.testing.expectEqual(runtime_deps.CredentialRefreshMode.if_needed, hooks.credential_refresh_modes.items[0]);
+    try std.testing.expectEqual(runtime_deps.CredentialRefreshMode.if_needed, hooks.credential_refresh_modes.items[1]);
+    try std.testing.expectEqual(@as(usize, 0), hooks.route_recovery_statuses.items.len);
+    try std.testing.expectEqual(types.TurnPresentationOutcome.completed, hooks.finalized_outcome.?);
+}
+
+test "processQueuedPrompt rejects a cross-account Codex credential change before send" {
+    const alloc = std.testing.allocator;
+    const completions = [_]FakeCompletion{
+        .{ .pre_send_error = error.CodexCredentialChanged },
+        .{ .content = "must not be requested" },
+    };
+    var gateway = FakeGateway.init(alloc, &completions);
+    defer gateway.deinit();
+    var hooks = FakeAgentRuntimeDeps.init(alloc);
+    hooks.credential_refresh_tokens = &.{ "old-codex-token", "other-account-token" };
+    hooks.credential_refresh_account_ids = &.{ "acct-old", "acct-new" };
+    defer hooks.deinit();
+    var fixture = PromptFixture{};
+    var job = fixture.job();
+    job.credential_source = .codex_oauth;
+    job.credential_account_id = @constCast("acct-old");
+
+    try std.testing.expectError(
+        error.CodexCredentialChanged,
+        runFakePrompt(&gateway, &hooks, fixture.config(), job),
+    );
+
+    try std.testing.expectEqual(@as(usize, 1), gateway.request_api_keys.items.len);
+    try std.testing.expectEqualStrings("old-codex-token", gateway.request_api_keys.items[0]);
+    try std.testing.expectEqual(@as(usize, 2), hooks.credential_refresh_modes.items.len);
+}
+
+test "processQueuedPrompt rejects a Codex request without prior account proof before send" {
+    const alloc = std.testing.allocator;
+    const completions = [_]FakeCompletion{
+        .{ .pre_send_error = error.CodexCredentialChanged },
+        .{ .content = "must not be requested" },
+    };
+    var gateway = FakeGateway.init(alloc, &completions);
+    defer gateway.deinit();
+    var hooks = FakeAgentRuntimeDeps.init(alloc);
+    hooks.credential_refresh_tokens = &.{ "current-codex-token", "current-codex-token" };
+    hooks.credential_refresh_account_ids = &.{ "acct-codex", "acct-codex" };
+    defer hooks.deinit();
+    var fixture = PromptFixture{};
+    var job = fixture.job();
+    job.credential_source = .codex_oauth;
+
+    try std.testing.expectError(
+        error.MissingCodexAccountId,
+        runFakePrompt(&gateway, &hooks, fixture.config(), job),
+    );
+
+    try std.testing.expectEqual(@as(usize, 0), gateway.request_api_keys.items.len);
+    try std.testing.expectEqual(@as(usize, 1), hooks.credential_refresh_modes.items.len);
+}
+
+test "processQueuedPrompt retries a Codex pre-send credential change only once" {
+    const alloc = std.testing.allocator;
+    const completions = [_]FakeCompletion{
+        .{ .pre_send_error = error.CodexCredentialChanged },
+        .{ .pre_send_error = error.CodexCredentialChanged },
+        .{ .content = "must not be requested" },
+    };
+    var gateway = FakeGateway.init(alloc, &completions);
+    defer gateway.deinit();
+    var hooks = FakeAgentRuntimeDeps.init(alloc);
+    hooks.credential_refresh_tokens = &.{ "old-codex-token", "rotated-codex-token" };
+    hooks.credential_refresh_account_ids = &.{ "acct-codex", "acct-codex" };
+    defer hooks.deinit();
+    var fixture = PromptFixture{};
+    var job = fixture.job();
+    job.credential_source = .codex_oauth;
+    job.credential_account_id = @constCast("acct-codex");
+
+    try std.testing.expectError(
+        error.CodexCredentialChanged,
+        runFakePrompt(&gateway, &hooks, fixture.config(), job),
+    );
+
+    try std.testing.expectEqual(@as(usize, 2), gateway.request_api_keys.items.len);
+    try std.testing.expectEqualStrings("old-codex-token", gateway.request_api_keys.items[0]);
+    try std.testing.expectEqualStrings("rotated-codex-token", gateway.request_api_keys.items[1]);
+    try std.testing.expectEqual(@as(usize, 2), hooks.credential_refresh_modes.items.len);
+}
+
 test "processQueuedPrompt refreshes and retries once after fx login 401" {
     const alloc = std.testing.allocator;
     const completions = [_]FakeCompletion{
@@ -5607,6 +5807,37 @@ test "processQueuedPrompt refreshes and retries once after fx login 401" {
     try std.testing.expectEqual(@as(usize, 2), gateway.request_api_keys.items.len);
     try std.testing.expectEqualStrings("still-stale", gateway.request_api_keys.items[0]);
     try std.testing.expectEqualStrings("fresh-after-401", gateway.request_api_keys.items[1]);
+    try std.testing.expectEqual(@as(usize, 2), hooks.credential_refresh_modes.items.len);
+    try std.testing.expectEqual(runtime_deps.CredentialRefreshMode.if_needed, hooks.credential_refresh_modes.items[0]);
+    try std.testing.expectEqual(runtime_deps.CredentialRefreshMode.force, hooks.credential_refresh_modes.items[1]);
+    try std.testing.expectEqual(types.TurnPresentationOutcome.completed, hooks.finalized_outcome.?);
+}
+
+test "processQueuedPrompt force refreshes Codex OAuth once after Responses 401" {
+    const alloc = std.testing.allocator;
+    const completions = [_]FakeCompletion{
+        .{
+            .status = .unauthorized,
+            .err_body = "{\"error\":{\"message\":\"expired\"}}",
+        },
+        .{ .content = "Done." },
+    };
+    var gateway = FakeGateway.init(alloc, &completions);
+    defer gateway.deinit();
+    var hooks = FakeAgentRuntimeDeps.init(alloc);
+    hooks.credential_refresh_tokens = &.{ "still-stale", "fresh-codex-after-401" };
+    hooks.credential_refresh_account_ids = &.{ "acct-codex", "acct-codex" };
+    defer hooks.deinit();
+    var fixture = PromptFixture{};
+    var job = fixture.job();
+    job.credential_source = .codex_oauth;
+    job.credential_account_id = @constCast("acct-codex");
+
+    try runFakePrompt(&gateway, &hooks, fixture.config(), job);
+
+    try std.testing.expectEqual(@as(usize, 2), gateway.request_api_keys.items.len);
+    try std.testing.expectEqualStrings("still-stale", gateway.request_api_keys.items[0]);
+    try std.testing.expectEqualStrings("fresh-codex-after-401", gateway.request_api_keys.items[1]);
     try std.testing.expectEqual(@as(usize, 2), hooks.credential_refresh_modes.items.len);
     try std.testing.expectEqual(runtime_deps.CredentialRefreshMode.if_needed, hooks.credential_refresh_modes.items[0]);
     try std.testing.expectEqual(runtime_deps.CredentialRefreshMode.force, hooks.credential_refresh_modes.items[1]);

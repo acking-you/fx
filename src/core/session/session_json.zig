@@ -2,6 +2,9 @@ const std = @import("std");
 const debug_trace = @import("../shared/debug_trace.zig");
 const tool_result_errors = @import("../tooling/tool_result_errors.zig");
 const types = @import("../shared/types.zig");
+const responses_output_items = @import("../shared/responses_output_items.zig");
+const responses_compaction = @import("../gateway/responses_compaction.zig");
+const responses_compaction_binding = @import("../gateway/responses_compaction_binding.zig");
 const session = @import("session.zig");
 
 const Allocator = std.mem.Allocator;
@@ -82,6 +85,19 @@ fn writeHistoryTurnJson(writer: *std.Io.Writer, turn: session.HistoryTurn) !void
             try writer.writeAll("{\"kind\":\"compacted_summary\",\"summary\":");
             try std.json.Stringify.value(entry.summary, .{}, writer);
             try writer.print(",\"removed_turn_count\":{d},\"compaction_count\":{d}", .{ entry.removed_turn_count, entry.compaction_count });
+            if (entry.responses_compaction) |checkpoint| {
+                try writer.writeAll(",\"responses_compaction\":{\"credential_source\":");
+                try std.json.Stringify.value(@tagName(checkpoint.credential_source), .{}, writer);
+                try writer.writeAll(",\"wire_model\":");
+                try std.json.Stringify.value(checkpoint.wire_model, .{}, writer);
+                try writer.writeAll(",\"input_json\":");
+                try std.json.Stringify.value(checkpoint.input_json, .{}, writer);
+                if (checkpoint.provider_binding) |binding| {
+                    try writer.writeAll(",\"provider_binding\":");
+                    try writeResponsesCompactionProviderBindingJson(writer, binding.view());
+                }
+                try writer.writeByte('}');
+            }
             try writer.writeByte('}');
         },
         .assistant => |entry| {
@@ -89,6 +105,35 @@ fn writeHistoryTurnJson(writer: *std.Io.Writer, turn: session.HistoryTurn) !void
             try writeUserTurnJson(writer, entry.user);
             try writer.writeAll(",\"assistant\":");
             try std.json.Stringify.value(entry.assistant, .{}, writer);
+            if (entry.responses_message_output_index) |output_index| {
+                try writer.print(",\"responses_message_output_index\":{d}", .{output_index});
+            }
+            if (entry.reasoning_items.len > 0 or entry.reasoning != null or entry.reasoning_item_id != null or
+                entry.reasoning_encrypted_content != null)
+            {
+                try writer.writeAll(",\"reasoning\":");
+                try writeOptionalStringJson(writer, entry.reasoning);
+                try writer.writeAll(",\"reasoning_item_id\":");
+                try writeOptionalStringJson(writer, entry.reasoning_item_id);
+                try writer.writeAll(",\"reasoning_encrypted_content\":");
+                try writeOptionalStringJson(writer, entry.reasoning_encrypted_content);
+                if (entry.reasoning_items.len > 0) {
+                    try writer.writeAll(",\"reasoning_items\":");
+                    try writeResponsesReasoningItemsJson(writer, entry.reasoning_items);
+                }
+            }
+            if (entry.responses_provider_output_items.len > 0 or
+                entry.responses_output_sequence_complete)
+            {
+                try writer.writeAll(",\"responses_provider_output_items\":");
+                try writeResponsesProviderOutputItemsJson(
+                    writer,
+                    entry.responses_provider_output_items,
+                );
+                try writer.print(",\"responses_output_sequence_complete\":{s}", .{
+                    if (entry.responses_output_sequence_complete) "true" else "false",
+                });
+            }
             if (entry.execution.tool_steps.len > 0 or entry.execution.files.len > 0) {
                 try writer.writeAll(",\"execution\":");
                 try writeExecutionMemoryJson(writer, entry.execution);
@@ -161,11 +206,32 @@ fn writeToolCallJson(writer: *std.Io.Writer, tool_call: session.ToolCall) !void 
     } else {
         try writer.writeAll("null");
     }
+    if (tool_call.responses_item_id) |item_id| {
+        try writer.writeAll(",\"responses_item_id\":");
+        try std.json.Stringify.value(item_id, .{}, writer);
+    }
+    if (tool_call.responses_output_index) |output_index| {
+        try writer.print(",\"responses_output_index\":{d}", .{output_index});
+    }
     try writer.writeByte('}');
 }
 
 pub fn writeExecutionMemoryJson(writer: *std.Io.Writer, execution: session.ExecutionMemory) !void {
-    try writer.writeAll("{\"schema_version\":2,\"tool_steps\":[");
+    const schema_version: u8 = blk: {
+        for (execution.tool_steps) |step| {
+            if (step.responses_message_output_index != null or
+                step.responses_provider_output_items.len > 0 or
+                step.responses_output_sequence_complete) break :blk 5;
+            if (step.reasoning_items.len > 0) break :blk 4;
+            if (step.reasoning != null or step.reasoning_item_id != null or
+                step.reasoning_encrypted_content != null)
+            {
+                break :blk 3;
+            }
+        }
+        break :blk 2;
+    };
+    try writer.print("{{\"schema_version\":{d},\"tool_steps\":[", .{schema_version});
     for (execution.tool_steps, 0..) |step, i| {
         if (i > 0) try writer.writeByte(',');
         try writer.writeAll("{\"assistant\":");
@@ -173,6 +239,30 @@ pub fn writeExecutionMemoryJson(writer: *std.Io.Writer, execution: session.Execu
             try std.json.Stringify.value(assistant, .{}, writer);
         } else {
             try writer.writeAll("null");
+        }
+        if (schema_version >= 3) {
+            try writer.writeAll(",\"reasoning\":");
+            try writeOptionalStringJson(writer, step.reasoning);
+            try writer.writeAll(",\"reasoning_item_id\":");
+            try writeOptionalStringJson(writer, step.reasoning_item_id);
+            try writer.writeAll(",\"reasoning_encrypted_content\":");
+            try writeOptionalStringJson(writer, step.reasoning_encrypted_content);
+            if (schema_version >= 4) {
+                try writer.writeAll(",\"reasoning_items\":");
+                try writeResponsesReasoningItemsJson(writer, step.reasoning_items);
+            }
+            if (schema_version >= 5) {
+                try writer.writeAll(",\"responses_message_output_index\":");
+                try writeOptionalU32Json(writer, step.responses_message_output_index);
+                try writer.writeAll(",\"responses_provider_output_items\":");
+                try writeResponsesProviderOutputItemsJson(
+                    writer,
+                    step.responses_provider_output_items,
+                );
+                try writer.print(",\"responses_output_sequence_complete\":{s}", .{
+                    if (step.responses_output_sequence_complete) "true" else "false",
+                });
+            }
         }
         try writer.writeAll(",\"tool_calls\":[");
         for (step.tool_calls, 0..) |tool_call, call_index| {
@@ -285,6 +375,40 @@ fn writeOptionalStringJson(writer: *std.Io.Writer, value: ?[]const u8) !void {
     } else {
         try writer.writeAll("null");
     }
+}
+
+fn writeResponsesReasoningItemsJson(
+    writer: *std.Io.Writer,
+    items: []const types.ResponsesReasoningItem,
+) !void {
+    try writer.writeByte('[');
+    for (items, 0..) |item, i| {
+        if (i > 0) try writer.writeByte(',');
+        try writer.writeAll("{\"output_index\":");
+        try writeOptionalU32Json(writer, item.output_index);
+        try writer.writeAll(",\"id\":");
+        try writeOptionalStringJson(writer, item.id);
+        try writer.writeAll(",\"summary\":");
+        try writeOptionalStringJson(writer, item.summary);
+        try writer.writeAll(",\"encrypted_content\":");
+        try writeOptionalStringJson(writer, item.encrypted_content);
+        try writer.writeByte('}');
+    }
+    try writer.writeByte(']');
+}
+
+fn writeResponsesProviderOutputItemsJson(
+    writer: *std.Io.Writer,
+    items: []const types.ResponsesProviderOutputItem,
+) !void {
+    try writer.writeByte('[');
+    for (items, 0..) |item, i| {
+        if (i > 0) try writer.writeByte(',');
+        try writer.print("{{\"output_index\":{d},\"json\":", .{item.output_index});
+        try std.json.Stringify.value(item.json, .{}, writer);
+        try writer.writeByte('}');
+    }
+    try writer.writeByte(']');
 }
 
 fn writeFileEvidenceJson(writer: *std.Io.Writer, file: session.FileEvidence) !void {
@@ -626,6 +750,17 @@ fn parseLegacyHistoryTurn(alloc: Allocator, value: std.json.Value) !session.Hist
             object.get("permission_feedback"),
         );
         errdefer types.freePermissionFeedback(alloc, permission_feedback);
+        const remote_compaction = if (object.get("responses_compaction")) |checkpoint_value|
+            try parseResponsesCompactionCheckpoint(alloc, checkpoint_value)
+        else
+            null;
+        errdefer if (remote_compaction) |checkpoint| {
+            alloc.free(checkpoint.wire_model);
+            alloc.free(checkpoint.input_json);
+            if (checkpoint.provider_binding) |binding| {
+                types.freeResponsesCompactionProviderBinding(alloc, binding);
+            }
+        };
         const removed_turn_count = try requireUsize(object, "removed_turn_count");
         return .{ .compacted_summary = .{
             .summary = try alloc.dupe(u8, try requireString(object, "summary")),
@@ -641,18 +776,61 @@ fn parseLegacyHistoryTurn(alloc: Allocator, value: std.json.Value) !session.Hist
                 try requireBool(object, "permission_feedback_complete")
             else
                 removed_turn_count == 0,
+            .responses_compaction = remote_compaction,
         } };
     }
     if (std.mem.eql(u8, kind, "assistant")) {
+        const has_provider_output_items = object.get("responses_provider_output_items") != null;
+        const has_output_sequence_complete = object.get("responses_output_sequence_complete") != null;
+        if (has_provider_output_items != has_output_sequence_complete) {
+            return error.InvalidSessionFormat;
+        }
         const user = try parseUserTurn(alloc, object.get("user") orelse return error.InvalidSessionFormat);
         errdefer session.freeUserTurn(alloc, user);
         const assistant = try alloc.dupe(u8, try requireString(object, "assistant"));
         errdefer alloc.free(assistant);
+        const message_output_index = try optionalU32(object.get("responses_message_output_index"));
+        const reasoning = try optionalStringDup(alloc, object.get("reasoning"));
+        errdefer if (reasoning) |text| alloc.free(text);
+        const reasoning_item_id = try optionalStringDup(alloc, object.get("reasoning_item_id"));
+        errdefer if (reasoning_item_id) |item_id| alloc.free(item_id);
+        const reasoning_encrypted_content = try optionalStringDup(
+            alloc,
+            object.get("reasoning_encrypted_content"),
+        );
+        errdefer if (reasoning_encrypted_content) |content| alloc.free(content);
+        const reasoning_items = try parseOptionalResponsesReasoningItems(
+            alloc,
+            object.get("reasoning_items"),
+        );
+        errdefer types.freeResponsesReasoningItems(alloc, reasoning_items);
+        const provider_output_items = try parseOptionalResponsesProviderOutputItems(
+            alloc,
+            object.get("responses_provider_output_items"),
+        );
+        errdefer types.freeResponsesProviderOutputItems(alloc, provider_output_items);
+        const output_sequence_complete = if (has_output_sequence_complete)
+            try requireBool(object, "responses_output_sequence_complete")
+        else
+            false;
+        if (output_sequence_complete) {
+            responses_output_items.validateComplete(alloc, provider_output_items) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.InvalidSessionFormat,
+            };
+        }
         const execution = try parseOptionalExecutionMemory(alloc, object.get("execution"));
         errdefer session.freeExecutionMemory(alloc, execution);
         return .{ .assistant = .{
             .user = user,
             .assistant = assistant,
+            .responses_message_output_index = message_output_index,
+            .reasoning = reasoning,
+            .reasoning_item_id = reasoning_item_id,
+            .reasoning_encrypted_content = reasoning_encrypted_content,
+            .reasoning_items = reasoning_items,
+            .responses_provider_output_items = provider_output_items,
+            .responses_output_sequence_complete = output_sequence_complete,
             .execution = execution,
         } };
     }
@@ -738,12 +916,16 @@ fn parseToolCall(alloc: Allocator, value: std.json.Value) !session.ToolCall {
     errdefer alloc.free(arguments_json);
     const provider_result = try optionalStringDup(alloc, object.get("provider_result"));
     errdefer if (provider_result) |result| alloc.free(result);
+    const responses_item_id = try optionalStringDup(alloc, object.get("responses_item_id"));
+    errdefer if (responses_item_id) |item_id| alloc.free(item_id);
     return .{
         .id = id,
         .name = name,
         .arguments_json = arguments_json,
         .argument_integrity = argument_integrity,
         .provider_result = provider_result,
+        .responses_item_id = responses_item_id,
+        .responses_output_index = try optionalU32(object.get("responses_output_index")),
     };
 }
 
@@ -752,7 +934,10 @@ fn parseOptionalExecutionMemory(alloc: Allocator, maybe_value: ?std.json.Value) 
     if (value == .null) return .{};
     const object = try requireObject(value);
     const schema_version: i64 = if (object.get("schema_version")) |version| blk: {
-        if (version != .integer or (version.integer != 1 and version.integer != 2)) {
+        if (version != .integer or
+            (version.integer != 1 and version.integer != 2 and version.integer != 3 and
+                version.integer != 4 and version.integer != 5))
+        {
             return error.InvalidSessionFormat;
         }
         break :blk version.integer;
@@ -789,6 +974,48 @@ fn parseToolExecutionSteps(
         const object = try requireObject(item);
         const assistant = try optionalStringDup(alloc, object.get("assistant"));
         errdefer if (assistant) |text| alloc.free(text);
+        const reasoning = if (schema_version >= 3)
+            try optionalStringDup(alloc, object.get("reasoning"))
+        else
+            null;
+        errdefer if (reasoning) |text| alloc.free(text);
+        const reasoning_item_id = if (schema_version >= 3)
+            try optionalStringDup(alloc, object.get("reasoning_item_id"))
+        else
+            null;
+        errdefer if (reasoning_item_id) |item_id| alloc.free(item_id);
+        const reasoning_encrypted_content = if (schema_version >= 3)
+            try optionalStringDup(alloc, object.get("reasoning_encrypted_content"))
+        else
+            null;
+        errdefer if (reasoning_encrypted_content) |content| alloc.free(content);
+        const reasoning_items: []types.ResponsesReasoningItem = if (schema_version >= 4)
+            try parseOptionalResponsesReasoningItems(alloc, object.get("reasoning_items"))
+        else
+            &.{};
+        errdefer types.freeResponsesReasoningItems(alloc, reasoning_items);
+        const message_output_index = if (schema_version >= 5)
+            try optionalU32(object.get("responses_message_output_index"))
+        else
+            null;
+        const provider_output_items: []types.ResponsesProviderOutputItem = if (schema_version >= 5)
+            try parseOptionalResponsesProviderOutputItems(
+                alloc,
+                object.get("responses_provider_output_items"),
+            )
+        else
+            &.{};
+        errdefer types.freeResponsesProviderOutputItems(alloc, provider_output_items);
+        const output_sequence_complete = if (schema_version >= 5)
+            try requireBool(object, "responses_output_sequence_complete")
+        else
+            false;
+        if (output_sequence_complete) {
+            responses_output_items.validateComplete(alloc, provider_output_items) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.InvalidSessionFormat,
+            };
+        }
         const tool_calls = try parseToolCallArray(alloc, object.get("tool_calls"));
         errdefer session.freeToolCallSlice(alloc, tool_calls);
         const tool_results = try parsePersistedToolResultArray(
@@ -800,6 +1027,13 @@ fn parseToolExecutionSteps(
         try session.repairPersistedToolArguments(alloc, tool_calls, tool_results, .legacy);
         steps[i] = .{
             .assistant = assistant,
+            .responses_message_output_index = message_output_index,
+            .reasoning = reasoning,
+            .reasoning_item_id = reasoning_item_id,
+            .reasoning_encrypted_content = reasoning_encrypted_content,
+            .reasoning_items = reasoning_items,
+            .responses_provider_output_items = provider_output_items,
+            .responses_output_sequence_complete = output_sequence_complete,
             .tool_calls = tool_calls,
             .tool_results = tool_results,
         };
@@ -989,7 +1223,7 @@ test "session JSON frees lifecycle call id when turn id is invalid" {
 }
 
 fn optionalU32(maybe_value: ?std.json.Value) !?u32 {
-    const value = maybe_value orelse return error.InvalidSessionFormat;
+    const value = maybe_value orelse return null;
     if (value == .null) return null;
     if (value != .integer or value.integer < 0) return error.InvalidSessionFormat;
     return std.math.cast(u32, value.integer) orelse error.InvalidSessionFormat;
@@ -1078,6 +1312,10 @@ fn parseFileEvidenceAction(value: []const u8) !session.FileEvidenceAction {
 
 fn freeParsedToolExecutionStep(alloc: Allocator, step: session.ToolExecutionStep) void {
     if (step.assistant) |assistant| alloc.free(assistant);
+    if (step.reasoning) |reasoning| alloc.free(reasoning);
+    if (step.reasoning_item_id) |item_id| alloc.free(item_id);
+    if (step.reasoning_encrypted_content) |content| alloc.free(content);
+    types.freeResponsesReasoningItems(alloc, step.reasoning_items);
     session.freeToolCallSlice(alloc, step.tool_calls);
     session.freePersistedToolResults(alloc, step.tool_results);
 }
@@ -1346,6 +1584,205 @@ noinline fn optionalStringDup(alloc: Allocator, maybe_value: ?std.json.Value) !?
     };
 }
 
+fn parseResponsesCompactionCheckpoint(
+    alloc: Allocator,
+    value: std.json.Value,
+) !types.ResponsesCompactionCheckpoint {
+    const object = try requireObject(value);
+    const has_provider_binding = object.get("provider_binding") != null;
+    if (object.count() != @as(usize, 3) + @intFromBool(has_provider_binding) or
+        object.get("credential_source") == null or
+        object.get("wire_model") == null or
+        object.get("input_json") == null)
+    {
+        return error.InvalidSessionFormat;
+    }
+
+    const source_raw = try requireString(object, "credential_source");
+    const credential_source = types.parseCredentialSource(source_raw) orelse
+        return error.InvalidSessionFormat;
+    switch (credential_source) {
+        .openai_api_key, .codex_oauth => {},
+        else => return error.InvalidSessionFormat,
+    }
+
+    const wire_model_raw = try requireString(object, "wire_model");
+    if (wire_model_raw.len == 0 or wire_model_raw.len > 1024 or
+        !std.unicode.utf8ValidateSlice(wire_model_raw) or
+        !std.mem.eql(u8, wire_model_raw, std.mem.trim(u8, wire_model_raw, " \t\r\n")))
+    {
+        return error.InvalidSessionFormat;
+    }
+    for (wire_model_raw) |byte| {
+        if (std.ascii.isControl(byte)) return error.InvalidSessionFormat;
+    }
+
+    const input_raw = try requireString(object, "input_json");
+    responses_compaction.validateReplayInputJson(alloc, input_raw) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidSessionFormat,
+    };
+
+    const wire_model = try alloc.dupe(u8, wire_model_raw);
+    errdefer alloc.free(wire_model);
+    const input_json = try alloc.dupe(u8, input_raw);
+    errdefer alloc.free(input_json);
+    const provider_binding = if (has_provider_binding)
+        try parseResponsesCompactionProviderBinding(
+            alloc,
+            credential_source,
+            object.get("provider_binding") orelse return error.InvalidSessionFormat,
+        )
+    else
+        null;
+    return .{
+        .credential_source = credential_source,
+        .wire_model = wire_model,
+        .input_json = input_json,
+        .provider_binding = provider_binding,
+    };
+}
+
+fn writeResponsesCompactionProviderBindingJson(
+    writer: *std.Io.Writer,
+    binding: types.ResponsesCompactionProviderBindingView,
+) !void {
+    try writer.writeAll("{\"normalized_origin\":");
+    try std.json.Stringify.value(binding.normalized_origin, .{}, writer);
+    try writer.writeAll(",\"account_id\":");
+    try std.json.Stringify.value(binding.account_id, .{}, writer);
+    try writer.writeAll(",\"api_key_sha256\":");
+    try std.json.Stringify.value(binding.api_key_sha256, .{}, writer);
+    try writer.writeAll(",\"organization\":");
+    try std.json.Stringify.value(binding.organization, .{}, writer);
+    try writer.writeAll(",\"project\":");
+    try std.json.Stringify.value(binding.project, .{}, writer);
+    try writer.writeByte('}');
+}
+
+fn parseResponsesCompactionProviderBinding(
+    alloc: Allocator,
+    credential_source: types.CredentialSource,
+    value: std.json.Value,
+) !types.ResponsesCompactionProviderBinding {
+    const object = try requireObject(value);
+    if (object.count() != 5 or
+        object.get("normalized_origin") == null or
+        object.get("account_id") == null or
+        object.get("api_key_sha256") == null or
+        object.get("organization") == null or
+        object.get("project") == null)
+    {
+        return error.InvalidSessionFormat;
+    }
+    const normalized_origin = try alloc.dupe(u8, try requireString(object, "normalized_origin"));
+    errdefer alloc.free(normalized_origin);
+    const account_id = try optionalStringDup(alloc, object.get("account_id"));
+    errdefer if (account_id) |field| alloc.free(field);
+    const api_key_sha256 = try optionalStringDup(alloc, object.get("api_key_sha256"));
+    errdefer if (api_key_sha256) |field| alloc.free(field);
+    const organization = try optionalStringDup(alloc, object.get("organization"));
+    errdefer if (organization) |field| alloc.free(field);
+    const project = try optionalStringDup(alloc, object.get("project"));
+    errdefer if (project) |field| alloc.free(field);
+    const binding: types.ResponsesCompactionProviderBinding = .{
+        .normalized_origin = normalized_origin,
+        .account_id = account_id,
+        .api_key_sha256 = api_key_sha256,
+        .organization = organization,
+        .project = project,
+    };
+    responses_compaction_binding.validate(credential_source, binding.view()) catch
+        return error.InvalidSessionFormat;
+    return binding;
+}
+
+fn parseOptionalResponsesReasoningItems(
+    alloc: Allocator,
+    maybe_value: ?std.json.Value,
+) ![]types.ResponsesReasoningItem {
+    const value = maybe_value orelse return &.{};
+    if (value == .null) return &.{};
+    if (value != .array) return error.InvalidSessionFormat;
+    if (value.array.items.len == 0) return &.{};
+    const items = try alloc.alloc(types.ResponsesReasoningItem, value.array.items.len);
+    errdefer alloc.free(items);
+    var parsed_count: usize = 0;
+    errdefer {
+        for (items[0..parsed_count]) |item| {
+            if (item.id) |owned| alloc.free(@constCast(owned));
+            if (item.summary) |owned| alloc.free(@constCast(owned));
+            if (item.encrypted_content) |owned| alloc.free(@constCast(owned));
+        }
+    }
+    for (value.array.items, 0..) |item_value, i| {
+        const object = try requireObject(item_value);
+        const output_index = try optionalU32(object.get("output_index"));
+        const id = try optionalStringDup(alloc, object.get("id"));
+        errdefer if (id) |owned| alloc.free(owned);
+        const summary = try optionalStringDup(alloc, object.get("summary"));
+        errdefer if (summary) |owned| alloc.free(owned);
+        const encrypted_content = try optionalStringDup(alloc, object.get("encrypted_content"));
+        errdefer if (encrypted_content) |owned| alloc.free(owned);
+        items[i] = .{
+            .output_index = output_index,
+            .id = id,
+            .summary = summary,
+            .encrypted_content = encrypted_content,
+        };
+        parsed_count += 1;
+    }
+    return items;
+}
+
+fn parseOptionalResponsesProviderOutputItems(
+    alloc: Allocator,
+    maybe_value: ?std.json.Value,
+) ![]types.ResponsesProviderOutputItem {
+    const value = maybe_value orelse return &.{};
+    if (value == .null) return &.{};
+    if (value != .array or value.array.items.len > responses_output_items.max_items) {
+        return error.InvalidSessionFormat;
+    }
+    if (value.array.items.len == 0) return &.{};
+
+    var items: std.ArrayList(types.ResponsesProviderOutputItem) = .empty;
+    errdefer {
+        for (items.items) |item| alloc.free(@constCast(item.json));
+        items.deinit(alloc);
+    }
+    var total_bytes: usize = 0;
+    for (value.array.items) |item_value| {
+        const object = try requireObject(item_value);
+        const output_index = try requireUsize(object, "output_index");
+        if (output_index > std.math.maxInt(u32)) return error.InvalidSessionFormat;
+        const json_value = object.get("json") orelse return error.InvalidSessionFormat;
+        if (json_value != .string or json_value.string.len == 0 or
+            json_value.string.len > responses_output_items.max_item_bytes)
+        {
+            return error.InvalidSessionFormat;
+        }
+        total_bytes = std.math.add(usize, total_bytes, json_value.string.len) catch
+            return error.InvalidSessionFormat;
+        if (total_bytes > responses_output_items.max_total_bytes) {
+            return error.InvalidSessionFormat;
+        }
+        const json = try alloc.dupe(u8, json_value.string);
+        errdefer alloc.free(json);
+        try items.append(alloc, .{
+            .output_index = @intCast(output_index),
+            .json = json,
+        });
+    }
+    const owned = try items.toOwnedSlice(alloc);
+    errdefer types.freeResponsesProviderOutputItems(alloc, owned);
+    responses_output_items.validate(alloc, owned) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidSessionFormat,
+    };
+    return owned;
+}
+
 fn parseOptionalStringArray(alloc: Allocator, maybe_value: ?std.json.Value) ![][]u8 {
     const value = maybe_value orelse return &.{};
     if (value == .null) return &.{};
@@ -1543,6 +1980,58 @@ test "session JSON round-trips images summaries and background commands" {
     try std.testing.expectEqual(@as(usize, 1), interruption_count);
 }
 
+test "legacy session JSON round trips an opaque Responses compaction checkpoint" {
+    const alloc = std.testing.allocator;
+    const replay_json =
+        "[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}," ++
+        "{\"type\":\"compaction\",\"encrypted_content\":\"legacy-opaque\"}]";
+    const history = [_]session.HistoryTurn{.{ .compacted_summary = .{
+        .summary = @constCast("portable summary"),
+        .removed_turn_count = 3,
+        .compaction_count = 1,
+        .responses_compaction = .{
+            .credential_source = .openai_api_key,
+            .wire_model = @constCast("gpt-5.4"),
+            .input_json = @constCast(replay_json),
+            .provider_binding = .{
+                .normalized_origin = @constCast("https://api.openai.com/v1/responses"),
+                .api_key_sha256 = @constCast("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+                .organization = @constCast("org-a"),
+                .project = @constCast("project-a"),
+            },
+        },
+    } }};
+    const encoded = try renderSessionJson(
+        alloc,
+        "session-compact",
+        1,
+        2,
+        session.ConversationLanguage.literal("en"),
+        "/tmp/workspace",
+        &history,
+        .{},
+    );
+    defer alloc.free(encoded);
+    var restored = try parseLegacyExact(TestStoredSession, alloc, encoded);
+    defer restored.deinit(alloc);
+
+    try std.testing.expectEqual(@as(usize, 1), restored.history.len);
+    const checkpoint = restored.history[0].compacted_summary.responses_compaction.?;
+    try std.testing.expectEqual(types.CredentialSource.openai_api_key, checkpoint.credential_source);
+    try std.testing.expectEqualStrings("gpt-5.4", checkpoint.wire_model);
+    try std.testing.expectEqualStrings(replay_json, checkpoint.input_json);
+    try std.testing.expectEqualStrings(
+        "https://api.openai.com/v1/responses",
+        checkpoint.provider_binding.?.normalized_origin,
+    );
+    try std.testing.expectEqualStrings(
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        checkpoint.provider_binding.?.api_key_sha256.?,
+    );
+    try std.testing.expectEqualStrings("org-a", checkpoint.provider_binding.?.organization.?);
+    try std.testing.expectEqualStrings("project-a", checkpoint.provider_binding.?.project.?);
+}
+
 test "legacy session migration keeps missing compacted authority incomplete" {
     const alloc = std.testing.allocator;
     var parsed = try std.json.parseFromSlice(
@@ -1578,11 +2067,33 @@ test "legacy session migration keeps missing compacted authority incomplete" {
 test "session JSON round-trips assistant execution memory" {
     const alloc = std.testing.allocator;
 
+    var step_reasoning_items = [_]types.ResponsesReasoningItem{
+        .{ .output_index = 0, .id = "rs_step_1", .summary = "step first", .encrypted_content = "step opaque 1" },
+        .{ .output_index = 2, .id = "rs_step_2", .summary = "step second", .encrypted_content = "step opaque 2" },
+    };
+    var terminal_reasoning_items = [_]types.ResponsesReasoningItem{
+        .{ .output_index = 0, .id = "rs_terminal_1", .summary = "terminal first", .encrypted_content = "terminal opaque 1" },
+        .{ .output_index = 1, .id = "rs_terminal_2", .summary = "terminal second", .encrypted_content = "terminal opaque 2" },
+    };
+    var step_output_items = [_]types.ResponsesProviderOutputItem{
+        .{ .output_index = 0, .json = "{\"type\":\"reasoning\",\"id\":\"rs_step_1\"}" },
+        .{ .output_index = 1, .json = "{\"type\":\"web_search_call\",\"id\":\"ws_step\",\"status\":\"completed\"}" },
+        .{ .output_index = 2, .json = "{\"type\":\"reasoning\",\"id\":\"rs_step_2\"}" },
+        .{ .output_index = 3, .json = "{\"type\":\"function_call\",\"call_id\":\"call_read\",\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"src/main.zig\\\"}\"}" },
+    };
+    var terminal_output_items = [_]types.ResponsesProviderOutputItem{
+        .{ .output_index = 0, .json = "{\"type\":\"reasoning\",\"id\":\"rs_terminal_1\"}" },
+        .{ .output_index = 1, .json = "{\"type\":\"reasoning\",\"id\":\"rs_terminal_2\"}" },
+        .{ .output_index = 2, .json = "{\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}" },
+    };
+
     var feedback = [_][]u8{@constCast("read it after writing")};
     var calls = [_]session.ToolCall{.{
         .id = "call_read",
         .name = "read_file",
         .arguments_json = "{\"path\":\"src/main.zig\"}",
+        .responses_item_id = "fc_call_read",
+        .responses_output_index = 3,
     }};
     var results = [_]session.PersistedToolResult{.{
         .tool_call_id = @constCast("call_read"),
@@ -1598,6 +2109,10 @@ test "session JSON round-trips assistant execution memory" {
     }};
     var steps = [_]session.ToolExecutionStep{.{
         .assistant = @constCast("I'll inspect it."),
+        .reasoning = @constCast("Need inspect main."),
+        .reasoning_items = &step_reasoning_items,
+        .responses_provider_output_items = &step_output_items,
+        .responses_output_sequence_complete = true,
         .tool_calls = calls[0..],
         .tool_results = results[0..],
     }};
@@ -1613,6 +2128,11 @@ test "session JSON round-trips assistant execution memory" {
     const history = [_]session.HistoryTurn{.{ .assistant = .{
         .user = .{ .text = @constCast("what is main") },
         .assistant = @constCast("main wires the app"),
+        .responses_message_output_index = 2,
+        .reasoning = @constCast("The tool output identifies main."),
+        .reasoning_items = &terminal_reasoning_items,
+        .responses_provider_output_items = &terminal_output_items,
+        .responses_output_sequence_complete = true,
         .execution = .{ .tool_steps = steps[0..], .files = files[0..] },
     } }};
 
@@ -1621,15 +2141,32 @@ test "session JSON round-trips assistant execution memory" {
     try std.testing.expect(std.mem.find(u8, json, "\"execution\"") != null);
     try std.testing.expect(std.mem.find(u8, json, "\"tool_steps\"") != null);
     try std.testing.expect(std.mem.find(u8, json, "\"files\"") != null);
-    try std.testing.expect(std.mem.find(u8, json, "\"schema_version\":2") != null);
+    try std.testing.expect(std.mem.find(u8, json, "\"schema_version\":5") != null);
+    try std.testing.expect(std.mem.find(u8, json, "\"id\":\"rs_terminal_1\"") != null);
+    try std.testing.expect(std.mem.find(u8, json, "\"id\":\"rs_step_2\"") != null);
     try std.testing.expect(std.mem.find(u8, json, "\"permission_feedback\"") != null);
 
     var loaded = try parseStoredSession(TestStoredSession, alloc, json);
     defer loaded.deinit(alloc);
     const execution = loaded.history[0].assistant.execution;
+    try std.testing.expectEqualStrings("The tool output identifies main.", loaded.history[0].assistant.reasoning.?);
+    try std.testing.expectEqual(@as(usize, 2), loaded.history[0].assistant.reasoning_items.len);
+    try std.testing.expectEqualStrings("rs_terminal_1", loaded.history[0].assistant.reasoning_items[0].id.?);
+    try std.testing.expectEqualStrings("terminal opaque 2", loaded.history[0].assistant.reasoning_items[1].encrypted_content.?);
+    try std.testing.expectEqual(@as(?u32, 2), loaded.history[0].assistant.responses_message_output_index);
+    try std.testing.expectEqual(@as(usize, 3), loaded.history[0].assistant.responses_provider_output_items.len);
+    try std.testing.expect(loaded.history[0].assistant.responses_output_sequence_complete);
     try std.testing.expectEqual(@as(usize, 1), execution.tool_steps.len);
     try std.testing.expectEqualStrings("I'll inspect it.", execution.tool_steps[0].assistant.?);
+    try std.testing.expectEqualStrings("Need inspect main.", execution.tool_steps[0].reasoning.?);
+    try std.testing.expectEqual(@as(usize, 2), execution.tool_steps[0].reasoning_items.len);
+    try std.testing.expectEqualStrings("rs_step_1", execution.tool_steps[0].reasoning_items[0].id.?);
+    try std.testing.expectEqualStrings("step opaque 2", execution.tool_steps[0].reasoning_items[1].encrypted_content.?);
+    try std.testing.expectEqual(@as(usize, 4), execution.tool_steps[0].responses_provider_output_items.len);
+    try std.testing.expect(execution.tool_steps[0].responses_output_sequence_complete);
     try std.testing.expectEqualStrings("call_read", execution.tool_steps[0].tool_calls[0].id);
+    try std.testing.expectEqualStrings("fc_call_read", execution.tool_steps[0].tool_calls[0].responses_item_id.?);
+    try std.testing.expectEqual(@as(?u32, 3), execution.tool_steps[0].tool_calls[0].responses_output_index);
     try std.testing.expectEqualStrings("read_file", execution.tool_steps[0].tool_results[0].tool_name);
     try std.testing.expectEqual(@as(usize, 54), execution.tool_steps[0].tool_results[0].stored_output_bytes);
     try std.testing.expectEqual(
@@ -1669,6 +2206,24 @@ fn checkLegacyExecutionMemoryAllocationFailures(alloc: Allocator) !void {
         @as(usize, 1),
         loaded.history[0].assistant.execution.files.len,
     );
+    try std.testing.expect(loaded.history[0].assistant.reasoning == null);
+    try std.testing.expect(loaded.history[0].assistant.reasoning_item_id == null);
+    try std.testing.expect(loaded.history[0].assistant.reasoning_encrypted_content == null);
+    try std.testing.expect(loaded.history[0].assistant.responses_message_output_index == null);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        loaded.history[0].assistant.responses_provider_output_items.len,
+    );
+    try std.testing.expect(!loaded.history[0].assistant.responses_output_sequence_complete);
+    const legacy_step = loaded.history[0].assistant.execution.tool_steps[0];
+    try std.testing.expect(legacy_step.responses_message_output_index == null);
+    try std.testing.expectEqual(@as(usize, 0), legacy_step.responses_provider_output_items.len);
+    try std.testing.expect(!legacy_step.responses_output_sequence_complete);
+    try std.testing.expect(legacy_step.tool_calls[0].responses_output_index == null);
+    const step = loaded.history[0].assistant.execution.tool_steps[0];
+    try std.testing.expect(step.reasoning == null);
+    try std.testing.expect(step.reasoning_item_id == null);
+    try std.testing.expect(step.reasoning_encrypted_content == null);
     try std.testing.expectEqual(
         @as(usize, 1),
         loaded.history[0].assistant.execution.tool_steps[0].tool_results[0].permission_feedback.len,

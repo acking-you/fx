@@ -9,6 +9,7 @@ const output_contracts = @import("../output/output_contracts.zig");
 const web_search_provider = @import("../tooling/web_search_provider.zig");
 const model_catalog = @import("model_catalog.zig");
 const model_catalog_metadata = @import("model_catalog_metadata.zig");
+const responses_compaction_provider = @import("responses_compaction_provider.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -62,6 +63,7 @@ pub const CliModelCatalogProvider = struct {
 pub const CreditsLookupInput = struct {
     credential: ?[]const u8,
     tenant: ?[]const u8,
+    credential_source: ?credentials.Source = null,
 };
 
 pub const FetchCreditsFn = *const fn (
@@ -86,12 +88,43 @@ pub const CreditsProvider = struct {
     }
 };
 
+pub const AccountUsageLookupInput = struct {
+    credential: ?[]const u8,
+    account_id: ?[]const u8,
+    credential_source: ?credentials.Source = null,
+    cancel_flag: ?*std.atomic.Value(bool) = null,
+};
+
+pub const FetchAccountUsageFn = *const fn (
+    ?*anyopaque,
+    Allocator,
+    AccountUsageLookupInput,
+) output_contracts.CodexAccountUsageSnapshot;
+
+pub const AccountUsageProvider = struct {
+    /// When set, context must remain valid until every in-flight `fetch` returns.
+    context: ?*anyopaque = null,
+    fetch_fn: FetchAccountUsageFn,
+
+    /// The returned snapshot owns all parsed provider fields. The caller must
+    /// call `CodexAccountUsageSnapshot.deinit`.
+    pub fn fetch(
+        self: AccountUsageProvider,
+        alloc: Allocator,
+        input: AccountUsageLookupInput,
+    ) output_contracts.CodexAccountUsageSnapshot {
+        return self.fetch_fn(self.context, alloc, input);
+    }
+};
+
 pub const Provider = struct {
     agent_stream: agent_stream_provider.Provider,
     oauth_transport: oauth_transport.Provider,
     chat_url: ChatUrlProvider,
     cli_model_catalog: CliModelCatalogProvider,
     credits: CreditsProvider,
+    account_usage: ?AccountUsageProvider = null,
+    responses_compaction: ?responses_compaction_provider.Provider = null,
     generation_usage: generation_usage_provider.Provider,
     web_search: web_search_provider.Provider,
     model_catalog: model_catalog.Provider,
@@ -132,6 +165,41 @@ test "credits lookup dispatches through the injected provider" {
     try std.testing.expectEqual(@as(usize, 1), fake.calls);
     try std.testing.expect(fake.saw_expected_input);
     try std.testing.expectEqualStrings("10", snapshot.balance.?);
+}
+
+test "account usage lookup dispatches the bound Codex identity" {
+    const Fake = struct {
+        calls: usize = 0,
+        saw_identity: bool = false,
+
+        fn fetch(
+            raw: ?*anyopaque,
+            _: Allocator,
+            input: AccountUsageLookupInput,
+        ) output_contracts.CodexAccountUsageSnapshot {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            self.calls += 1;
+            self.saw_identity = input.credential_source == .codex_oauth and
+                std.mem.eql(u8, input.credential orelse "", "access") and
+                std.mem.eql(u8, input.account_id orelse "", "account");
+            return .{};
+        }
+    };
+
+    var fake: Fake = .{};
+    const provider = AccountUsageProvider{
+        .context = &fake,
+        .fetch_fn = Fake.fetch,
+    };
+    var snapshot = provider.fetch(std.testing.allocator, .{
+        .credential = "access",
+        .account_id = "account",
+        .credential_source = .codex_oauth,
+    });
+    defer snapshot.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), fake.calls);
+    try std.testing.expect(fake.saw_identity);
 }
 
 const CapabilityResolverState = enum {

@@ -4,6 +4,7 @@ const types = @import("../../shared/types.zig");
 const debug_trace = @import("../../shared/debug_trace.zig");
 const deps_mod = @import("deps.zig");
 const execution_memory = @import("execution_memory.zig");
+const durable_execution_memory = @import("../execution_memory.zig");
 const lifecycle_runtime = @import("lifecycle.zig");
 const telemetry = @import("telemetry.zig");
 const worker_runtime = @import("../worker_runtime.zig");
@@ -39,6 +40,8 @@ pub const TurnFinalizationGuard = struct {
     turn_id: u64,
     lifecycle: LifecycleContext,
     state: State = .open,
+    auto_compact_after_finish: bool = false,
+    auto_compact_after_finish_local_only: bool = false,
 
     pub fn init(
         deps: *const AgentRuntimeDeps,
@@ -51,6 +54,15 @@ pub const TurnFinalizationGuard = struct {
             .turn_id = turn_id,
             .lifecycle = lifecycle_context,
         };
+    }
+
+    pub fn requestAutoCompaction(
+        self: *TurnFinalizationGuard,
+        local_only: bool,
+    ) void {
+        self.auto_compact_after_finish = true;
+        self.auto_compact_after_finish_local_only =
+            self.auto_compact_after_finish_local_only or local_only;
     }
 
     pub fn finish(
@@ -89,6 +101,9 @@ pub const TurnFinalizationGuard = struct {
         if (finished_prompt) |finished| {
             var qualified_finished = finished;
             qualified_finished.terminal_outcome = outcome;
+            qualified_finished.auto_compact_after_finish = self.auto_compact_after_finish;
+            qualified_finished.auto_compact_after_finish_local_only =
+                self.auto_compact_after_finish_local_only;
             try self.deps.push_event(self.deps.ctx, .{ .finish_prompt = qualified_finished });
         }
     }
@@ -106,9 +121,66 @@ pub fn finishAssistantTerminalWithExecution(
     finish_trace: *PromptFinishTrace,
     trace_outcome: []const u8,
 ) !void {
+    return finishAssistantTerminalWithExecutionAndReasoning(
+        deps,
+        finalization,
+        job,
+        execution,
+        summary,
+        assistant_text,
+        null,
+        null,
+        null,
+        &.{},
+        &.{},
+        null,
+        false,
+        outcome,
+        disposition,
+        finish_trace,
+        trace_outcome,
+    );
+}
+
+pub fn finishAssistantTerminalWithExecutionAndReasoning(
+    deps: *const AgentRuntimeDeps,
+    finalization: *TurnFinalizationGuard,
+    job: QueuedPrompt,
+    execution: types.ExecutionMemory,
+    summary: *TurnSummaryAccumulator,
+    assistant_text: []const u8,
+    reasoning: ?[]const u8,
+    reasoning_item_id: ?[]const u8,
+    reasoning_encrypted_content: ?[]const u8,
+    reasoning_items: []const types.ResponsesReasoningItem,
+    provider_output_items: []const types.ResponsesProviderOutputItem,
+    message_output_index: ?u32,
+    output_sequence_complete: bool,
+    outcome: types.TurnPresentationOutcome,
+    disposition: ?types.ProviderCompletionDisposition,
+    finish_trace: *PromptFinishTrace,
+    trace_outcome: []const u8,
+) !void {
+    const maybe_provider_output_items = try durable_execution_memory.dupePersistableResponsesProviderOutputItems(
+        std.heap.c_allocator,
+        provider_output_items,
+    );
+    const persisted_provider_output_items = maybe_provider_output_items orelse &.{};
+    defer types.freeResponsesProviderOutputItems(
+        std.heap.c_allocator,
+        persisted_provider_output_items,
+    );
     const turn: HistoryTurn = .{ .assistant = .{
         .user = .{ .text = job.prompt, .images = job.images },
         .assistant = @constCast(assistant_text),
+        .responses_message_output_index = message_output_index,
+        .reasoning = if (reasoning) |value| @constCast(value) else null,
+        .reasoning_item_id = if (reasoning_item_id) |value| @constCast(value) else null,
+        .reasoning_encrypted_content = if (reasoning_encrypted_content) |value| @constCast(value) else null,
+        .reasoning_items = @constCast(reasoning_items),
+        .responses_provider_output_items = @constCast(persisted_provider_output_items),
+        .responses_output_sequence_complete = output_sequence_complete and
+            maybe_provider_output_items != null,
         .execution = execution,
     } };
     const finished = try types.dupeFinishedPrompt(

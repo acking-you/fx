@@ -3,6 +3,11 @@ const builtin = @import("builtin");
 const question_answer = @import("../agent/question_answer.zig");
 const config_runtime = @import("../config/config_runtime.zig");
 const model_capabilities = @import("../config/model_capabilities.zig");
+const stream_provider = @import("../agent/stream_provider.zig");
+const worker_runtime = @import("../agent/worker_runtime.zig");
+const responses_compaction_provider = @import("../gateway/responses_compaction_provider.zig");
+const responses_compaction_binding = @import("../gateway/responses_compaction_binding.zig");
+const provider_route = @import("../gateway/provider_route.zig");
 const assistant_presentation = @import("../agent/assistant_presentation.zig");
 const tool_presentation = @import("../agent/runtime/tool_presentation.zig");
 const debug_trace = @import("../shared/debug_trace.zig");
@@ -41,6 +46,7 @@ const subagent_resume_admission = @import("../subagent/resume_admission.zig");
 const tool_set_contract = @import("../tooling/tool_set.zig");
 const builtin_tools = @import("../../builtins/tools.zig");
 const types = @import("../shared/types.zig");
+const secret = @import("../auth/secret.zig");
 const permissions = @import("../permissions/permissions.zig");
 const session_permission_state = @import("../permissions/session_permission_state.zig");
 const mcp_access = @import("../mcp/access_policy.zig");
@@ -50,6 +56,64 @@ const ui_input = @import("../../ui/input/runtime.zig");
 const ui_render = @import("../../ui/render.zig");
 
 const Allocator = std.mem.Allocator;
+
+pub const CompactHistoryOutcome = enum {
+    unchanged,
+    compacted_locally,
+    remote_started,
+    remote_busy,
+    local_after_remote_failure,
+};
+
+pub fn shouldBeginAutomaticCompaction(
+    source: types.CredentialSource,
+    has_remote_candidate: bool,
+    active_context_tokens: u64,
+    capabilities: model_capabilities.Capabilities,
+) bool {
+    const route = provider_route.fromCredentialSource(source) orelse return false;
+    if (route.contract().wire_api != .openai_responses or !has_remote_candidate) return false;
+    const limit = model_capabilities.autoCompactTokenLimit(capabilities) orelse return false;
+    return active_context_tokens >= @as(u64, limit);
+}
+
+test "automatic compaction follows direct Responses total-token threshold" {
+    const capabilities: model_capabilities.Capabilities = .{
+        .context_window = 272_000,
+        .auto_compact_token_limit = 244_800,
+        .effective_context_window_percent = 95,
+    };
+    try std.testing.expect(!shouldBeginAutomaticCompaction(
+        .codex_oauth,
+        true,
+        244_799,
+        capabilities,
+    ));
+    try std.testing.expect(shouldBeginAutomaticCompaction(
+        .codex_oauth,
+        true,
+        244_800,
+        capabilities,
+    ));
+    try std.testing.expect(shouldBeginAutomaticCompaction(
+        .openai_api_key,
+        true,
+        244_800,
+        capabilities,
+    ));
+    try std.testing.expect(!shouldBeginAutomaticCompaction(
+        .ai_gateway_api_key,
+        true,
+        244_800,
+        capabilities,
+    ));
+    try std.testing.expect(!shouldBeginAutomaticCompaction(
+        .codex_oauth,
+        false,
+        244_800,
+        capabilities,
+    ));
+}
 
 const BackgroundSessionPolicy = enum {
     carry_forward,
@@ -1072,6 +1136,224 @@ const PendingCancelledCommand = struct {
     }
 };
 
+const ResponsesCompactionTaskRuntime = struct {
+    const PublishFn = *const fn (
+        context: *anyopaque,
+        event: types.ResponsesCompactionWorkerEvent,
+    ) anyerror!void;
+
+    const Task = struct {
+        thread: ?std.Thread = null,
+        cancel_requested: std.atomic.Value(bool) = .init(false),
+        provider: responses_compaction_provider.Provider,
+        publish_context: *anyopaque,
+        publish_fn: PublishFn,
+        generation: u64,
+        automatic: bool = false,
+        expected_history_generation: u64,
+        expected_history_len: usize,
+        expected_context_history_start: usize,
+        session_id: ?[]u8,
+        credential_source: types.CredentialSource,
+        credential: []u8,
+        account_id: ?[]u8,
+        model: []u8,
+        wire_model: []u8,
+        provider_binding: types.ResponsesCompactionProviderBinding,
+        system_prompt: []u8,
+        model_prompt_overlay: ?[]u8,
+        serialized_tools: []u8,
+        history: []types.HistoryTurn,
+        provider_options: model_capabilities.ResolvedProviderOptions,
+
+        fn deinit(self: *Task) void {
+            self.cancel_requested.store(true, .seq_cst);
+            if (comptime builtin.single_threaded) {
+                std.debug.assert(self.thread == null);
+            } else if (self.thread) |thread| {
+                thread.join();
+            }
+            const alloc = std.heap.c_allocator;
+            if (self.session_id) |id| alloc.free(id);
+            secret.zeroAndFree(alloc, self.credential);
+            if (self.account_id) |account| alloc.free(account);
+            alloc.free(self.model);
+            alloc.free(self.wire_model);
+            types.freeResponsesCompactionProviderBinding(alloc, self.provider_binding);
+            alloc.free(self.system_prompt);
+            if (self.model_prompt_overlay) |overlay| alloc.free(overlay);
+            alloc.free(self.serialized_tools);
+            types.freeHistoryTurnSlice(alloc, self.history);
+            alloc.destroy(self);
+        }
+    };
+
+    active: ?*Task = null,
+    next_generation: u64 = 1,
+
+    fn allocateGeneration(self: *ResponsesCompactionTaskRuntime) u64 {
+        const generation = self.next_generation;
+        self.next_generation +%= 1;
+        if (self.next_generation == 0) self.next_generation = 1;
+        return generation;
+    }
+
+    fn start(self: *ResponsesCompactionTaskRuntime, task: *Task) !void {
+        if (self.active != null) return error.ResponsesCompactionBusy;
+        if (comptime builtin.single_threaded) {
+            // WASM has no worker threads. Keep the same provider/result event
+            // contract, but run the bounded request inline and let the normal
+            // worker-event drain install or fall back from its owned result.
+            self.active = task;
+            threadMain(task);
+            return;
+        }
+        // Ownership transfers only after spawn succeeds. This makes every
+        // snapshot-construction failure follow one caller-owned cleanup path.
+        task.thread = try std.Thread.spawn(.{}, threadMain, .{task});
+        self.active = task;
+    }
+
+    fn isActive(self: *const ResponsesCompactionTaskRuntime) bool {
+        return self.active != null;
+    }
+
+    fn takeCompletedGeneration(
+        self: *ResponsesCompactionTaskRuntime,
+        generation: u64,
+    ) ?*Task {
+        const task = self.active orelse return null;
+        if (task.generation != generation) return null;
+        self.active = null;
+        return task;
+    }
+
+    fn deinit(self: *ResponsesCompactionTaskRuntime) void {
+        const task = self.active;
+        self.active = null;
+        if (task) |active| active.deinit();
+        self.* = .{};
+    }
+
+    fn threadMain(task: *Task) void {
+        run(task) catch |err| publishFailure(task, @errorName(err)) catch {};
+    }
+
+    fn run(task: *Task) !void {
+        const backing = std.heap.c_allocator;
+        var arena_state = std.heap.ArenaAllocator.init(backing);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+
+        var messages: std.ArrayList(types.ChatMessage) = .empty;
+        if (task.system_prompt.len > 0) {
+            try messages.append(arena, .{ .role = .system, .content = task.system_prompt });
+        }
+        if (task.model_prompt_overlay) |overlay| {
+            if (overlay.len > 0) {
+                try messages.append(arena, .{ .role = .system, .content = overlay });
+            }
+        }
+        try session_runtime.appendHistoryChatMessages(arena, &messages, task.history);
+
+        const outcome = try task.provider.fetch(backing, .{
+            .credential = task.credential,
+            .account_id = task.account_id,
+            .provider_binding = task.provider_binding.view(),
+            .build_request = .{
+                .credential_source = task.credential_source,
+                .session_id = task.session_id,
+                .model = task.model,
+                .serialized_tools = task.serialized_tools,
+                .messages = messages.items,
+                .tool_choice = .auto,
+                .provider_options = task.provider_options,
+                .budget = .{ .cancel_flag = &task.cancel_requested },
+            },
+        });
+        switch (outcome) {
+            .unsupported => try publishFailure(task, "ResponsesCompactionUnsupported"),
+            .rejected => |status| try publishRejected(task, status),
+            .compacted => |completed| try publishCompleted(task, completed),
+        }
+    }
+
+    fn eventBase(task: *Task) !types.ResponsesCompactionWorkerEvent {
+        const alloc = std.heap.c_allocator;
+        const session_id = if (task.session_id) |id| try alloc.dupe(u8, id) else null;
+        errdefer if (session_id) |id| alloc.free(id);
+        const wire_model = try alloc.dupe(u8, task.wire_model);
+        errdefer alloc.free(wire_model);
+        const provider_binding = try types.dupeResponsesCompactionProviderBinding(
+            alloc,
+            task.provider_binding.view(),
+        );
+        errdefer types.freeResponsesCompactionProviderBinding(alloc, provider_binding);
+        return .{
+            .generation = task.generation,
+            .automatic = task.automatic,
+            .expected_history_generation = task.expected_history_generation,
+            .expected_history_len = task.expected_history_len,
+            .expected_context_history_start = task.expected_context_history_start,
+            .session_id = session_id,
+            .credential_source = task.credential_source,
+            .wire_model = wire_model,
+            .provider_binding = provider_binding,
+            // A valid placeholder keeps allocation failures in callers safe:
+            // their errdefer may destroy this event before replacing outcome.
+            .outcome = .{ .rejected = .internal_server_error },
+        };
+    }
+
+    fn publishFailure(task: *Task, error_name: []const u8) !void {
+        const alloc = std.heap.c_allocator;
+        var event = try eventBase(task);
+        var owns_event = true;
+        errdefer if (owns_event) types.freeResponsesCompactionWorkerEvent(alloc, event);
+        event.outcome = .{ .failed = try alloc.dupe(u8, error_name) };
+        try task.publish_fn(task.publish_context, event);
+        owns_event = false;
+    }
+
+    fn publishRejected(task: *Task, status: std.http.Status) !void {
+        const alloc = std.heap.c_allocator;
+        var event = try eventBase(task);
+        var owns_event = true;
+        errdefer if (owns_event) types.freeResponsesCompactionWorkerEvent(alloc, event);
+        event.outcome = .{ .rejected = status };
+        try task.publish_fn(task.publish_context, event);
+        owns_event = false;
+    }
+
+    fn publishCompleted(
+        task: *Task,
+        completed: responses_compaction_provider.Completed,
+    ) !void {
+        const alloc = std.heap.c_allocator;
+        var owns_input = true;
+        defer alloc.free(completed.wire_model);
+        errdefer if (owns_input) alloc.free(completed.input_json);
+        if (completed.credential_source != task.credential_source or
+            !std.mem.eql(u8, completed.wire_model, task.wire_model))
+        {
+            alloc.free(completed.input_json);
+            owns_input = false;
+            return publishFailure(task, "ResponsesCompactionIdentityMismatch");
+        }
+
+        var event = try eventBase(task);
+        var owns_event = true;
+        errdefer if (owns_event) types.freeResponsesCompactionWorkerEvent(alloc, event);
+        event.outcome = .{ .compacted = .{
+            .input_json = completed.input_json,
+            .usage = completed.usage,
+        } };
+        owns_input = false;
+        try task.publish_fn(task.publish_context, event);
+        owns_event = false;
+    }
+};
+
 pub const Persistence = struct {
     // Serializes event-log mutations with worker usage callbacks. Usage takes
     // its checkpoint mutex first, so callers must not checkpoint while held.
@@ -1086,6 +1368,7 @@ pub const Persistence = struct {
     process_model_override: ?[]u8 = null,
     session_picker: SessionPicker = .{},
     session_picker_load: SessionPickerLoad = .{},
+    responses_compaction_tasks: ResponsesCompactionTaskRuntime = .{},
     session_picker_current_cache: SessionPickerPageCache = .{},
     session_picker_all_cache: SessionPickerPageCache = .{},
     degraded_warning_emitted: bool = false,
@@ -1119,6 +1402,7 @@ pub const Persistence = struct {
         if (self.process_model_override) |model| alloc.free(model);
         self.session_picker.deinit(alloc);
         self.session_picker_load.deinit();
+        self.responses_compaction_tasks.deinit();
         self.session_picker_current_cache.deinit();
         self.session_picker_all_cache.deinit();
         self.* = .{};
@@ -2399,6 +2683,47 @@ pub fn Runtime(comptime App: type) type {
                 .strict,
                 finished.snapshot_file_ownership,
             );
+            if (finished.auto_compact_after_finish and
+                comptime @hasField(App, "auth") and
+                    @hasField(App, "selected_model") and
+                    @hasDecl(App, "responsesCompactionProvider"))
+            {
+                const outcome: CompactHistoryOutcome = blk: {
+                    if (finished.auto_compact_after_finish_local_only) {
+                        break :blk if (compactHistoryFullyLocally(app) catch |err| {
+                            debug_trace.logf(
+                                "session",
+                                "event=post_turn_auto_compaction outcome=failed err={s}",
+                                .{@errorName(err)},
+                            );
+                            writeCompactionNotice(
+                                app,
+                                .warning,
+                                "Automatic post-turn local context compaction failed.",
+                            );
+                            return;
+                        }) .compacted_locally else .unchanged;
+                    }
+                    break :blk autoCompactHistory(app) catch |err| {
+                        debug_trace.logf(
+                            "session",
+                            "event=post_turn_auto_compaction outcome=failed err={s}",
+                            .{@errorName(err)},
+                        );
+                        writeCompactionNotice(
+                            app,
+                            .warning,
+                            "Automatic post-turn context compaction failed.",
+                        );
+                        return;
+                    };
+                };
+                debug_trace.logf(
+                    "session",
+                    "event=post_turn_auto_compaction outcome={s}",
+                    .{@tagName(outcome)},
+                );
+            }
         }
 
         pub fn persistUsageCheckpoint(
@@ -2780,11 +3105,122 @@ pub fn Runtime(comptime App: type) type {
             };
         }
 
-        pub fn compactHistory(app: *App) !void {
+        pub fn beginAutomaticCompactionIfNeeded(app: *App) !bool {
+            const credential = app.auth.gatewayCredential() orelse return false;
+            const capabilities = model_capabilities.resolveForApp(
+                App,
+                app,
+                app.selected_model.items,
+            );
+            const active_context_tokens = app.total_input_tokens +| app.total_output_tokens;
+            if (!shouldBeginAutomaticCompaction(
+                credential.source,
+                app.session.hasRemoteCompactionCandidate(),
+                active_context_tokens,
+                capabilities,
+            )) return false;
+            if (!app.worker.tryHoldTurnStart()) return false;
+            errdefer app.worker.releaseTurnStartHold();
+
+            const outcome = try autoCompactHistory(app);
+            if (outcome != .remote_started) {
+                app.worker.releaseTurnStartHold();
+                return false;
+            }
+            writeCompactionNotice(
+                app,
+                .neutral,
+                "Context limit reached; compacting before the next turn.",
+            );
+            return true;
+        }
+
+        pub fn compactHistory(app: *App) !CompactHistoryOutcome {
+            return compactHistoryWithTrigger(app, false);
+        }
+
+        pub fn autoCompactHistory(app: *App) !CompactHistoryOutcome {
+            return compactHistoryWithTrigger(app, true);
+        }
+
+        fn compactHistoryWithTrigger(app: *App, automatic: bool) !CompactHistoryOutcome {
+            const credential = app.auth.gatewayCredential() orelse {
+                if (!app.session.hasCompactionCandidate()) return .unchanged;
+                return if (try compactHistoryLocally(app))
+                    .compacted_locally
+                else
+                    .unchanged;
+            };
+            const route = provider_route.fromCredentialSource(credential.source) orelse {
+                if (!app.session.hasCompactionCandidate()) return .unchanged;
+                return if (try compactHistoryLocally(app))
+                    .compacted_locally
+                else
+                    .unchanged;
+            };
+            if (route.contract().remote_compaction == .unsupported) {
+                if (!app.session.hasCompactionCandidate()) return .unchanged;
+                return if (try compactHistoryLocally(app))
+                    .compacted_locally
+                else
+                    .unchanged;
+            }
+            if (!app.session.hasRemoteCompactionCandidate()) return .unchanged;
+            const provider = if (comptime @hasDecl(App, "responsesCompactionProvider"))
+                app.responsesCompactionProvider()
+            else
+                null;
+            const remote_provider = provider orelse {
+                return if (try compactHistoryFullyLocally(app))
+                    .compacted_locally
+                else
+                    .unchanged;
+            };
+            if (app.session_persistence.responses_compaction_tasks.isActive()) {
+                return .remote_busy;
+            }
+
+            startResponsesCompactionTask(app, remote_provider, credential, route, automatic) catch |err| {
+                debug_trace.logf(
+                    "session",
+                    "event=responses_compaction_start outcome=local_fallback err={s}",
+                    .{@errorName(err)},
+                );
+                return if (try compactHistoryFullyLocally(app))
+                    .local_after_remote_failure
+                else
+                    .unchanged;
+            };
+            return .remote_started;
+        }
+
+        fn compactHistoryLocally(app: *App) !bool {
             const previous_start = app.session.contextHistoryStart();
             app.session.forceCompaction();
-            if (app.session.contextHistoryStart() == previous_start) return;
+            if (app.session.contextHistoryStart() == previous_start) return false;
+            refreshContextUsageAfterCompaction(app);
+            try persistCompactionState(app);
+            return true;
+        }
 
+        fn compactHistoryFullyLocally(app: *App) !bool {
+            if (!try app.session.installLocalCompaction(app.alloc)) return false;
+            refreshContextUsageAfterCompaction(app);
+            try persistCompactionState(app);
+            return true;
+        }
+
+        fn refreshContextUsageAfterCompaction(app: *App) void {
+            if (comptime @hasField(App, "total_input_tokens") and @hasField(App, "total_output_tokens")) {
+                app.total_input_tokens = std.math.cast(
+                    u64,
+                    app.session.estimatedContextTokens(),
+                ) orelse std.math.maxInt(u64);
+                app.total_output_tokens = 0;
+            }
+        }
+
+        fn persistCompactionState(app: *App) !void {
             commitJsHostSnapshot(app, "compaction");
 
             app.session_persistence.write_mutex.lockUncancelable(io_mod.getIo());
@@ -2795,6 +3231,405 @@ pub fn Runtime(comptime App: type) type {
                 return;
             try convergeDegraded(app, loaded, .{});
             try commitCurrentStateReplacement(app, loaded, .compaction, .{}, false);
+        }
+
+        fn startResponsesCompactionTask(
+            app: *App,
+            provider: responses_compaction_provider.Provider,
+            credential: anytype,
+            route: provider_route.ProviderRoute,
+            automatic: bool,
+        ) !void {
+            const alloc = std.heap.c_allocator;
+            const tasks = &app.session_persistence.responses_compaction_tasks;
+            if (tasks.isActive()) return error.ResponsesCompactionBusy;
+
+            var snapshots_owned_by_task = false;
+            const session_id = if (activeSessionId(app)) |id|
+                try alloc.dupe(u8, id)
+            else
+                null;
+            errdefer if (!snapshots_owned_by_task) {
+                if (session_id) |id| alloc.free(id);
+            };
+            const credential_copy = try alloc.dupe(u8, credential.api_key);
+            errdefer if (!snapshots_owned_by_task) secret.zeroAndFree(alloc, credential_copy);
+            const account_id = if (credential.account_id) |id|
+                try alloc.dupe(u8, id)
+            else
+                null;
+            errdefer if (!snapshots_owned_by_task) {
+                if (account_id) |id| alloc.free(id);
+            };
+            if (route == .codex_responses_oauth and account_id == null) {
+                return error.MissingCodexAccountId;
+            }
+
+            const model = try alloc.dupe(u8, app.selected_model.items);
+            errdefer if (!snapshots_owned_by_task) alloc.free(model);
+            const wire_model = try alloc.dupe(
+                u8,
+                provider_route.wireModel(route, app.selected_model.items),
+            );
+            errdefer if (!snapshots_owned_by_task) alloc.free(wire_model);
+            const provider_binding = try responses_compaction_binding.buildFromEnvironmentAlloc(
+                alloc,
+                credential.source,
+                credential.api_key,
+                credential.account_id,
+            );
+            errdefer if (!snapshots_owned_by_task) {
+                types.freeResponsesCompactionProviderBinding(alloc, provider_binding);
+            };
+
+            const prompt_policy = app.promptPolicy();
+            const system_prompt = try alloc.dupe(u8, prompt_policy.system_prompt);
+            errdefer if (!snapshots_owned_by_task) alloc.free(system_prompt);
+            const model_prompt_overlay = if (prompt_policy.modelPromptOverlay(
+                app.selected_model.items,
+            )) |overlay|
+                try alloc.dupe(u8, overlay)
+            else
+                null;
+            errdefer if (!snapshots_owned_by_task) {
+                if (model_prompt_overlay) |overlay| alloc.free(overlay);
+            };
+
+            var projection = try app.snapshotGatewayToolProjection(
+                alloc,
+                app.permission_engine.mode,
+            );
+            defer projection.deinit(alloc);
+            const serialized_tools = try alloc.dupe(u8, projection.tools_json);
+            errdefer if (!snapshots_owned_by_task) alloc.free(serialized_tools);
+            const history = try app.session.snapshotContextHistory(alloc);
+            errdefer if (!snapshots_owned_by_task) {
+                types.freeHistoryTurnSlice(alloc, history);
+            };
+
+            const capabilities = model_capabilities.resolveForApp(
+                App,
+                app,
+                app.selected_model.items,
+            );
+            const provider_options = model_capabilities.resolveProviderOptionsForCapabilities(
+                capabilities,
+                app.effort,
+                app.fast_mode,
+            );
+            const task = try alloc.create(ResponsesCompactionTaskRuntime.Task);
+            task.* = .{
+                .provider = provider,
+                .publish_context = @ptrCast(app),
+                .publish_fn = publishResponsesCompactionEvent,
+                .generation = tasks.allocateGeneration(),
+                .automatic = automatic,
+                .expected_history_generation = app.session.historyGeneration(),
+                .expected_history_len = app.session.historyLen(),
+                .expected_context_history_start = app.session.contextHistoryStart(),
+                .session_id = session_id,
+                .credential_source = credential.source,
+                .credential = credential_copy,
+                .account_id = account_id,
+                .model = model,
+                .wire_model = wire_model,
+                .provider_binding = provider_binding,
+                .system_prompt = system_prompt,
+                .model_prompt_overlay = model_prompt_overlay,
+                .serialized_tools = serialized_tools,
+                .history = history,
+                .provider_options = provider_options,
+            };
+            snapshots_owned_by_task = true;
+            tasks.start(task) catch |err| {
+                task.deinit();
+                return err;
+            };
+            debug_trace.logf(
+                "session",
+                "event=responses_compaction_start outcome=started generation={d} source={s} model={s}",
+                .{ task.generation, @tagName(task.credential_source), task.wire_model },
+            );
+        }
+
+        fn publishResponsesCompactionEvent(
+            raw: *anyopaque,
+            event: types.ResponsesCompactionWorkerEvent,
+        ) !void {
+            const app: *App = @ptrCast(@alignCast(raw));
+            // The provider thread only queues owned data. Session and
+            // transcript mutation remain exclusively on the UI drain.
+            try app.worker.pushOwnedEvent(
+                std.heap.c_allocator,
+                .{ .responses_compaction = event },
+            );
+        }
+
+        pub fn applyResponsesCompactionEvent(
+            app: *App,
+            event: types.ResponsesCompactionWorkerEvent,
+        ) void {
+            const task = app.session_persistence.responses_compaction_tasks
+                .takeCompletedGeneration(event.generation) orelse {
+                debug_trace.logf(
+                    "session",
+                    "event=responses_compaction_result outcome=ignored reason=unknown_generation generation={d}",
+                    .{event.generation},
+                );
+                return;
+            };
+            // Publishing is the final worker action. Joining here cannot hold
+            // a persistence/session lock and normally only reaps the thread.
+            task.deinit();
+            defer if (event.automatic) resumePromptAfterAutomaticCompaction(app);
+
+            if (!optionalStringsEqual(activeSessionId(app), event.session_id)) {
+                debug_trace.logf(
+                    "session",
+                    "event=responses_compaction_result outcome=discarded reason=session_changed generation={d}",
+                    .{event.generation},
+                );
+                writeCompactionNotice(
+                    app,
+                    .warning,
+                    "Remote context compaction finished after the active session changed; no context was changed.",
+                );
+                return;
+            }
+
+            const history_matches = app.session.historyGeneration() ==
+                event.expected_history_generation and
+                app.session.historyLen() == event.expected_history_len and
+                app.session.contextHistoryStart() ==
+                    event.expected_context_history_start;
+            const credential = app.auth.gatewayCredential();
+            const source_matches = credential != null and
+                credential.?.source == event.credential_source;
+            const route = if (credential) |current|
+                provider_route.fromCredentialSource(current.source)
+            else
+                null;
+            const model_matches = if (route) |current_route|
+                std.mem.eql(
+                    u8,
+                    provider_route.wireModel(current_route, app.selected_model.items),
+                    event.wire_model,
+                )
+            else
+                false;
+            const current_binding: ?types.ResponsesCompactionProviderBinding = if (credential) |current|
+                responses_compaction_binding.buildFromEnvironmentAlloc(
+                    app.alloc,
+                    current.source,
+                    current.api_key,
+                    current.account_id,
+                ) catch null
+            else
+                null;
+            defer if (current_binding) |binding| {
+                types.freeResponsesCompactionProviderBinding(app.alloc, binding);
+            };
+            const binding_matches = if (current_binding) |binding|
+                responses_compaction_binding.eql(
+                    binding.view(),
+                    event.provider_binding.view(),
+                )
+            else
+                false;
+
+            if (!history_matches or !source_matches or !model_matches or !binding_matches) {
+                debug_trace.logf(
+                    "session",
+                    "event=responses_compaction_result outcome=local_fallback reason=stale history_match={} source_match={} model_match={} binding_match={}",
+                    .{ history_matches, source_matches, model_matches, binding_matches },
+                );
+                applyRemoteCompactionLocalFallback(app);
+                return;
+            }
+
+            switch (event.outcome) {
+                .rejected => |status| {
+                    debug_trace.logf(
+                        "session",
+                        "event=responses_compaction_result outcome=local_fallback reason=http_status status={d}",
+                        .{@intFromEnum(status)},
+                    );
+                    applyRemoteCompactionLocalFallback(app);
+                },
+                .failed => |name| {
+                    debug_trace.logf(
+                        "session",
+                        "event=responses_compaction_result outcome=local_fallback reason={s}",
+                        .{name},
+                    );
+                    applyRemoteCompactionLocalFallback(app);
+                },
+                .compacted => |completed| {
+                    const installed = app.session.installResponsesCompaction(
+                        app.alloc,
+                        event.credential_source,
+                        event.wire_model,
+                        completed.input_json,
+                        event.provider_binding.view(),
+                    ) catch |err| {
+                        debug_trace.logf(
+                            "session",
+                            "event=responses_compaction_result outcome=install_failed err={s}",
+                            .{@errorName(err)},
+                        );
+                        writeCompactionNotice(
+                            app,
+                            .@"error",
+                            "Remote context compaction returned a result, but fx could not install it. No local fallback was applied.",
+                        );
+                        return;
+                    };
+                    if (!installed) {
+                        writeCompactionNotice(
+                            app,
+                            .@"error",
+                            "Remote context compaction returned a result, but its history boundary was no longer installable. No local fallback was applied.",
+                        );
+                        return;
+                    }
+                    refreshContextUsageAfterCompaction(app);
+                    persistCompactionState(app) catch |err| {
+                        debug_trace.logf(
+                            "session",
+                            "event=responses_compaction_result outcome=persist_failed err={s}",
+                            .{@errorName(err)},
+                        );
+                        writeCompactionNotice(
+                            app,
+                            .@"error",
+                            "Remote context compaction was installed in memory, but fx could not persist it. No local fallback was applied.",
+                        );
+                        return;
+                    };
+                    recordResponsesCompactionUsage(
+                        app,
+                        event.wire_model,
+                        completed.usage,
+                    );
+                    debug_trace.logf(
+                        "session",
+                        "event=responses_compaction_result outcome=installed generation={d}",
+                        .{event.generation},
+                    );
+                    writeCompactionNotice(
+                        app,
+                        .neutral,
+                        "Context compacted with the active Responses provider.",
+                    );
+                },
+            }
+        }
+
+        fn resumePromptAfterAutomaticCompaction(app: *App) void {
+            if (comptime @hasDecl(@TypeOf(app.worker), "replaceHeldQueuedPromptHistory") and
+                @hasDecl(@TypeOf(app.worker), "releaseTurnStartHold"))
+            {
+                const alloc = std.heap.c_allocator;
+                const history = app.session.snapshotContextHistory(alloc) catch |err| {
+                    debug_trace.logf(
+                        "session",
+                        "event=auto_compaction_resume outcome=stale_history err={s}",
+                        .{@errorName(err)},
+                    );
+                    app.worker.releaseTurnStartHold();
+                    return;
+                };
+                if (!app.worker.replaceHeldQueuedPromptHistory(alloc, history)) {
+                    types.freeHistoryTurnSlice(alloc, history);
+                    debug_trace.logf(
+                        "session",
+                        "event=auto_compaction_resume outcome=no_held_prompt",
+                        .{},
+                    );
+                } else {
+                    debug_trace.logf(
+                        "session",
+                        "event=auto_compaction_resume outcome=history_refreshed",
+                        .{},
+                    );
+                }
+                app.worker.releaseTurnStartHold();
+            }
+        }
+
+        fn applyRemoteCompactionLocalFallback(app: *App) void {
+            const changed = compactHistoryFullyLocally(app) catch |err| {
+                debug_trace.logf(
+                    "session",
+                    "event=responses_compaction_fallback outcome=failed err={s}",
+                    .{@errorName(err)},
+                );
+                writeCompactionNotice(
+                    app,
+                    .@"error",
+                    "Remote context compaction failed, and fx could not persist the local fallback.",
+                );
+                return;
+            };
+            writeCompactionNotice(
+                app,
+                .warning,
+                if (changed)
+                    "Remote context compaction failed; context was compacted locally."
+                else
+                    "Remote context compaction failed; the context was already compacted locally.",
+            );
+        }
+
+        fn recordResponsesCompactionUsage(
+            app: *App,
+            model: []const u8,
+            usage: types.Usage,
+        ) void {
+            if (comptime !@hasField(@TypeOf(app.session), "usage")) return;
+            const observation = session_usage.GatewayObservation.begin(
+                &app.session.usage,
+            ) catch |err| {
+                debug_trace.logf(
+                    "session",
+                    "event=responses_compaction_usage outcome=reserve_failed err={s}",
+                    .{@errorName(err)},
+                );
+                return;
+            };
+            observation.completeDirect(app.alloc, model, usage, .{
+                .http_ok = true,
+                .terminal_finish_reason = null,
+            }) catch |err| {
+                debug_trace.logf(
+                    "session",
+                    "event=responses_compaction_usage outcome=record_failed err={s}",
+                    .{@errorName(err)},
+                );
+            };
+        }
+
+        fn optionalStringsEqual(a: ?[]const u8, b: ?[]const u8) bool {
+            if (a == null or b == null) return a == null and b == null;
+            return std.mem.eql(u8, a.?, b.?);
+        }
+
+        fn writeCompactionNotice(
+            app: *App,
+            tone: types.NoticeTone,
+            body: []const u8,
+        ) void {
+            app.writeDomainNotice(.{
+                .topic = "context",
+                .tone = tone,
+                .body = body,
+            }, true) catch |err| {
+                debug_trace.logf(
+                    "session",
+                    "event=responses_compaction_notice outcome=failed err={s}",
+                    .{@errorName(err)},
+                );
+            };
         }
 
         pub fn commitRuntimePreferences(
@@ -3112,6 +3947,9 @@ pub fn Runtime(comptime App: type) type {
         }
 
         pub fn finalizePersistence(app: *App) void {
+            // Cancel and join provider I/O before closing session state. No
+            // persistence/session lock is held across the join.
+            app.session_persistence.responses_compaction_tasks.deinit();
             if (app.session_persistence.writable) |*loaded| {
                 if (loaded.log.isParked()) {
                     app.session_persistence.resume_handoff_intent = .none;
@@ -3123,6 +3961,9 @@ pub fn Runtime(comptime App: type) type {
         }
 
         pub fn finalizePersistenceWithResumeHandoff(app: *App) ?ResumeHandoff {
+            // See finalizePersistence: the provider task must not outlive the
+            // session identity or publish into a destroyed worker queue.
+            app.session_persistence.responses_compaction_tasks.deinit();
             if (app.session_persistence.writable) |*loaded| {
                 if (loaded.log.isParked()) {
                     app.session_persistence.resume_handoff_intent = .none;
@@ -5016,10 +5857,28 @@ const FakeWorker = struct {
     model: std.ArrayList(u8) = .empty,
     effort: types.ReasoningEffort = .auto,
     fast_mode: bool = false,
+    responses_compaction_events: std.ArrayList(types.ResponsesCompactionWorkerEvent) = .empty,
 
     fn deinit(self: *FakeWorker, alloc: Allocator) void {
+        for (self.responses_compaction_events.items) |event| {
+            types.freeResponsesCompactionWorkerEvent(alloc, event);
+        }
+        self.responses_compaction_events.deinit(alloc);
         self.model.deinit(alloc);
         self.* = .{};
+    }
+
+    fn pushOwnedEvent(
+        self: *FakeWorker,
+        alloc: Allocator,
+        event: worker_runtime.WorkerEvent,
+    ) !void {
+        switch (event) {
+            .responses_compaction => |completed| {
+                try self.responses_compaction_events.append(alloc, completed);
+            },
+            else => return error.UnsupportedTestWorkerEvent,
+        }
     }
 
     pub fn queuedPromptCount(self: *const FakeWorker) usize {
@@ -5045,6 +5904,25 @@ const FakeWorker = struct {
 
     fn syncQueuedPromptFastMode(self: *FakeWorker, fast_mode: bool) void {
         self.fast_mode = fast_mode;
+    }
+};
+
+const CompactTestAuth = struct {
+    const Credential = struct {
+        api_key: []const u8,
+        gateway_team: ?[]const u8 = null,
+        account_id: ?[]const u8 = null,
+        source: types.CredentialSource,
+    };
+
+    credential: ?Credential = null,
+
+    fn gatewayCredential(self: *const CompactTestAuth) ?Credential {
+        return self.credential;
+    }
+
+    fn apiKey(self: *const CompactTestAuth) ?[]const u8 {
+        return if (self.credential) |credential| credential.api_key else null;
     }
 };
 
@@ -5081,6 +5959,7 @@ const ReplayEvent = enum {
 const TestApp = struct {
     alloc: Allocator,
     workspace_root: []u8,
+    auth: CompactTestAuth = .{},
     session: session_runtime.SessionRuntime = .{ .max_history_turns = 8 },
     session_persistence: Persistence = .{},
     session_title: std.ArrayList(u8) = .empty,
@@ -9830,4 +10709,423 @@ test "terminal title bounds session and model context" {
     try std.testing.expect(label.len <= Runtime(TestApp).terminal_title_label_max_bytes);
     try std.testing.expect(std.mem.find(u8, label, "...") != null);
     try std.testing.expect(std.mem.find(u8, label, " · provider/") != null);
+}
+
+fn unsupportedTestResponsesCompaction(
+    _: ?*anyopaque,
+    _: Allocator,
+    _: responses_compaction_provider.Request,
+) !responses_compaction_provider.Outcome {
+    return .unsupported;
+}
+
+fn discardTestResponsesCompactionEvent(
+    _: *anyopaque,
+    event: types.ResponsesCompactionWorkerEvent,
+) !void {
+    types.freeResponsesCompactionWorkerEvent(std.heap.c_allocator, event);
+}
+
+fn makeInertResponsesCompactionTask(
+    generation: u64,
+    session_id: ?[]const u8,
+) !*ResponsesCompactionTaskRuntime.Task {
+    const alloc = std.heap.c_allocator;
+    const task = try alloc.create(ResponsesCompactionTaskRuntime.Task);
+    errdefer alloc.destroy(task);
+    const owned_session_id = if (session_id) |id| try alloc.dupe(u8, id) else null;
+    errdefer if (owned_session_id) |id| alloc.free(id);
+    const credential = try alloc.dupe(u8, "test-token");
+    errdefer secret.zeroAndFree(alloc, credential);
+    const model = try alloc.dupe(u8, "gpt-5.6-sol");
+    errdefer alloc.free(model);
+    const wire_model = try alloc.dupe(u8, "gpt-5.6-sol");
+    errdefer alloc.free(wire_model);
+    const provider_binding = try types.dupeResponsesCompactionProviderBinding(alloc, .{
+        .normalized_origin = "https://chatgpt.com/backend-api/codex/responses",
+        .account_id = "account",
+    });
+    errdefer types.freeResponsesCompactionProviderBinding(alloc, provider_binding);
+    const system_prompt = try alloc.dupe(u8, "");
+    errdefer alloc.free(system_prompt);
+    const serialized_tools = try alloc.dupe(u8, "[]");
+    errdefer alloc.free(serialized_tools);
+    const history = try alloc.alloc(types.HistoryTurn, 0);
+    errdefer alloc.free(history);
+    task.* = .{
+        .provider = .{ .fetch_fn = unsupportedTestResponsesCompaction },
+        .publish_context = undefined,
+        .publish_fn = discardTestResponsesCompactionEvent,
+        .generation = generation,
+        .expected_history_generation = 0,
+        .expected_history_len = 0,
+        .expected_context_history_start = 0,
+        .session_id = owned_session_id,
+        .credential_source = .codex_oauth,
+        .credential = credential,
+        .account_id = null,
+        .model = model,
+        .wire_model = wire_model,
+        .provider_binding = provider_binding,
+        .system_prompt = system_prompt,
+        .model_prompt_overlay = null,
+        .serialized_tools = serialized_tools,
+        .history = history,
+        .provider_options = .{},
+    };
+    return task;
+}
+
+test "responses compaction provider callback only queues owned result" {
+    const alloc = std.testing.allocator;
+    var app = try TestApp.init(alloc, "/tmp/workspace");
+    defer app.deinit();
+    try app.session.appendAssistantHistoryTurn(alloc, "one", "reply one");
+    try app.session.appendAssistantHistoryTurn(alloc, "two", "reply two");
+    const generation = app.session.historyGeneration();
+    const boundary = app.session.contextHistoryStart();
+
+    const borrowed = types.ResponsesCompactionWorkerEvent{
+        .generation = 7,
+        .expected_history_generation = generation,
+        .expected_history_len = app.session.historyLen(),
+        .expected_context_history_start = boundary,
+        .credential_source = .codex_oauth,
+        .wire_model = @constCast("gpt-5.6-sol"),
+        .provider_binding = .{
+            .normalized_origin = @constCast("https://chatgpt.com/backend-api/codex/responses"),
+            .account_id = @constCast("account"),
+        },
+        .outcome = .{ .compacted = .{
+            .input_json = @constCast("[{\"type\":\"compaction\",\"encrypted_content\":\"opaque\"}]"),
+        } },
+    };
+    const owned = try types.dupeResponsesCompactionWorkerEvent(
+        std.heap.c_allocator,
+        borrowed,
+    );
+    var transferred = false;
+    defer if (!transferred) {
+        types.freeResponsesCompactionWorkerEvent(std.heap.c_allocator, owned);
+    };
+    try Runtime(TestApp).publishResponsesCompactionEvent(&app, owned);
+    transferred = true;
+
+    try std.testing.expectEqual(@as(usize, 1), app.worker.responses_compaction_events.items.len);
+    try std.testing.expectEqual(generation, app.session.historyGeneration());
+    try std.testing.expectEqual(boundary, app.session.contextHistoryStart());
+    try std.testing.expectEqual(@as(usize, 2), app.session.historyLen());
+}
+
+test "same-session stale remote compaction falls back locally exactly once" {
+    const alloc = std.testing.allocator;
+    var app = try TestApp.init(alloc, "/tmp/workspace");
+    defer app.deinit();
+    app.auth.credential = .{
+        .api_key = "token",
+        .account_id = "account",
+        .source = .codex_oauth,
+    };
+    try app.selected_model.appendSlice(alloc, "gpt-5.6-sol");
+    try app.session.appendAssistantHistoryTurn(alloc, "one", "reply one");
+    try app.session.appendAssistantHistoryTurn(alloc, "two", "reply two");
+    try app.session.appendAssistantHistoryTurn(alloc, "three", "reply three");
+    const before_generation = app.session.historyGeneration();
+
+    const task = try makeInertResponsesCompactionTask(11, null);
+    app.session_persistence.responses_compaction_tasks.active = task;
+    const event = types.ResponsesCompactionWorkerEvent{
+        .generation = 11,
+        .expected_history_generation = before_generation + 1,
+        .expected_history_len = app.session.historyLen(),
+        .expected_context_history_start = app.session.contextHistoryStart(),
+        .credential_source = .codex_oauth,
+        .wire_model = @constCast("gpt-5.6-sol"),
+        .provider_binding = .{
+            .normalized_origin = @constCast("https://chatgpt.com/backend-api/codex/responses"),
+            .account_id = @constCast("account"),
+        },
+        .outcome = .{ .compacted = .{
+            .input_json = @constCast("[{\"type\":\"compaction\",\"encrypted_content\":\"opaque\"}]"),
+        } },
+    };
+    Runtime(TestApp).applyResponsesCompactionEvent(&app, event);
+
+    try std.testing.expectEqual(@as(usize, 4), app.session.historyLen());
+    try std.testing.expectEqual(@as(usize, 3), app.session.contextHistoryStart());
+    try std.testing.expectEqual(before_generation + 1, app.session.historyGeneration());
+    try std.testing.expectEqual(@as(usize, 1), app.notices.items.len);
+
+    // A duplicate result has no active generation to consume and therefore
+    // cannot compact or notify a second time.
+    Runtime(TestApp).applyResponsesCompactionEvent(&app, event);
+    try std.testing.expectEqual(before_generation + 1, app.session.historyGeneration());
+    try std.testing.expectEqual(@as(usize, 1), app.notices.items.len);
+}
+
+const CompactionIdentityTestEnvironment = struct {
+    alloc: Allocator,
+    map: std.process.Environ.Map,
+
+    fn install(
+        alloc: Allocator,
+        responses_base_url: ?[]const u8,
+        organization: ?[]const u8,
+        project: ?[]const u8,
+    ) !*CompactionIdentityTestEnvironment {
+        _ = try stableEmptyTestEnviron();
+        const self = try alloc.create(CompactionIdentityTestEnvironment);
+        errdefer alloc.destroy(self);
+        self.* = .{ .alloc = alloc, .map = std.process.Environ.Map.init(alloc) };
+        errdefer self.map.deinit();
+        if (responses_base_url) |value| try self.map.put("FX_RESPONSES_BASE_URL", value);
+        if (organization) |value| try self.map.put("OPENAI_ORG_ID", value);
+        if (project) |value| try self.map.put("OPENAI_PROJECT_ID", value);
+        io_mod.setEnvironMap(&self.map);
+        return self;
+    }
+
+    fn deinit(self: *CompactionIdentityTestEnvironment) void {
+        if (stable_test_environ) |map| io_mod.setEnvironMap(map);
+        self.map.deinit();
+        const alloc = self.alloc;
+        alloc.destroy(self);
+    }
+};
+
+fn expectInFlightCompactionBindingFallback(
+    credential_source: types.CredentialSource,
+    api_key: []const u8,
+    account_id: ?[]const u8,
+    model: []const u8,
+    event_binding: types.ResponsesCompactionProviderBindingView,
+) !void {
+    const alloc = std.testing.allocator;
+    var app = try TestApp.init(alloc, "/tmp/workspace");
+    defer app.deinit();
+    app.auth.credential = .{
+        .api_key = api_key,
+        .account_id = account_id,
+        .source = credential_source,
+    };
+    try app.selected_model.appendSlice(alloc, model);
+    try app.session.appendAssistantHistoryTurn(alloc, "one", "reply one");
+    try app.session.appendAssistantHistoryTurn(alloc, "two", "reply two");
+    try app.session.appendAssistantHistoryTurn(alloc, "three", "reply three");
+    const before_generation = app.session.historyGeneration();
+
+    const task = try makeInertResponsesCompactionTask(21, null);
+    app.session_persistence.responses_compaction_tasks.active = task;
+    const owned_binding = try types.dupeResponsesCompactionProviderBinding(alloc, event_binding);
+    defer types.freeResponsesCompactionProviderBinding(alloc, owned_binding);
+    const event = types.ResponsesCompactionWorkerEvent{
+        .generation = 21,
+        .expected_history_generation = before_generation,
+        .expected_history_len = app.session.historyLen(),
+        .expected_context_history_start = app.session.contextHistoryStart(),
+        .credential_source = credential_source,
+        .wire_model = @constCast(model),
+        .provider_binding = owned_binding,
+        .outcome = .{ .compacted = .{
+            .input_json = @constCast("[{\"type\":\"compaction\",\"encrypted_content\":\"opaque\"}]"),
+        } },
+    };
+    Runtime(TestApp).applyResponsesCompactionEvent(&app, event);
+
+    try std.testing.expectEqual(@as(usize, 4), app.session.historyLen());
+    try std.testing.expectEqual(@as(usize, 3), app.session.contextHistoryStart());
+    try std.testing.expectEqual(before_generation + 1, app.session.historyGeneration());
+    try std.testing.expectEqual(@as(usize, 1), app.notices.items.len);
+}
+
+test "in-flight remote compaction rejects Codex account drift" {
+    try expectInFlightCompactionBindingFallback(
+        .codex_oauth,
+        "token-current",
+        "account-current",
+        "gpt-5.6-sol",
+        .{
+            .normalized_origin = "https://chatgpt.com/backend-api/codex/responses",
+            .account_id = "account-original",
+        },
+    );
+}
+
+test "in-flight remote compaction rejects OpenAI key base organization and project drift" {
+    const alloc = std.testing.allocator;
+    const cases = [_]struct {
+        original_key: []const u8,
+        current_key: []const u8,
+        original_base: []const u8,
+        current_base: []const u8,
+        original_org: ?[]const u8,
+        current_org: ?[]const u8,
+        original_project: ?[]const u8,
+        current_project: ?[]const u8,
+    }{
+        .{
+            .original_key = "key-original",
+            .current_key = "key-current",
+            .original_base = "https://api-a.example/v1",
+            .current_base = "https://api-a.example/v1",
+            .original_org = "org-a",
+            .current_org = "org-a",
+            .original_project = "project-a",
+            .current_project = "project-a",
+        },
+        .{
+            .original_key = "key-a",
+            .current_key = "key-a",
+            .original_base = "https://api-a.example/v1",
+            .current_base = "https://api-b.example/v1",
+            .original_org = "org-a",
+            .current_org = "org-a",
+            .original_project = "project-a",
+            .current_project = "project-a",
+        },
+        .{
+            .original_key = "key-a",
+            .current_key = "key-a",
+            .original_base = "https://api-a.example/v1",
+            .current_base = "https://api-a.example/v1",
+            .original_org = "org-a",
+            .current_org = "org-b",
+            .original_project = "project-a",
+            .current_project = "project-a",
+        },
+        .{
+            .original_key = "key-a",
+            .current_key = "key-a",
+            .original_base = "https://api-a.example/v1",
+            .current_base = "https://api-a.example/v1",
+            .original_org = "org-a",
+            .current_org = "org-a",
+            .original_project = "project-a",
+            .current_project = "project-b",
+        },
+    };
+
+    for (cases) |case| {
+        const original_binding = try responses_compaction_binding.buildAlloc(
+            alloc,
+            .openai_api_key,
+            case.original_key,
+            null,
+            .{
+                .endpoint_overrides = .{ .responses_base_url = case.original_base },
+                .organization = case.original_org,
+                .project = case.original_project,
+            },
+        );
+        defer types.freeResponsesCompactionProviderBinding(alloc, original_binding);
+        const environment = try CompactionIdentityTestEnvironment.install(
+            alloc,
+            case.current_base,
+            case.current_org,
+            case.current_project,
+        );
+        defer environment.deinit();
+        try expectInFlightCompactionBindingFallback(
+            .openai_api_key,
+            case.current_key,
+            null,
+            "gpt-5.4",
+            original_binding.view(),
+        );
+    }
+}
+
+test "remote compaction result for a previous session never falls back into current session" {
+    const alloc = std.testing.allocator;
+    var app = try TestApp.init(alloc, "/tmp/workspace");
+    defer app.deinit();
+    app.auth.credential = .{
+        .api_key = "token",
+        .account_id = "account",
+        .source = .codex_oauth,
+    };
+    try app.selected_model.appendSlice(alloc, "gpt-5.6-sol");
+    try app.session.appendAssistantHistoryTurn(alloc, "one", "reply one");
+    try app.session.appendAssistantHistoryTurn(alloc, "two", "reply two");
+    try app.session.appendAssistantHistoryTurn(alloc, "three", "reply three");
+    const generation = app.session.historyGeneration();
+
+    const task = try makeInertResponsesCompactionTask(12, "previous-session");
+    app.session_persistence.responses_compaction_tasks.active = task;
+    const event = types.ResponsesCompactionWorkerEvent{
+        .generation = 12,
+        .expected_history_generation = generation,
+        .expected_history_len = app.session.historyLen(),
+        .expected_context_history_start = app.session.contextHistoryStart(),
+        .session_id = @constCast("previous-session"),
+        .credential_source = .codex_oauth,
+        .wire_model = @constCast("gpt-5.6-sol"),
+        .provider_binding = .{
+            .normalized_origin = @constCast("https://chatgpt.com/backend-api/codex/responses"),
+            .account_id = @constCast("account"),
+        },
+        .outcome = .{ .compacted = .{
+            .input_json = @constCast("[{\"type\":\"compaction\",\"encrypted_content\":\"opaque\"}]"),
+        } },
+    };
+    Runtime(TestApp).applyResponsesCompactionEvent(&app, event);
+
+    try std.testing.expectEqual(@as(usize, 0), app.session.contextHistoryStart());
+    try std.testing.expectEqual(generation, app.session.historyGeneration());
+    try std.testing.expectEqual(@as(usize, 3), app.session.historyLen());
+    try std.testing.expectEqual(@as(usize, 1), app.notices.items.len);
+    try std.testing.expect(std.mem.find(u8, app.notices.items[0], "active session changed") != null);
+}
+
+test "responses compaction task teardown cancels and joins provider thread" {
+    const Fixture = struct {
+        const State = struct {
+            started: std.atomic.Value(bool) = .init(false),
+            finished: std.atomic.Value(bool) = .init(false),
+            published: std.atomic.Value(bool) = .init(false),
+        };
+
+        fn fetch(
+            raw: ?*anyopaque,
+            _: Allocator,
+            request: responses_compaction_provider.Request,
+        ) !responses_compaction_provider.Outcome {
+            const state: *State = @ptrCast(@alignCast(raw.?));
+            const cancel = request.build_request.budget.?.cancel_flag.?;
+            state.started.store(true, .seq_cst);
+            while (!cancel.load(.seq_cst)) io_mod.sleep(std.time.ns_per_ms);
+            state.finished.store(true, .seq_cst);
+            return .unsupported;
+        }
+
+        fn publish(
+            raw: *anyopaque,
+            event: types.ResponsesCompactionWorkerEvent,
+        ) !void {
+            const state: *State = @ptrCast(@alignCast(raw));
+            state.published.store(true, .seq_cst);
+            types.freeResponsesCompactionWorkerEvent(std.heap.c_allocator, event);
+        }
+    };
+
+    var state: Fixture.State = .{};
+    var tasks: ResponsesCompactionTaskRuntime = .{};
+    defer tasks.deinit();
+    const task = try makeInertResponsesCompactionTask(13, null);
+    task.provider = .{ .context = &state, .fetch_fn = Fixture.fetch };
+    task.publish_context = &state;
+    task.publish_fn = Fixture.publish;
+    try tasks.start(task);
+    var waits: usize = 0;
+    while (!state.started.load(.seq_cst) and waits < 1_000) : (waits += 1) {
+        io_mod.sleep(std.time.ns_per_ms);
+    }
+    try std.testing.expect(state.started.load(.seq_cst));
+
+    // deinit requests cancellation and does not return until the provider has
+    // finished and its owned result has been published.
+    tasks.deinit();
+    try std.testing.expect(state.finished.load(.seq_cst));
+    try std.testing.expect(state.published.load(.seq_cst));
+    try std.testing.expect(!tasks.isActive());
 }

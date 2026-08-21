@@ -341,6 +341,51 @@ pub fn Commands(comptime App: type) type {
             try setResolvedModel(app, resolved, true);
         }
 
+        pub fn handleEffort(app: *App, raw_effort: []const u8) !void {
+            const trimmed = std.mem.trim(u8, raw_effort, " \t");
+            if (trimmed.len == 0) {
+                try app.writeDomainNotice(.{
+                    .topic = "effort",
+                    .tone = .neutral,
+                    .body = app.effort.label(),
+                }, true);
+                return;
+            }
+
+            const effort = types.ReasoningEffort.parse(trimmed) orelse {
+                try app.writeDomainNotice(.{
+                    .topic = "effort",
+                    .tone = .@"error",
+                    .body = "Use: /effort [auto|supported-level].",
+                }, true);
+                return;
+            };
+            const capabilities = model_capabilities.resolveForApp(
+                App,
+                app,
+                app.selected_model.items,
+            );
+            if (!model_capabilities.reasoningEffortSupported(capabilities, effort)) {
+                var body: std.Io.Writer.Allocating = .init(app.alloc);
+                defer body.deinit();
+                try body.writer.print(
+                    "{s} is not supported by {s}. Available: auto",
+                    .{ effort.label(), app.selected_model.items },
+                );
+                for (capabilities.reasoning_efforts.slice()) |option| {
+                    try body.writer.print(", {s}", .{option.label()});
+                }
+                try app.writeDomainNotice(.{
+                    .topic = "effort",
+                    .tone = .@"error",
+                    .body = body.written(),
+                }, true);
+                return;
+            }
+
+            try applyEffort(app, effort, true, true);
+        }
+
         pub fn handlePermissions(app: *App, rest: []const u8) !void {
             if (rest.len == 0) {
                 try writePermissionsStatus(app);
@@ -761,20 +806,35 @@ pub fn Commands(comptime App: type) type {
             try setResolvedModelRuntime(app, model, true);
             var patch = app_session_runtime.SessionPreferencePatch{ .model = model };
             const capabilities = model_capabilities.resolveForApp(App, app, model);
-            if (capabilities.reasoning_efforts.len == 0) {
-                if (capabilities.supports_fast_mode) {
-                    try applyFastMode(app, fast_mode, false, false);
-                    patch.fast_mode = fast_mode;
-                }
-            } else {
-                try applyEffort(app, effort, false, false);
-                patch.effort = effort;
-                if (capabilities.supports_fast_mode) {
-                    try applyFastMode(app, fast_mode, false, false);
-                    patch.fast_mode = fast_mode;
-                }
+            const selected_effort = if (capabilities.reasoning_efforts.len > 0 and
+                model_capabilities.reasoningEffortSupported(capabilities, effort))
+                effort
+            else
+                types.ReasoningEffort.auto;
+            if (capabilities.reasoning_efforts.len > 0 or !app.effort.isDefault()) {
+                try applyEffort(app, selected_effort, false, false);
+                patch.effort = selected_effort;
+            }
+
+            const selected_fast_mode = capabilities.supports_fast_mode and fast_mode;
+            if (capabilities.supports_fast_mode or app.fast_mode) {
+                try applyFastMode(app, selected_fast_mode, false, false);
+                patch.fast_mode = selected_fast_mode;
             }
             try persistPreferenceTargets(app, patch, "model picker", false);
+        }
+
+        /// Reconciles a route-native default without changing the user's
+        /// reasoning or Fast preferences. The same runtime and persistence
+        /// path used by an explicit model selection remains authoritative.
+        pub fn reconcileRouteDefaultModel(app: *App, model: []const u8, announce: bool) !void {
+            try setResolvedModelRuntime(app, model, announce);
+            try persistPreferenceTargets(
+                app,
+                .{ .model = model },
+                "model route",
+                !announce,
+            );
         }
 
         fn permissionWorkspaceRoot(
@@ -2197,6 +2257,37 @@ test "session_commands handleModel reports current model for empty query" {
     try std.testing.expectEqualStrings("", app.terminalTitleLabelText());
 }
 
+test "session_commands handleEffort validates syncs and reports current model controls" {
+    const alloc = std.testing.allocator;
+    var app = try FakeApp.init(alloc, "/tmp/workspace", "openai/gpt-5.6-sol");
+    defer app.deinit();
+    const efforts = [_]types.ReasoningEffort{
+        types.ReasoningEffort.literal("low"),
+        types.ReasoningEffort.literal("high"),
+        types.ReasoningEffort.literal("max"),
+    };
+    app.setGatewayControls("openai/gpt-5.6-sol", &efforts, true);
+
+    try Commands(FakeApp).handleEffort(&app, "high");
+    try std.testing.expectEqual(types.ReasoningEffort.literal("high"), app.effort);
+    try std.testing.expectEqual(types.ReasoningEffort.literal("high"), app.worker.synced_effort.?);
+    try std.testing.expectEqual(types.ReasoningEffort.literal("high"), app.last_preference_effort.?);
+    try expectTranscriptContains(&app, "● Effort: high");
+
+    app.clearTranscript();
+    try Commands(FakeApp).handleEffort(&app, "");
+    try expectTranscriptContains(&app, "● Effort: high");
+
+    app.clearTranscript();
+    try Commands(FakeApp).handleEffort(&app, "xhigh");
+    try std.testing.expectEqual(types.ReasoningEffort.literal("high"), app.effort);
+    try expectTranscriptContains(&app, "xhigh is not supported by openai/gpt-5.6-sol. Available: auto, low, high, max");
+
+    app.clearTranscript();
+    try Commands(FakeApp).handleEffort(&app, "not/an/effort");
+    try expectTranscriptContains(&app, "Use: /effort [auto|supported-level].");
+}
+
 test "session_commands handleModel resolves fuzzy cached model and syncs queued prompts" {
     const alloc = std.testing.allocator;
     const ids = [_][]const u8{
@@ -2732,7 +2823,7 @@ test "session_commands toggleFast syncs queued fast mode for supported models" {
     try expectTranscriptContains(&app, "● Fast: on");
 }
 
-test "session_commands selectModelFromPicker skips effort changes for models without reasoning support" {
+test "session_commands selectModelFromPicker clears stale controls for unsupported models" {
     const alloc = std.testing.allocator;
     var app = try FakeApp.init(alloc, "/tmp/workspace", "anthropic/claude-opus-4.6");
     defer app.deinit();
@@ -2742,8 +2833,9 @@ test "session_commands selectModelFromPicker skips effort changes for models wit
 
     try std.testing.expectEqualStrings("openai/gpt-4o", app.selected_model.items);
     try std.testing.expectEqualStrings("openai/gpt-4o", app.worker.synced_model.?);
-    try std.testing.expectEqual(types.ReasoningEffort.literal("high"), app.effort);
+    try std.testing.expectEqual(types.ReasoningEffort.auto, app.effort);
     try std.testing.expect(!app.fast_mode);
+    try std.testing.expectEqual(@as(?types.ReasoningEffort, .auto), app.last_preference_effort);
 }
 
 test "session_commands model picker accepts the current selected model slice" {
@@ -2768,6 +2860,24 @@ test "session_commands model picker accepts the current selected model slice" {
         app.terminalTitleLabelText(),
     );
     try std.testing.expectEqual(types.ReasoningEffort.literal("high"), app.effort);
+}
+
+test "session_commands route default reconciliation preserves model controls" {
+    const alloc = std.testing.allocator;
+    var app = try FakeApp.init(alloc, "/tmp/workspace", "zai/glm-5.2");
+    defer app.deinit();
+    app.effort = types.ReasoningEffort.literal("high");
+    app.fast_mode = true;
+
+    try Commands(FakeApp).reconcileRouteDefaultModel(&app, "gpt-5.6-sol", false);
+
+    try std.testing.expectEqualStrings("gpt-5.6-sol", app.selected_model.items);
+    try std.testing.expectEqualStrings("gpt-5.6-sol", app.worker.synced_model.?);
+    try std.testing.expectEqualStrings("gpt-5.6-sol", app.last_preference_model.items);
+    try std.testing.expectEqual(types.ReasoningEffort.literal("high"), app.effort);
+    try std.testing.expect(app.fast_mode);
+    try std.testing.expect(app.last_preference_effort == null);
+    try std.testing.expect(app.last_preference_fast_mode == null);
 }
 
 test "session_commands selectModelFromPicker persists portable Gateway reasoning effort" {
@@ -3095,9 +3205,10 @@ test "session_commands model controls remain catalog validated" {
 
     try Commands(FakeApp).selectModelFromPicker(&app, "openai/gpt-4o", types.ReasoningEffort.literal("low"), false);
 
-    try std.testing.expect(app.fast_mode);
-    try std.testing.expectEqual(@as(usize, 0), app.worker.fast_sync_count);
-    try std.testing.expectEqual(@as(?bool, true), app.worker.synced_fast_mode);
+    try std.testing.expect(!app.fast_mode);
+    try std.testing.expectEqual(@as(usize, 1), app.worker.fast_sync_count);
+    try std.testing.expectEqual(@as(?bool, false), app.worker.synced_fast_mode);
+    try std.testing.expectEqual(@as(?bool, false), app.last_preference_fast_mode);
     const unsupported_options = model_capabilities.resolveProviderOptionsForCapabilities(
         app.resolvedModelCapabilities(app.selected_model.items),
         app.effort,
@@ -3116,7 +3227,7 @@ test "session_commands model controls remain catalog validated" {
     try Commands(FakeApp).selectModelFromPicker(&app, "anthropic/claude-opus-4.6", types.ReasoningEffort.literal("high"), true);
 
     try std.testing.expectEqual(@as(?bool, true), app.worker.synced_fast_mode);
-    try std.testing.expectEqual(@as(usize, 1), app.worker.fast_sync_count);
+    try std.testing.expectEqual(@as(usize, 2), app.worker.fast_sync_count);
     const supported_options = model_capabilities.resolveProviderOptionsForCapabilities(
         app.resolvedModelCapabilities(app.selected_model.items),
         app.effort,

@@ -7,11 +7,13 @@ pub const Input = struct {
     query: []u8,
     allowed_domains: ?[][]u8 = null,
     blocked_domains: ?[][]u8 = null,
+    commands_json: ?[]u8 = null,
 
     pub fn deinit(self: *Input, alloc: Allocator) void {
         alloc.free(self.query);
         freeOptionalStrings(alloc, self.allowed_domains);
         freeOptionalStrings(alloc, self.blocked_domains);
+        if (self.commands_json) |commands| alloc.free(commands);
         self.* = .{ .query = &.{} };
     }
 };
@@ -25,9 +27,12 @@ pub fn decode(ctx: tool_dispatch.DispatchContext, args_json: []const u8) tool_di
     if (parsed.value != .object) {
         return .{ .failure = try ctx.allocator.dupe(u8, "web_search arguments must be an object") };
     }
-    if (unknownField(parsed.value.object)) |field| {
+    const is_legacy = parsed.value.object.get("query") != null;
+    if ((if (is_legacy) unknownLegacyField(parsed.value.object) else unknownCommandField(parsed.value.object))) |field| {
         return .{ .failure = try std.fmt.allocPrint(ctx.allocator, "web_search field \"{s}\" is not supported", .{field}) };
     }
+
+    if (!is_legacy) return decodeCommands(ctx, parsed.value.object, args_json);
 
     const query_value = parsed.value.object.get("query") orelse {
         return .{ .failure = try ctx.allocator.dupe(u8, "web_search field \"query\" is required") };
@@ -102,14 +107,17 @@ const DecodeOwned = struct {
     query: ?[]u8 = null,
     allowed_domains: ?[][]u8 = null,
     blocked_domains: ?[][]u8 = null,
+    commands_json: ?[]u8 = null,
 
     fn deinit(self: *DecodeOwned) void {
         if (self.query) |query| self.alloc.free(query);
         freeOptionalStrings(self.alloc, self.allowed_domains);
         freeOptionalStrings(self.alloc, self.blocked_domains);
+        if (self.commands_json) |commands| self.alloc.free(commands);
         self.query = null;
         self.allowed_domains = null;
         self.blocked_domains = null;
+        self.commands_json = null;
     }
 
     fn take(self: *DecodeOwned) Input {
@@ -117,10 +125,12 @@ const DecodeOwned = struct {
             .query = self.query.?,
             .allowed_domains = self.allowed_domains,
             .blocked_domains = self.blocked_domains,
+            .commands_json = self.commands_json,
         };
         self.query = null;
         self.allowed_domains = null;
         self.blocked_domains = null;
+        self.commands_json = null;
         return input;
     }
 };
@@ -155,7 +165,7 @@ fn decodeOptionalStrings(ctx: tool_dispatch.DispatchContext, object: std.json.Ob
     return .{ .strings = strings };
 }
 
-fn unknownField(object: std.json.ObjectMap) ?[]const u8 {
+fn unknownLegacyField(object: std.json.ObjectMap) ?[]const u8 {
     var fields = object.iterator();
     while (fields.next()) |entry| {
         if (std.mem.eql(u8, entry.key_ptr.*, "query")) continue;
@@ -164,6 +174,73 @@ fn unknownField(object: std.json.ObjectMap) ?[]const u8 {
         return entry.key_ptr.*;
     }
     return null;
+}
+
+fn unknownCommandField(object: std.json.ObjectMap) ?[]const u8 {
+    var fields = object.iterator();
+    while (fields.next()) |entry| {
+        for ([_][]const u8{
+            "search_query",
+            "image_query",
+            "open",
+            "click",
+            "find",
+            "screenshot",
+            "finance",
+            "weather",
+            "sports",
+            "time",
+            "response_length",
+        }) |name| {
+            if (std.mem.eql(u8, entry.key_ptr.*, name)) break;
+        } else return entry.key_ptr.*;
+    }
+    return null;
+}
+
+fn decodeCommands(
+    ctx: tool_dispatch.DispatchContext,
+    object: std.json.ObjectMap,
+    args_json: []const u8,
+) tool_dispatch.DispatchError!tool_dispatch.DecodeResult {
+    const owned_query = try commandLabel(ctx.allocator, object);
+    errdefer ctx.allocator.free(owned_query);
+    const commands = try ctx.allocator.dupe(u8, args_json);
+    errdefer ctx.allocator.free(commands);
+    const input = try ctx.allocator.create(Input);
+    input.* = .{
+        .query = owned_query,
+        .commands_json = commands,
+    };
+    return .{ .input = .{ .ptr = input, .deinit_fn = inputDeinit } };
+}
+
+fn commandLabel(alloc: Allocator, object: std.json.ObjectMap) ![]u8 {
+    for ([_][]const u8{ "search_query", "image_query" }) |field| {
+        const values = object.get(field) orelse continue;
+        if (values != .array or values.array.items.len == 0) continue;
+        const first = values.array.items[0];
+        if (first != .object) continue;
+        const query = first.object.get("q") orelse continue;
+        if (query == .string and query.string.len > 0) return alloc.dupe(u8, query.string);
+    }
+    for ([_][]const u8{ "open", "click", "find", "screenshot" }) |field| {
+        const values = object.get(field) orelse continue;
+        if (values != .array or values.array.items.len == 0) continue;
+        const first = values.array.items[0];
+        if (first != .object) continue;
+        const ref_id = first.object.get("ref_id") orelse continue;
+        if (ref_id == .string and ref_id.string.len > 0) return alloc.dupe(u8, ref_id.string);
+    }
+    for ([_][]const u8{ "ticker", "location", "utc_offset" }, [_][]const u8{ "finance", "weather", "time" }) |detail, field| {
+        const values = object.get(field) orelse continue;
+        if (values != .array or values.array.items.len == 0) continue;
+        const first = values.array.items[0];
+        if (first != .object) continue;
+        const value = first.object.get(detail) orelse continue;
+        if (value == .string and value.string.len > 0) return alloc.dupe(u8, value.string);
+    }
+    return alloc.dupe(u8, "web");
 }
 
 fn hasValues(strings: ?[][]u8) bool {
@@ -205,7 +282,6 @@ test "web_search decode rejects invalid argument shapes" {
     try expectDecodeFailure("{", "web_search arguments must be valid JSON");
     try expectDecodeFailure("[]", "web_search arguments must be an object");
     try expectDecodeFailure("{\"query\":\"ok\",\"extra\":true}", "web_search field \"extra\" is not supported");
-    try expectDecodeFailure("{}", "web_search field \"query\" is required");
     try expectDecodeFailure("{\"query\":1}", "web_search field \"query\" must be a string");
     try expectDecodeFailure("{\"query\":\"a\"}", "web_search field \"query\" must contain at least two characters");
     try expectDecodeFailure(
@@ -216,6 +292,23 @@ test "web_search decode rejects invalid argument shapes" {
         "{\"query\":\"zig\",\"blocked_domains\":[\"example.com\",1]}",
         "web_search field \"blocked_domains\" item 1 must be a string",
     );
+}
+
+test "web_search accepts empty latest command object for provider defaults" {
+    const alloc = std.testing.allocator;
+    const decoded = try decode(.{ .allocator = alloc }, "{}");
+    switch (decoded) {
+        .failure => |failure| {
+            defer alloc.free(failure);
+            return error.TestExpectedEqual;
+        },
+        .input => |input| {
+            defer input.deinit(alloc);
+            const value = input.as(Input);
+            try std.testing.expectEqualStrings("web", value.query);
+            try std.testing.expectEqualStrings("{}", value.commands_json.?);
+        },
+    }
 }
 
 test "web_search decode owns query and optional domain filters" {
@@ -232,6 +325,37 @@ test "web_search decode owns query and optional domain filters" {
     try std.testing.expectEqual(@as(usize, 2), decoded.allowed_domains.?.len);
     try std.testing.expectEqualStrings("ziglang.org", decoded.allowed_domains.?[0]);
     try std.testing.expectEqualStrings("example.com", decoded.allowed_domains.?[1]);
+}
+
+test "web_search decode preserves latest Codex command objects" {
+    const alloc = std.testing.allocator;
+    const input = try expectDecodeInput(
+        "{\"search_query\":[{\"q\":\"latest Codex release\",\"recency\":7}],\"open\":[{\"ref_id\":\"turn0search0\",\"lineno\":12}],\"response_length\":\"short\"}",
+        "latest Codex release",
+    );
+    defer input.deinit(alloc);
+
+    const decoded = input.as(Input);
+    try std.testing.expect(decoded.commands_json != null);
+    try std.testing.expectEqualStrings(
+        "{\"search_query\":[{\"q\":\"latest Codex release\",\"recency\":7}],\"open\":[{\"ref_id\":\"turn0search0\",\"lineno\":12}],\"response_length\":\"short\"}",
+        decoded.commands_json.?,
+    );
+    try std.testing.expect(decoded.allowed_domains == null);
+    try std.testing.expect(decoded.blocked_domains == null);
+}
+
+test "web_search command decode derives a safe fallback label and rejects unknown commands" {
+    const alloc = std.testing.allocator;
+    const input = try expectDecodeInput(
+        "{\"sports\":[{\"fn\":\"schedule\",\"league\":\"nba\"}]}",
+        "web",
+    );
+    input.deinit(alloc);
+    try expectDecodeFailure(
+        "{\"search_query\":[{\"q\":\"zig\"}],\"future_command\":[]}",
+        "web_search field \"future_command\" is not supported",
+    );
 }
 
 test "web_search validation allows only one non-empty domain filter" {

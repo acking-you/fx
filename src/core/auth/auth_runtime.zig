@@ -18,11 +18,24 @@ pub const CredentialRefreshMode = enum {
     force,
 };
 
+pub const RefreshedCredential = struct {
+    token: []u8,
+    account_id: ?[]u8 = null,
+
+    pub fn deinit(self: *RefreshedCredential, alloc: Allocator) void {
+        secret.zeroAndFree(alloc, self.token);
+        if (self.account_id) |account_id| alloc.free(account_id);
+        self.* = undefined;
+    }
+};
+
 const credential_source_order = [_]credentials.Source{
     .vercel_oidc_token,
     .ai_gateway_api_key,
+    .openai_api_key,
     .fx_login,
     .stored_key,
+    .codex_oauth,
 };
 
 const SourceProbeFn = *const fn (?*anyopaque, Allocator, credentials.Source) anyerror!bool;
@@ -95,25 +108,34 @@ pub const FailureSnapshot = struct {
     }
 };
 
-/// Returns an owned token when the selected fx-login credential can be
-/// refreshed. The caller must release it with `secret.zeroAndFree`.
-pub fn refreshFxLoginToken(
+/// Returns an owned managed credential. Codex credentials carry their stable
+/// account identity so callers can reject cross-account token replacement.
+pub fn refreshCredential(
     transport: oauth_transport.Provider,
     alloc: Allocator,
     source: credentials.Source,
     mode: CredentialRefreshMode,
-) !?[]u8 {
-    if (source != .fx_login) return null;
-
-    var credential = switch (mode) {
-        .if_needed => (try credentials.loadFxLoginCredential(alloc, transport)) orelse return null,
-        .force => (try credentials.refreshFxLoginCredential(alloc, transport)) orelse return null,
+) !?RefreshedCredential {
+    var credential = switch (source) {
+        .fx_login => switch (mode) {
+            .if_needed => (try credentials.loadFxLoginCredential(alloc, transport)) orelse return null,
+            .force => (try credentials.refreshFxLoginCredential(alloc, transport)) orelse return null,
+        },
+        .codex_oauth => switch (mode) {
+            .if_needed => (try credentials.loadCodexCredential(alloc, transport)) orelse return null,
+            .force => (try credentials.refreshCodexCredential(alloc, transport)) orelse return null,
+        },
+        else => return null,
     };
     defer credential.deinit(alloc);
 
-    const token = credential.token;
+    const refreshed = RefreshedCredential{
+        .token = credential.token,
+        .account_id = credential.account_id,
+    };
     credential.token = &.{};
-    return token;
+    credential.account_id = null;
+    return refreshed;
 }
 
 pub const AcquisitionAction = enum {
@@ -576,6 +598,7 @@ pub const View = struct {
 pub const GatewayCredential = struct {
     api_key: []const u8,
     gateway_team: ?[]const u8,
+    account_id: ?[]const u8,
     source: credentials.Source,
 };
 
@@ -636,6 +659,7 @@ pub const Runtime = struct {
         return .{
             .api_key = credential.token,
             .gateway_team = credential.gatewayTeam(),
+            .account_id = credential.account_id,
             .source = credential.source,
         };
     }
@@ -669,6 +693,11 @@ pub const Runtime = struct {
     pub fn gatewayTeam(self: *const Self) ?[]const u8 {
         const credential = self.gatewayCredential() orelse return null;
         return credential.gateway_team;
+    }
+
+    pub fn credentialAccountId(self: *const Self) ?[]const u8 {
+        const credential = self.gatewayCredential() orelse return null;
+        return credential.account_id;
     }
 
     pub fn credentialNeedsRefresh(self: *const Self) bool {
@@ -1072,6 +1101,7 @@ pub const Runtime = struct {
             selected.source != credential.source or
                 !std.mem.eql(u8, selected.token, credential.token) or
                 !optionalBytesEqual(selected.gatewayTeam(), credential.gatewayTeam()) or
+                !optionalBytesEqual(selected.account_id, credential.account_id) or
                 selected.refresh_after_ms != credential.refresh_after_ms
         else
             true;
@@ -1083,6 +1113,7 @@ pub const Runtime = struct {
         credential.token = &.{};
         credential.team_id = null;
         credential.team_slug = null;
+        credential.account_id = null;
         self.source_inventory.insert(source);
         if (source == .stored_key) self.stored_key_status = .not_attempted;
         return changed;
@@ -1120,11 +1151,11 @@ pub const Runtime = struct {
         return self.selectSourceWithLoader(alloc, source, self, loadRuntimeCredentialSource);
     }
 
-    pub fn refreshFxLoginIfNeeded(self: *Self, alloc: Allocator) !bool {
+    pub fn refreshSelectedCredentialIfNeeded(self: *Self, alloc: Allocator) !bool {
         const source = self.credentialSource() orelse return false;
-        if (source != .fx_login) return false;
+        if (!credentials.sourceRefreshable(source)) return false;
 
-        const loaded = (try credentials.loadFxLoginCredential(alloc, self.oauth_transport)) orelse {
+        const loaded = (try credentials.loadSource(alloc, self.oauth_transport, self.secret_store, source)) orelse {
             if (self.credentialNeedsRefresh()) return error.CredentialRefreshUnavailable;
             return false;
         };
@@ -1435,9 +1466,9 @@ fn expectApiKeyAllocationCleared(
     try std.testing.expect(std.mem.indexOf(u8, backing, sentinel) == null);
 }
 
-test "auth runtime token refresher ignores non-refreshable credential sources" {
+test "auth runtime credential refresher ignores non-refreshable credential sources" {
     for ([_]credentials.Source{ .vercel_oidc_token, .ai_gateway_api_key, .stored_key }) |source| {
-        try std.testing.expect((try refreshFxLoginToken(
+        try std.testing.expect((try refreshCredential(
             oauth_transport.unavailable_provider,
             std.testing.allocator,
             source,
@@ -1543,6 +1574,26 @@ test "auth runtime adopts credential ownership and prefers team id" {
     var unchanged = try makeTestCredential(alloc, "token-a", .fx_login, null, "team_123");
     defer unchanged.deinit(alloc);
     try std.testing.expect(!runtime.adoptCredential(alloc, &unchanged));
+}
+
+test "auth runtime adopts and compares Codex account identity" {
+    const alloc = std.testing.allocator;
+    var runtime: Runtime = .{};
+    defer runtime.deinit(alloc);
+
+    var first = try makeTestCredential(alloc, "token", .codex_oauth, null, null);
+    first.account_id = try alloc.dupe(u8, "acct-one");
+    defer first.deinit(alloc);
+    try std.testing.expect(runtime.adoptCredential(alloc, &first));
+    try std.testing.expect(first.account_id == null);
+    try std.testing.expectEqualStrings("acct-one", runtime.credentialAccountId().?);
+
+    var changed = try makeTestCredential(alloc, "token", .codex_oauth, null, null);
+    changed.account_id = try alloc.dupe(u8, "acct-two");
+    defer changed.deinit(alloc);
+    try std.testing.expect(runtime.adoptCredential(alloc, &changed));
+    try std.testing.expect(changed.account_id == null);
+    try std.testing.expectEqualStrings("acct-two", runtime.credentialAccountId().?);
 }
 
 test "auth runtime exposes one current Gateway credential for prompt admission" {

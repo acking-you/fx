@@ -16,7 +16,10 @@ if (!supportsJspi()) {
 let fetchStartedResolve;
 const fetchStarted = new Promise((resolve) => { fetchStartedResolve = resolve; });
 let fetchAborted = false;
-const stalledFetch = async (_url, init) => {
+const stalledFetch = async (url, init) => {
+  if (init.method === "GET" && String(url).endsWith("/v1/models")) {
+    return Response.json({ object: "list", data: [{ id: "sdk/cancel-model", type: "language", released: 1 }] });
+  }
   let controller;
   const body = new ReadableStream({ start(value) { controller = value; } });
   init.signal.addEventListener("abort", () => {

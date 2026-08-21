@@ -8,6 +8,11 @@ const tool_dispatch = @import("../tooling/tool_dispatch.zig");
 const Allocator = std.mem.Allocator;
 
 pub const StreamCallback = *const fn (ctx: *anyopaque, chunk: []const u8) void;
+pub const RawEventCallback = *const fn (
+    ctx: *anyopaque,
+    wire_type: []const u8,
+    raw_json: []const u8,
+) void;
 pub const ToolStartCallback = *const fn (
     ctx: *anyopaque,
     tool_id: []const u8,
@@ -91,6 +96,13 @@ pub const StructuredResponseFormat = struct {
 };
 
 pub const BuildRequest = struct {
+    credential_source: ?types.CredentialSource = null,
+    /// Borrowed only while the provider builds a request. Direct Responses
+    /// providers hash this credential to validate opaque compaction replay;
+    /// it is never serialized into the payload or checkpoint.
+    provider_credential: ?[]const u8 = null,
+    credential_account_id: ?[]const u8 = null,
+    session_id: ?[]const u8 = null,
     model: []const u8,
     tool_registry: tool_dispatch.Registry = .{},
     serialized_tools: []const u8,
@@ -103,11 +115,33 @@ pub const BuildRequest = struct {
     budget: ?BuildBudget = null,
     verified_images: ?[]const image_attachments.VerifiedSnapshot = null,
     response_format: ?StructuredResponseFormat = null,
+    /// Raw Responses-only extension points. The Responses codec validates both
+    /// values and prevents extra fields from overriding fields owned by fx.
+    /// `responses_input_json` replaces message-derived input, while the text
+    /// and reasoning objects are merged with non-overlapping typed options.
+    responses_input_json: ?[]const u8 = null,
+    responses_text_options_json: ?[]const u8 = null,
+    responses_reasoning_options_json: ?[]const u8 = null,
+    responses_tool_choice_json: ?[]const u8 = null,
+    responses_extra_fields_json: ?[]const u8 = null,
+    /// Precomputed non-secret identity used internally by the Responses codec.
+    /// Product callers normally leave this unset; the direct provider adapter
+    /// derives it from `provider_credential` and the active route.
+    responses_compaction_binding: ?types.ResponsesCompactionProviderBindingView = null,
+    /// Requests remote compaction V2 by appending exactly one typed
+    /// `compaction_trigger` item to Responses input. The Responses codec keeps
+    /// the trigger last and rejects a duplicate supplied through raw input.
+    responses_compaction_trigger: bool = false,
 };
 
 pub const Request = struct {
     api_key: []const u8,
     team: ?[]const u8,
+    credential_source: ?types.CredentialSource = null,
+    /// Exact non-secret identity snapshot used when the payload was built.
+    /// The transport revalidates it against the credential and sends the
+    /// request only to this binding's endpoint.
+    responses_compaction_binding: ?types.ResponsesCompactionProviderBindingView = null,
     /// Borrowed for the duration of `Provider.stream`.
     session_id: ?[]const u8 = null,
     model: []const u8,
@@ -124,6 +158,9 @@ pub const Request = struct {
     on_tool_start: ?ToolStartCallback,
     on_reasoning_chunk: ?StreamCallback,
     on_tool_input_chunk: ?StreamCallback = null,
+    /// Exact raw provider events that the shared semantic completion contract
+    /// does not consume. Slices are borrowed for the callback duration.
+    on_unhandled_provider_event: ?RawEventCallback = null,
     cancel_flag: *std.atomic.Value(bool),
     provider_attempt_owner: ProviderAttemptOwner = .transport,
 };
@@ -133,6 +170,15 @@ pub const ResultOwnership = enum {
     owned,
 };
 
+/// Selects how the session ledger settles one provider invocation. Gateway
+/// generations are reconciled through Vercel; direct APIs report token usage
+/// in-band and must not create a missing-generation billing incident.
+pub const AccountingDisposition = enum {
+    gateway_generation,
+    direct_usage,
+    none,
+};
+
 pub const Result = struct {
     status: std.http.Status,
     completion: types.GatewayCompletion = .{},
@@ -140,6 +186,7 @@ pub const Result = struct {
     /// Borrowed base URL used to reconcile generation usage for this result.
     generation_origin: []const u8 = "",
     reconcile_generation_usage: bool = false,
+    accounting: AccountingDisposition = .gateway_generation,
     failure_schema: ?[]u8 = null,
     failure_request_shape: ?[]u8 = null,
     retry_after_seconds: ?u64 = null,
@@ -153,6 +200,11 @@ pub const Result = struct {
             if (self.completion.content) |content| alloc.free(@constCast(content));
             if (self.completion.reasoning) |reasoning| alloc.free(@constCast(reasoning));
             if (self.completion.reasoning_signature) |signature| alloc.free(@constCast(signature));
+            if (self.completion.reasoning_item_id) |id| alloc.free(@constCast(id));
+            if (self.completion.reasoning_encrypted_content) |content| alloc.free(@constCast(content));
+            types.freeResponsesReasoningItems(alloc, self.completion.reasoning_items);
+            types.freeResponsesProviderOutputItems(alloc, self.completion.responses_provider_output_items);
+            types.freeResponsesUrlCitations(alloc, self.completion.url_citations);
             if (self.completion.generation_id) |id| alloc.free(@constCast(id));
             if (self.completion.billing) |billing| alloc.free(@constCast(billing.model));
             types.freeToolCallSlice(alloc, @constCast(self.completion.tool_calls));

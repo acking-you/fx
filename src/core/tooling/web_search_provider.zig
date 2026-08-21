@@ -1,5 +1,6 @@
 const std = @import("std");
 const session_usage = @import("../session/session_usage.zig");
+const types = @import("../shared/types.zig");
 const web_search_contract = @import("web_search_contract.zig");
 const web_search_policy = @import("web_search_policy.zig");
 
@@ -7,6 +8,8 @@ const Allocator = std.mem.Allocator;
 
 pub const Inputs = struct {
     api_key: []const u8,
+    credential_source: types.CredentialSource = .ai_gateway_api_key,
+    credential_account_id: ?[]const u8 = null,
     gateway_team: ?[]const u8 = null,
     worker_model: []const u8,
     gateway_retry_count: usize,
@@ -15,7 +18,10 @@ pub const Inputs = struct {
     usage_allocator: Allocator = std.heap.c_allocator,
 };
 
-pub const PreferredBackendsFn = *const fn (?*anyopaque) anyerror!?[]const web_search_contract.SearchBackendId;
+pub const PreferredBackendsFn = *const fn (
+    ?*anyopaque,
+    Inputs,
+) anyerror!?[]const web_search_contract.SearchBackendId;
 
 pub const ExecuteFn = *const fn (
     ?*anyopaque,
@@ -33,8 +39,8 @@ pub const Provider = struct {
     preferred_backends_fn: PreferredBackendsFn,
     execute_fn: ExecuteFn,
 
-    pub fn preferredBackends(self: Provider) !?[]const web_search_contract.SearchBackendId {
-        return self.preferred_backends_fn(self.context);
+    pub fn preferredBackends(self: Provider, inputs: Inputs) !?[]const web_search_contract.SearchBackendId {
+        return self.preferred_backends_fn(self.context, inputs);
     }
 
     pub fn execute(

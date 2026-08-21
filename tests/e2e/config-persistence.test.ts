@@ -577,7 +577,7 @@ describe.skipIf(!tmuxAvailable())("config persistence", () => {
         });
         await session.waitForText("Run /help", TIMEOUT);
         await session.sendText("/output quiet");
-        await session.waitForText("Fx needs access to Vercel AI Gateway", TIMEOUT);
+        await session.waitForText("Fx needs a model credential", TIMEOUT);
         expect(composerContains(await session.capturePane(), "/output quiet")).toBe(
           true,
         );
@@ -1075,6 +1075,16 @@ describe.skipIf(!tmuxAvailable())("config persistence", () => {
           effort: "max",
           fast_mode: true,
         });
+
+        await session.sendText("/effort future-tier");
+        await session.waitForText("● Effort: future-tier", TIMEOUT);
+        expect(JSON.parse(readFileSync(settingsPath, "utf8"))).toMatchObject({
+          model: "openai/gpt-5.6-sol",
+          effort: "future-tier",
+          fast_mode: true,
+        });
+        await session.sendText("/effort max");
+        await session.waitForText("● Effort: max", TIMEOUT);
 
         await session.sendText("Use max fast.");
         await session.waitForText("GPT 5.6 max fast complete", TIMEOUT);

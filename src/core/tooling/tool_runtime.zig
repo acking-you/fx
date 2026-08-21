@@ -49,6 +49,7 @@ const command_replay_store = @import("../session/command_replay_store.zig");
 const session_store = @import("../session/session_store.zig");
 const text_utils = @import("../shared/text_utils.zig");
 const model_capabilities = @import("../config/model_capabilities.zig");
+const responses_compaction_provider = @import("../gateway/responses_compaction_provider.zig");
 const mcp_access_policy = @import("../mcp/access_policy.zig");
 const tool_admission = @import("tool_admission.zig");
 const tool_args = @import("tool_args.zig");
@@ -133,6 +134,7 @@ pub const Context = struct {
     max_tool_result_bytes: usize = tool_result_limits.default_max_tool_result_bytes,
     api_key: []const u8,
     agent_stream_provider: agent_stream_provider.Provider = agent_stream_provider.unavailable_provider,
+    responses_compaction_provider: ?responses_compaction_provider.Provider = null,
     gateway_team: ?[]const u8 = null,
     credential_source: ?types.CredentialSource = null,
     oauth_transport: oauth_transport.Provider = oauth_transport.unavailable_provider,
@@ -278,6 +280,7 @@ pub const Context = struct {
         return permission_auto_classifier.Classifier.withProvider(provider, .{
             .credential = self.api_key,
             .tenant = self.gateway_team,
+            .credential_source = self.credential_source,
             .endpoint = self.gateway_chat_url,
             .cancel_flag = self.cancel_flag,
             .usage = &self.session.usage,
@@ -884,6 +887,8 @@ fn typedDispatchContext(ctx: Context, arena: Allocator) tool_dispatch.DispatchCo
         .web_fetch_artifact_error = ctx.web_fetch_artifact_error,
         .tool_capabilities = capabilities,
         .web_search_backend = ctx.web_search_backend,
+        .root_user_intent_context = ctx.root_user_intent_context,
+        .previous_assistant_turn = latestCompletedAssistantTurn(ctx.session.history.items),
         .web_search_progress_ctx = ctx.web_search_progress_ctx,
         .on_web_search_progress = ctx.on_web_search_progress,
         .web_fetch_progress_ctx = ctx.web_fetch_progress_ctx,
@@ -900,6 +905,29 @@ fn typedDispatchContext(ctx: Context, arena: Allocator) tool_dispatch.DispatchCo
         else
             ctx.permission_rules,
     };
+}
+
+fn latestCompletedAssistantTurn(history: []const types.HistoryTurn) ?tool_dispatch.PreviousAssistantTurn {
+    var index = history.len;
+    while (index > 0) {
+        index -= 1;
+        const pair: ?tool_dispatch.PreviousAssistantTurn = switch (history[index]) {
+            .assistant => |turn| .{ .user_text = turn.user.text, .assistant_text = turn.assistant },
+            .background_command => |turn| if (turn.assistant) |text|
+                .{ .user_text = turn.user.text, .assistant_text = text }
+            else
+                null,
+            .interrupted => |turn| if (turn.assistant) |text|
+                .{ .user_text = turn.user.text, .assistant_text = text }
+            else
+                null,
+            .compacted_summary => null,
+        };
+        if (pair) |value| {
+            if (value.assistant_text.len > 0) return value;
+        }
+    }
+    return null;
 }
 
 fn requestQuestionBatchWithWorker(
@@ -996,6 +1024,7 @@ fn executeVisionRequest(
         .stream_provider = state.runtime.agent_stream_provider,
         .api_key = state.runtime.api_key,
         .gateway_team = state.runtime.gateway_team,
+        .credential_source = state.runtime.credential_source,
         .session_id = state.runtime.lifecycle_scope.session_id,
         .retry_count = state.runtime.gateway_retry_count,
         .chat_url = state.runtime.gateway_chat_url,

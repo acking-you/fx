@@ -21,17 +21,27 @@ It's open source (Apache-2.0), model-agnostic, and suitable for both local and c
 
 ## About this fork (`byok`)
 
-This is the `byok` branch of [`acking-you/fx`](https://github.com/acking-you/fx), a fork of upstream [`vercel-labs/fx`](https://github.com/vercel-labs/fx). Upstream stays the source of truth for the shared codebase and is merged in regularly; this branch exists for the work upstream would not take, aimed at three goals.
+This is the `byok` branch of a fork of upstream [`vercel-labs/fx`](https://github.com/vercel-labs/fx). Upstream stays the source of truth for the shared codebase and is merged in regularly; this branch exists for the work upstream would not take, aimed at three goals.
 
-**1. Remove every hard binding to Vercel.** Upstream is model-agnostic in principle but is wired to one hosted path in practice: `fx login` signs in with Vercel, credentials resolve through Vercel OIDC and AI Gateway keys, and the model catalog and request endpoint assume that gateway. This fork treats all of it as one provider among many. Vercel remains fully supported, never required — nothing in a default run should assume that account, that gateway, or that key.
+**1. Remove every hard binding to Vercel.** Upstream is model-agnostic in principle but is wired to one hosted path in practice. The intended end state is to keep Vercel fully supported without requiring its account, gateway, key, catalog, or request endpoint.
 
-**2. Support any BYOK provider.** Bring the key you already pay for and point fx at whatever speaks the protocol: an OpenAI-compatible endpoint, a corporate proxy, a self-hosted or local server, or another commercial provider. That means configurable base URLs, credentials from the environment or a local store instead of one vendor's login, and model catalogs that are not the upstream default.
+**2. Support any BYOK provider.** The target is to bring the key you already pay for and point fx at a compatible commercial, corporate, self-hosted, or local endpoint. That requires configurable base URLs, multiple credential sources, provider protocols, and model catalogs.
 
 **3. Improve the agent harness.** Better default agent behavior even where upstream keeps it optional or absent. Streamed model reasoning, for example, is always shown and is replayed to the provider as reasoning context for the rest of the turn, so the model keeps its own reasoning across tool steps rather than losing it.
 
 ### Status
 
-Goals 1 and 2 are in progress, not finished. Today `fx login` still signs in with Vercel, credentials still resolve through Vercel OIDC or an AI Gateway key, and `FX_GATEWAY_BASE_URL` is honored only for a loopback address because the base URL carries the bearer token — a remote override is ignored rather than used. Goal 3 has landed in part: the reasoning behavior described above works now. Treat the first two goals as the direction of this branch, and check the code before assuming a given endpoint or credential source is already supported.
+Goals 1 and 2 remain in progress. The branch currently supports these model-access paths:
+
+- Vercel through `fx login`, `fx setup`, `VERCEL_OIDC_TOKEN`, or `AI_GATEWAY_API_KEY`.
+- ChatGPT Codex through device-code OAuth with `fx login --codex`.
+- Direct Responses API access with `OPENAI_API_KEY`, using OpenAI by default or a configurable Responses-compatible base URL.
+
+The direct API-key and Codex OAuth paths share the same Responses request conversion and streaming behavior. This means work on the `v1/responses` protocol benefits both routes; it does not mean every OpenAI-compatible or provider-specific protocol is supported. Chat Completions endpoints, broader provider-specific authentication, and additional catalogs and credential stores are still in progress.
+
+For direct API-key access, `FX_RESPONSES_BASE_URL` takes precedence over `OPENAI_BASE_URL`. fx appends `/responses` unless the configured URL already ends with it. Remote bases must use HTTPS; loopback HTTP is accepted only with an explicit port. These generic variables never redirect a Codex OAuth credential away from ChatGPT. `FX_CODEX_BASE_URL` is the separate explicit Codex override.
+
+The Vercel route retains one existing limitation: `FX_GATEWAY_BASE_URL` is honored only for a loopback address because the base URL carries the bearer token. A remote override is ignored rather than used. Goal 3 has landed in part through the reasoning behavior described above.
 
 Fork changes stay deliberately small and shaped like upstream's own code: divergence costs a merge conflict every time, and a change that fits upstream's structure can still be sent back as a pull request. Bug fixes and features upstream would plausibly accept are contributed to `vercel-labs/fx` rather than kept here. See [AGENTS.md](AGENTS.md) for branch roles and the merge routine.
 
@@ -43,13 +53,71 @@ curl -fsSL https://fx.sh/setup.sh | bash
 
 ## Run fx
 
-To get started, sign in with Vercel:
+Sign in with Vercel:
 
 ```bash
 fx login
 ```
 
-Or add an AI Gateway API key:
+Or sign in to ChatGPT Codex with a device code:
+
+```bash
+fx login --codex
+```
+
+Successful Codex login saves the OAuth session in the standard Codex auth file and makes it the global active credential in fx. `FX_CODEX_AUTH_FILE` selects an exact file; otherwise fx uses `$CODEX_HOME/auth.json`, then `~/.codex/auth.json`. An existing workspace-specific credential choice still has higher precedence. When several sources are available, open `/setup` and choose **Switch credential**.
+
+To remove the saved Codex tokens and attempt remote revocation:
+
+```bash
+fx logout --codex
+```
+
+For direct BYOK access to the Responses API, set an OpenAI API key:
+
+```bash
+export OPENAI_API_KEY="your-key"
+fx
+```
+
+To use another endpoint that implements the Responses API, set its base URL before running fx:
+
+```bash
+export FX_RESPONSES_BASE_URL=https://gateway.example.com/v1
+export OPENAI_API_KEY="your-key"
+fx
+```
+
+`OPENAI_BASE_URL` is also supported when `FX_RESPONSES_BASE_URL` is unset. This path expects the Responses API, not the Chat Completions protocol.
+
+Query the live limits and token activity for the Codex account saved in the Codex auth file:
+
+```bash
+fx usage --codex
+fx usage --codex --json
+```
+
+This is separate from `fx usage`, which reports only the local fx usage ledger. The Codex form reads the provider's current rate-limit windows, reset times, credits, spend controls, and account token statistics. Because `--codex` explicitly selects the ChatGPT account surface, it works even when a workspace currently uses another credential source.
+
+Inside the interactive app, run `/model` to browse the active provider's catalog. After choosing a model, the same picker offers only the reasoning efforts and Fast mode supported by that catalog entry. The **Model** row in `/settings` uses the same flow. `/effort` shows or sets the current reasoning effort, while `/fast` toggles Fast mode for the current model. ACP clients receive the same `model`, `effort`, and `fast_mode` configuration options; the JavaScript SDK exposes `setModel`, `setEffort`, and `setFastMode`. On the Responses wire, Fast mode uses the `priority` service tier. Selecting a model that does not support the current effort or Fast mode clears that stale setting instead of sending an invalid request.
+
+For a direct switch, pass the model, effort, and optional speed in one command:
+
+```text
+/model gpt-5.6-sol high fast
+/model gpt-5.6-sol xhigh normal
+/effort max
+/effort auto
+/fast
+```
+
+Web search follows the selected direct provider instead of routing a direct credential through Vercel. With an OpenAI API key, fx advertises the hosted Responses `web_search` tool only when the current permission policy allows it and retains returned URL citations in the answer. With Codex OAuth, fx uses the Codex `web.run` namespace and the account's `/alpha/search` endpoint, keeping one search-session identity across follow-up search, open, click, and find commands. Standalone search receives only the previous verified user/assistant turn and the current verified user request; the assistant excerpt is capped at 1,000 estimated tokens, and the in-progress assistant that invoked the tool is excluded.
+
+For a saved conversation, `/compact` uses the active direct Responses provider's remote compaction transport. Codex OAuth and API-key Responses providers follow the current Codex flow by appending a `compaction_trigger` to a non-streaming `/responses` request. Native builds perform the bounded request in the background; single-threaded WebAssembly runs the same request inline. A successful response is stored as the provider's complete opaque replacement output and replayed only while the same provider identity, normalized Responses endpoint, and wire model remain active. Codex checkpoints bind to the ChatGPT account; API-key checkpoints bind to a non-secret key digest plus organization and project. If any binding changes, fx falls back to the portable local summary instead of sending the old opaque context to the new provider identity. If a BYOK endpoint does not implement remote compaction, or the remote request is rejected or unavailable, fx applies its existing local compaction once instead. Vercel sessions continue to use local compaction.
+
+For Codex OAuth models, fx also consumes the model catalog's context-budget metadata. The effective context display reserves the model-declared headroom, defaulting to 95% of the raw window, and automatic compaction starts before the next turn when the latest provider-reported total usage reaches the model limit, defaulting to 90% of the raw window. The queued prompt remains held until the replacement checkpoint is installed or the local fallback completes.
+
+You can also add a Vercel AI Gateway API key interactively:
 
 ```bash
 fx setup

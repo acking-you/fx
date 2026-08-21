@@ -7055,10 +7055,21 @@ describe.skipIf(!HAS_API_KEY)("acp: model-backed protocol", () => {
   );
 
   test(
-    "session/set_config_option updates model and returns configOptions",
+    "session/set_config_option validates capabilities and normalizes model controls",
     async () => {
       const root = createIsolatedRoot("fx-acp-set-config-");
-      const gateway = startFakeGateway([]);
+      const gateway = startFakeGateway([], {
+        models: [
+          {
+            id: FAKE_GATEWAY_MODEL,
+            type: "language",
+            tags: ["tool-use", "reasoning"],
+            reasoning_options: [{ type: "effort", values: ["high"] }],
+            fast_options: [{ type: "toggle" }],
+          },
+          { id: "o4-mini", type: "language", tags: ["tool-use"] },
+        ],
+      });
       try {
         client = await AcpClient.create({
           cwd: root.workspace,
@@ -7068,16 +7079,63 @@ describe.skipIf(!HAS_API_KEY)("acp: model-backed protocol", () => {
         await client.request("session/new", { mcpServers: [] }, 2);
         await client.readLine(); // consume session/update notification
 
+        const effortResp = await client.request("session/set_config_option", {
+          configId: "effort",
+          value: "high",
+        }, 3) as any;
+        expect(effortResp.result.configOptions.find((o: any) => o.id === "effort").currentValue).toBe("high");
+
+        const fastResp = await client.request("session/set_config_option", {
+          configId: "fast_mode",
+          value: "fast",
+        }, 4) as any;
+        expect(fastResp.result.configOptions.find((o: any) => o.id === "fast_mode").currentValue).toBe("fast");
+
         const resp = await client.request("session/set_config_option", {
           configId: "model",
           value: "o4-mini",
-        }, 3) as any;
+        }, 5) as any;
         expect(resp.result).toBeDefined();
-        expect(resp.result.configOptions).toBeDefined();
         expect(Array.isArray(resp.result.configOptions)).toBe(true);
-        const modelOpt = resp.result.configOptions.find((o: any) => o.id === "model");
-        expect(modelOpt).toBeDefined();
-        expect(modelOpt.currentValue).toBe("o4-mini");
+        expect(resp.result.configOptions.find((o: any) => o.id === "model").currentValue).toBe("o4-mini");
+        expect(resp.result.configOptions.find((o: any) => o.id === "effort").currentValue).toBe("auto");
+        expect(resp.result.configOptions.find((o: any) => o.id === "fast_mode").currentValue).toBe("normal");
+
+        const unsupportedEffort = await client.request("session/set_config_option", {
+          configId: "effort",
+          value: "high",
+        }, 6) as any;
+        expect(unsupportedEffort.error.code).toBe(-32602);
+
+        const unsupportedFast = await client.request("session/set_config_option", {
+          configId: "fast_mode",
+          value: "fast",
+        }, 7) as any;
+        expect(unsupportedFast.error.code).toBe(-32602);
+
+        const invalidEffort = await client.request("session/set_config_option", {
+          configId: "effort",
+          value: "contains space",
+        }, 8) as any;
+        expect(invalidEffort.error.code).toBe(-32602);
+
+        const invalidFast = await client.request("session/set_config_option", {
+          configId: "fast_mode",
+          value: "priority",
+        }, 9) as any;
+        expect(invalidFast.error.code).toBe(-32602);
+
+        const invalidMode = await client.request("session/set_config_option", {
+          configId: "mode",
+          value: "unknown-mode",
+        }, 10) as any;
+        expect(invalidMode.error.code).toBe(-32602);
+
+        const unknownResp = await client.request("session/set_config_option", {
+          configId: "unknown-control",
+          value: "ignored",
+        }, 11) as any;
+        expect(unknownResp.error.code).toBe(-32602);
       } finally {
         await client?.close();
         gateway.stop();

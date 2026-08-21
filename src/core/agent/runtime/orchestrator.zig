@@ -1,7 +1,11 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const agent_steps = @import("../../config/agent_steps.zig");
+const codex_auth = @import("../../auth/codex_auth.zig");
+const credentials = @import("../../auth/credentials.zig");
 const model_capabilities = @import("../../config/model_capabilities.zig");
+const provider_route = @import("../../gateway/provider_route.zig");
+const responses_compaction_binding = @import("../../gateway/responses_compaction_binding.zig");
 const types = @import("../../shared/types.zig");
 const worker_runtime = @import("../worker_runtime.zig");
 const session_runtime = @import("../../session/session.zig");
@@ -32,6 +36,7 @@ const runtime_finalization = @import("finalization.zig");
 const runtime_deps = @import("deps.zig");
 const runtime_lifecycle = @import("lifecycle.zig");
 const runtime_prompt_context = @import("prompt_context.zig");
+const runtime_compaction = @import("compaction.zig");
 const runtime_telemetry = @import("telemetry.zig");
 const runtime_tool_contracts = @import("tool_contracts.zig");
 const runtime_gateway_step = @import("gateway_step.zig");
@@ -1219,10 +1224,11 @@ fn persistRecoveryCheckpoint(
     trace_ctx: TraceContext,
 ) !void {
     const effect = deps.recovery_checkpoint orelse return;
-    const execution = try runtime_execution_memory.buildExecutionMemory(
+    var execution = try runtime_execution_memory.buildExecutionMemory(
         arena,
         current_turn_messages,
     );
+    runtime_execution_memory.boundRecoveryCheckpointPresentation(&execution);
     try effect.set(deps.ctx, .{
         .turn_id = job.turn_id,
         .user = .{
@@ -1266,6 +1272,84 @@ fn isRetryableModelStatus(status: std.http.Status) bool {
         => true,
         else => false,
     };
+}
+
+fn providerFailureRecoveryCause(
+    completion: types.GatewayCompletion,
+) model_response_recovery.FailureCause {
+    const metadata = completion.provider_failure_metadata orelse
+        return .provider_unavailable;
+    if (metadata.kind == .rate_limited or metadata.status_code == 429) {
+        return .rate_limited;
+    }
+    return .provider_unavailable;
+}
+
+fn providerRetryAfterSeconds(
+    completion: types.GatewayCompletion,
+    fallback: ?u64,
+    now_ms: i64,
+) ?u64 {
+    const metadata = completion.provider_failure_metadata orelse return fallback;
+    if (metadata.retry_after_seconds) |seconds| return seconds;
+    const resets_at = metadata.resets_at orelse return fallback;
+    const reset_ms = @as(i128, resets_at) * std.time.ms_per_s;
+    const remaining_ms = reset_ms - @as(i128, now_ms);
+    if (remaining_ms <= 0) return 0;
+    const rounded_seconds = @divTrunc(
+        remaining_ms + std.time.ms_per_s - 1,
+        std.time.ms_per_s,
+    );
+    return std.math.cast(u64, rounded_seconds) orelse std.math.maxInt(u64);
+}
+
+test "Responses terminal metadata drives rate-limit recovery and typed wait" {
+    const explicit: types.GatewayCompletion = .{
+        .provider_failure_metadata = .{
+            .kind = .rate_limited,
+            .status_code = 429,
+            .retry_after_seconds = 3,
+            .resets_at = 999,
+        },
+    };
+    try std.testing.expectEqual(
+        model_response_recovery.FailureCause.rate_limited,
+        providerFailureRecoveryCause(explicit),
+    );
+    const retry_after = providerRetryAfterSeconds(explicit, 12, 100_000);
+    try std.testing.expectEqual(@as(?u64, 3), retry_after);
+    const decision = model_response_recovery.decide(.{
+        .cause = providerFailureRecoveryCause(explicit),
+        .delivery = .possibly_sent,
+        .attempts = .{ .consumed = 1, .limit = 3 },
+        .retry_after_seconds = retry_after,
+    });
+    try std.testing.expectEqual(model_response_recovery.Strategy.retry_request, decision.strategy);
+    try std.testing.expectEqual(@as(u64, 3 * std.time.ns_per_s), decision.delay_ns);
+
+    const reset_only: types.GatewayCompletion = .{
+        .provider_failure_metadata = .{
+            .kind = .rate_limited,
+            .resets_at = 105,
+        },
+    };
+    try std.testing.expectEqual(
+        @as(?u64, 5),
+        providerRetryAfterSeconds(reset_only, 12, 100_001),
+    );
+    try std.testing.expectEqual(
+        @as(?u64, 0),
+        providerRetryAfterSeconds(reset_only, 12, 105_000),
+    );
+
+    const unavailable: types.GatewayCompletion = .{
+        .provider_failure_metadata = .{ .kind = .provider_unavailable, .status_code = 503 },
+    };
+    try std.testing.expectEqual(
+        model_response_recovery.FailureCause.provider_unavailable,
+        providerFailureRecoveryCause(unavailable),
+    );
+    try std.testing.expectEqual(@as(?u64, 12), providerRetryAfterSeconds(unavailable, 12, 100_000));
 }
 
 fn isPostVisionAssistantPrefillRejection(
@@ -1416,13 +1500,15 @@ fn refreshGatewayCredentialForJob(
     mode: CredentialRefreshMode,
     active_api_key: *[]const u8,
     owned_api_key: *?[]u8,
+    active_codex_account_id: *?[]const u8,
+    owned_codex_account_id: *?[]u8,
     trace_ctx: TraceContext,
 ) !bool {
     const source = job.credential_source orelse return false;
-    if (source != .fx_login) return false;
+    if (!credentials.sourceRefreshable(source)) return false;
     const refresh = deps.refresh_gateway_credential orelse return false;
 
-    const refreshed = refresh(deps.ctx, alloc, source, mode) catch |err| {
+    var refreshed = refresh(deps.ctx, alloc, source, mode) catch |err| {
         if (err == error.OutOfMemory) return err;
         debug_trace.eventf(
             "gateway",
@@ -1433,19 +1519,59 @@ fn refreshGatewayCredentialForJob(
         );
         return false;
     } orelse return false;
+    defer refreshed.deinit(alloc);
+
+    if (source == .codex_oauth) {
+        const refreshed_account = refreshed.account_id orelse {
+            debug_trace.eventf(
+                "gateway",
+                "credential_refresh_rejected",
+                trace_ctx,
+                "source=codex_oauth reason=missing_refreshed_account",
+                .{},
+            );
+            return false;
+        };
+        const expected_account = active_codex_account_id.* orelse {
+            debug_trace.eventf(
+                "gateway",
+                "credential_refresh_rejected",
+                trace_ctx,
+                "source=codex_oauth reason=missing_previous_account",
+                .{},
+            );
+            return false;
+        };
+        if (!std.mem.eql(u8, expected_account, refreshed_account)) {
+            debug_trace.eventf(
+                "gateway",
+                "credential_refresh_rejected",
+                trace_ctx,
+                "source=codex_oauth reason=account_changed",
+                .{},
+            );
+            return false;
+        }
+    }
+
     const previous_api_key = active_api_key.*;
     if (comptime !host_target.is_wasm) {
         if (deps.usage) |usage| {
             usage.refreshReconciliationCredential(
                 deps.usage_allocator,
                 previous_api_key,
-                refreshed,
+                refreshed.token,
             );
         }
     }
     if (owned_api_key.*) |old| secret.zeroAndFree(alloc, old);
-    owned_api_key.* = refreshed;
-    active_api_key.* = refreshed;
+    owned_api_key.* = refreshed.token;
+    active_api_key.* = refreshed.token;
+    refreshed.token = &.{};
+    if (owned_codex_account_id.*) |old| alloc.free(old);
+    owned_codex_account_id.* = refreshed.account_id;
+    active_codex_account_id.* = refreshed.account_id;
+    refreshed.account_id = null;
     debug_trace.eventf(
         "gateway",
         "credential_refreshed",
@@ -1806,7 +1932,11 @@ fn processQueuedPromptInner(
     defer completed_tool_names.deinit(arena);
     var interrupted_persisted = false;
 
-    debug_trace.eventf("agent", "prompt_start", finish_trace.ctx, "prompt_bytes={d} model={s}", .{ job.prompt.len, job.model });
+    const wire_model = if (job.credential_source) |source|
+        provider_route.wireModelForCredentialSource(source, job.model)
+    else
+        job.model;
+    debug_trace.eventf("agent", "prompt_start", finish_trace.ctx, "prompt_bytes={d} model={s}", .{ job.prompt.len, wire_model });
 
     try stable_prefix.append(arena, .{ .role = .system, .content = config.system_prompt });
     if (config.custom_tool_guidance.len > 0) {
@@ -1821,14 +1951,14 @@ fn processQueuedPromptInner(
     if (deps.append_static_context) |append_static_context| {
         try append_static_context(deps.ctx, arena, &stable_prefix);
     }
-    var request_capabilities = deps.available_model_capabilities(deps.ctx, job.model);
+    var request_capabilities = deps.available_model_capabilities(deps.ctx, wire_model);
     if (requiresResolvedRequestCapabilities(
         job.images.len > 0 or job.authorized_image_catalog.len > 0,
         config.effort,
         config.fast_mode,
         request_capabilities,
     )) {
-        request_capabilities = deps.resolve_model_capabilities(deps.ctx, arena, job.model) catch |err| {
+        request_capabilities = deps.resolve_model_capabilities(deps.ctx, arena, wire_model) catch |err| {
             if (err != error.Cancelled) return err;
             runtime_telemetry.traceCancelObserved(finish_trace.ctx, false);
             var terminal_materializing = false;
@@ -1906,6 +2036,7 @@ fn processQueuedPromptInner(
         lifecycle,
         config,
         job,
+        wire_model,
         request_capabilities,
         finalization,
         arena,
@@ -2514,6 +2645,7 @@ fn processQueuedPromptLoop(
     lifecycle: LifecycleContext,
     config: Config,
     job: QueuedPrompt,
+    wire_model: []const u8,
     request_capabilities: model_capabilities.Capabilities,
     finalization: *TurnFinalizationGuard,
     arena: Allocator,
@@ -2564,6 +2696,15 @@ fn processQueuedPromptLoop(
     var active_api_key: []const u8 = job.api_key;
     var owned_refreshed_api_key: ?[]u8 = null;
     defer if (owned_refreshed_api_key) |key| secret.zeroAndFree(std.heap.c_allocator, key);
+    var owned_codex_account_id: ?[]u8 = if (job.credential_account_id == null and
+        job.credential_source != null and
+        job.credential_source.? == .codex_oauth)
+        try codex_auth.accountIdFromJwt(std.heap.c_allocator, job.api_key)
+    else
+        null;
+    defer if (owned_codex_account_id) |account_id| std.heap.c_allocator.free(account_id);
+    var active_codex_account_id: ?[]const u8 = job.credential_account_id orelse
+        owned_codex_account_id;
     var summary_accumulator = summary_accumulator_ptr.*;
     defer summary_accumulator_ptr.* = summary_accumulator;
     var finish_trace = finish_trace_ptr.*;
@@ -2594,7 +2735,7 @@ fn processQueuedPromptLoop(
         0;
     const selected_fast_mode = config.fast_mode;
     const selection_changed = if (job.recovery_checkpoint) |checkpoint|
-        recoverySelectionChanged(checkpoint, job.model, selected_fast_mode)
+        recoverySelectionChanged(checkpoint, wire_model, selected_fast_mode)
     else
         false;
     const restored_budget_exhausted = if (job.recovery_checkpoint) |checkpoint|
@@ -2632,6 +2773,11 @@ fn processQueuedPromptLoop(
     else
         .none;
     var restore_recovery_source = job.recovery_checkpoint != null;
+    var inline_compaction: ?runtime_compaction.Result = null;
+    defer if (inline_compaction) |*result| result.deinit(arena);
+    var inline_compaction_suffix_start: usize = 0;
+    var inline_auto_compaction_pending = false;
+    var context_overflow_recovery_used = false;
     var step: usize = 0;
     while (agent_steps.allowsStep(config.agent_step_limit, step)) : (step += 1) {
         current_step_index = step + 1;
@@ -2676,10 +2822,30 @@ fn processQueuedPromptLoop(
             overlay_arena,
             &ephemeral_overlay,
         );
-        var gateway_messages = try runtime_prompt_context.buildGatewayMessages(overlay_arena, stable_prefix.items, ephemeral_overlay.items, history_messages.items, current_user_effective, within_turn_suffix.items);
+        var gateway_messages = if (inline_compaction) |result|
+            try runtime_compaction.buildMessagesAfterCompaction(
+                overlay_arena,
+                stable_prefix.items,
+                ephemeral_overlay.items,
+                result.message,
+                within_turn_suffix.items,
+                inline_compaction_suffix_start,
+            )
+        else
+            try runtime_prompt_context.buildGatewayMessages(
+                overlay_arena,
+                stable_prefix.items,
+                ephemeral_overlay.items,
+                history_messages.items,
+                current_user_effective,
+                within_turn_suffix.items,
+            );
         last_gateway_message_count = gateway_messages.items.len;
         const history_start_index = stable_prefix.items.len + ephemeral_overlay.items.len;
-        const current_user_message_index = history_start_index + history_messages.items.len;
+        const current_user_message_index: ?usize = if (inline_compaction == null)
+            history_start_index + history_messages.items.len
+        else
+            null;
 
         debug_trace.logf("agent", "step start step={d} limit={d} messages={d}", .{ current_step_index, config.agent_step_limit, gateway_messages.items.len });
         debug_trace.eventf("agent", "step_begin", step_ctx, "step_index={d} step_limit={d} gateway_messages={d}", .{ current_step_index, config.agent_step_limit, gateway_messages.items.len });
@@ -2710,7 +2876,7 @@ fn processQueuedPromptLoop(
         const advertised_dynamic_tool_names = selected_dynamic_tool_names.items;
         var stream_result: runtime_gateway_step.StreamResult = undefined;
         var stream_result_set = false;
-        var gateway_model: []const u8 = job.model;
+        var gateway_model: []const u8 = wire_model;
         var successful_request_messages: []const ChatMessage = &.{};
         var successful_source_messages: []const ChatMessage = &.{};
         var successful_gateway_model: []const u8 = "";
@@ -2718,6 +2884,7 @@ fn processQueuedPromptLoop(
         var successful_vision_mode: runtime_gateway_step.VisionToolMode = .unavailable;
         var reset_stream_for_next_attempt = false;
         var auth_retry_used = false;
+        var credential_change_retry_used = false;
         var assistant_prefill_recovery_used = false;
         var skip_next_preflight_refresh = false;
         var recovery_has_unexecuted_tool_start = false;
@@ -2755,7 +2922,7 @@ fn processQueuedPromptLoop(
                 reset_stream_for_next_attempt = false;
             }
 
-            gateway_model = job.model;
+            gateway_model = wire_model;
             if (recoveryPauseRequested(config)) {
                 recovery_strategy = .pause;
                 try persistRecoveryCheckpoint(
@@ -2837,17 +3004,29 @@ fn processQueuedPromptLoop(
                     .if_needed,
                     &active_api_key,
                     &owned_refreshed_api_key,
+                    &active_codex_account_id,
+                    &owned_codex_account_id,
                     step_ctx,
                 );
             }
-            gateway_messages = try runtime_prompt_context.buildGatewayMessages(
-                overlay_arena,
-                stable_prefix.items,
-                ephemeral_overlay.items,
-                history_messages.items,
-                current_user_effective,
-                within_turn_suffix.items,
-            );
+            gateway_messages = if (inline_compaction) |result|
+                try runtime_compaction.buildMessagesAfterCompaction(
+                    overlay_arena,
+                    stable_prefix.items,
+                    ephemeral_overlay.items,
+                    result.message,
+                    within_turn_suffix.items,
+                    inline_compaction_suffix_start,
+                )
+            else
+                try runtime_prompt_context.buildGatewayMessages(
+                    overlay_arena,
+                    stable_prefix.items,
+                    ephemeral_overlay.items,
+                    history_messages.items,
+                    current_user_effective,
+                    within_turn_suffix.items,
+                );
             debug_trace.eventf("gateway", "before_payload_build", step_ctx, "model={s} gateway_messages={d}", .{ gateway_model, gateway_messages.items.len });
             var vision_route: runtime_vision_contracts.VisionRoute = .native_images;
             var vision_mode: runtime_gateway_step.VisionToolMode = if (deps.tool_registry.lookup("vision") != null)
@@ -2868,13 +3047,18 @@ fn processQueuedPromptLoop(
                 if (job.authorized_image_catalog.len == 0 and job.images.len == 0) {
                     break :blk recovery_source_messages;
                 }
-                if (request_capabilities.supports_vision and request_capabilities.supports_file_input) {
+                if (inline_compaction != null) break :blk recovery_source_messages;
+                if (request_capabilities.supports_vision and
+                    request_capabilities.supports_file_input and
+                    current_user_message_index != null)
+                {
                     break :blk try runtime_vision_contracts.project_native_messages(
                         overlay_arena,
                         recovery_source_messages,
-                        current_user_message_index,
+                        current_user_message_index.?,
                     );
                 }
+                if (current_user_message_index == null) break :blk recovery_source_messages;
                 if (job.authorized_image_catalog.len == 0) {
                     return error.MissingAuthorizedImageCatalog;
                 }
@@ -2883,7 +3067,7 @@ fn processQueuedPromptLoop(
                 break :blk try runtime_vision_contracts.project_text_only_messages(
                     overlay_arena,
                     recovery_source_messages,
-                    current_user_message_index,
+                    current_user_message_index.?,
                     job.authorized_image_catalog,
                 );
             };
@@ -2891,15 +3075,59 @@ fn processQueuedPromptLoop(
             last_gateway_message_count = request_messages.len;
             const provider_opts = model_capabilities.resolveProviderOptionsForCapabilities(request_capabilities, config.effort, route_fast_mode);
             runtime_telemetry.traceGatewayProviderOptions(step_ctx, gateway_model, route_fast_mode, config.effort, provider_opts);
+            if (inline_auto_compaction_pending) {
+                try deps.pushContextNotice("Context limit reached; compacting before the next model step.");
+                const compacted = try runtime_compaction.compact(arena, .{
+                    .provider = deps.responses_compaction_provider,
+                    .credential_source = job.credential_source,
+                    .credential = active_api_key,
+                    .account_id = active_codex_account_id,
+                    .session_id = lifecycle.scope.session_id,
+                    .model = gateway_model,
+                    .serialized_tools = config.gateway_tools_json,
+                    .messages = request_messages,
+                    .provider_options = provider_opts,
+                    .cancel_flag = config.cancel_flag,
+                });
+                if (inline_compaction) |*previous| previous.deinit(arena);
+                const used_remote = compacted.used_remote;
+                inline_compaction = compacted;
+                inline_compaction_suffix_start = within_turn_suffix.items.len;
+                inline_auto_compaction_pending = false;
+                finalization.requestAutoCompaction(!used_remote);
+                try deps.pushContextNotice(if (used_remote)
+                    "Context compacted with the active Responses provider."
+                else
+                    "Remote context compaction is unavailable; continuing with local compacted context.");
+                continue;
+            }
             const tool_choice: types.ToolChoice = if (recovery_strategy == .reconcile_tool)
                 .none
             else if (configured_first_tool_choice_pending and vision_mode != .required)
                 config.first_call_tool_choice
             else
                 .auto;
+            const request_provider_binding: ?types.ResponsesCompactionProviderBinding = if (job.credential_source) |source| blk: {
+                const route = provider_route.fromCredentialSource(source) orelse break :blk null;
+                if (route.contract().wire_api != .openai_responses) break :blk null;
+                break :blk try responses_compaction_binding.buildFromEnvironmentAlloc(
+                    overlay_arena,
+                    source,
+                    active_api_key,
+                    active_codex_account_id,
+                );
+            } else null;
             const request_payload = deps.agent_stream_provider.build(
                 overlay_arena,
                 .{
+                    .credential_source = job.credential_source,
+                    .provider_credential = active_api_key,
+                    .credential_account_id = active_codex_account_id,
+                    .responses_compaction_binding = if (request_provider_binding) |binding|
+                        binding.view()
+                    else
+                        null,
+                    .session_id = lifecycle.scope.session_id,
                     .model = gateway_model,
                     .tool_registry = deps.tool_registry,
                     .serialized_tools = config.gateway_tools_json,
@@ -2975,6 +3203,8 @@ fn processQueuedPromptLoop(
                 arena,
                 active_api_key,
                 job.gateway_team,
+                job.credential_source,
+                if (request_provider_binding) |binding| binding.view() else null,
                 lifecycle.scope.session_id,
                 gateway_model,
                 config.gateway_retry_count,
@@ -2998,6 +3228,52 @@ fn processQueuedPromptLoop(
                 null,
                 .agent,
             ) catch |err| {
+                const codex_credential_changed_before_send =
+                    err == error.CodexCredentialChanged and
+                    job.credential_source != null and
+                    job.credential_source.? == .codex_oauth and
+                    gateway_delivery.load() == .definitely_unsent and
+                    !credential_change_retry_used;
+                if (codex_credential_changed_before_send and
+                    try refreshGatewayCredentialForJob(
+                        deps,
+                        std.heap.c_allocator,
+                        job,
+                        .if_needed,
+                        &active_api_key,
+                        &owned_refreshed_api_key,
+                        &active_codex_account_id,
+                        &owned_codex_account_id,
+                        step_ctx,
+                    ))
+                {
+                    parent_turn_delivery.observeGatewayDelivery(
+                        deps,
+                        overlay_arena,
+                        gateway_delivery.load(),
+                    );
+                    runtime_assistant_stream.pushTokenProgressUpdate(
+                        &stream_ctx,
+                        summary_accumulator.finishTokenRequestWithoutUsage(false),
+                    ) catch |progress_err| {
+                        debug_trace.logf(
+                            "agent",
+                            "token progress publication failed source=credential_change_recovery err={s}",
+                            .{@errorName(progress_err)},
+                        );
+                    };
+                    debug_trace.eventf(
+                        "gateway",
+                        "credential_change_recovered",
+                        step_ctx,
+                        "source=codex_oauth delivery=definitely_unsent",
+                        .{},
+                    );
+                    credential_change_retry_used = true;
+                    reset_stream_for_next_attempt = true;
+                    skip_next_preflight_refresh = true;
+                    continue;
+                }
                 parent_turn_delivery.observeGatewayDelivery(
                     deps,
                     overlay_arena,
@@ -3425,6 +3701,8 @@ fn processQueuedPromptLoop(
                     .force,
                     &active_api_key,
                     &owned_refreshed_api_key,
+                    &active_codex_account_id,
+                    &owned_codex_account_id,
                     step_ctx,
                 )) {
                     auth_retry_used = true;
@@ -3504,7 +3782,11 @@ fn processQueuedPromptLoop(
                         stream_result.completion,
                         &stream_ctx,
                     ),
-                    .retry_after_seconds = stream_result.retry_after_seconds,
+                    .retry_after_seconds = providerRetryAfterSeconds(
+                        stream_result.completion,
+                        stream_result.retry_after_seconds,
+                        io_mod.milliTimestamp(),
+                    ),
                     .cancelled = config.cancel_flag.load(.seq_cst),
                 });
                 if (decision.strategy == .pause) {
@@ -3662,7 +3944,7 @@ fn processQueuedPromptLoop(
                 else if (finish_reason.? == .content_filter)
                     .content_filter
                 else
-                    .provider_unavailable;
+                    providerFailureRecoveryCause(attempt_completion);
                 const diagnostic = try providerCompletionDiagnostic(
                     arena,
                     attempt_completion,
@@ -3680,6 +3962,11 @@ fn processQueuedPromptLoop(
                         preserved_tool_evidence,
                         attempt_completion,
                         &stream_ctx,
+                    ),
+                    .retry_after_seconds = providerRetryAfterSeconds(
+                        attempt_completion,
+                        stream_result.retry_after_seconds,
+                        io_mod.milliTimestamp(),
                     ),
                     .cancelled = config.cancel_flag.load(.seq_cst),
                 });
@@ -3873,6 +4160,31 @@ fn processQueuedPromptLoop(
                 return error.ModelError;
             }
 
+            if (stream_result.status != .ok and
+                !context_overflow_recovery_used and
+                runtime_compaction.supportsAutomaticCompaction(job.credential_source) and
+                runtime_compaction.isContextOverflow(
+                    stream_result.status,
+                    stream_result.err_body orelse "",
+                ) and
+                streamReplaySafe(&stream_ctx))
+            {
+                debug_trace.eventf(
+                    "agent",
+                    "context_overflow_recovery",
+                    step_ctx,
+                    "status={d} action=compact_retry",
+                    .{@intFromEnum(stream_result.status)},
+                );
+                if (stream_result.err_body) |body| mem_utils.free(arena, body);
+                stream_result.err_body = null;
+                stream_result_set = false;
+                context_overflow_recovery_used = true;
+                inline_auto_compaction_pending = true;
+                reset_stream_for_next_attempt = true;
+                continue;
+            }
+
             successful_request_messages = request_messages;
             successful_source_messages = recovery_source_messages;
             successful_gateway_model = gateway_model;
@@ -3996,6 +4308,18 @@ fn processQueuedPromptLoop(
             return;
         }
 
+        if (deps.report_usage) |report_fn| {
+            if (completion.usage.input_tokens != null or completion.usage.output_tokens != null) {
+                report_fn(deps.ctx, completion.usage);
+            }
+        }
+        if (runtime_compaction.supportsAutomaticCompaction(job.credential_source) and
+            runtime_compaction.shouldCompact(completion.usage, request_capabilities))
+        {
+            inline_auto_compaction_pending = true;
+            finalization.requestAutoCompaction(false);
+        }
+
         const disposition = types.classifyProviderCompletion(completion);
         switch (disposition) {
             .completed, .length_limited => {},
@@ -4082,12 +4406,6 @@ fn processQueuedPromptLoop(
         recovery_cause = .transport_interrupted;
         retry_pacing = .idle;
         preserved_tool_evidence = .none;
-
-        if (deps.report_usage) |report_fn| {
-            if (completion.usage.input_tokens != null or completion.usage.output_tokens != null) {
-                report_fn(deps.ctx, completion.usage);
-            }
-        }
 
         if (disposition == .completed and completion.tool_calls.len > 0) {
             const admission = types.authoritativeToolAdmission(completion);
@@ -4255,8 +4573,14 @@ fn processQueuedPromptLoop(
                 try within_turn_suffix.append(arena, .{
                     .role = .assistant,
                     .content = completion.content,
+                    .responses_message_output_index = completion.responses_message_output_index,
                     .reasoning = completion.reasoning,
                     .reasoning_signature = completion.reasoning_signature,
+                    .reasoning_item_id = completion.reasoning_item_id,
+                    .reasoning_encrypted_content = completion.reasoning_encrypted_content,
+                    .reasoning_items = completion.reasoning_items,
+                    .responses_provider_output_items = completion.responses_provider_output_items,
+                    .responses_output_sequence_complete = completion.responses_output_sequence_complete,
                 });
                 try within_turn_suffix.append(arena, .{ .role = .user, .content = continuation_prompt });
                 continue;
@@ -4283,7 +4607,7 @@ fn processQueuedPromptLoop(
                 );
                 stop_state.terminal_materializing =
                     stop_state.retained_candidate != null;
-                try finishCommonAssistantTerminal(
+                try finishCommonAssistantTerminalWithResponsesReasoning(
                     deps,
                     finalization,
                     arena,
@@ -4291,6 +4615,7 @@ fn processQueuedPromptLoop(
                     within_turn_suffix.items,
                     &summary_accumulator,
                     persisted_text,
+                    completion,
                     .completed,
                     if (disposition == .length_limited)
                         .length_limited
@@ -4345,7 +4670,7 @@ fn processQueuedPromptLoop(
             switch (stop_outcome) {
                 .allow => {
                     stop_state.terminal_materializing = true;
-                    try finishCommonAssistantTerminal(
+                    try finishCommonAssistantTerminalWithResponsesReasoning(
                         deps,
                         finalization,
                         arena,
@@ -4353,6 +4678,7 @@ fn processQueuedPromptLoop(
                         within_turn_suffix.items,
                         &summary_accumulator,
                         history_text,
+                        completion,
                         .completed,
                         if (disposition == .length_limited)
                             .length_limited
@@ -4367,8 +4693,14 @@ fn processQueuedPromptLoop(
                     try within_turn_suffix.append(arena, .{
                         .role = .assistant,
                         .content = history_text,
+                        .responses_message_output_index = completion.responses_message_output_index,
                         .reasoning = completion.reasoning,
                         .reasoning_signature = completion.reasoning_signature,
+                        .reasoning_item_id = completion.reasoning_item_id,
+                        .reasoning_encrypted_content = completion.reasoning_encrypted_content,
+                        .reasoning_items = completion.reasoning_items,
+                        .responses_provider_output_items = completion.responses_provider_output_items,
+                        .responses_output_sequence_complete = completion.responses_output_sequence_complete,
                     });
                     const synthetic = try hooks.prompt.buildContinuationMessage(
                         arena,
@@ -4490,9 +4822,15 @@ fn processQueuedPromptLoop(
                 null
             else
                 partial_assistant,
+            .responses_message_output_index = completion.responses_message_output_index,
             .tool_calls = effective_tool_calls,
             .reasoning = completion.reasoning,
             .reasoning_signature = completion.reasoning_signature,
+            .reasoning_item_id = completion.reasoning_item_id,
+            .reasoning_encrypted_content = completion.reasoning_encrypted_content,
+            .reasoning_items = completion.reasoning_items,
+            .responses_provider_output_items = completion.responses_provider_output_items,
+            .responses_output_sequence_complete = completion.responses_output_sequence_complete,
         };
 
         var preparation_batch = tool_preparation.ReadyCallBatch.init(
@@ -4725,8 +5063,14 @@ fn processQueuedPromptLoop(
             if (terminal_provider_completion) null else completion.content,
             effective_tool_calls,
             .{
+                .message_output_index = completion.responses_message_output_index,
                 .text = completion.reasoning,
                 .signature = completion.reasoning_signature,
+                .item_id = completion.reasoning_item_id,
+                .encrypted_content = completion.reasoning_encrypted_content,
+                .items = completion.reasoning_items,
+                .provider_output_items = completion.responses_provider_output_items,
+                .output_sequence_complete = completion.responses_output_sequence_complete,
             },
         );
 
@@ -7431,8 +7775,14 @@ fn processQueuedPromptLoop(
                     try within_turn_suffix.append(arena, .{
                         .role = .assistant,
                         .content = rendered,
+                        .responses_message_output_index = completion.responses_message_output_index,
                         .reasoning = completion.reasoning,
                         .reasoning_signature = completion.reasoning_signature,
+                        .reasoning_item_id = completion.reasoning_item_id,
+                        .reasoning_encrypted_content = completion.reasoning_encrypted_content,
+                        .reasoning_items = completion.reasoning_items,
+                        .responses_provider_output_items = completion.responses_provider_output_items,
+                        .responses_output_sequence_complete = completion.responses_output_sequence_complete,
                     });
                     const synthetic = try hooks.prompt.buildContinuationMessage(
                         arena,
@@ -7630,6 +7980,50 @@ pub fn finishCommonAssistantTerminal(
         execution_memory,
         summary_accumulator,
         assistant_text,
+        outcome,
+        disposition,
+        finish_trace,
+        trace_outcome,
+    );
+}
+
+fn finishCommonAssistantTerminalWithResponsesReasoning(
+    deps: *const AgentRuntimeDeps,
+    finalization: *TurnFinalizationGuard,
+    arena: Allocator,
+    job: QueuedPrompt,
+    current_turn_messages: []const ChatMessage,
+    summary_accumulator: *runtime_telemetry.TurnSummaryAccumulator,
+    assistant_text: []const u8,
+    completion: types.GatewayCompletion,
+    outcome: types.TurnPresentationOutcome,
+    disposition: ?types.ProviderCompletionDisposition,
+    finish_trace: *PromptFinishTrace,
+    trace_outcome: []const u8,
+) !void {
+    const execution_memory = try runtime_execution_memory.buildExecutionMemory(
+        arena,
+        current_turn_messages,
+    );
+    const has_responses_identity =
+        completion.reasoning_items.len > 0 or
+        (completion.reasoning_item_id != null and completion.reasoning_item_id.?.len > 0) or
+        (completion.reasoning_encrypted_content != null and
+            completion.reasoning_encrypted_content.?.len > 0);
+    try runtime_finalization.finishAssistantTerminalWithExecutionAndReasoning(
+        deps,
+        finalization,
+        job,
+        execution_memory,
+        summary_accumulator,
+        assistant_text,
+        if (has_responses_identity) completion.reasoning else null,
+        if (has_responses_identity) completion.reasoning_item_id else null,
+        if (has_responses_identity) completion.reasoning_encrypted_content else null,
+        if (has_responses_identity) completion.reasoning_items else &.{},
+        completion.responses_provider_output_items,
+        completion.responses_message_output_index,
+        completion.responses_output_sequence_complete,
         outcome,
         disposition,
         finish_trace,

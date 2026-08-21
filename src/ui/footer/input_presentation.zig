@@ -320,7 +320,6 @@ pub fn composeHintRow(
         ctx.fast_mode,
         ctx.model_supports_fast,
         ctx.effort,
-        ctx.model_supports_effort,
         ctx.statusline,
         width,
         &hint_buf,

@@ -183,7 +183,7 @@ fn parseExplicitModelSelection(input: []const u8) ExplicitModelSelectionParse {
 
 fn validateExplicitModelSelection(selection: ExplicitModelSelection, capabilities: model_capabilities.Capabilities) ExplicitModelSelectionParse {
     if (!model_capabilities.reasoningEffortSupported(capabilities, selection.effort)) return .invalid;
-    if (capabilities.supports_fast_mode != selection.has_fast_mode_token) return .invalid;
+    if (selection.fast_mode and !capabilities.supports_fast_mode) return .invalid;
     return .{ .selection = selection };
 }
 
@@ -1903,7 +1903,7 @@ pub fn Runtime(comptime App: type) type {
             const menu = &app.input_runtime.settings_menu;
             if (comptime @hasField(App, "model_cache")) {
                 if (app.model_cache.menu.active) {
-                    if (delta < 0) try applyInlineSettingsModelSelection(app);
+                    if (delta < 0) try beginInlineSettingsModelSelection(app);
                     return;
                 }
             }
@@ -1927,24 +1927,19 @@ pub fn Runtime(comptime App: type) type {
             app.shell.render_requests.request(.footer);
         }
 
-        fn applyInlineSettingsModelSelection(app: *App) !void {
+        fn beginInlineSettingsModelSelection(app: *App) !void {
             const selected = (try app.model_cache.menu.selectedModelAlloc(app.alloc)) orelse return;
             defer app.alloc.free(selected);
-            try session_commands.Commands(App).selectModelFromPicker(
-                app,
-                selected,
-                app.effort,
-                app.fast_mode,
-            );
             app.model_cache.closeMenu();
-            app.shell.render_requests.request(.footer);
+            _ = closeSettingsMenu(app, true);
+            try completion_rt.beginExactModelSelection(app, selected);
         }
 
         fn submitSettingsMenuSelection(app: *App) !bool {
             if (!settingsMenuActive(app)) return false;
             if (comptime @hasField(App, "model_cache")) {
                 if (app.model_cache.menu.active) {
-                    try applyInlineSettingsModelSelection(app);
+                    try beginInlineSettingsModelSelection(app);
                     return true;
                 }
 
@@ -5286,6 +5281,43 @@ test "app_input_runtime model catalog selection preserves effort and fast picker
     try std.testing.expectEqual(@as(usize, 0), app.preference_commit_count);
 }
 
+test "app_input_runtime settings model selection reuses effort and fast picker stages" {
+    const alloc = std.testing.allocator;
+    var app = try RoutingFakeApp.init(alloc);
+    defer app.deinit();
+    const model = "gpt-5.6-sol";
+    const efforts = [_]types.ReasoningEffort{types.ReasoningEffort.literal("xhigh")};
+    app.setGatewayControls(model, &efforts, true);
+    app.input_runtime.settings_menu.open();
+    try openRoutingModelMenu(&app, &.{model});
+
+    try Runtime(RoutingFakeApp).handleByte(&app, '\r', 4096, 100);
+
+    try std.testing.expect(!app.input_runtime.settings_menu.active);
+    try std.testing.expect(!app.model_cache.menu.active);
+    try std.testing.expectEqualStrings("test/model", app.selected_model.items);
+    try std.testing.expectEqualStrings("/model " ++ model ++ " ", app.input_runtime.edit_state.input.items);
+    try std.testing.expect(app.input_runtime.picker.hasPendingModelPickerSelection());
+    try std.testing.expectEqual(picker_state.ModelPickerStage.effort, app.input_runtime.picker.model_picker_stage);
+    try std.testing.expectEqual(@as(usize, 0), app.preference_commit_count);
+}
+
+test "app_input_runtime settings model selection commits models without controls" {
+    const alloc = std.testing.allocator;
+    var app = try RoutingFakeApp.init(alloc);
+    defer app.deinit();
+    app.input_runtime.settings_menu.open();
+    try openRoutingModelMenu(&app, &.{"alpha/one"});
+
+    try Runtime(RoutingFakeApp).handleByte(&app, '\r', 4096, 100);
+
+    try std.testing.expect(!app.input_runtime.settings_menu.active);
+    try std.testing.expect(!app.model_cache.menu.active);
+    try std.testing.expectEqualStrings("alpha/one", app.selected_model.items);
+    try std.testing.expectEqual(@as(usize, 1), app.preference_commit_count);
+    try std.testing.expectEqualStrings("", app.input_runtime.edit_state.input.items);
+}
+
 test "app_input_runtime stream Escape closes the model catalog without cancelling the active operation" {
     const alloc = std.testing.allocator;
     var app = try RoutingFakeApp.init(alloc);
@@ -5652,7 +5684,7 @@ test "explicit model selection semantic validation uses resolved capabilities" {
     const high_efforts = [_]types.ReasoningEffort{types.ReasoningEffort.literal("high")};
     const xhigh_efforts = [_]types.ReasoningEffort{types.ReasoningEffort.literal("xhigh")};
     const unsupported_fast = switch (parseExplicitModelSelection(
-        "/model anthropic/claude-sonnet-4.6 auto normal",
+        "/model anthropic/claude-sonnet-4.6 auto fast",
     )) {
         .selection => |selection| selection,
         else => return error.TestExpectedEqual,
@@ -5661,6 +5693,17 @@ test "explicit model selection semantic validation uses resolved capabilities" {
         unsupported_fast,
         model_capabilities.capabilitiesForModel(unsupported_fast.model),
     ) == .invalid);
+
+    const explicit_normal = switch (parseExplicitModelSelection(
+        "/model anthropic/claude-sonnet-4.6 auto normal",
+    )) {
+        .selection => |selection| selection,
+        else => return error.TestExpectedEqual,
+    };
+    try std.testing.expect(validateExplicitModelSelection(
+        explicit_normal,
+        model_capabilities.capabilitiesForModel(explicit_normal.model),
+    ) != .invalid);
 
     const gateway_reasoning_only = switch (parseExplicitModelSelection(
         "/model provider/new-reasoning-model high",
@@ -5693,6 +5736,22 @@ test "explicit model selection semantic validation uses resolved capabilities" {
     try std.testing.expect(validateExplicitModelSelection(
         verified,
         model_capabilities.resolveCapabilities(verified.model, .{
+            .reasoning_efforts = .fromSlice(&xhigh_efforts),
+            .supports_fast_mode = true,
+        }),
+    ) != .invalid);
+
+    const normal_by_default = switch (parseExplicitModelSelection(
+        "/model anthropic/claude-opus-4.8 xhigh",
+    )) {
+        .selection => |selection| selection,
+        else => return error.TestExpectedEqual,
+    };
+    try std.testing.expect(!normal_by_default.fast_mode);
+    try std.testing.expect(!normal_by_default.has_fast_mode_token);
+    try std.testing.expect(validateExplicitModelSelection(
+        normal_by_default,
+        model_capabilities.resolveCapabilities(normal_by_default.model, .{
             .reasoning_efforts = .fromSlice(&xhigh_efforts),
             .supports_fast_mode = true,
         }),
@@ -5899,7 +5958,7 @@ test "app_input_runtime bare model opens on current scrolled selection before st
         0,
         app.input_runtime.picker.model_picker_effort_index,
     );
-    try std.testing.expect(app.input_runtime.picker.selectedModelPickerFast());
+    try std.testing.expect(!app.input_runtime.picker.selectedModelPickerFast());
     try std.testing.expectEqualStrings(current_model, app.selected_model.items);
     try std.testing.expectEqual(types.ReasoningEffort.literal("high"), app.effort);
     try std.testing.expect(!app.fast_mode);

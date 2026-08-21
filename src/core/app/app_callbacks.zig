@@ -270,6 +270,10 @@ pub fn Bindings(comptime App: type) type {
                     app.agentStreamProvider()
                 else
                     agent_stream_provider.unavailable_provider,
+                .responses_compaction_provider = if (comptime @hasDecl(App, "responsesCompactionProvider"))
+                    app.responsesCompactionProvider()
+                else
+                    null,
                 .cooperative_transport_pulse = if (comptime @hasDecl(App, "cooperativeTransportPulse")) .{
                     .ctx = @ptrCast(app),
                     .run = cooperativeTransportPulse,
@@ -361,9 +365,9 @@ pub fn Bindings(comptime App: type) type {
             alloc: std.mem.Allocator,
             source: credentials.Source,
             mode: auth_runtime.CredentialRefreshMode,
-        ) !?[]u8 {
+        ) !?auth_runtime.RefreshedCredential {
             const app: *App = @ptrCast(@alignCast(raw_ctx));
-            return auth_runtime.refreshFxLoginToken(
+            return auth_runtime.refreshCredential(
                 app.auth.oauthTransport(),
                 alloc,
                 source,
@@ -403,10 +407,21 @@ pub fn Bindings(comptime App: type) type {
                 .command_output = workerBridgeCommandOutput,
                 .command_output_complete = workerBridgeCommandOutputComplete,
                 .diff_block = workerBridgeDiffBlock,
+                .responses_compaction = workerBridgeResponsesCompaction,
                 .append_history_turn = workerBridgeAppendHistoryTurn,
                 .session_grant = workerBridgeSessionGrant,
                 .error_text = workerBridgeErrorText,
             };
+        }
+
+        fn workerBridgeResponsesCompaction(
+            ctx: *anyopaque,
+            event: types.ResponsesCompactionWorkerEvent,
+        ) !void {
+            const app: *App = @ptrCast(@alignCast(ctx));
+            if (comptime @hasDecl(App, "applyResponsesCompactionEvent")) {
+                try app.applyResponsesCompactionEvent(event);
+            }
         }
 
         pub fn worker_tool_lifecycle_presenter(

@@ -864,6 +864,11 @@ pub fn freeGatewayCompletion(alloc: std.mem.Allocator, completion: GatewayComple
     if (completion.content) |content| alloc.free(content);
     if (completion.reasoning) |reasoning| alloc.free(@constCast(reasoning));
     if (completion.reasoning_signature) |signature| alloc.free(@constCast(signature));
+    if (completion.reasoning_item_id) |id| alloc.free(@constCast(id));
+    if (completion.reasoning_encrypted_content) |content| alloc.free(@constCast(content));
+    types.freeResponsesReasoningItems(alloc, completion.reasoning_items);
+    types.freeResponsesProviderOutputItems(alloc, completion.responses_provider_output_items);
+    types.freeResponsesUrlCitations(alloc, completion.url_citations);
     for (completion.tool_calls) |tool_call| {
         alloc.free(tool_call.id);
         alloc.free(tool_call.name);

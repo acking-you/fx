@@ -45,8 +45,14 @@ pub const ToolResultAccounting = struct {
 /// `signature` always travel together: Anthropic rejects a thinking block whose
 /// signature does not match its text.
 pub const StepReasoning = struct {
+    message_output_index: ?u32 = null,
     text: ?[]const u8 = null,
     signature: ?[]const u8 = null,
+    item_id: ?[]const u8 = null,
+    encrypted_content: ?[]const u8 = null,
+    items: []const types.ResponsesReasoningItem = &.{},
+    provider_output_items: []const types.ResponsesProviderOutputItem = &.{},
+    output_sequence_complete: bool = false,
 };
 
 pub fn appendAssistantToolCallStep(
@@ -68,9 +74,15 @@ pub fn appendAssistantToolCallStepWithReasoning(
     try within_turn_suffix.append(arena, .{
         .role = .assistant,
         .content = content,
+        .responses_message_output_index = reasoning.message_output_index,
         .tool_calls = tool_calls,
         .reasoning = reasoning.text,
         .reasoning_signature = reasoning.signature,
+        .reasoning_item_id = reasoning.item_id,
+        .reasoning_encrypted_content = reasoning.encrypted_content,
+        .reasoning_items = reasoning.items,
+        .responses_provider_output_items = reasoning.provider_output_items,
+        .responses_output_sequence_complete = reasoning.output_sequence_complete,
     });
 }
 

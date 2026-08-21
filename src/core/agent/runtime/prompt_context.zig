@@ -11,6 +11,11 @@ const ChatMessage = types.ChatMessage;
 const HistoryTurn = types.HistoryTurn;
 
 pub fn historyContextBudgetTokensForCapabilities(capabilities: model_capabilities.Capabilities) usize {
+    if (model_capabilities.autoCompactTokenLimit(capabilities)) |auto_compact_limit| {
+        if (capabilities.auto_compact_token_limit != null) {
+            return @max(@as(usize, 1), @as(usize, @intCast(auto_compact_limit)));
+        }
+    }
     const context_window = capabilities.context_window orelse
         return runtime_config.default_history_context_budget_tokens;
     const context_tokens: usize = @intCast(context_window);
@@ -60,6 +65,7 @@ test "history context budget reserves known output capacity from one capability 
         .{ .capabilities = .{ .context_window = 256_000, .max_output_tokens = 64_000 }, .expected = 48_000 },
         .{ .capabilities = .{ .context_window = 1_000_000, .max_output_tokens = 128_000 }, .expected = 218_000 },
         .{ .capabilities = .{ .context_window = 512_000 }, .expected = 128_000 },
+        .{ .capabilities = .{ .context_window = 272_000, .auto_compact_token_limit = 244_800, .effective_context_window_percent = 95 }, .expected = 244_800 },
         .{ .capabilities = .{ .max_output_tokens = 32_000 }, .expected = runtime_config.default_history_context_budget_tokens },
         .{ .capabilities = .{ .context_window = 32_000, .max_output_tokens = 32_000 }, .expected = 1 },
         .{ .capabilities = .{ .context_window = 32_000, .max_output_tokens = 64_000 }, .expected = 1 },

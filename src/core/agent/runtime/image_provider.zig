@@ -2,6 +2,7 @@ const std = @import("std");
 const agent_stream_provider = @import("../stream_provider.zig");
 const image_attachments = @import("../../images/image_attachments.zig");
 const model_capabilities = @import("../../config/model_capabilities.zig");
+const provider_route = @import("../../gateway/provider_route.zig");
 const types = @import("../../shared/types.zig");
 const debug_trace = @import("../../shared/debug_trace.zig");
 const session_usage = @import("../../session/session_usage.zig");
@@ -10,12 +11,13 @@ const runtime_gateway_step = @import("gateway_step.zig");
 const Allocator = std.mem.Allocator;
 const ChatMessage = types.ChatMessage;
 
-const model = "google/gemini-2.5-flash";
+const gateway_image_model = "google/gemini-2.5-flash";
 
 pub const Request = struct {
     stream_provider: agent_stream_provider.Provider,
     api_key: []const u8,
     gateway_team: ?[]const u8,
+    credential_source: ?types.CredentialSource = null,
     session_id: ?[]const u8 = null,
     retry_count: usize,
     chat_url: []const u8,
@@ -49,11 +51,14 @@ pub fn inspect(
         .{ .role = .system, .content = system_prompt },
         .{ .role = .user, .content = user_prompt },
     };
-    const provider_opts = model_capabilities.resolveProviderOptions(model, .auto, false);
+    const wire_model = inspectionModel(request.credential_source);
+    const provider_opts = model_capabilities.resolveProviderOptions(wire_model, .auto, false);
     const payload = try request.stream_provider.build(
         alloc,
         .{
-            .model = model,
+            .credential_source = request.credential_source,
+            .session_id = request.session_id,
+            .model = wire_model,
             .serialized_tools = "[]",
             .messages = &messages,
             .tool_choice = .none,
@@ -77,8 +82,10 @@ pub fn inspect(
         alloc,
         request.api_key,
         request.gateway_team,
+        request.credential_source,
+        null,
         request.session_id,
-        model,
+        wire_model,
         request.retry_count,
         request.chat_url,
         payload,
@@ -124,6 +131,17 @@ pub fn inspect(
     return error.InvalidProviderResponse;
 }
 
+fn inspectionModel(source: ?types.CredentialSource) []const u8 {
+    const route = if (source) |credential_source|
+        provider_route.fromCredentialSource(credential_source) orelse unreachable
+    else
+        provider_route.ProviderRoute.vercel_gateway;
+    if (route.contract().wire_api == .openai_responses) {
+        return provider_route.wireModel(route, provider_route.fx_default_model);
+    }
+    return gateway_image_model;
+}
+
 const StreamCapture = struct {
     alloc: Allocator,
     text: std.ArrayList(u8) = .empty,
@@ -164,4 +182,11 @@ test "shared image provider capture counts all streamed bytes while retaining it
 
     try std.testing.expectEqual(@as(usize, "abc二xyz".len), capture.observed_bytes);
     try std.testing.expectEqualStrings("abc\xe4", capture.text.items);
+}
+
+test "image fallback uses one route model for capability payload and telemetry" {
+    try std.testing.expectEqualStrings(gateway_image_model, inspectionModel(null));
+    try std.testing.expectEqualStrings(gateway_image_model, inspectionModel(.ai_gateway_api_key));
+    try std.testing.expectEqualStrings(provider_route.openai_default_model, inspectionModel(.openai_api_key));
+    try std.testing.expectEqualStrings(provider_route.codex_default_model, inspectionModel(.codex_oauth));
 }

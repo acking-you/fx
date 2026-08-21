@@ -20,6 +20,11 @@ pub fn fromCatalogEntry(entry: model_catalog.ModelCatalogEntry) model_capabiliti
         .supports_implicit_caching = entry.has_implicit_caching,
         .context_window = optionalPositiveU32(entry.context_window),
         .max_output_tokens = optionalPositiveU32(entry.max_tokens),
+        .auto_compact_token_limit = optionalPositiveU32(entry.auto_compact_token_limit),
+        .effective_context_window_percent = if (entry.effective_context_window_percent == 0)
+            null
+        else
+            entry.effective_context_window_percent,
     };
 }
 
@@ -41,6 +46,8 @@ test "fromCatalogEntry preserves catalog capability metadata" {
         .has_implicit_caching = true,
         .context_window = 256_000,
         .max_tokens = 32_000,
+        .auto_compact_token_limit = 230_400,
+        .effective_context_window_percent = 95,
     });
 
     try std.testing.expect(metadata.supports_reasoning);
@@ -54,6 +61,8 @@ test "fromCatalogEntry preserves catalog capability metadata" {
     try std.testing.expect(metadata.supports_implicit_caching);
     try std.testing.expectEqual(@as(?u32, 256_000), metadata.context_window);
     try std.testing.expectEqual(@as(?u32, 32_000), metadata.max_output_tokens);
+    try std.testing.expectEqual(@as(?u32, 230_400), metadata.auto_compact_token_limit);
+    try std.testing.expectEqual(@as(?u8, 95), metadata.effective_context_window_percent);
 
     const unknown_limits = fromCatalogEntry(.{
         .id = @constCast("provider/model"),
@@ -61,4 +70,6 @@ test "fromCatalogEntry preserves catalog capability metadata" {
     });
     try std.testing.expectEqual(@as(?u32, null), unknown_limits.context_window);
     try std.testing.expectEqual(@as(?u32, null), unknown_limits.max_output_tokens);
+    try std.testing.expectEqual(@as(?u32, null), unknown_limits.auto_compact_token_limit);
+    try std.testing.expectEqual(@as(?u8, null), unknown_limits.effective_context_window_percent);
 }

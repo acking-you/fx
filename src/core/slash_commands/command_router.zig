@@ -24,6 +24,7 @@ pub const ParsedCommand = union(enum) {
     image: []const u8,
     images: []const u8,
     model: []const u8,
+    effort: []const u8,
     models,
     permissions: []const u8,
     allowlist: []const u8,
@@ -70,6 +71,7 @@ pub const CommandHandlers = struct {
     attach_image: *const fn (ctx: *anyopaque, path: []const u8) anyerror!void,
     manage_images: *const fn (ctx: *anyopaque, rest: []const u8) anyerror!void,
     handle_model: *const fn (ctx: *anyopaque, query: []const u8) anyerror!void,
+    handle_effort: *const fn (ctx: *anyopaque, effort: []const u8) anyerror!void,
     show_models: *const fn (ctx: *anyopaque) anyerror!void,
     handle_permissions: *const fn (ctx: *anyopaque, rest: []const u8) anyerror!void,
     handle_allowlist: *const fn (ctx: *anyopaque, rest: []const u8) anyerror!void,
@@ -122,6 +124,7 @@ fn parsedCommand(kind: SlashKind, payload: []const u8) ParsedCommand {
         .images => .{ .images = payload },
         .image => .{ .image = payload },
         .model => .{ .model = payload },
+        .effort => .{ .effort = payload },
         .models => .models,
         .permissions => .{ .permissions = payload },
         .allowlist => .{ .allowlist = payload },
@@ -182,6 +185,7 @@ pub fn route(registry: SlashRegistry, handlers: *const CommandHandlers, cmd: []c
         .image => |path| try handlers.attach_image(handlers.ctx, path),
         .images => |rest| try handlers.manage_images(handlers.ctx, rest),
         .model => |query| try handlers.handle_model(handlers.ctx, query),
+        .effort => |effort| try handlers.handle_effort(handlers.ctx, effort),
         .models => try handlers.show_models(handlers.ctx),
         .permissions => |rest| try handlers.handle_permissions(handlers.ctx, rest),
         .allowlist => |rest| try handlers.handle_allowlist(handlers.ctx, rest),
@@ -218,6 +222,17 @@ test "parse extracts model command payload" {
     const parsed = parse(testSlashRegistry(), "/model claude-opus");
     switch (parsed) {
         .model => |query| try std.testing.expectEqualStrings("claude-opus", query),
+        else => return error.TestExpectedEqual,
+    }
+}
+
+test "parse extracts effort command payload" {
+    switch (parse(testSlashRegistry(), "/effort xhigh")) {
+        .effort => |effort| try std.testing.expectEqualStrings("xhigh", effort),
+        else => return error.TestExpectedEqual,
+    }
+    switch (parse(testSlashRegistry(), "/effort")) {
+        .effort => |effort| try std.testing.expectEqualStrings("", effort),
         else => return error.TestExpectedEqual,
     }
 }
@@ -503,6 +518,12 @@ fn recordModel(ctx: *anyopaque, value: []const u8) anyerror!void {
     test_context.payload = value;
 }
 
+fn recordEffort(ctx: *anyopaque, value: []const u8) anyerror!void {
+    const test_context = testContext(ctx);
+    test_context.called = "effort";
+    test_context.payload = value;
+}
+
 fn recordAllowlist(ctx: *anyopaque, value: []const u8) anyerror!void {
     const test_context = testContext(ctx);
     test_context.called = "allowlist";
@@ -564,6 +585,7 @@ fn testHandlers(ctx: *TestContext) CommandHandlers {
         .attach_image = unexpectedPayload,
         .manage_images = unexpectedPayload,
         .handle_model = unexpectedPayload,
+        .handle_effort = unexpectedPayload,
         .show_models = unexpectedNoPayload,
         .handle_permissions = unexpectedPayload,
         .handle_allowlist = unexpectedPayload,
@@ -644,6 +666,19 @@ test "route forwards borrowed payload slice" {
     try std.testing.expectEqualStrings("model", ctx.called);
     try std.testing.expectEqualStrings("claude-opus", ctx.payload);
     try std.testing.expect(ctx.payload.ptr == cmd["/model ".len..].ptr);
+}
+
+test "route forwards effort payload" {
+    var ctx: TestContext = .{};
+    var handlers = testHandlers(&ctx);
+    handlers.handle_effort = recordEffort;
+    const cmd = "/effort high";
+
+    try route(testSlashRegistry(), &handlers, cmd);
+
+    try std.testing.expectEqualStrings("effort", ctx.called);
+    try std.testing.expectEqualStrings("high", ctx.payload);
+    try std.testing.expect(ctx.payload.ptr == cmd["/effort ".len..].ptr);
 }
 
 test "route forwards allowlist payload" {

@@ -289,6 +289,8 @@ pub const ModelCatalogEntry = struct {
     has_implicit_caching: bool = false,
     context_window: u32 = 0,
     max_tokens: u32 = 0,
+    auto_compact_token_limit: u32 = 0,
+    effective_context_window_percent: u8 = 0,
     web_search_price: ?[]u8 = null,
 };
 
@@ -348,6 +350,8 @@ fn cloneModelCatalogEntry(alloc: std.mem.Allocator, entry: ModelCatalogEntry) !M
         .has_implicit_caching = entry.has_implicit_caching,
         .context_window = entry.context_window,
         .max_tokens = entry.max_tokens,
+        .auto_compact_token_limit = entry.auto_compact_token_limit,
+        .effective_context_window_percent = entry.effective_context_window_percent,
         .web_search_price = null,
     };
     if (entry.web_search_price) |price| {

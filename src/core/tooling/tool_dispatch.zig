@@ -193,6 +193,11 @@ pub const RunCommandBackend = struct {
     }
 };
 
+pub const PreviousAssistantTurn = struct {
+    user_text: []const u8,
+    assistant_text: []const u8,
+};
+
 /// Context shared by core tool dispatch, validation, and execution.
 pub const DispatchContext = struct {
     allocator: Allocator,
@@ -241,6 +246,14 @@ pub const DispatchContext = struct {
     web_fetch_artifact_store: ?*web_fetch_artifacts.Store = null,
     web_fetch_artifact_error: ?anyerror = null,
     web_search_backend: ?WebSearchBackend = null,
+    /// Borrowed trusted root-user context. Synchronous provider-backed tools
+    /// may project a bounded request context but must not retain it after
+    /// dispatch returns.
+    root_user_intent_context: []const u8 = "",
+    /// Borrowed latest completed user/assistant pair. Provider-backed tools may
+    /// use it only as bounded conversational context for the current
+    /// synchronous dispatch and must not retain it.
+    previous_assistant_turn: ?PreviousAssistantTurn = null,
     tool_call_id: []const u8 = "",
     tool_call_name: []const u8 = "",
     web_search_progress_ctx: ?*anyopaque = null,

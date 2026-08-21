@@ -90,14 +90,20 @@ pub const top_level_specs = [_]TopLevelSpec{
     .{
         .kind = .login,
         .token = "login",
-        .usage = "login",
-        .summary = "Sign in with Vercel",
+        .usage = "login [--codex]",
+        .summary = "Sign in with Vercel or ChatGPT Codex",
+        .options = &.{
+            .{ .flag = "--codex", .description = "Sign in to ChatGPT Codex using a device code" },
+        },
     },
     .{
         .kind = .logout,
         .token = "logout",
-        .usage = "logout",
-        .summary = "Sign out of the current Vercel session",
+        .usage = "logout [--codex]",
+        .summary = "Sign out of Vercel or ChatGPT Codex",
+        .options = &.{
+            .{ .flag = "--codex", .description = "Sign out of ChatGPT Codex and attempt to revoke its tokens" },
+        },
     },
     .{
         .kind = .setup,
@@ -215,15 +221,16 @@ pub const top_level_specs = [_]TopLevelSpec{
     .{
         .kind = .usage,
         .token = "usage",
-        .usage = "usage [--period <24h|7d|30d>] [--json]",
-        .summary = "Show local fx token usage and spend",
+        .usage = "usage [--period <24h|7d|30d> | --codex] [--json]",
+        .summary = "Show local fx usage or live saved Codex account limits",
         .options = &.{
             .{ .flag = "--period <24h|7d|30d>", .description = "Select a rolling window (default: 30d)" },
+            .{ .flag = "--codex", .description = "Query limits, credits, and token activity for the saved ChatGPT Codex account" },
             json_option,
         },
         .details = &.{
-            "Reports only usage recorded by fx on this machine.",
-            "This command reads local state and does not query account-wide Gateway reports.",
+            "Without --codex, reports only usage recorded by fx on this machine.",
+            "With --codex, queries the account in the configured Codex auth file instead of the local ledger.",
         },
     },
     .{
@@ -287,12 +294,12 @@ pub const top_level_help_groups = [_]TopLevelHelpGroup{
         .{ .kind = .replay, .usage = "replay <tape>" },
     } },
     .{ .entries = &.{
-        .{ .kind = .login, .usage = "login" },
-        .{ .kind = .logout, .usage = "logout" },
+        .{ .kind = .login, .usage = "login [--codex]" },
+        .{ .kind = .logout, .usage = "logout [--codex]" },
         .{ .kind = .setup, .usage = "setup" },
         .{ .kind = .teams, .usage = "teams" },
         .{ .kind = .credits, .usage = "credits|balance" },
-        .{ .kind = .usage, .usage = "usage [--period <24h|7d|30d>]" },
+        .{ .kind = .usage, .usage = "usage [--period <24h|7d|30d> | --codex]" },
     } },
     .{ .entries = &.{
         .{ .kind = .status, .usage = "status" },
@@ -425,7 +432,8 @@ pub const slash_specs = [_]SlashSpec{
     .{ .kind = .background_logs, .command = "/background logs", .accepts_payload = true },
     .{ .kind = .image, .command = "/image", .aliases = &.{"/img"}, .help_entry = "/image <path> (/img)", .completion_description = "attach an image by path", .presentation_category = .media, .has_args = true, .accepts_payload = true },
     .{ .kind = .images, .command = "/images", .help_entry = "/images [clear]", .completion_description = "manage pending image attachments", .presentation_category = .media, .has_args = true, .accepts_payload = true },
-    .{ .kind = .model, .command = "/model", .help_entry = "/model <id-or-query>", .completion_description = "choose what model and reasoning effort to use", .presentation_category = .model, .has_args = true, .accepts_payload = true, .requires_prompt_credential = true },
+    .{ .kind = .model, .command = "/model", .help_entry = "/model [id-or-query [effort] [normal|fast]]", .completion_description = "choose what model and reasoning effort to use", .presentation_category = .model, .has_args = true, .accepts_payload = true, .requires_prompt_credential = true },
+    .{ .kind = .effort, .command = "/effort", .help_entry = "/effort [auto|level]", .completion_description = "show or set reasoning effort for the current model", .presentation_category = .model, .has_args = true, .accepts_payload = true },
     .{ .kind = .models, .command = "/models", .help_entry = "/models", .completion_description = "browse available models", .presentation_category = .model },
     .{ .kind = .permissions, .command = "/permissions", .help_entry = "/permissions [ask|auto|yolo|reset]", .completion_description = "choose what fx is allowed to do", .presentation_category = .security, .show_in_welcome = true, .has_args = true, .accepts_payload = true },
     .{ .kind = .allowlist, .command = "/allowlist", .help_entry = "/allowlist [view [effective|local|user]|[local|user] add|remove|reset ...]", .completion_description = "manage trusted commands, tools, and URLs", .presentation_category = .security, .show_in_welcome = true, .has_args = true, .accepts_payload = true },
@@ -533,6 +541,7 @@ test "built-in slash commands register exact active order" {
         "/image",
         "/images",
         "/model",
+        "/effort",
         "/models",
         "/permissions",
         "/allowlist",

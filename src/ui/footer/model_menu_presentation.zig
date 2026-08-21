@@ -339,6 +339,7 @@ fn loadedCatalogStatusText(state: model_cache_runtime.ModelMenuCatalogState) ?[]
             .no_credential => "Using the public model catalog; sign in or use an API key for team-private models.",
             .fx_login_team_required => "Choose a Vercel team to load its private models.",
             .fx_login_refresh_required => "Vercel sign-in must refresh before team-private models can load.",
+            .codex_oauth_refresh_required => "Codex sign-in must refresh before its model catalog can load.",
             .credential_refresh_failed => "Vercel sign-in refresh failed; using the public model catalog.",
             .authenticated_credential_rejected => "Your Gateway credential was rejected; using the public model catalog.",
         };
@@ -515,6 +516,7 @@ test "model menu status follows provenance and retryable failure precedence" {
         .{ .state = .{ .public_only_reason = .no_credential, .private_models_hidden = true }, .expected = "Using the public model catalog; sign in or use an API key for team-private models." },
         .{ .state = .{ .public_only_reason = .fx_login_team_required, .private_models_hidden = true }, .expected = "Choose a Vercel team to load its private models." },
         .{ .state = .{ .public_only_reason = .fx_login_refresh_required, .private_models_hidden = true }, .expected = "Vercel sign-in must refresh before team-private models can load." },
+        .{ .state = .{ .public_only_reason = .codex_oauth_refresh_required, .private_models_hidden = true }, .expected = "Codex sign-in must refresh before its model catalog can load." },
         .{ .state = .{ .public_only_reason = .credential_refresh_failed, .private_models_hidden = true }, .expected = "Vercel sign-in refresh failed; using the public model catalog." },
         .{ .state = .{ .public_only_reason = .authenticated_credential_rejected, .private_models_hidden = true }, .expected = "Your Gateway credential was rejected; using the public model catalog." },
         .{ .state = .{ .failure = .{ .category = .transport, .retryable = true } }, .expected = "Could not reach AI Gateway; retry /models." },

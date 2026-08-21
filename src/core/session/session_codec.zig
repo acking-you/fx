@@ -3,6 +3,9 @@ const session = @import("session.zig");
 const session_usage = @import("session_usage.zig");
 const session_permission_state = @import("../permissions/session_permission_state.zig");
 const types = @import("../shared/types.zig");
+const responses_output_items = @import("../shared/responses_output_items.zig");
+const responses_compaction = @import("../gateway/responses_compaction.zig");
+const responses_compaction_binding = @import("../gateway/responses_compaction_binding.zig");
 const captured_command = @import("../tooling/captured_command.zig");
 
 const Allocator = std.mem.Allocator;
@@ -275,6 +278,19 @@ pub fn writeHistoryTurn(writer: *std.Io.Writer, turn: session.HistoryTurn) !void
                 entry.removed_turn_count,
                 entry.compaction_count,
             });
+            if (entry.responses_compaction) |checkpoint| {
+                try writer.writeAll(",\"responses_compaction\":{\"credential_source\":");
+                try writeJsonString(writer, @tagName(checkpoint.credential_source));
+                try writer.writeAll(",\"wire_model\":");
+                try writeDurableBytes(writer, checkpoint.wire_model);
+                try writer.writeAll(",\"input_json\":");
+                try writeDurableBytes(writer, checkpoint.input_json);
+                if (checkpoint.provider_binding) |binding| {
+                    try writer.writeAll(",\"provider_binding\":");
+                    try writeResponsesCompactionProviderBinding(writer, binding.view());
+                }
+                try writer.writeByte('}');
+            }
             try writer.writeByte('}');
         },
         .assistant => |entry| {
@@ -282,6 +298,35 @@ pub fn writeHistoryTurn(writer: *std.Io.Writer, turn: session.HistoryTurn) !void
             try writeUserTurn(writer, entry.user);
             try writer.writeAll(",\"assistant\":");
             try writeDurableBytes(writer, entry.assistant);
+            if (entry.responses_message_output_index) |output_index| {
+                try writer.print(",\"responses_message_output_index\":{d}", .{output_index});
+            }
+            if (entry.reasoning_items.len > 0 or entry.reasoning != null or entry.reasoning_item_id != null or
+                entry.reasoning_encrypted_content != null)
+            {
+                try writer.writeAll(",\"reasoning\":");
+                try writeOptionalDurableBytes(writer, entry.reasoning);
+                try writer.writeAll(",\"reasoning_item_id\":");
+                try writeOptionalDurableBytes(writer, entry.reasoning_item_id);
+                try writer.writeAll(",\"reasoning_encrypted_content\":");
+                try writeOptionalDurableBytes(writer, entry.reasoning_encrypted_content);
+                if (entry.reasoning_items.len > 0) {
+                    try writer.writeAll(",\"reasoning_items\":");
+                    try writeResponsesReasoningItems(writer, entry.reasoning_items);
+                }
+            }
+            if (entry.responses_provider_output_items.len > 0 or
+                entry.responses_output_sequence_complete)
+            {
+                try writer.writeAll(",\"responses_provider_output_items\":");
+                try writeResponsesProviderOutputItems(
+                    writer,
+                    entry.responses_provider_output_items,
+                );
+                try writer.print(",\"responses_output_sequence_complete\":{s}", .{
+                    if (entry.responses_output_sequence_complete) "true" else "false",
+                });
+            }
             try writer.writeAll(",\"execution\":");
             try writeExecutionMemory(writer, entry.execution);
             try writer.writeByte('}');
@@ -350,17 +395,18 @@ pub fn parseHistoryTurn(alloc: Allocator, value: std.json.Value) !session.Histor
         const has_completeness = raw_object.get("root_user_messages_complete") != null;
         const has_permission_feedback = raw_object.get("permission_feedback") != null;
         const has_feedback_completeness = raw_object.get("permission_feedback_complete") != null;
+        const has_responses_compaction = raw_object.get("responses_compaction") != null;
         if (has_permission_feedback != has_feedback_completeness) {
             return error.InvalidSessionFormat;
         }
-        const object = if (has_feedback_completeness)
-            try exactObject(value, &.{ "kind", "summary", "removed_turn_count", "compaction_count", "root_user_messages", "root_user_messages_complete", "permission_feedback", "permission_feedback_complete" })
-        else if (has_completeness)
-            try exactObject(value, &.{ "kind", "summary", "removed_turn_count", "compaction_count", "root_user_messages", "root_user_messages_complete" })
-        else if (has_root_user_messages)
-            try exactObject(value, &.{ "kind", "summary", "removed_turn_count", "compaction_count", "root_user_messages" })
-        else
-            try exactObject(value, &.{ "kind", "summary", "removed_turn_count", "compaction_count" });
+        const object = try exactCompactedSummaryObject(
+            value,
+            has_root_user_messages,
+            has_completeness,
+            has_permission_feedback,
+            has_feedback_completeness,
+            has_responses_compaction,
+        );
         const summary = try parseRequiredDurableBytes(alloc, object, "summary");
         errdefer alloc.free(summary);
         const root_user_messages: [][]u8 = if (has_root_user_messages)
@@ -379,6 +425,20 @@ pub fn parseHistoryTurn(alloc: Allocator, value: std.json.Value) !session.Histor
         else
             &.{};
         errdefer types.freePermissionFeedback(alloc, permission_feedback);
+        const remote_compaction = if (has_responses_compaction)
+            try parseResponsesCompactionCheckpoint(
+                alloc,
+                object.get("responses_compaction") orelse return error.InvalidSessionFormat,
+            )
+        else
+            null;
+        errdefer if (remote_compaction) |checkpoint| {
+            alloc.free(checkpoint.wire_model);
+            alloc.free(checkpoint.input_json);
+            if (checkpoint.provider_binding) |binding| {
+                types.freeResponsesCompactionProviderBinding(alloc, binding);
+            }
+        };
         const removed_turn_count = try requireUsize(object, "removed_turn_count");
         return .{ .compacted_summary = .{
             .summary = summary,
@@ -394,19 +454,98 @@ pub fn parseHistoryTurn(alloc: Allocator, value: std.json.Value) !session.Histor
                 try requireBool(object, "permission_feedback_complete")
             else
                 removed_turn_count == 0,
+            .responses_compaction = remote_compaction,
         } };
     }
     if (std.mem.eql(u8, kind, "assistant")) {
-        const object = try exactObject(value, &.{ "kind", "user", "assistant", "execution" });
+        const raw_object = try requireObject(value);
+        const has_reasoning = raw_object.get("reasoning") != null;
+        const has_reasoning_item_id = raw_object.get("reasoning_item_id") != null;
+        const has_reasoning_encrypted_content = raw_object.get("reasoning_encrypted_content") != null;
+        const has_reasoning_items = raw_object.get("reasoning_items") != null;
+        const has_provider_output_items = raw_object.get("responses_provider_output_items") != null;
+        const has_output_sequence_complete = raw_object.get("responses_output_sequence_complete") != null;
+        const has_message_output_index = raw_object.get("responses_message_output_index") != null;
+        if (has_provider_output_items != has_output_sequence_complete) {
+            return error.InvalidSessionFormat;
+        }
+        const has_responses_reasoning = has_reasoning or has_reasoning_item_id or
+            has_reasoning_encrypted_content or has_reasoning_items;
+        if (has_responses_reasoning and
+            (!has_reasoning or !has_reasoning_item_id or !has_reasoning_encrypted_content))
+        {
+            return error.InvalidSessionFormat;
+        }
+        const object = try exactAssistantHistoryObject(
+            value,
+            has_responses_reasoning,
+            has_reasoning_items,
+            has_provider_output_items,
+            has_message_output_index,
+        );
         const user = try parseUserTurn(alloc, object.get("user") orelse return error.InvalidSessionFormat);
         errdefer session.freeUserTurn(alloc, user);
         const assistant = try parseRequiredDurableBytes(alloc, object, "assistant");
         errdefer alloc.free(assistant);
+        const message_output_index: ?u32 = if (has_message_output_index) blk: {
+            const value_index = try requireU64(object, "responses_message_output_index");
+            if (value_index > std.math.maxInt(u32)) return error.InvalidSessionFormat;
+            break :blk @intCast(value_index);
+        } else null;
+        const reasoning = if (has_responses_reasoning)
+            try parseOptionalDurableBytes(alloc, object.get("reasoning") orelse return error.InvalidSessionFormat)
+        else
+            null;
+        errdefer if (reasoning) |owned| alloc.free(owned);
+        const reasoning_item_id = if (has_responses_reasoning)
+            try parseOptionalDurableBytes(alloc, object.get("reasoning_item_id") orelse return error.InvalidSessionFormat)
+        else
+            null;
+        errdefer if (reasoning_item_id) |owned| alloc.free(owned);
+        const reasoning_encrypted_content = if (has_responses_reasoning)
+            try parseOptionalDurableBytes(alloc, object.get("reasoning_encrypted_content") orelse return error.InvalidSessionFormat)
+        else
+            null;
+        errdefer if (reasoning_encrypted_content) |owned| alloc.free(owned);
+        const reasoning_items: []types.ResponsesReasoningItem = if (has_reasoning_items)
+            try parseResponsesReasoningItems(
+                alloc,
+                object.get("reasoning_items") orelse return error.InvalidSessionFormat,
+            )
+        else
+            &.{};
+        errdefer types.freeResponsesReasoningItems(alloc, reasoning_items);
+        const provider_output_items: []types.ResponsesProviderOutputItem = if (has_provider_output_items)
+            try parseResponsesProviderOutputItems(
+                alloc,
+                object.get("responses_provider_output_items") orelse
+                    return error.InvalidSessionFormat,
+            )
+        else
+            &.{};
+        errdefer types.freeResponsesProviderOutputItems(alloc, provider_output_items);
+        const output_sequence_complete = if (has_output_sequence_complete)
+            try requireBool(object, "responses_output_sequence_complete")
+        else
+            false;
+        if (output_sequence_complete) {
+            responses_output_items.validateComplete(alloc, provider_output_items) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.InvalidSessionFormat,
+            };
+        }
         const execution = try parseExecutionMemory(alloc, object.get("execution") orelse return error.InvalidSessionFormat);
         errdefer session.freeExecutionMemory(alloc, execution);
         return .{ .assistant = .{
             .user = user,
             .assistant = assistant,
+            .responses_message_output_index = message_output_index,
+            .reasoning = reasoning,
+            .reasoning_item_id = reasoning_item_id,
+            .reasoning_encrypted_content = reasoning_encrypted_content,
+            .reasoning_items = reasoning_items,
+            .responses_provider_output_items = provider_output_items,
+            .responses_output_sequence_complete = output_sequence_complete,
             .execution = execution,
         } };
     }
@@ -503,6 +642,201 @@ pub fn parseHistoryTurn(alloc: Allocator, value: std.json.Value) !session.Histor
         } };
     }
     return error.InvalidSessionFormat;
+}
+
+fn exactAssistantHistoryObject(
+    value: std.json.Value,
+    has_responses_reasoning: bool,
+    has_reasoning_items: bool,
+    has_provider_output_items: bool,
+    has_message_output_index: bool,
+) !std.json.ObjectMap {
+    var keys: [11][]const u8 = undefined;
+    keys[0] = "kind";
+    keys[1] = "user";
+    keys[2] = "assistant";
+    var len: usize = 3;
+    if (has_message_output_index) {
+        keys[len] = "responses_message_output_index";
+        len += 1;
+    }
+    if (has_responses_reasoning) {
+        keys[len] = "reasoning";
+        len += 1;
+        keys[len] = "reasoning_item_id";
+        len += 1;
+        keys[len] = "reasoning_encrypted_content";
+        len += 1;
+    }
+    if (has_reasoning_items) {
+        keys[len] = "reasoning_items";
+        len += 1;
+    }
+    if (has_provider_output_items) {
+        keys[len] = "responses_provider_output_items";
+        len += 1;
+        keys[len] = "responses_output_sequence_complete";
+        len += 1;
+    }
+    keys[len] = "execution";
+    len += 1;
+    return exactObject(value, keys[0..len]);
+}
+
+fn exactCompactedSummaryObject(
+    value: std.json.Value,
+    has_root_user_messages: bool,
+    has_root_completeness: bool,
+    has_permission_feedback: bool,
+    has_feedback_completeness: bool,
+    has_responses_compaction: bool,
+) !std.json.ObjectMap {
+    if ((has_root_completeness and !has_root_user_messages) or
+        (has_permission_feedback and (!has_root_user_messages or !has_root_completeness)) or
+        has_permission_feedback != has_feedback_completeness)
+    {
+        return error.InvalidSessionFormat;
+    }
+
+    var keys: [9][]const u8 = undefined;
+    keys[0] = "kind";
+    keys[1] = "summary";
+    keys[2] = "removed_turn_count";
+    keys[3] = "compaction_count";
+    var len: usize = 4;
+    if (has_root_user_messages) {
+        keys[len] = "root_user_messages";
+        len += 1;
+    }
+    if (has_root_completeness) {
+        keys[len] = "root_user_messages_complete";
+        len += 1;
+    }
+    if (has_permission_feedback) {
+        keys[len] = "permission_feedback";
+        len += 1;
+    }
+    if (has_feedback_completeness) {
+        keys[len] = "permission_feedback_complete";
+        len += 1;
+    }
+    if (has_responses_compaction) {
+        keys[len] = "responses_compaction";
+        len += 1;
+    }
+    return exactObject(value, keys[0..len]);
+}
+
+fn parseResponsesCompactionCheckpoint(
+    alloc: Allocator,
+    value: std.json.Value,
+) !types.ResponsesCompactionCheckpoint {
+    const raw_object = switch (value) {
+        .object => |object| object,
+        else => return error.InvalidSessionFormat,
+    };
+    const has_provider_binding = raw_object.get("provider_binding") != null;
+    const object = if (has_provider_binding)
+        try exactObject(
+            value,
+            &.{ "credential_source", "wire_model", "input_json", "provider_binding" },
+        )
+    else
+        try exactObject(value, &.{ "credential_source", "wire_model", "input_json" });
+    const source_raw = try requireString(object, "credential_source");
+    const credential_source = types.parseCredentialSource(source_raw) orelse
+        return error.InvalidSessionFormat;
+    switch (credential_source) {
+        .openai_api_key, .codex_oauth => {},
+        else => return error.InvalidSessionFormat,
+    }
+
+    const wire_model = try parseRequiredDurableBytes(alloc, object, "wire_model");
+    errdefer alloc.free(wire_model);
+    validateModel(wire_model) catch return error.InvalidSessionFormat;
+    const input_json = try parseRequiredDurableBytes(alloc, object, "input_json");
+    errdefer alloc.free(input_json);
+    responses_compaction.validateReplayInputJson(alloc, input_json) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidSessionFormat,
+    };
+    const provider_binding = if (has_provider_binding)
+        try parseResponsesCompactionProviderBinding(
+            alloc,
+            credential_source,
+            object.get("provider_binding") orelse return error.InvalidSessionFormat,
+        )
+    else
+        null;
+    return .{
+        .credential_source = credential_source,
+        .wire_model = wire_model,
+        .input_json = input_json,
+        .provider_binding = provider_binding,
+    };
+}
+
+fn writeResponsesCompactionProviderBinding(
+    writer: *std.Io.Writer,
+    binding: types.ResponsesCompactionProviderBindingView,
+) !void {
+    try writer.writeAll("{\"normalized_origin\":");
+    try writeDurableBytes(writer, binding.normalized_origin);
+    try writer.writeAll(",\"account_id\":");
+    try writeOptionalDurableBytes(writer, binding.account_id);
+    try writer.writeAll(",\"api_key_sha256\":");
+    try writeOptionalDurableBytes(writer, binding.api_key_sha256);
+    try writer.writeAll(",\"organization\":");
+    try writeOptionalDurableBytes(writer, binding.organization);
+    try writer.writeAll(",\"project\":");
+    try writeOptionalDurableBytes(writer, binding.project);
+    try writer.writeByte('}');
+}
+
+fn parseResponsesCompactionProviderBinding(
+    alloc: Allocator,
+    credential_source: types.CredentialSource,
+    value: std.json.Value,
+) !types.ResponsesCompactionProviderBinding {
+    const object = try exactObject(value, &.{
+        "normalized_origin",
+        "account_id",
+        "api_key_sha256",
+        "organization",
+        "project",
+    });
+    const normalized_origin = try parseRequiredDurableBytes(alloc, object, "normalized_origin");
+    errdefer alloc.free(normalized_origin);
+    const account_id = try parseOptionalDurableBytes(
+        alloc,
+        object.get("account_id") orelse return error.InvalidSessionFormat,
+    );
+    errdefer if (account_id) |field| alloc.free(field);
+    const api_key_sha256 = try parseOptionalDurableBytes(
+        alloc,
+        object.get("api_key_sha256") orelse return error.InvalidSessionFormat,
+    );
+    errdefer if (api_key_sha256) |field| alloc.free(field);
+    const organization = try parseOptionalDurableBytes(
+        alloc,
+        object.get("organization") orelse return error.InvalidSessionFormat,
+    );
+    errdefer if (organization) |field| alloc.free(field);
+    const project = try parseOptionalDurableBytes(
+        alloc,
+        object.get("project") orelse return error.InvalidSessionFormat,
+    );
+    errdefer if (project) |field| alloc.free(field);
+    const binding: types.ResponsesCompactionProviderBinding = .{
+        .normalized_origin = normalized_origin,
+        .account_id = account_id,
+        .api_key_sha256 = api_key_sha256,
+        .organization = organization,
+        .project = project,
+    };
+    responses_compaction_binding.validate(credential_source, binding.view()) catch
+        return error.InvalidSessionFormat;
+    return binding;
 }
 
 fn isCapturedCommandToolCall(alloc: Allocator, call: types.ToolCall) !bool {
@@ -969,11 +1303,49 @@ fn writeSnapshotLocator(writer: *std.Io.Writer, value: ?[]const u8) !void {
 }
 
 fn writeExecutionMemory(writer: *std.Io.Writer, execution: session.ExecutionMemory) !void {
-    try writer.writeAll("{\"schema_version\":3,\"tool_steps\":[");
+    const schema_version: u8 = blk: {
+        for (execution.tool_steps) |step| {
+            if (step.responses_message_output_index != null or
+                step.responses_provider_output_items.len > 0 or
+                step.responses_output_sequence_complete) break :blk 6;
+            if (step.reasoning_items.len > 0) break :blk 5;
+            if (step.reasoning != null or step.reasoning_item_id != null or
+                step.reasoning_encrypted_content != null)
+            {
+                break :blk 4;
+            }
+        }
+        break :blk 3;
+    };
+    try writer.print("{{\"schema_version\":{d},\"tool_steps\":[", .{schema_version});
     for (execution.tool_steps, 0..) |step, i| {
         if (i > 0) try writer.writeByte(',');
         try writer.writeAll("{\"assistant\":");
         try writeOptionalDurableBytes(writer, step.assistant);
+        if (schema_version >= 4) {
+            try writer.writeAll(",\"reasoning\":");
+            try writeOptionalDurableBytes(writer, step.reasoning);
+            try writer.writeAll(",\"reasoning_item_id\":");
+            try writeOptionalDurableBytes(writer, step.reasoning_item_id);
+            try writer.writeAll(",\"reasoning_encrypted_content\":");
+            try writeOptionalDurableBytes(writer, step.reasoning_encrypted_content);
+            if (schema_version >= 5) {
+                try writer.writeAll(",\"reasoning_items\":");
+                try writeResponsesReasoningItems(writer, step.reasoning_items);
+            }
+            if (schema_version >= 6) {
+                try writer.writeAll(",\"responses_message_output_index\":");
+                try writeOptionalU32(writer, step.responses_message_output_index);
+                try writer.writeAll(",\"responses_provider_output_items\":");
+                try writeResponsesProviderOutputItems(
+                    writer,
+                    step.responses_provider_output_items,
+                );
+                try writer.print(",\"responses_output_sequence_complete\":{s}", .{
+                    if (step.responses_output_sequence_complete) "true" else "false",
+                });
+            }
+        }
         try writer.writeAll(",\"tool_calls\":[");
         for (step.tool_calls, 0..) |tool_call, call_index| {
             if (call_index > 0) try writer.writeByte(',');
@@ -1003,6 +1375,13 @@ fn writeToolCall(writer: *std.Io.Writer, tool_call: session.ToolCall) !void {
     try writeDurableBytes(writer, tool_call.arguments_json);
     try writer.writeAll(",\"provider_result\":");
     try writeOptionalDurableBytes(writer, tool_call.provider_result);
+    if (tool_call.responses_item_id) |item_id| {
+        try writer.writeAll(",\"responses_item_id\":");
+        try writeDurableBytes(writer, item_id);
+    }
+    if (tool_call.responses_output_index) |output_index| {
+        try writer.print(",\"responses_output_index\":{d}", .{output_index});
+    }
     try writer.writeByte('}');
 }
 
@@ -1267,7 +1646,9 @@ fn imageAttachmentObject(value: std.json.Value) !std.json.ObjectMap {
 fn parseExecutionMemory(alloc: Allocator, value: std.json.Value) !session.ExecutionMemory {
     const object = try exactObject(value, &.{ "schema_version", "tool_steps", "files" });
     const schema_version = try requireU64(object, "schema_version");
-    if (schema_version != 1 and schema_version != 2 and schema_version != 3) {
+    if (schema_version != 1 and schema_version != 2 and schema_version != 3 and
+        schema_version != 4 and schema_version != 5 and schema_version != 6)
+    {
         return error.InvalidSessionFormat;
     }
     const tool_steps = try parseToolSteps(
@@ -1292,13 +1673,98 @@ fn parseToolSteps(
     var parsed_count: usize = 0;
     errdefer for (steps[0..parsed_count]) |step| {
         if (step.assistant) |assistant| alloc.free(assistant);
+        if (step.reasoning) |reasoning| alloc.free(reasoning);
+        if (step.reasoning_item_id) |item_id| alloc.free(item_id);
+        if (step.reasoning_encrypted_content) |content| alloc.free(content);
+        types.freeResponsesReasoningItems(alloc, step.reasoning_items);
+        types.freeResponsesProviderOutputItems(alloc, step.responses_provider_output_items);
         session.freeToolCallSlice(alloc, step.tool_calls);
         session.freePersistedToolResults(alloc, step.tool_results);
     };
     for (value.array.items, 0..) |step_value, i| {
-        const object = try exactObject(step_value, &.{ "assistant", "tool_calls", "tool_results" });
+        const object = if (schema_version >= 6)
+            try exactObject(step_value, &.{
+                "assistant",
+                "reasoning",
+                "reasoning_item_id",
+                "reasoning_encrypted_content",
+                "reasoning_items",
+                "responses_message_output_index",
+                "responses_provider_output_items",
+                "responses_output_sequence_complete",
+                "tool_calls",
+                "tool_results",
+            })
+        else if (schema_version >= 5)
+            try exactObject(step_value, &.{
+                "assistant",
+                "reasoning",
+                "reasoning_item_id",
+                "reasoning_encrypted_content",
+                "reasoning_items",
+                "tool_calls",
+                "tool_results",
+            })
+        else if (schema_version >= 4)
+            try exactObject(step_value, &.{
+                "assistant",
+                "reasoning",
+                "reasoning_item_id",
+                "reasoning_encrypted_content",
+                "tool_calls",
+                "tool_results",
+            })
+        else
+            try exactObject(step_value, &.{ "assistant", "tool_calls", "tool_results" });
         const assistant = try parseOptionalDurableBytes(alloc, object.get("assistant") orelse return error.InvalidSessionFormat);
         errdefer if (assistant) |owned| alloc.free(owned);
+        const reasoning = if (schema_version >= 4)
+            try parseOptionalDurableBytes(alloc, object.get("reasoning") orelse return error.InvalidSessionFormat)
+        else
+            null;
+        errdefer if (reasoning) |owned| alloc.free(owned);
+        const reasoning_item_id = if (schema_version >= 4)
+            try parseOptionalDurableBytes(alloc, object.get("reasoning_item_id") orelse return error.InvalidSessionFormat)
+        else
+            null;
+        errdefer if (reasoning_item_id) |owned| alloc.free(owned);
+        const reasoning_encrypted_content = if (schema_version >= 4)
+            try parseOptionalDurableBytes(alloc, object.get("reasoning_encrypted_content") orelse return error.InvalidSessionFormat)
+        else
+            null;
+        errdefer if (reasoning_encrypted_content) |owned| alloc.free(owned);
+        const reasoning_items: []types.ResponsesReasoningItem = if (schema_version >= 5)
+            try parseResponsesReasoningItems(
+                alloc,
+                object.get("reasoning_items") orelse return error.InvalidSessionFormat,
+            )
+        else
+            &.{};
+        errdefer types.freeResponsesReasoningItems(alloc, reasoning_items);
+        const provider_output_items: []types.ResponsesProviderOutputItem = if (schema_version >= 6)
+            try parseResponsesProviderOutputItems(
+                alloc,
+                object.get("responses_provider_output_items") orelse
+                    return error.InvalidSessionFormat,
+            )
+        else
+            &.{};
+        errdefer types.freeResponsesProviderOutputItems(alloc, provider_output_items);
+        const message_output_index: ?u32 = if (schema_version >= 6)
+            try parseOptionalU32(object.get("responses_message_output_index") orelse
+                return error.InvalidSessionFormat)
+        else
+            null;
+        const output_sequence_complete = if (schema_version >= 6)
+            try requireBool(object, "responses_output_sequence_complete")
+        else
+            false;
+        if (output_sequence_complete) {
+            responses_output_items.validateComplete(alloc, provider_output_items) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.InvalidSessionFormat,
+            };
+        }
         const tool_calls = try parseToolCalls(alloc, object.get("tool_calls") orelse return error.InvalidSessionFormat);
         errdefer session.freeToolCallSlice(alloc, tool_calls);
         const tool_results = try parseToolResults(
@@ -1310,6 +1776,13 @@ fn parseToolSteps(
         try session.repairPersistedToolArguments(alloc, tool_calls, tool_results, .schema_v3);
         steps[i] = .{
             .assistant = assistant,
+            .responses_message_output_index = message_output_index,
+            .reasoning = reasoning,
+            .reasoning_item_id = reasoning_item_id,
+            .reasoning_encrypted_content = reasoning_encrypted_content,
+            .reasoning_items = reasoning_items,
+            .responses_provider_output_items = provider_output_items,
+            .responses_output_sequence_complete = output_sequence_complete,
             .tool_calls = tool_calls,
             .tool_results = tool_results,
         };
@@ -1333,12 +1806,41 @@ fn parseToolCalls(alloc: Allocator, value: std.json.Value) ![]session.ToolCall {
 }
 
 fn parseToolCall(alloc: Allocator, value: std.json.Value) !session.ToolCall {
-    const object = try exactObject(value, &.{
-        "id",
-        "name",
-        "arguments_json",
-        "provider_result",
-    });
+    const raw_object = try requireObject(value);
+    const has_item_id = raw_object.get("responses_item_id") != null;
+    const has_output_index = raw_object.get("responses_output_index") != null;
+    const object = if (has_item_id and has_output_index)
+        try exactObject(value, &.{
+            "id",
+            "name",
+            "arguments_json",
+            "provider_result",
+            "responses_item_id",
+            "responses_output_index",
+        })
+    else if (has_item_id)
+        try exactObject(value, &.{
+            "id",
+            "name",
+            "arguments_json",
+            "provider_result",
+            "responses_item_id",
+        })
+    else if (has_output_index)
+        try exactObject(value, &.{
+            "id",
+            "name",
+            "arguments_json",
+            "provider_result",
+            "responses_output_index",
+        })
+    else
+        try exactObject(value, &.{
+            "id",
+            "name",
+            "arguments_json",
+            "provider_result",
+        });
     const id = try parseRequiredDurableBytes(alloc, object, "id");
     errdefer alloc.free(id);
     const name = try parseRequiredDurableBytes(alloc, object, "name");
@@ -1355,12 +1857,27 @@ fn parseToolCall(alloc: Allocator, value: std.json.Value) !session.ToolCall {
         alloc,
         object.get("provider_result") orelse return error.InvalidSessionFormat,
     );
+    errdefer if (provider_result) |owned| alloc.free(owned);
+    const responses_item_id = if (has_item_id)
+        try parseOptionalDurableBytes(
+            alloc,
+            object.get("responses_item_id") orelse return error.InvalidSessionFormat,
+        )
+    else
+        null;
+    errdefer if (responses_item_id) |owned| alloc.free(owned);
     return .{
         .id = id,
         .name = name,
         .arguments_json = arguments_json,
         .argument_integrity = argument_integrity,
         .provider_result = provider_result,
+        .responses_item_id = responses_item_id,
+        .responses_output_index = if (has_output_index) blk: {
+            const output_index = try requireU64(object, "responses_output_index");
+            if (output_index > std.math.maxInt(u32)) return error.InvalidSessionFormat;
+            break :blk @intCast(output_index);
+        } else null,
     };
 }
 
@@ -1474,7 +1991,7 @@ fn parseToolResult(
     const result_shape: ExactVariantObject = switch (schema_version) {
         1 => .{ .object = try exactObject(value, v1_keys), .extended = false },
         2 => try exactVariantObject(value, v2_keys, v2_extended_keys),
-        3 => .{ .object = try exactObject(value, v3_keys), .extended = true },
+        3, 4, 5, 6 => .{ .object = try exactObject(value, v3_keys), .extended = true },
         else => return error.InvalidSessionFormat,
     };
     const object = result_shape.object;
@@ -1797,6 +2314,102 @@ noinline fn parseOptionalDurableBytes(alloc: Allocator, value: std.json.Value) !
     };
 }
 
+fn parseResponsesReasoningItems(
+    alloc: Allocator,
+    value: std.json.Value,
+) ![]types.ResponsesReasoningItem {
+    if (value != .array) return error.InvalidSessionFormat;
+    if (value.array.items.len == 0) return &.{};
+    const items = try alloc.alloc(types.ResponsesReasoningItem, value.array.items.len);
+    errdefer alloc.free(items);
+    var parsed_count: usize = 0;
+    errdefer {
+        for (items[0..parsed_count]) |item| {
+            if (item.id) |owned| alloc.free(@constCast(owned));
+            if (item.summary) |owned| alloc.free(@constCast(owned));
+            if (item.encrypted_content) |owned| alloc.free(@constCast(owned));
+        }
+    }
+    for (value.array.items, 0..) |item_value, i| {
+        const raw_object = try requireObject(item_value);
+        const has_output_index = raw_object.get("output_index") != null;
+        const object = if (has_output_index)
+            try exactObject(item_value, &.{ "output_index", "id", "summary", "encrypted_content" })
+        else
+            try exactObject(item_value, &.{ "id", "summary", "encrypted_content" });
+        const output_index = if (has_output_index)
+            try parseOptionalU32(object.get("output_index") orelse return error.InvalidSessionFormat)
+        else
+            null;
+        const id = try parseOptionalDurableBytes(alloc, object.get("id") orelse return error.InvalidSessionFormat);
+        errdefer if (id) |owned| alloc.free(owned);
+        const summary = try parseOptionalDurableBytes(alloc, object.get("summary") orelse return error.InvalidSessionFormat);
+        errdefer if (summary) |owned| alloc.free(owned);
+        const encrypted_content = try parseOptionalDurableBytes(
+            alloc,
+            object.get("encrypted_content") orelse return error.InvalidSessionFormat,
+        );
+        errdefer if (encrypted_content) |owned| alloc.free(owned);
+        items[i] = .{
+            .output_index = output_index,
+            .id = id,
+            .summary = summary,
+            .encrypted_content = encrypted_content,
+        };
+        parsed_count += 1;
+    }
+    return items;
+}
+
+fn parseResponsesProviderOutputItems(
+    alloc: Allocator,
+    value: std.json.Value,
+) ![]types.ResponsesProviderOutputItem {
+    if (value != .array or value.array.items.len > responses_output_items.max_items) {
+        return error.InvalidSessionFormat;
+    }
+    if (value.array.items.len == 0) return &.{};
+
+    var items: std.ArrayList(types.ResponsesProviderOutputItem) = .empty;
+    errdefer {
+        for (items.items) |item| alloc.free(@constCast(item.json));
+        items.deinit(alloc);
+    }
+    var total_bytes: usize = 0;
+    for (value.array.items) |item_value| {
+        const object = try exactObject(item_value, &.{ "output_index", "json" });
+        const output_index = try requireU64(object, "output_index");
+        if (output_index > std.math.maxInt(u32)) return error.InvalidSessionFormat;
+        const json = parseDurableBytes(
+            alloc,
+            object.get("json") orelse return error.InvalidSessionFormat,
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.InvalidSessionFormat,
+        };
+        errdefer alloc.free(json);
+        if (json.len == 0 or json.len > responses_output_items.max_item_bytes) {
+            return error.InvalidSessionFormat;
+        }
+        total_bytes = std.math.add(usize, total_bytes, json.len) catch
+            return error.InvalidSessionFormat;
+        if (total_bytes > responses_output_items.max_total_bytes) {
+            return error.InvalidSessionFormat;
+        }
+        try items.append(alloc, .{
+            .output_index = @intCast(output_index),
+            .json = json,
+        });
+    }
+    const owned = try items.toOwnedSlice(alloc);
+    errdefer types.freeResponsesProviderOutputItems(alloc, owned);
+    responses_output_items.validate(alloc, owned) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidSessionFormat,
+    };
+    return owned;
+}
+
 fn parseOptionalIdentifier(value: std.json.Value) !?types.StableBackgroundRecordId {
     return switch (value) {
         .null => null,
@@ -1820,6 +2433,40 @@ noinline fn writeOptionalDurableBytes(writer: *std.Io.Writer, value: anytype) !v
     } else {
         try writer.writeAll("null");
     }
+}
+
+fn writeResponsesReasoningItems(
+    writer: *std.Io.Writer,
+    items: []const types.ResponsesReasoningItem,
+) !void {
+    try writer.writeByte('[');
+    for (items, 0..) |item, i| {
+        if (i > 0) try writer.writeByte(',');
+        try writer.writeAll("{\"output_index\":");
+        try writeOptionalU32(writer, item.output_index);
+        try writer.writeAll(",\"id\":");
+        try writeOptionalDurableBytes(writer, item.id);
+        try writer.writeAll(",\"summary\":");
+        try writeOptionalDurableBytes(writer, item.summary);
+        try writer.writeAll(",\"encrypted_content\":");
+        try writeOptionalDurableBytes(writer, item.encrypted_content);
+        try writer.writeByte('}');
+    }
+    try writer.writeByte(']');
+}
+
+fn writeResponsesProviderOutputItems(
+    writer: *std.Io.Writer,
+    items: []const types.ResponsesProviderOutputItem,
+) !void {
+    try writer.writeByte('[');
+    for (items, 0..) |item, i| {
+        if (i > 0) try writer.writeByte(',');
+        try writer.print("{{\"output_index\":{d},\"json\":", .{item.output_index});
+        try writeDurableBytes(writer, item.json);
+        try writer.writeByte('}');
+    }
+    try writer.writeByte(']');
 }
 
 fn writeOptionalU32(writer: *std.Io.Writer, value: ?u32) !void {
@@ -2658,6 +3305,154 @@ test "execution memory codec preserves feedback and reads v1 results without it"
     try std.testing.expect(v2_decoded.assistant.execution.tool_steps[0].tool_results[0].command_process_presentation == null);
 }
 
+test "assistant history codec round trips Responses reasoning identity and accepts legacy turns" {
+    const alloc = std.testing.allocator;
+    var tool_reasoning_items = [_]types.ResponsesReasoningItem{
+        .{ .output_index = 0, .id = "rs_tool_1", .summary = "tool first", .encrypted_content = "tool opaque 1" },
+        .{ .output_index = 2, .id = "rs_tool_2", .summary = "tool second", .encrypted_content = "tool opaque 2" },
+    };
+    var terminal_reasoning_items = [_]types.ResponsesReasoningItem{
+        .{ .output_index = 0, .id = "rs_terminal_1", .summary = "terminal first", .encrypted_content = "terminal opaque 1" },
+        .{ .output_index = 1, .id = "rs_terminal_2", .summary = "terminal second", .encrypted_content = "terminal opaque 2" },
+    };
+    var tool_output_items = [_]types.ResponsesProviderOutputItem{
+        .{ .output_index = 0, .json = "{\"type\":\"reasoning\",\"id\":\"rs_tool_1\"}" },
+        .{ .output_index = 1, .json = "{\"type\":\"web_search_call\",\"id\":\"ws_tool\",\"status\":\"completed\"}" },
+        .{ .output_index = 2, .json = "{\"type\":\"reasoning\",\"id\":\"rs_tool_2\"}" },
+        .{ .output_index = 3, .json = "{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"a.txt\\\"}\"}" },
+    };
+    var terminal_output_items = [_]types.ResponsesProviderOutputItem{
+        .{ .output_index = 0, .json = "{\"type\":\"reasoning\",\"id\":\"rs_terminal_1\"}" },
+        .{ .output_index = 1, .json = "{\"type\":\"reasoning\",\"id\":\"rs_terminal_2\"}" },
+        .{ .output_index = 2, .json = "{\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}" },
+    };
+    var calls = [_]session.ToolCall{.{
+        .id = @constCast("call_1"),
+        .name = @constCast("read_file"),
+        .arguments_json = @constCast("{\"path\":\"a.txt\"}"),
+        .responses_item_id = @constCast("fc_call_1"),
+        .responses_output_index = 3,
+    }};
+    var results = [_]session.PersistedToolResult{.{
+        .tool_call_id = @constCast("call_1"),
+        .tool_name = @constCast("read_file"),
+        .status = .success,
+        .output = @constCast("contents"),
+        .output_bytes = 8,
+        .stored_output_bytes = 8,
+    }};
+    var steps = [_]session.ToolExecutionStep{.{
+        .reasoning = @constCast("tool reasoning"),
+        .reasoning_items = &tool_reasoning_items,
+        .responses_provider_output_items = &tool_output_items,
+        .responses_output_sequence_complete = true,
+        .tool_calls = &calls,
+        .tool_results = &results,
+    }};
+    const turn: session.HistoryTurn = .{ .assistant = .{
+        .user = .{ .text = @constCast("inspect") },
+        .assistant = @constCast("done"),
+        .responses_message_output_index = 2,
+        .reasoning = @constCast("checked the repository"),
+        .reasoning_items = &terminal_reasoning_items,
+        .responses_provider_output_items = &terminal_output_items,
+        .responses_output_sequence_complete = true,
+        .execution = .{ .tool_steps = &steps },
+    } };
+
+    var encoded: std.Io.Writer.Allocating = .init(alloc);
+    defer encoded.deinit();
+    try writeHistoryTurn(&encoded.writer, turn);
+    try std.testing.expect(std.mem.find(u8, encoded.written(), "\"schema_version\":6") != null);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, alloc, encoded.written(), .{});
+    defer parsed.deinit();
+    const decoded = try parseHistoryTurn(alloc, parsed.value);
+    defer session.freeHistoryTurn(alloc, decoded);
+    try expectHistoryTurnEqual(turn, decoded);
+
+    var legacy = try std.json.parseFromSlice(
+        std.json.Value,
+        alloc,
+        "{\"kind\":\"assistant\",\"user\":{\"text\":\"old\",\"images\":[]},\"assistant\":\"reply\",\"execution\":{\"schema_version\":3,\"tool_steps\":[],\"files\":[]}}",
+        .{},
+    );
+    defer legacy.deinit();
+    const legacy_turn = try parseHistoryTurn(alloc, legacy.value);
+    defer session.freeHistoryTurn(alloc, legacy_turn);
+    try std.testing.expect(legacy_turn.assistant.reasoning == null);
+    try std.testing.expect(legacy_turn.assistant.reasoning_item_id == null);
+    try std.testing.expect(legacy_turn.assistant.reasoning_encrypted_content == null);
+    try std.testing.expectEqual(@as(usize, 0), legacy_turn.assistant.reasoning_items.len);
+    try std.testing.expect(legacy_turn.assistant.responses_message_output_index == null);
+    try std.testing.expectEqual(@as(usize, 0), legacy_turn.assistant.responses_provider_output_items.len);
+    try std.testing.expect(!legacy_turn.assistant.responses_output_sequence_complete);
+}
+
+test "compacted history codec round trips a bound opaque Responses checkpoint" {
+    const alloc = std.testing.allocator;
+    const replay_json =
+        "[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}," ++
+        "{\"type\":\"compaction\",\"encrypted_content\":\"opaque\"}]";
+    const turn = session.HistoryTurn{ .compacted_summary = .{
+        .summary = @constCast("portable local summary"),
+        .removed_turn_count = 4,
+        .compaction_count = 2,
+        .responses_compaction = .{
+            .credential_source = .codex_oauth,
+            .wire_model = @constCast("gpt-5.6-sol"),
+            .input_json = @constCast(replay_json),
+            .provider_binding = .{
+                .normalized_origin = @constCast("https://chatgpt.com/backend-api/codex/responses"),
+                .account_id = @constCast("account-a"),
+            },
+        },
+    } };
+
+    var encoded: std.Io.Writer.Allocating = .init(alloc);
+    defer encoded.deinit();
+    try writeHistoryTurn(&encoded.writer, turn);
+    var parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        alloc,
+        encoded.written(),
+        .{},
+    );
+    defer parsed.deinit();
+    const restored = try parseHistoryTurn(alloc, parsed.value);
+    defer session.freeHistoryTurn(alloc, restored);
+    const checkpoint = restored.compacted_summary.responses_compaction.?;
+    try std.testing.expectEqual(types.CredentialSource.codex_oauth, checkpoint.credential_source);
+    try std.testing.expectEqualStrings("gpt-5.6-sol", checkpoint.wire_model);
+    try std.testing.expectEqualStrings(replay_json, checkpoint.input_json);
+    try std.testing.expectEqualStrings(
+        "https://chatgpt.com/backend-api/codex/responses",
+        checkpoint.provider_binding.?.normalized_origin,
+    );
+    try std.testing.expectEqualStrings("account-a", checkpoint.provider_binding.?.account_id.?);
+
+    const legacy_without_binding =
+        "{\"kind\":\"compacted_summary\",\"summary\":\"summary\",\"removed_turn_count\":1," ++
+        "\"compaction_count\":1,\"responses_compaction\":{\"credential_source\":\"codex_oauth\"," ++
+        "\"wire_model\":\"gpt-5.6-sol\",\"input_json\":\"[{\\\"type\\\":\\\"compaction\\\",\\\"encrypted_content\\\":\\\"opaque\\\"}]\"}}";
+    var legacy = try std.json.parseFromSlice(std.json.Value, alloc, legacy_without_binding, .{});
+    defer legacy.deinit();
+    const legacy_turn = try parseHistoryTurn(alloc, legacy.value);
+    defer session.freeHistoryTurn(alloc, legacy_turn);
+    try std.testing.expect(legacy_turn.compacted_summary.responses_compaction.?.provider_binding == null);
+
+    const wrong_source =
+        "{\"kind\":\"compacted_summary\",\"summary\":\"summary\",\"removed_turn_count\":1," ++
+        "\"compaction_count\":1,\"responses_compaction\":{\"credential_source\":\"stored_key\"," ++
+        "\"wire_model\":\"gpt-5.6-sol\",\"input_json\":\"[{\\\"type\\\":\\\"compaction\\\",\\\"encrypted_content\\\":\\\"opaque\\\"}]\"}}";
+    var invalid = try std.json.parseFromSlice(std.json.Value, alloc, wrong_source, .{});
+    defer invalid.deinit();
+    try std.testing.expectError(
+        error.InvalidSessionFormat,
+        parseHistoryTurn(alloc, invalid.value),
+    );
+}
+
 test "durable history rejects unknown fields instead of silently dropping bytes" {
     const alloc = std.testing.allocator;
     var parsed = try std.json.parseFromSlice(
@@ -3042,6 +3837,25 @@ fn expectHistoryTurnEqual(expected: session.HistoryTurn, actual: session.History
             const got = actual.assistant;
             try expectUserTurnEqual(entry.user, got.user);
             try std.testing.expectEqualSlices(u8, entry.assistant, got.assistant);
+            try std.testing.expectEqual(
+                entry.responses_message_output_index,
+                got.responses_message_output_index,
+            );
+            try expectOptionalBytesEqual(entry.reasoning, got.reasoning);
+            try expectOptionalBytesEqual(entry.reasoning_item_id, got.reasoning_item_id);
+            try expectOptionalBytesEqual(
+                entry.reasoning_encrypted_content,
+                got.reasoning_encrypted_content,
+            );
+            try expectResponsesReasoningItemsEqual(entry.reasoning_items, got.reasoning_items);
+            try expectResponsesProviderOutputItemsEqual(
+                entry.responses_provider_output_items,
+                got.responses_provider_output_items,
+            );
+            try std.testing.expectEqual(
+                entry.responses_output_sequence_complete,
+                got.responses_output_sequence_complete,
+            );
             try expectExecutionMemoryEqual(entry.execution, got.execution);
         },
         .background_command => |entry| {
@@ -3078,6 +3892,25 @@ fn expectExecutionMemoryEqual(expected: session.ExecutionMemory, actual: session
     try std.testing.expectEqual(expected.tool_steps.len, actual.tool_steps.len);
     for (expected.tool_steps, actual.tool_steps) |step, got_step| {
         try expectOptionalBytesEqual(step.assistant, got_step.assistant);
+        try std.testing.expectEqual(
+            step.responses_message_output_index,
+            got_step.responses_message_output_index,
+        );
+        try expectOptionalBytesEqual(step.reasoning, got_step.reasoning);
+        try expectOptionalBytesEqual(step.reasoning_item_id, got_step.reasoning_item_id);
+        try expectOptionalBytesEqual(
+            step.reasoning_encrypted_content,
+            got_step.reasoning_encrypted_content,
+        );
+        try expectResponsesReasoningItemsEqual(step.reasoning_items, got_step.reasoning_items);
+        try expectResponsesProviderOutputItemsEqual(
+            step.responses_provider_output_items,
+            got_step.responses_provider_output_items,
+        );
+        try std.testing.expectEqual(
+            step.responses_output_sequence_complete,
+            got_step.responses_output_sequence_complete,
+        );
         try std.testing.expectEqual(step.tool_calls.len, got_step.tool_calls.len);
         for (step.tool_calls, got_step.tool_calls) |call, got_call| try expectToolCallEqual(call, got_call);
         try std.testing.expectEqual(step.tool_results.len, got_step.tool_results.len);
@@ -3108,6 +3941,30 @@ fn expectExecutionMemoryEqual(expected: session.ExecutionMemory, actual: session
     }
 }
 
+fn expectResponsesReasoningItemsEqual(
+    expected: []const types.ResponsesReasoningItem,
+    actual: []const types.ResponsesReasoningItem,
+) !void {
+    try std.testing.expectEqual(expected.len, actual.len);
+    for (expected, actual) |item, got| {
+        try std.testing.expectEqual(item.output_index, got.output_index);
+        try expectOptionalBytesEqual(item.id, got.id);
+        try expectOptionalBytesEqual(item.summary, got.summary);
+        try expectOptionalBytesEqual(item.encrypted_content, got.encrypted_content);
+    }
+}
+
+fn expectResponsesProviderOutputItemsEqual(
+    expected: []const types.ResponsesProviderOutputItem,
+    actual: []const types.ResponsesProviderOutputItem,
+) !void {
+    try std.testing.expectEqual(expected.len, actual.len);
+    for (expected, actual) |item, got| {
+        try std.testing.expectEqual(item.output_index, got.output_index);
+        try std.testing.expectEqualSlices(u8, item.json, got.json);
+    }
+}
+
 fn expectUserTurnEqual(expected: session.UserTurn, actual: session.UserTurn) !void {
     try std.testing.expectEqualSlices(u8, expected.text, actual.text);
     try expectOptionalBytesEqual(expected.work_id, actual.work_id);
@@ -3126,6 +3983,8 @@ fn expectToolCallEqual(expected: session.ToolCall, actual: session.ToolCall) !vo
     try std.testing.expectEqualSlices(u8, expected.name, actual.name);
     try std.testing.expectEqualSlices(u8, expected.arguments_json, actual.arguments_json);
     try expectOptionalBytesEqual(expected.provider_result, actual.provider_result);
+    try expectOptionalBytesEqual(expected.responses_item_id, actual.responses_item_id);
+    try std.testing.expectEqual(expected.responses_output_index, actual.responses_output_index);
 }
 
 fn expectOptionalBytesEqual(expected: anytype, actual: @TypeOf(expected)) !void {

@@ -20,6 +20,9 @@ const background_process_provider = @import(
 const github_publish = @import("../github/github_publish.zig");
 const github_workflows = @import("../github/github_workflows.zig");
 const host = @import("../hosts/host.zig");
+const codex_auth = @import("../auth/codex_auth.zig");
+const codex_login = @import("../auth/codex_login.zig");
+const credentials = @import("../auth/credentials.zig");
 const login_flow = @import("../auth/login_flow.zig");
 const oauth_transport = @import("../auth/oauth_transport.zig");
 const secret = @import("../auth/secret.zig");
@@ -214,6 +217,7 @@ const SessionListOptions = struct {
 const UsageOptions = struct {
     format: output_contracts.OutputFormat = .text,
     scope: usage_report.Scope = .days_30,
+    codex_account: bool = false,
 };
 
 const WorkspaceOptions = struct {
@@ -723,50 +727,109 @@ fn runNonInteractiveWithDeps(
         .pr => |rest| return runGithubWorkflow(alloc, rest, cfg, global_args.modifiers, deps, .pull_request),
         .issue => |rest| return runGithubWorkflow(alloc, rest, cfg, global_args.modifiers, deps, .issue),
         .login => |rest| {
-            if (rest.len != 0) {
-                try writeStderr(deps, "usage: fx login\n");
-                return .handled_failure;
-            }
-            login_flow.runLogin(
-                alloc,
-                cfg.gateway_provider.oauth_transport,
-                cfg.url_opener,
-            ) catch |err| {
-                const message = switch (err) {
-                    error.ClientIdMissing => "fx login: missing FX_OAUTH_CLIENT_ID; configure the fx Vercel App client id first\n",
-                    error.AccessDenied => "fx login: authorization denied\n",
-                    error.ExpiredToken, error.LoginTimedOut => "fx login: authorization expired; run fx login again\n",
-                    else => "fx login: failed to sign in\n",
-                };
-                try writeStderr(deps, message);
+            const provider = parseLoginProvider(rest) catch {
+                try writeStderr(deps, "usage: fx login [--codex]\n");
                 return .handled_failure;
             };
+            switch (provider) {
+                .vercel => login_flow.runLogin(
+                    alloc,
+                    cfg.gateway_provider.oauth_transport,
+                    cfg.url_opener,
+                ) catch |err| {
+                    const message = switch (err) {
+                        error.ClientIdMissing => "fx login: missing FX_OAUTH_CLIENT_ID; configure the fx Vercel App client id first\n",
+                        error.AccessDenied => "fx login: authorization denied\n",
+                        error.ExpiredToken, error.LoginTimedOut => "fx login: authorization expired; run fx login again\n",
+                        else => "fx login: failed to sign in\n",
+                    };
+                    try writeStderr(deps, message);
+                    return .handled_failure;
+                },
+                .codex => {
+                    runCodexLogin(
+                        alloc,
+                        cfg.gateway_provider.oauth_transport,
+                        cfg.url_opener,
+                        deps,
+                    ) catch |err| {
+                        const message = switch (err) {
+                            error.CodexDeviceCodeUnavailable => "fx login: Codex device-code login is not available\n",
+                            error.CodexDeviceCodeRejected => "fx login: Codex device-code request was rejected\n",
+                            error.InvalidCodexDeviceCodeResponse => "fx login: Codex device-code response was invalid\n",
+                            error.CodexDeviceAuthorizationRejected => "fx login: Codex authorization was rejected\n",
+                            error.InvalidCodexDeviceAuthorization => "fx login: Codex authorization response was invalid\n",
+                            error.CodexTokenExchangeRejected, error.InvalidCodexTokenResponse => "fx login: Codex token exchange failed\n",
+                            error.CodexDeviceLoginTimedOut => "fx login: Codex authorization expired; run fx login --codex again\n",
+                            error.HomeNotSet => "fx login: home directory is unavailable; set HOME or FX_CODEX_AUTH_FILE\n",
+                            else => "fx login: failed to sign in to Codex\n",
+                        };
+                        try writeStderr(deps, message);
+                        return .handled_failure;
+                    };
+                    var preference = config_runtime.setUserPreferences(
+                        alloc,
+                        .{ .credential_source = .codex_oauth },
+                    ) catch {
+                        try writeStderr(deps, "fx login: signed in to Codex, but failed to save it as the active credential\n");
+                        return .handled_failure;
+                    };
+                    defer preference.deinit(alloc);
+                    try writeStdout(deps, "Signed in to Codex and made it the active credential.\n");
+                },
+            }
             return .handled_success;
         },
         .logout => |rest| {
-            if (rest.len != 0) {
-                try writeStderr(deps, "usage: fx logout\n");
+            const provider = parseLoginProvider(rest) catch {
+                try writeStderr(deps, "usage: fx logout [--codex]\n");
                 return .handled_failure;
-            }
-            const result = login_flow.logout(alloc, cfg.gateway_provider.oauth_transport) catch |err| switch (err) {
-                error.SessionDeleteFailed => {
-                    try writeStderr(deps, "fx logout: failed to durably remove saved Fx login\n");
-                    return .handled_failure;
-                },
             };
-            if (result.local_durability_failed) {
-                try writeStderr(deps, "fx logout: failed to durably remove saved Fx login\n");
-            } else {
-                try writeStdout(
-                    deps,
-                    if (result.session_deleted) "Signed out of fx.\n" else "No fx login session found.\n",
-                );
+            switch (provider) {
+                .vercel => {
+                    const result = login_flow.logout(alloc, cfg.gateway_provider.oauth_transport) catch |err| switch (err) {
+                        error.SessionDeleteFailed => {
+                            try writeStderr(deps, "fx logout: failed to durably remove saved Fx login\n");
+                            return .handled_failure;
+                        },
+                    };
+                    if (result.local_durability_failed) {
+                        try writeStderr(deps, "fx logout: failed to durably remove saved Fx login\n");
+                    } else {
+                        try writeStdout(
+                            deps,
+                            if (result.session_deleted) "Signed out of fx.\n" else "No fx login session found.\n",
+                        );
+                    }
+                    if (result.remote_revocation_failed) {
+                        try writeStderr(deps, login_flow.remote_revocation_warning);
+                        try writeStderr(deps, "\n");
+                    }
+                    return if (result.local_durability_failed) .handled_failure else .handled_success;
+                },
+                .codex => {
+                    const result = codex_auth.logout(alloc, cfg.gateway_provider.oauth_transport, .{}) catch {
+                        try writeStderr(deps, "fx logout: failed to durably remove saved Codex login\n");
+                        return .handled_failure;
+                    };
+                    try writeStdout(
+                        deps,
+                        if (result.credentials_cleared) "Signed out of Codex.\n" else "No Codex login found.\n",
+                    );
+                    if (result.remote_revocation_failed) {
+                        try writeStderr(deps, "Warning: signed out locally, but the Codex session could not be revoked.\n");
+                    }
+                    var preference = config_runtime.setUserPreferences(
+                        alloc,
+                        .{ .clear_credential_source_if = .codex_oauth },
+                    ) catch {
+                        try writeStderr(deps, "fx logout: removed the Codex login, but failed to clear its active credential preference\n");
+                        return .handled_failure;
+                    };
+                    defer preference.deinit(alloc);
+                    return .handled_success;
+                },
             }
-            if (result.remote_revocation_failed) {
-                try writeStderr(deps, login_flow.remote_revocation_warning);
-                try writeStderr(deps, "\n");
-            }
-            return if (result.local_durability_failed) .handled_failure else .handled_success;
         },
         .teams => |rest| {
             if (rest.len != 0) {
@@ -1267,6 +1330,7 @@ fn runNonInteractiveWithDeps(
             var snapshot = cfg.gateway_provider.credits.fetch(alloc, .{
                 .credential = startup.apiKey(),
                 .tenant = startup.gatewayTeam(),
+                .credential_source = startup.modelCatalogAccess().credentialSource(),
             });
             defer snapshot.deinit(alloc);
             const text = try snapshot.render(alloc, opts.format);
@@ -1287,6 +1351,35 @@ fn runNonInteractiveWithDeps(
                 try writeUsageOrJsonError(alloc, cfg.command_catalog, deps, .usage, "usage", err, rest);
                 return .handled_failure;
             };
+            if (opts.codex_account) {
+                const provider = cfg.gateway_provider.account_usage orelse {
+                    try writeUsageCommandFailure(alloc, deps, error.AccountUsageUnavailable, opts.format);
+                    return .handled_failure;
+                };
+                var stored = codex_auth.loadStored(alloc, .{}) catch |err| {
+                    try writeUsageCommandFailure(alloc, deps, err, opts.format);
+                    return .handled_failure;
+                };
+                defer if (stored) |*credential| credential.deinit(alloc);
+                var snapshot = provider.fetch(alloc, .{
+                    .credential = if (stored) |credential| credential.access_token else null,
+                    .account_id = if (stored) |credential| credential.account_id else null,
+                    .credential_source = .codex_oauth,
+                });
+                defer snapshot.deinit(alloc);
+                const text = try snapshot.render(alloc, opts.format);
+                defer alloc.free(text);
+                if (snapshot.failure != null) {
+                    if (opts.format == .json) {
+                        try writeFormattedOutput(deps, text, opts.format);
+                    } else {
+                        try writeStderr(deps, text);
+                    }
+                    return .handled_failure;
+                }
+                try writeFormattedOutput(deps, text, opts.format);
+                return .handled_success;
+            }
             const home = deps.getenv(deps.env_ctx, "HOME") orelse {
                 try writeUsageCommandFailure(
                     alloc,
@@ -1472,6 +1565,39 @@ fn writeStdout(deps: RunDeps, text: []const u8) !void {
 
 fn writeStderr(deps: RunDeps, text: []const u8) !void {
     try deps.write_stderr(deps.stderr_ctx, text);
+}
+
+fn runCodexLogin(
+    alloc: Allocator,
+    transport: oauth_transport.Provider,
+    url_opener: host.UrlOpener,
+    deps: RunDeps,
+) !void {
+    var device = try codex_login.requestDeviceCode(alloc, transport, .{});
+    defer device.deinit(alloc);
+
+    try writeStdout(deps, "Open ");
+    try writeStdout(deps, device.verification_url);
+    try writeStdout(deps, "\nCode: ");
+    try writeStdout(deps, device.user_code);
+    try writeStdout(deps, "\n\nWaiting for Codex authorization...\n");
+
+    if (io_mod.getenv("FX_NO_OPEN_BROWSER") == null) {
+        try openCodexLoginBrowserBestEffort(alloc, url_opener, device.verification_url, deps);
+    }
+    try codex_login.completeLogin(alloc, transport, .{}, device, null);
+}
+
+fn openCodexLoginBrowserBestEffort(
+    alloc: Allocator,
+    url_opener: host.UrlOpener,
+    url: []const u8,
+    deps: RunDeps,
+) !void {
+    const opened = url_opener.open(alloc, url) catch false;
+    if (!opened) {
+        try writeStderr(deps, "fx login: could not open a browser; open the URL above manually\n");
+    }
 }
 
 fn runPasteSetup(
@@ -2716,6 +2842,14 @@ fn writeWorkspaceModifierUsage(deps: RunDeps) !void {
     );
 }
 
+const LoginProvider = enum { vercel, codex };
+
+fn parseLoginProvider(args: []const [:0]const u8) !LoginProvider {
+    if (args.len == 0) return .vercel;
+    if (args.len == 1 and std.mem.eql(u8, args[0], "--codex")) return .codex;
+    return error.InvalidLoginUsage;
+}
+
 fn globalLaunchErrorMessage(err: anyerror) ?[]const u8 {
     return switch (err) {
         error.MissingAddDirectoryValue => "--add-dir requires a directory path",
@@ -2837,6 +2971,7 @@ fn parseSessionListArgs(args: []const [:0]const u8) !SessionListOptions {
 fn parseUsageArgs(args: []const [:0]const u8) !UsageOptions {
     var options = UsageOptions{};
     var period_seen = false;
+    var codex_seen = false;
     var json_seen = false;
     var index: usize = 0;
     while (index < args.len) : (index += 1) {
@@ -2845,6 +2980,12 @@ fn parseUsageArgs(args: []const [:0]const u8) !UsageOptions {
             if (json_seen) return error.InvalidUsageArgs;
             json_seen = true;
             options.format = .json;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--codex")) {
+            if (codex_seen) return error.InvalidUsageArgs;
+            codex_seen = true;
+            options.codex_account = true;
             continue;
         }
         if (std.mem.eql(u8, arg, "--period")) {
@@ -2863,6 +3004,7 @@ fn parseUsageArgs(args: []const [:0]const u8) !UsageOptions {
         }
         return error.InvalidUsageArgs;
     }
+    if (options.codex_account and period_seen) return error.InvalidUsageArgs;
     return options;
 }
 
@@ -3249,6 +3391,7 @@ test "usage arguments accept only rolling periods and one JSON flag" {
     const defaults = try parseUsageArgs(&.{});
     try std.testing.expectEqual(usage_report.Scope.days_30, defaults.scope);
     try std.testing.expectEqual(output_contracts.OutputFormat.text, defaults.format);
+    try std.testing.expect(!defaults.codex_account);
 
     const selected = try parseUsageArgs(&.{
         @constCast("--json"),
@@ -3258,11 +3401,20 @@ test "usage arguments accept only rolling periods and one JSON flag" {
     try std.testing.expectEqual(usage_report.Scope.days_7, selected.scope);
     try std.testing.expectEqual(output_contracts.OutputFormat.json, selected.format);
 
+    const codex = try parseUsageArgs(&.{
+        @constCast("--codex"),
+        @constCast("--json"),
+    });
+    try std.testing.expect(codex.codex_account);
+    try std.testing.expectEqual(output_contracts.OutputFormat.json, codex.format);
+
     for ([_][]const [:0]const u8{
         &.{@constCast("--period")},
         &.{ @constCast("--period"), @constCast("session") },
         &.{ @constCast("--period"), @constCast("24h"), @constCast("--period"), @constCast("7d") },
         &.{ @constCast("--json"), @constCast("--json") },
+        &.{ @constCast("--codex"), @constCast("--codex") },
+        &.{ @constCast("--codex"), @constCast("--period"), @constCast("7d") },
         &.{@constCast("30d")},
     }) |invalid| {
         try std.testing.expectError(error.InvalidUsageArgs, parseUsageArgs(invalid));
@@ -4640,7 +4792,7 @@ test "runIfRequested local json success appends exactly one newline" {
     const result = try runIfRequestedWithDeps(std.testing.allocator, &.{ @constCast("status"), @constCast("--json") }, testConfig(), deps);
     try std.testing.expectEqual(RunResult.handled_success, result);
     try std.testing.expectEqualStrings(
-        "{\"kind\":\"status\",\"model\":\"test-model\",\"update_channel\":\"stable\",\"build_channel\":\"stable\",\"build_revision\":\"\",\"auth\":\"missing\",\"auth_refreshable\":false,\"auth_help\":\"Fx needs access to Vercel AI Gateway. Run fx login to sign in, fx setup to use an API key, or set AI_GATEWAY_API_KEY.\",\"permission_mode\":\"auto\",\"sandbox\":\"none\",\"workspace\":\"/tmp/fx\",\"history_turns\":0,\"session_permission_grants\":0,\"agent_step_limit\":42}\n",
+        "{\"kind\":\"status\",\"model\":\"test-model\",\"update_channel\":\"stable\",\"build_channel\":\"stable\",\"build_revision\":\"\",\"auth\":\"missing\",\"auth_refreshable\":false,\"auth_help\":\"" ++ credentials.missing_credential_message ++ "\",\"permission_mode\":\"auto\",\"sandbox\":\"none\",\"workspace\":\"/tmp/fx\",\"history_turns\":0,\"session_permission_grants\":0,\"agent_step_limit\":42}\n",
         capture.stdout.written(),
     );
     try std.testing.expect(!std.mem.endsWith(u8, capture.stdout.written(), "\n\n"));
@@ -4733,7 +4885,7 @@ test "writeRenderedJsonLine falls back to heap and appends exactly one newline" 
     );
 
     try std.testing.expectEqualStrings(
-        "{\"kind\":\"status\",\"model\":\"test-model\",\"update_channel\":\"stable\",\"build_channel\":\"stable\",\"build_revision\":\"\",\"auth\":\"missing\",\"auth_refreshable\":false,\"auth_help\":\"Fx needs access to Vercel AI Gateway. Run fx login to sign in, fx setup to use an API key, or set AI_GATEWAY_API_KEY.\",\"permission_mode\":\"ask\",\"sandbox\":\"none\",\"workspace\":\"/tmp/fx\",\"history_turns\":0,\"session_permission_grants\":0,\"agent_step_limit\":42}\n",
+        "{\"kind\":\"status\",\"model\":\"test-model\",\"update_channel\":\"stable\",\"build_channel\":\"stable\",\"build_revision\":\"\",\"auth\":\"missing\",\"auth_refreshable\":false,\"auth_help\":\"" ++ credentials.missing_credential_message ++ "\",\"permission_mode\":\"ask\",\"sandbox\":\"none\",\"workspace\":\"/tmp/fx\",\"history_turns\":0,\"session_permission_grants\":0,\"agent_step_limit\":42}\n",
         capture.stdout.written(),
     );
 }
@@ -4883,6 +5035,58 @@ fn captureSecretStoreInteractiveWrite(
     if (!capture.setup_interactive_store) return false;
     capture.setup_store_calls += 1;
     return true;
+}
+
+const CodexBrowserOpenResult = enum { opened, unavailable, failed };
+
+const CodexBrowserOpenFixture = struct {
+    result: CodexBrowserOpenResult,
+    calls: usize = 0,
+    url_matched: bool = false,
+
+    fn opener(self: *@This()) host.UrlOpener {
+        return .{ .context = self, .open_fn = open };
+    }
+
+    fn open(
+        raw: ?*anyopaque,
+        _: Allocator,
+        url: []const u8,
+    ) host.UrlOpenError!bool {
+        const self: *@This() = @ptrCast(@alignCast(raw.?));
+        self.calls += 1;
+        self.url_matched = std.mem.eql(u8, url, "https://example.test/device");
+        return switch (self.result) {
+            .opened => true,
+            .unavailable => false,
+            .failed => error.OutOfMemory,
+        };
+    }
+};
+
+test "Codex browser launch failure keeps the manual device login path available" {
+    for ([_]CodexBrowserOpenResult{ .opened, .unavailable, .failed }) |result| {
+        var browser = CodexBrowserOpenFixture{ .result = result };
+        var capture = CaptureOutput.init(std.testing.allocator);
+        defer capture.deinit();
+
+        try openCodexLoginBrowserBestEffort(
+            std.testing.allocator,
+            browser.opener(),
+            "https://example.test/device",
+            capture.deps(),
+        );
+
+        try std.testing.expectEqual(@as(usize, 1), browser.calls);
+        try std.testing.expect(browser.url_matched);
+        try std.testing.expectEqualStrings(
+            if (result == .opened)
+                ""
+            else
+                "fx login: could not open a browser; open the URL above manually\n",
+            capture.stderr.written(),
+        );
+    }
 }
 
 fn gatherNoopContextForTest(_: Allocator, _: context_contract.InitialContextInput) context_contract.ProviderError!context_contract.ProviderContext {

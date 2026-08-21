@@ -734,9 +734,19 @@ fn hydrateMenuSnapshot(
 }
 
 fn modelProvider(model: []const u8) []const u8 {
-    const slash = std.mem.findScalar(u8, model, '/') orelse return "";
+    const slash = std.mem.findScalar(u8, model, '/') orelse {
+        if (isRawOpenAiModel(model)) return "openai";
+        return "";
+    };
     if (slash == 0) return "";
     return model[0..slash];
+}
+
+fn isRawOpenAiModel(model: []const u8) bool {
+    return std.mem.startsWith(u8, model, "gpt-") or
+        std.mem.startsWith(u8, model, "codex-") or
+        std.mem.startsWith(u8, model, "chatgpt-") or
+        (model.len >= 2 and model[0] == 'o' and std.ascii.isDigit(model[1]));
 }
 
 fn findCatalogModel(catalog: []const model_catalog.ModelCatalogEntry, model: []const u8) ?*const model_catalog.ModelCatalogEntry {
@@ -1320,6 +1330,20 @@ test "model menu owns resolved catalog state and filters without changing catalo
     const selected = (try runtime.menu.selectedModelAlloc(alloc)).?;
     defer alloc.free(selected);
     try std.testing.expectEqualStrings("standalone", selected);
+}
+
+test "model menu classifies raw Codex model IDs as OpenAI" {
+    for ([_][]const u8{
+        "gpt-5.6-sol",
+        "o3",
+        "o4-mini",
+        "codex-mini-latest",
+        "chatgpt-4o-latest",
+    }) |model| {
+        try std.testing.expectEqualStrings("openai", modelProvider(model));
+    }
+    try std.testing.expectEqualStrings("", modelProvider("standalone"));
+    try std.testing.expectEqualStrings("private", modelProvider("private/custom"));
 }
 
 test "model menu snapshot construction cleans every allocation failure" {

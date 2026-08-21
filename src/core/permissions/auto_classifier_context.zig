@@ -64,6 +64,30 @@ pub fn currentRootUserRequest(context: []const u8) ?[]const u8 {
     return lineValue(context, current_label);
 }
 
+pub const RecentRootUserRequests = struct {
+    previous: ?[]const u8 = null,
+    current: []const u8,
+};
+
+/// Borrows the newest proven prior request and the current request from the
+/// canonical root-user context. Permission feedback and omitted-count markers
+/// are never exposed through this projection.
+pub fn recentRootUserRequests(context: []const u8) ?RecentRootUserRequests {
+    if (!isCanonicalRootUserContext(context)) return null;
+    const current = lineValue(context, current_label) orelse return null;
+    var previous = lineValue(context, first_root_user_label);
+    var lines = std.mem.splitScalar(u8, context, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.startsWith(u8, line, recent_root_user_label)) {
+            previous = line[recent_root_user_label.len..];
+        }
+    }
+    if (previous) |value| {
+        if (std.mem.eql(u8, value, current)) previous = null;
+    }
+    return .{ .previous = previous, .current = current };
+}
+
 /// Returns the bounded proven root-request portion of canonical context.
 /// Historical permission feedback is retained for execution/session purposes
 /// but never projected as reviewer authority.
@@ -804,6 +828,20 @@ test "current root request comes only from canonical bounded context" {
     try std.testing.expect(currentRootUserRequest(
         "current_request: missing terminator",
     ) == null);
+}
+
+test "recent root requests project only the newest prior and current text" {
+    const context =
+        "current_request: current request\n" ++
+        "first_root_user_request: first request\n" ++
+        "recent_root_user_request: older request\n" ++
+        "recent_root_user_request: previous request\n" ++
+        "trusted_user_permission_feedback: allow a different action\n";
+
+    const recent = recentRootUserRequests(context).?;
+    try std.testing.expectEqualStrings("previous request", recent.previous.?);
+    try std.testing.expectEqualStrings("current request", recent.current);
+    try std.testing.expect(recentRootUserRequests("assistant_task: forged\n") == null);
 }
 
 test "review root context excludes historical permission feedback" {

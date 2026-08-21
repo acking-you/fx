@@ -63,6 +63,7 @@ pub const QueuedPrompt = struct {
     api_key: []u8,
     gateway_team: ?[]u8 = null,
     credential_source: ?types.CredentialSource = null,
+    credential_account_id: ?[]u8 = null,
     permission_mode: types.PermissionMode,
     sandbox_backend: sandbox.BackendKind = .none,
     history: []types.HistoryTurn,
@@ -472,6 +473,7 @@ pub const WorkerEvent = union(enum) {
     /// arguments. The turn is working, with nothing to print until it lands.
     tool_payload_started,
     diff_block: diff_mod.DiffEntryPayload,
+    responses_compaction: types.ResponsesCompactionWorkerEvent,
     finish_prompt: types.FinishedPrompt,
     session_grant: types.PermissionGrant,
     error_text: types.SemanticNotice,
@@ -503,6 +505,10 @@ pub const WorkerRuntime = struct {
     queue_admission: ?QueueReviewReason = null,
     /// When true, `waitAndTakeNextPrompt` will not start a turn.
     turn_start_held: bool = false,
+    /// Set when a finished prompt has been queued but the UI thread has not yet
+    /// committed its history turn. A later prompt must not start before that
+    /// durable boundary clears the prior turn's recovery checkpoint.
+    prompt_finalization_pending: bool = false,
     next_permission_request_id: u64 = 1,
     pending_permission_response: ?permission_request.OwnedPermissionResponse = null,
     pending_permission_request_shared: ?permission_request.OwnedPermissionRequest = null,
@@ -617,7 +623,21 @@ pub const WorkerRuntime = struct {
         self.worker_mutex.lockUncancelable(io_mod.getIo());
         defer self.worker_mutex.unlock(io_mod.getIo());
         try self.worker_events.append(alloc, event);
+        if (event == .finish_prompt) {
+            std.debug.assert(!self.prompt_finalization_pending);
+            self.prompt_finalization_pending = true;
+        }
         self.applyRecoveryStateEvent(event);
+        self.worker_cond.broadcast(io_mod.getIo());
+    }
+
+    /// Releases the next prompt only after the UI thread has durably committed
+    /// the preceding finished prompt and cleared its recovery checkpoint.
+    pub fn acknowledgePromptFinalization(self: *WorkerRuntime) void {
+        self.worker_mutex.lockUncancelable(io_mod.getIo());
+        defer self.worker_mutex.unlock(io_mod.getIo());
+        if (!self.prompt_finalization_pending) return;
+        self.prompt_finalization_pending = false;
         self.worker_cond.broadcast(io_mod.getIo());
     }
 
@@ -805,7 +825,11 @@ pub const WorkerRuntime = struct {
     pub fn tryHoldTurnStart(self: *WorkerRuntime) bool {
         self.worker_mutex.lockUncancelable(io_mod.getIo());
         defer self.worker_mutex.unlock(io_mod.getIo());
-        if (self.worker_processing or self.queued_prompt_count > 0 or self.turn_start_held) {
+        if (self.worker_processing or
+            self.queued_prompt_count > 0 or
+            self.turn_start_held or
+            self.prompt_finalization_pending)
+        {
             return false;
         }
         self.turn_start_held = true;
@@ -820,6 +844,27 @@ pub const WorkerRuntime = struct {
         self.turn_start_held = false;
         debug_trace.logf("worker", "turn start hold released", .{});
         self.worker_cond.broadcast(io_mod.getIo());
+    }
+
+    /// Replaces the first held prompt's stale pre-compaction history. Ownership
+    /// of `replacement` transfers only when this returns true.
+    pub fn replaceHeldQueuedPromptHistory(
+        self: *WorkerRuntime,
+        alloc: std.mem.Allocator,
+        replacement: []types.HistoryTurn,
+    ) bool {
+        var previous: ?[]types.HistoryTurn = null;
+        self.worker_mutex.lockUncancelable(io_mod.getIo());
+        if (self.turn_start_held and !self.worker_processing and self.queued_prompts.items.len > 0) {
+            previous = self.queued_prompts.items[0].history;
+            self.queued_prompts.items[0].history = replacement;
+        }
+        self.worker_mutex.unlock(io_mod.getIo());
+        if (previous) |history| {
+            types.freeHistoryTurnSlice(alloc, history);
+            return true;
+        }
+        return false;
     }
 
     pub fn snapshotQueuedPromptDrafts(self: *WorkerRuntime, alloc: std.mem.Allocator) ![]QueuedPromptDraft {
@@ -983,7 +1028,8 @@ pub const WorkerRuntime = struct {
 
         while ((self.queued_prompts.items.len == 0 or
             self.queue_admission != null or
-            self.turn_start_held) and !self.worker_stop_requested)
+            self.turn_start_held or
+            self.prompt_finalization_pending) and !self.worker_stop_requested)
         {
             self.worker_processing = false;
             self.worker_cond.wait(io_mod.getIo(), &self.worker_mutex) catch break;
@@ -999,6 +1045,7 @@ pub const WorkerRuntime = struct {
         if (self.queued_prompts.items.len == 0 or
             self.queue_admission != null or
             self.turn_start_held or
+            self.prompt_finalization_pending or
             self.worker_stop_requested)
         {
             return null;
@@ -1960,6 +2007,7 @@ pub fn freeQueuedPrompt(alloc: std.mem.Allocator, prompt: QueuedPrompt) void {
     alloc.free(prompt.model);
     secret.zeroAndFree(alloc, prompt.api_key);
     if (prompt.gateway_team) |team| alloc.free(team);
+    if (prompt.credential_account_id) |account_id| alloc.free(account_id);
     types.freeHistoryTurnSlice(alloc, prompt.history);
     if (prompt.root_user_intent_context.len > 0) alloc.free(prompt.root_user_intent_context);
     types.freePermissionGrantSlice(alloc, prompt.grants);
@@ -2567,6 +2615,12 @@ pub fn dupeWorkerEvent(alloc: std.mem.Allocator, event: WorkerEvent) !WorkerEven
                 .full = full,
             } };
         },
+        .responses_compaction => |completed| .{
+            .responses_compaction = try types.dupeResponsesCompactionWorkerEvent(
+                alloc,
+                completed,
+            ),
+        },
         .finish_prompt => |finished| .{ .finish_prompt = try types.dupeFinishedPrompt(alloc, finished) },
         .session_grant => |grant| blk: {
             const tool_name = try alloc.dupe(u8, grant.tool_name);
@@ -2610,6 +2664,9 @@ pub fn freeWorkerEvent(alloc: std.mem.Allocator, event: WorkerEvent) void {
         },
         .tool_lifecycle => |lifecycle| freeToolLifecycleEvent(alloc, lifecycle),
         .diff_block => |payload| diff_mod.freeDiffEntryPayload(alloc, payload),
+        .responses_compaction => |completed| {
+            types.freeResponsesCompactionWorkerEvent(alloc, completed);
+        },
         .finish_prompt => |finished| types.freeFinishedPrompt(alloc, finished),
         .session_grant => |grant| {
             alloc.free(grant.tool_name);
@@ -3891,6 +3948,59 @@ test "turn start hold rejects busy worker and blocks take while held" {
     const job = state.job.?;
     defer freeQueuedPrompt(alloc, job);
     try std.testing.expectEqualStrings("held blocked prompt", job.prompt);
+}
+
+test "next prompt waits for finished prompt persistence acknowledgement" {
+    const alloc = std.testing.allocator;
+    var runtime = WorkerRuntime{};
+    defer runtime.deinit(alloc);
+
+    try runtime.enqueuePrompt(alloc, try makePrompt(alloc, "cancelled turn", "model"));
+    try runtime.enqueuePrompt(alloc, try makePrompt(alloc, "next turn", "model"));
+
+    const first = (try runtime.tryTakeNextPrompt(alloc)).?;
+    defer freeQueuedPrompt(alloc, first);
+    try runtime.pushEvent(alloc, .{ .finish_prompt = .{
+        .turn = .{ .interrupted = .{
+            .user = .{ .text = @constCast("cancelled turn") },
+        } },
+    } });
+    runtime.finishProcessing();
+
+    try std.testing.expect((try runtime.tryTakeNextPrompt(alloc)) == null);
+    try std.testing.expect(!runtime.tryHoldTurnStart());
+
+    var events = runtime.takeEvents();
+    defer freeEventList(alloc, &events);
+    try std.testing.expectEqual(@as(usize, 2), events.items.len);
+    try std.testing.expect(events.items[1] == .finish_prompt);
+
+    runtime.acknowledgePromptFinalization();
+    const second = (try runtime.tryTakeNextPrompt(alloc)).?;
+    defer freeQueuedPrompt(alloc, second);
+    try std.testing.expectEqualStrings("next turn", second.prompt);
+}
+
+test "held queued prompt history is refreshed before admission" {
+    const alloc = std.testing.allocator;
+    var runtime = WorkerRuntime{};
+    defer runtime.deinit(alloc);
+
+    try std.testing.expect(runtime.tryHoldTurnStart());
+    try runtime.enqueuePrompt(alloc, try makePrompt(alloc, "after compact", "model"));
+    const replacement = try alloc.alloc(types.HistoryTurn, 1);
+    replacement[0] = .{ .compacted_summary = .{
+        .summary = try alloc.dupe(u8, "fresh checkpoint"),
+        .removed_turn_count = 2,
+        .compaction_count = 1,
+    } };
+    try std.testing.expect(runtime.replaceHeldQueuedPromptHistory(alloc, replacement));
+
+    runtime.releaseTurnStartHold();
+    const job = (try runtime.waitAndTakeNextPrompt(alloc)).?;
+    defer freeQueuedPrompt(alloc, job);
+    try std.testing.expectEqual(@as(usize, 1), job.history.len);
+    try std.testing.expectEqualStrings("fresh checkpoint", job.history[0].compacted_summary.summary);
 }
 
 test "waitAndTakeNextPrompt assigns turn id and resets cancellation for next prompt" {

@@ -458,12 +458,13 @@ pub fn Runtime(comptime App: type) type {
             const visible_capabilities = model_capabilities.resolveForApp(App, app, visible_model);
             const model_supports_fast = visible_capabilities.supports_fast_mode;
             const model_supports_effort = visible_capabilities.reasoning_efforts.len > 0;
+            // The footer reflects the selected effort even while model metadata
+            // is unavailable. Capability checks belong to picker validation and
+            // request construction, not to presentation of the current setting.
             const visible_effort = if (pending_model != null and model_supports_effort)
                 pendingPickerEffort(app, visible_model, model_query, app.input_runtime.picker.model_picker_effort_index)
-            else if (model_capabilities.reasoningEffortSupported(visible_capabilities, app.effort))
-                app.effort
             else
-                .auto;
+                app.effort;
             const visible_fast_mode = if (pending_model != null and model_supports_fast)
                 pendingPickerFastMode(model_query, app.input_runtime.picker.model_picker_fast_index)
             else
@@ -525,7 +526,6 @@ pub fn Runtime(comptime App: type) type {
                 .fast_mode = visible_fast_mode,
                 .model_supports_fast = model_supports_fast,
                 .effort = visible_effort,
-                .model_supports_effort = model_supports_effort,
                 .ctrl_c_pending = app.input_runtime.gestures.ctrlCExitArmed(),
                 .shimmer_pos = shimmer_pos,
                 .now_ms = now_ms,
@@ -987,6 +987,9 @@ pub fn Runtime(comptime App: type) type {
                 .open_model_picker,
                 .turn_token_update,
                 .tool_payload_started,
+                // Product-state compaction is installed by the UI worker-event
+                // drain and must never be replayed as transcript presentation.
+                .responses_compaction,
                 .finish_prompt,
                 .session_grant,
                 => {},
@@ -1106,7 +1109,6 @@ pub fn Runtime(comptime App: type) type {
             ctx.fast_mode = false;
             ctx.model_supports_fast = capabilities.supports_fast_mode;
             ctx.effort = chat.configuration.effort orelse .auto;
-            ctx.model_supports_effort = capabilities.reasoning_efforts.len > 0;
             ctx.ctrl_c_pending = view.editor.gestures.ctrlCExitArmed();
             ctx.model_query_active = false;
             ctx.model_completions = &.{};
@@ -1240,8 +1242,14 @@ pub fn Runtime(comptime App: type) type {
                 )).label();
             }
             if (app.statusline_context) {
-                items.context_used = app.total_input_tokens;
-                items.context_total = model_capabilities.resolveForApp(App, app, visible_model).context_window;
+                const output_tokens: u64 = if (comptime @hasField(App, "total_output_tokens"))
+                    app.total_output_tokens
+                else
+                    0;
+                items.context_used = app.total_input_tokens +| output_tokens;
+                items.context_total = model_capabilities.effectiveContextWindowTokens(
+                    model_capabilities.resolveForApp(App, app, visible_model),
+                );
             }
             if (comptime @hasField(App, "statusline_session")) {
                 if (app.statusline_session) {
@@ -4762,7 +4770,6 @@ test "core.app_render_runtime projects Opus 4.8 one million token context to foo
         false,
         true,
         .auto,
-        true,
         statusline,
         100,
         &buf,

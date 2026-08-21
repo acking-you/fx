@@ -169,7 +169,19 @@ pub const TransportOutcome = union(enum) {
 };
 
 pub const Transport = struct {
+    pub const BuildFn = *const fn (
+        *anyopaque,
+        std.mem.Allocator,
+        []const u8,
+        []const u8,
+        []const types.ChatMessage,
+        []const u8,
+        std.Io.Clock.Timestamp,
+        *std.atomic.Value(bool),
+    ) anyerror![]u8;
+
     context: *anyopaque,
+    build_fn: BuildFn = buildGatewayReviewPayload,
     send_fn: *const fn (
         *anyopaque,
         std.mem.Allocator,
@@ -178,6 +190,28 @@ pub const Transport = struct {
         std.Io.Clock.Timestamp,
         *std.atomic.Value(bool),
     ) anyerror!TransportOutcome,
+
+    pub fn build(
+        self: Transport,
+        alloc: std.mem.Allocator,
+        model: []const u8,
+        tools_json: []const u8,
+        messages: []const types.ChatMessage,
+        target_call_id: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+        cancel_flag: *std.atomic.Value(bool),
+    ) ![]u8 {
+        return self.build_fn(
+            self.context,
+            alloc,
+            model,
+            tools_json,
+            messages,
+            target_call_id,
+            deadline,
+            cancel_flag,
+        );
+    }
 
     pub fn send(
         self: Transport,
@@ -191,6 +225,28 @@ pub const Transport = struct {
     }
 };
 
+fn buildGatewayReviewPayload(
+    _: *anyopaque,
+    alloc: std.mem.Allocator,
+    _: []const u8,
+    tools_json: []const u8,
+    messages: []const types.ChatMessage,
+    target_call_id: []const u8,
+    deadline: std.Io.Clock.Timestamp,
+    cancel_flag: *std.atomic.Value(bool),
+) ![]u8 {
+    return gateway_json.buildGatewayPendingToolReviewRequestBodyWithMaxOutputTokens(
+        alloc,
+        tools_json,
+        messages,
+        target_call_id,
+        .{},
+        2048,
+        deadline,
+        cancel_flag,
+    );
+}
+
 pub const OverrideFn = *const fn (
     *anyopaque,
     std.mem.Allocator,
@@ -203,6 +259,7 @@ pub const OverrideFn = *const fn (
 pub const ProviderInput = struct {
     credential: []const u8 = "",
     tenant: ?[]const u8 = null,
+    credential_source: ?types.CredentialSource = null,
     endpoint: []const u8 = "",
     cancel_flag: ?*std.atomic.Value(bool) = null,
     usage: ?*session_usage.Usage = null,
@@ -337,13 +394,12 @@ pub const Reviewer = struct {
         message_index += 1;
         messages[message_index] = .{ .role = .system, .content = instruction };
 
-        const payload = gateway_json.buildGatewayPendingToolReviewRequestBodyWithMaxOutputTokens(
+        const payload = transport.build(
             alloc,
+            reviewer_model,
             tools_json,
             messages,
             review_turn.target_call_id,
-            .{},
-            2048,
             deadline,
             cancel_flag,
         ) catch |err| return constructionFailure(err);
