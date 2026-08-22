@@ -134,12 +134,14 @@ fn sendReview(
     };
     var result_owned = true;
     defer if (result_owned) result.deinit(alloc);
-    usage_observation.complete(
+    usage_observation.completeDirect(
         config.usage_allocator,
-        result.status,
-        result.completion,
-        "https://chatgpt.com/backend-api/codex",
-        null,
+        model,
+        result.completion.usage,
+        .{
+            .http_ok = result.status == .ok,
+            .terminal_finish_reason = result.completion.finish_reason,
+        },
     ) catch return .permanent_failure;
     if (cancel_flag.load(.seq_cst)) return .cancelled;
     if (result.status != .ok) {

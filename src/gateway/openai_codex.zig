@@ -11,7 +11,6 @@ const gateway_client = @import("client.zig");
 
 const Allocator = std.mem.Allocator;
 const endpoint = "https://chatgpt.com/backend-api/codex/responses";
-const generation_origin = "https://chatgpt.com/backend-api/codex";
 const e2e_endpoint_env = "FX_E2E_OPENAI_CODEX_RESPONSES_URL";
 const max_error_body_bytes: usize = 1024 * 1024;
 const max_sse_line_bytes: usize = 32 * 1024 * 1024;
@@ -359,6 +358,20 @@ const OpenRequestOperation = struct {
     }
 };
 
+fn ownedDirectResult(
+    status: std.http.Status,
+    completion: types.GatewayCompletion,
+    err_body: ?[]u8,
+) stream_provider.Result {
+    return .{
+        .status = status,
+        .completion = completion,
+        .err_body = err_body,
+        .accounting = .direct_usage,
+        .ownership = .owned,
+    };
+}
+
 fn streamCompletionCore(alloc: Allocator, request: stream_provider.Request) !stream_provider.Result {
     if (request.cancel_flag.load(.seq_cst)) return error.Cancelled;
     if (request.credential_source != .chatgpt_subscription) {
@@ -445,11 +458,7 @@ fn streamCompletionCore(alloc: Allocator, request: stream_provider.Request) !str
             error.StreamTooLong => try alloc.dupe(u8, "OpenAI Codex error response exceeded the local limit"),
             else => return err,
         };
-        return .{
-            .status = response.head.status,
-            .err_body = body,
-            .ownership = .owned,
-        };
+        return ownedDirectResult(response.head.status, .{}, body);
     }
 
     var transfer_buffer: [transfer_buffer_bytes]u8 = undefined;
@@ -466,12 +475,7 @@ fn streamCompletionCore(alloc: Allocator, request: stream_provider.Request) !str
         request.content_capture_limit,
         .{},
     );
-    return .{
-        .status = .ok,
-        .completion = completion,
-        .generation_origin = generation_origin,
-        .ownership = .owned,
-    };
+    return ownedDirectResult(.ok, completion, null);
 }
 
 const ToolAccumulator = struct {
@@ -1114,6 +1118,16 @@ test "OpenAI Codex SSE maps text reasoning tools and usage" {
     try std.testing.expect(completion.provider_state_json != null);
     try std.testing.expect(std.mem.find(u8, completion.provider_state_json.?, "\"encrypted_content\":\"opaque\"") != null);
     try std.testing.expectEqual(types.ProviderFinishReason.tool_calls, completion.finish_reason.?);
+}
+
+test "OpenAI Codex transport declares direct usage accounting" {
+    const result = ownedDirectResult(.ok, .{
+        .generation_id = "resp_direct",
+        .usage = .{ .input_tokens = 4, .output_tokens = 2 },
+    }, null);
+
+    try std.testing.expectEqual(stream_provider.AccountingDisposition.direct_usage, result.accounting);
+    try std.testing.expectEqualStrings("resp_direct", result.completion.generation_id.?);
 }
 
 fn consumeOpenAICodexTestSse(sse_text: []const u8, limits: CodexLimits) !types.GatewayCompletion {

@@ -469,6 +469,7 @@ test "direct Responses accounting records terminal usage without reconciliation"
                 .reconcile_generation_usage = false,
                 .ownership = .owned,
                 .completion = .{
+                    .generation_id = try alloc.dupe(u8, "resp_direct_accounting"),
                     .url_citations = owned_citations,
                     .usage = .{
                         .input_tokens = 42,
@@ -529,6 +530,7 @@ test "direct Responses accounting records terminal usage without reconciliation"
         types.freeResponsesReasoningItems(alloc, result.completion.reasoning_items);
         types.freeResponsesProviderOutputItems(alloc, result.completion.responses_provider_output_items);
         types.freeResponsesUrlCitations(alloc, result.completion.url_citations);
+        if (result.completion.generation_id) |id| alloc.free(@constCast(id));
         if (result.completion.provider_failure_detail) |detail| alloc.free(@constCast(detail));
         message.freeToolCalls(alloc, @constCast(result.completion.tool_calls));
     }
@@ -544,6 +546,91 @@ test "direct Responses accounting records terminal usage without reconciliation"
     try std.testing.expectEqual(@as(usize, 1), result.completion.url_citations.len);
     try std.testing.expectEqualStrings("https://example.com/source", result.completion.url_citations[0].url);
     try std.testing.expect(result.completion.url_citations.ptr != Gateway.citations[0..].ptr);
+}
+
+test "direct Responses accounting releases more than the active invocation limit" {
+    const Gateway = struct {
+        fn stream(
+            _: ?*anyopaque,
+            _: Allocator,
+            _: agent_stream_provider.Request,
+        ) anyerror!agent_stream_provider.Result {
+            return .{
+                .status = .ok,
+                .accounting = .direct_usage,
+                .completion = .{
+                    .generation_id = "resp_direct_capacity",
+                    .finish_reason = .stop,
+                    .usage = .{ .input_tokens = 1, .output_tokens = 1 },
+                },
+            };
+        }
+    };
+    const Publication = struct {
+        fn publish(
+            _: *anyopaque,
+            _: session_usage.usage_report.ProfileEvent,
+        ) !void {}
+    };
+    const Callbacks = struct {
+        fn content(_: *anyopaque, _: []const u8) void {}
+    };
+
+    const alloc = std.testing.allocator;
+    var usage = session_usage.Usage.initFresh();
+    defer usage.deinit(alloc);
+    var publication_context: u8 = 0;
+    usage.configurePublicationSink(.{
+        .context = &publication_context,
+        .allocator = alloc,
+        .publish = Publication.publish,
+    });
+    defer usage.configurePublicationSink(null);
+    var cancel_flag = std.atomic.Value(bool).init(false);
+    var callback_ctx: u8 = 0;
+
+    for (0..65) |_| {
+        var delivery = DeliveryCertainty.init();
+        var attempt_evidence: agent_stream_provider.AttemptEvidence = .{};
+        _ = try streamGatewayCompletion(
+            .{ .stream_fn = Gateway.stream },
+            alloc,
+            "openai-test-key",
+            .chatgpt_subscription,
+            null,
+            null,
+            null,
+            null,
+            "gpt-5.6-sol",
+            1,
+            "https://chatgpt.com/backend-api/codex/responses",
+            "{}",
+            null,
+            &delivery,
+            &attempt_evidence,
+            &callback_ctx,
+            Callbacks.content,
+            null,
+            null,
+            null,
+            &cancel_flag,
+            &usage,
+            alloc,
+            .{},
+            null,
+            .agent,
+        );
+    }
+
+    var snapshot = try usage.snapshot(alloc);
+    defer snapshot.deinit(alloc);
+    try std.testing.expectEqual(session_usage.Availability.complete, snapshot.billing);
+    try std.testing.expect(snapshot.api_duration_complete);
+    try std.testing.expectEqual(@as(u64, 66), snapshot.next_sequence);
+    try std.testing.expectEqual(@as(u64, 65), snapshot.settled_through_sequence);
+    try std.testing.expectEqual(@as(u64, 65), snapshot.input_tokens);
+    try std.testing.expectEqual(@as(u64, 65), snapshot.output_tokens);
+    try std.testing.expectEqual(@as(?u64, 65), snapshot.request_count);
 }
 
 const DirectAccountingTestFixture = struct {
