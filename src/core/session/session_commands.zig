@@ -362,14 +362,14 @@ pub fn Commands(comptime App: type) type {
             const capabilities = model_capabilities.resolveForApp(
                 App,
                 app,
-                app.selected_model.items,
+                provider_runtime.model(app),
             );
             if (!model_capabilities.reasoningEffortSupported(capabilities, effort)) {
                 var body: std.Io.Writer.Allocating = .init(app.alloc);
                 defer body.deinit();
                 try body.writer.print(
                     "{s} is not supported by {s}. Available: auto",
-                    .{ effort.label(), app.selected_model.items },
+                    .{ effort.label(), provider_runtime.model(app) },
                 );
                 for (capabilities.reasoning_efforts.slice()) |option| {
                     try body.writer.print(", {s}", .{option.label()});
