@@ -471,6 +471,8 @@ pub fn Runtime(comptime App: type) type {
                     false;
             const settings_snapshot = app_commands.settingsCatalogSnapshot(app);
             const now_ms = io_mod.milliTimestamp();
+            const compacting_context = app_session_runtime.Runtime(App)
+                .responsesCompactionActive(app);
             var visible_stream = app.stream;
             if (!visible_stream.active) {
                 if (app.pacer.completedAssistantPresentationTokenProgress()) |progress| {
@@ -483,9 +485,11 @@ pub fn Runtime(comptime App: type) type {
                 .stream = visible_stream,
                 .completed_assistant_presentation_tail = app.pacer.hasCompletedAssistantPresentationTail(),
                 .writing_response = app.pacer.hasPending(),
+                .compacting_context = compacting_context,
                 .has_api_key = app.auth.credentialSource() != null,
                 .model = visible_model,
                 .pending_images = app.pending_images.items,
+                .composer_visible = !compacting_context,
                 .permission_mode = if (comptime @hasField(App, "permission_engine"))
                     app.permission_engine.mode
                 else

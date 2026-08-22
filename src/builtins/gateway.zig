@@ -902,7 +902,7 @@ fn streamAgentCompletion(
     alloc: Allocator,
     request: agent_stream_provider_contract.Request,
 ) anyerror!agent_stream_provider_contract.Result {
-    if (request.credential_source == .chatgpt_subscription or request.credential_source == .grok_subscription) {
+    if (request.credential_source == .grok_subscription) {
         return error.SubscriptionCredentialCannotAuthorizeGateway;
     }
     const result = gateway_client.streamGatewayCompletion(

@@ -1965,6 +1965,8 @@ fn responsesExtraHeaders(
     len += 1;
     len = appendDirectProviderIdentityHeaders(buf, len, route, account_id, fedramp, openai_identity);
     if (route == .codex_responses_oauth) {
+        buf[len] = .{ .name = "OpenAI-Beta", .value = "responses=experimental" };
+        len += 1;
         if (codex_beta_features) |features| {
             if (features.len > 0) {
                 buf[len] = .{ .name = "x-codex-beta-features", .value = features };
@@ -2268,6 +2270,10 @@ test "Codex streaming headers share the same account identity fields" {
     try std.testing.expectEqualStrings("account_123", headerValue(headers, "ChatGPT-Account-ID").?);
     try std.testing.expectEqualStrings("true", headerValue(headers, "X-OpenAI-Fedramp").?);
     try std.testing.expectEqualStrings("fx", headerValue(headers, "originator").?);
+    try std.testing.expectEqualStrings(
+        "responses=experimental",
+        headerValue(headers, "OpenAI-Beta").?,
+    );
     try std.testing.expectEqualStrings("session_123", headerValue(headers, "session-id").?);
     try std.testing.expectEqualStrings(
         "remote_compaction_v2",

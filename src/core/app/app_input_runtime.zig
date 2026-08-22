@@ -856,6 +856,16 @@ pub fn Runtime(comptime App: type) type {
         ) !void {
             const byte = raw.byte;
             const max_input_len = input_limits.composer_bytes;
+            if (app_session_runtime.Runtime(App).responsesCompactionActive(app)) {
+                if (byte == 3) {
+                    try handleSemanticCtrlC(app);
+                } else if (byte == 4) {
+                    try handleSemanticCtrlD(app, max_input_len);
+                } else {
+                    app.shell.render_requests.request(.footer);
+                }
+                return;
+            }
             // Fire the max-level cue only when the slash menu becomes visible.
             const slash_menu_was_visible = slashMenuVisibleForCue(app);
             defer announceSlashMenuOpened(app, slash_menu_was_visible);
@@ -922,6 +932,10 @@ pub fn Runtime(comptime App: type) type {
             was_cancel_pending: bool,
             max_input_len: usize,
         ) !ResolvedEscapeRoute {
+            if (app_session_runtime.Runtime(App).responsesCompactionActive(app)) {
+                app.shell.render_requests.request(.footer);
+                return .done;
+            }
             switch (resolved) {
                 .remapped_byte, .paste_start, .paste_end, .ignore => {},
                 else => disarmCtrlCExit(app, "semantic_action"),

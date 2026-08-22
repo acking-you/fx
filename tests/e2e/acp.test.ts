@@ -1338,6 +1338,110 @@ describe("acp: model-independent", () => {
   );
 
   test(
+    "ACP compact reports progress and persists the settled remote checkpoint before returning",
+    async () => {
+      const root = createIsolatedRoot("fx-acp-remote-compact-");
+      const gateway = startFakeGateway([]);
+      const heldCompaction = deferred<void>();
+      let compactRequestSeen = false;
+      const codex = startAcpFakeCodex({
+        async route(body) {
+          const parsed = JSON.parse(body) as {
+            input?: Array<{ type?: string }>;
+          };
+          if (parsed.input?.at(-1)?.type !== "compaction_trigger") {
+            return codexFinalText("ACP_COMPACTION_SEED");
+          }
+          compactRequestSeen = true;
+          await heldCompaction.promise;
+          return 'data: {"type":"response.output_item.done","output_index":0,"item":{"id":"cmp_acp_e2e","type":"compaction","encrypted_content":"opaque-acp-compaction-e2e"}}\n\n' +
+            'data: {"type":"response.completed","response":{"id":"resp_acp_compact_e2e","status":"completed","output":[],"usage":{"input_tokens":12,"output_tokens":3,"total_tokens":15}}}\n\n';
+        },
+      });
+      writeSeededAcpChatGptLogin(root.home, codex.accessToken);
+      try {
+        client = await AcpClient.create({
+          cwd: root.workspace,
+          env: {
+            ...fakeGatewayEnv(root, gateway),
+            FX_CODEX_BASE_URL: codex.responsesUrl.replace(/\/responses$/, ""),
+            FX_E2E_OPENAI_CODEX_MODELS_URL: codex.modelsUrl,
+          },
+        });
+        const sessionId = await startCodeSession(client);
+        await client.request("session/set_config_option", {
+          configId: "provider",
+          value: "codex",
+        }, 4);
+
+        const seeded = await runPrompt(client, "Seed context for ACP compaction.", TIMEOUT);
+        expect(seeded.promptResult.result.stopReason).toBe("end_turn");
+
+        let compactSettled = false;
+        const compactPromise = runPrompt(client, "/compact", TIMEOUT).then((result) => {
+          compactSettled = true;
+          return result;
+        });
+        await waitForCondition(
+          "ACP compaction progress",
+          () => compactRequestSeen && client!.rawLines.some((line) => {
+            const message = JSON.parse(line) as any;
+            return message.params?.update?.sessionUpdate === "agent_thought_chunk" &&
+              message.params.update.content?.text === "Compacting context.";
+          }),
+          TIMEOUT,
+        );
+        expect(compactSettled).toBe(false);
+
+        heldCompaction.resolve(undefined);
+        const compacted = await compactPromise;
+        expect(compacted.promptResult.result.stopReason).toBe("end_turn");
+        expect(JSON.stringify(compacted.messages)).toContain(
+          "Context compacted with the active Responses provider.",
+        );
+
+        const events = readFileSync(
+          join(root.home, ".fx", "sessions", sessionId, "events.jsonl"),
+          "utf8",
+        ).trim().split("\n").map((line) => JSON.parse(line) as any);
+        const committed = events.findLast((event) =>
+          event.kind === "state_replacement_committed"
+        );
+        expect(committed).toBeDefined();
+        const replacementId = committed.payload.replacement_id as string;
+        const chunks = events
+          .filter((event) =>
+            event.kind === "state_replacement_chunk" &&
+            event.payload.replacement_id === replacementId
+          )
+          .sort((a, b) => a.payload.chunk_index - b.payload.chunk_index);
+        const state = JSON.parse(Buffer.concat(chunks.map((event) =>
+          Buffer.from(event.payload.base64, "base64")
+        )).toString("utf8")) as {
+          context_history_start: number;
+          history: Array<{
+            kind: string;
+            responses_compaction?: { input_json?: string };
+          }>;
+        };
+        const active = state.history[state.context_history_start];
+        expect(active?.kind).toBe("compacted_summary");
+        expect(active?.responses_compaction?.input_json).toContain(
+          "opaque-acp-compaction-e2e",
+        );
+        expect(client.stderr).toBe("");
+      } finally {
+        heldCompaction.resolve(undefined);
+        await client?.close();
+        gateway.stop();
+        codex.stop();
+        rmSync(root.root, { recursive: true, force: true });
+      }
+    },
+    TIMEOUT,
+  );
+
+  test(
     "ACP reports a paused recovery and continues it only on explicit metadata",
     async () => {
       const root = createIsolatedRoot("fx-acp-model-recovery-");
@@ -7119,7 +7223,7 @@ describe("acp: model-independent", () => {
           cwd: root.workspace,
           env: {
             ...fakeGatewayEnv(root, gateway),
-            FX_E2E_OPENAI_CODEX_RESPONSES_URL: codex.responsesUrl,
+            FX_CODEX_BASE_URL: codex.responsesUrl.replace(/\/responses$/, ""),
             FX_E2E_OPENAI_CODEX_MODELS_URL: codex.modelsUrl,
           },
         });
@@ -7675,7 +7779,7 @@ describe.skipIf(!HAS_API_KEY)("acp: model-backed protocol", () => {
           cwd: root.workspace,
           env: {
             ...fakeGatewayEnv(root, gateway),
-            FX_E2E_OPENAI_CODEX_RESPONSES_URL: codex.responsesUrl,
+            FX_CODEX_BASE_URL: codex.responsesUrl.replace(/\/responses$/, ""),
             FX_E2E_OPENAI_CODEX_MODELS_URL: codex.modelsUrl,
             FX_E2E_CHATGPT_TOKEN_URL: codex.tokenUrl,
           },

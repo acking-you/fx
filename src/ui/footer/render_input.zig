@@ -265,6 +265,7 @@ pub const RenderContext = struct {
     completed_assistant_presentation_tail: bool = false,
     // Pacer emitting visible text, including the post-finish tail drain.
     writing_response: bool = false,
+    compacting_context: bool = false,
     has_api_key: bool,
     model: []const u8,
     pending_images: []const types.ImageAttachment = &.{},
@@ -453,6 +454,12 @@ fn thinkingActivityProjection(
     ctx: RenderContext,
 ) ActivityProjection {
     _ = shell;
+    if (ctx.compacting_context) {
+        return .{ .turn_thinking = .{
+            .label = "• Compacting context",
+            .tone = .thinking,
+        } };
+    }
     // The markerless counter row belongs to the response: the text landing on
     // screen is its own progress report, and it keeps the row through the gaps
     // where the pacer waits on the next chunk. Once the model switches to a
@@ -798,6 +805,38 @@ test "current frame-owned activity leaves the focused tool in the transcript" {
         ),
         .none, .tool_slot => return error.TestUnexpectedResult,
     }
+}
+
+test "remote compaction owns the activity row until it settles" {
+    var input = InputRuntime{};
+    defer input.deinit(std.testing.allocator);
+    var shell = TranscriptRuntime{};
+    defer shell.deinit(std.testing.allocator);
+    const ctx: RenderContext = .{
+        .stream = .{},
+        .compacting_context = true,
+        .has_api_key = true,
+        .model = "gpt-5.6-sol",
+        .composer_visible = false,
+        .queued_count = 0,
+        .subagent_count = 0,
+        .subagent_view_active = false,
+        .selected_subagent_id = null,
+        .selected_subagent_label = null,
+        .selected_subagent_status = null,
+        .activity = .none,
+        .input = &input,
+    };
+
+    var active_buf: [256]u8 = undefined;
+    switch (frameOwnedActivityProjection(&active_buf, &shell, ctx, null)) {
+        .turn_thinking => |thinking| {
+            try std.testing.expectEqualStrings("• Compacting context", thinking.label);
+            try std.testing.expectEqual(ActivityProjection.Tone.thinking, thinking.tone);
+        },
+        .none, .tool_slot => return error.TestUnexpectedResult,
+    }
+    try std.testing.expect(!ctx.composer_visible);
 }
 
 test "minimal connected tool label clips with an ellipsis" {

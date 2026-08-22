@@ -366,10 +366,17 @@ function startFakeChatGptOAuth(
     tokenDelayMs?: number;
     responseDelayMs?: number;
     unauthorizedResponses?: number;
+    holdCompactionResponse?: boolean;
   } = {},
 ) {
   const accessToken = chatgptAccessToken();
   let responseCount = 0;
+  let releaseCompactionResponse: (() => void) | null = null;
+  const compactionResponseGate = options.holdCompactionResponse
+    ? new Promise<void>((resolve) => {
+      releaseCompactionResponse = resolve;
+    })
+    : null;
   let models = [
     { slug: "gpt-5.6-sol", visibility: "list", supported_in_api: true, supported_reasoning_levels: [{ effort: "max" }, { effort: "high" }], additional_speed_tiers: ["fast"], input_modalities: ["text", "image"], context_window: 272000 },
     { slug: "gpt-5.4-mini", visibility: "list", supported_in_api: true, supported_reasoning_levels: [{ effort: "low" }], additional_speed_tiers: [], input_modalities: ["text"], context_window: 128000 },
@@ -439,6 +446,7 @@ function startFakeChatGptOAuth(
               { status: 400 },
             );
           }
+          if (compactionResponseGate) await compactionResponseGate;
           return new Response(
             'data: {"type":"response.output_item.done","output_index":0,"item":{"id":"cmp_e2e","type":"compaction","encrypted_content":"opaque-codex-compaction-e2e"}}\n\n' +
               'data: {"type":"response.completed","response":{"id":"resp_compact_e2e","status":"completed","output":[],"usage":{"input_tokens":12,"output_tokens":3,"total_tokens":15}}}\n\n',
@@ -462,13 +470,19 @@ function startFakeChatGptOAuth(
       FX_E2E_CHATGPT_ISSUER_URL: baseUrl,
       FX_E2E_CHATGPT_TOKEN_URL: `${baseUrl}/chatgpt/token`,
       FX_E2E_OPENAI_CODEX_MODELS_URL: `${baseUrl}/chatgpt/models`,
-      FX_E2E_OPENAI_CODEX_RESPONSES_URL: `${baseUrl}/chatgpt/responses`,
+      FX_CODEX_BASE_URL: `${baseUrl}/chatgpt`,
     },
     baseUrl,
     setModels(next: typeof models) {
       models = next;
     },
+    releaseCompaction() {
+      releaseCompactionResponse?.();
+      releaseCompactionResponse = null;
+    },
     stop() {
+      releaseCompactionResponse?.();
+      releaseCompactionResponse = null;
       server.stop(true);
     },
   };
@@ -2101,7 +2115,7 @@ tmuxTest(
       provider: "codex",
       codex_model: "gpt-5.6-sol",
     }) + "\n");
-    chatgptOauth = startFakeChatGptOAuth();
+    chatgptOauth = startFakeChatGptOAuth({ holdCompactionResponse: true });
     const env = {
       HOME: home,
       AI_GATEWAY_API_KEY: undefined,
@@ -2138,7 +2152,14 @@ tmuxTest(
     );
     await session.waitForComposer(TIMEOUT);
     await session.sendText("/compact");
+    await session.waitForText("Remote context compaction started.", TIMEOUT);
+    await session.waitForText("Compacting context", TIMEOUT);
+    await session.sendText("BLOCKED_DURING_COMPACTION");
+    expect(await session.capturePane()).not.toContain("BLOCKED_DURING_COMPACTION");
+    chatgptOauth.releaseCompaction();
     await session.waitForText("Context compacted with the active Responses provider.", TIMEOUT);
+    await session.waitForComposer(TIMEOUT);
+    expect(await session.capturePane()).not.toContain("BLOCKED_DURING_COMPACTION");
     await session.sendText("/quit");
     await session.waitForSessionEnd(TIMEOUT);
     session = null;
@@ -2575,7 +2596,7 @@ test(
             FX_AUTO_UPGRADE: "0",
             FX_GATEWAY_BASE_URL: gateway.baseUrl,
             FX_E2E_GATEWAY_MODELS_URL: `${gateway.baseUrl}/coding-agent/v1/models`,
-            FX_E2E_OPENAI_CODEX_RESPONSES_URL: codex.responsesUrl,
+            FX_CODEX_BASE_URL: codex.responsesUrl.replace(/\/responses$/, ""),
             FX_E2E_OPENAI_CODEX_MODELS_URL: codex.modelsUrl,
           },
           timeoutMs: TIMEOUT,
@@ -2735,7 +2756,7 @@ test(
             FX_AUTO_UPGRADE: "0",
             FX_GATEWAY_BASE_URL: gateway.baseUrl,
             FX_E2E_GATEWAY_MODELS_URL: `${gateway.baseUrl}/coding-agent/v1/models`,
-            FX_E2E_OPENAI_CODEX_RESPONSES_URL: codex.responsesUrl,
+            FX_CODEX_BASE_URL: codex.responsesUrl.replace(/\/responses$/, ""),
             FX_E2E_OPENAI_CODEX_MODELS_URL: codex.modelsUrl,
           },
           timeoutMs: TIMEOUT,
@@ -2839,7 +2860,7 @@ test(
             FX_AUTO_UPGRADE: "0",
             FX_GATEWAY_BASE_URL: gateway.baseUrl,
             FX_E2E_GATEWAY_MODELS_URL: `${gateway.baseUrl}/coding-agent/v1/models`,
-            FX_E2E_OPENAI_CODEX_RESPONSES_URL: codex.responsesUrl,
+            FX_CODEX_BASE_URL: codex.responsesUrl.replace(/\/responses$/, ""),
             FX_E2E_OPENAI_CODEX_MODELS_URL: codex.modelsUrl,
           },
           timeoutMs: TIMEOUT,

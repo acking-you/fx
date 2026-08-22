@@ -28,6 +28,7 @@ const session_log = @import("../core/session/session_log.zig");
 const session_store = @import("../core/session/session_store.zig");
 const session_runtime = @import("../core/session/session.zig");
 const session_usage = @import("../core/session/session_usage.zig");
+const runtime_compaction = @import("../core/agent/runtime/compaction.zig");
 const subagent_agent_adapter = @import("../core/subagent/agent_adapter.zig");
 const subagent_domain = @import("../core/subagent/domain.zig");
 const subagent_execution = @import("../core/subagent/execution.zig");
@@ -437,6 +438,89 @@ fn appendMarkdownLinkClose(alloc: Allocator, out: *std.ArrayList(u8), uri: []con
     try out.append(alloc, ')');
 }
 
+fn isCompactCommand(text: []const u8) bool {
+    return std.mem.eql(u8, std.mem.trim(u8, text, " \t\r\n"), "/compact");
+}
+
+fn handleCompactCommand(
+    ctx: *AcpContext,
+    session: *server.ActiveSessionState,
+) !TerminalOutcome {
+    if (!session.session_rt.hasRemoteCompactionCandidate()) {
+        try ctx.sendAgentText("Context is already compacted.");
+        return .{ .stop_reason = .end_turn };
+    }
+
+    try ctx.sendAgentThought("Compacting context.");
+    const history = try session.session_rt.snapshotContextHistory(ctx.alloc);
+    defer types.freeHistoryTurnSlice(ctx.alloc, history);
+    var messages: std.ArrayList(ChatMessage) = .empty;
+    defer messages.deinit(ctx.alloc);
+    try session_runtime.appendHistoryChatMessages(ctx.alloc, &messages, history);
+
+    var tool_projection = try ctx.state.cfg.mode_registry.buildGatewayToolProjection(
+        ctx.alloc,
+        activeToolSet(ctx.state),
+        ctx.captured_mode orelse session.mode,
+        .{
+            .permission_mode = ctx.captured_permission_mode orelse session.permission_mode,
+            .permission_rules = session.permission_rules,
+            .mcp_runtime = session.mcp,
+            .subagent_available = ctx.state.subagent_host != null,
+        },
+    );
+    defer tool_projection.deinit(ctx.alloc);
+
+    session.cancel_flag.store(false, .seq_cst);
+    const capabilities = model_capabilities.capabilitiesForModel(session.model);
+    var result = try runtime_compaction.compact(ctx.alloc, .{
+        .provider = ctx.state.cfg.gateway_provider.responses_compaction,
+        .credential_source = session.credential_source,
+        .credential = session.api_key,
+        .account_id = session.account_id,
+        .session_id = session.session_id,
+        .model = session.model,
+        .serialized_tools = tool_projection.tools_json,
+        .messages = messages.items,
+        .provider_options = model_capabilities.resolveProviderOptionsForCapabilities(
+            capabilities,
+            session.effort,
+            session.fast_mode,
+        ),
+        .cancel_flag = &session.cancel_flag,
+    });
+    defer result.deinit(ctx.alloc);
+
+    const changed = if (result.used_remote) remote: {
+        const checkpoint = result.message.responses_compaction orelse
+            return error.MissingResponsesCompactionItem;
+        const binding = checkpoint.provider_binding orelse
+            return error.InvalidResponsesCompactionProviderBinding;
+        break :remote try session.session_rt.installResponsesCompaction(
+            ctx.alloc,
+            checkpoint.credential_source,
+            checkpoint.wire_model,
+            checkpoint.input_json,
+            binding,
+        );
+    } else try session.session_rt.installLocalCompaction(ctx.alloc);
+
+    if (changed) {
+        session.session_write_mutex.lockUncancelable(io_mod.getIo());
+        defer session.session_write_mutex.unlock(io_mod.getIo());
+        if (session.writable) |*writable| {
+            try commitAcpStateReplacement(ctx.alloc, session, writable, false);
+        }
+    }
+    try ctx.sendAgentText(if (!changed)
+        "Context is already compacted."
+    else if (result.used_remote)
+        "Context compacted with the active Responses provider."
+    else
+        "Remote context compaction failed; context was compacted locally.");
+    return .{ .stop_reason = .end_turn };
+}
+
 /// Runs a prompt turn under the mode and permission policy captured at
 /// dispatch. Mid-turn session/set_mode changes only affect later prompts.
 pub fn handlePrompt(
@@ -516,6 +600,9 @@ pub fn handlePrompt(
         .captured_permission_mode = captured_permission_mode,
     };
     defer ctx.deinitPublishedToolCalls();
+    if (!prompt_input.continue_recovery and isCompactCommand(prompt_text)) {
+        return handleCompactCommand(&ctx, session);
+    }
 
     var recovery_checkpoint: ?session_codec.RecoveryCheckpoint = null;
     defer if (recovery_checkpoint) |*checkpoint| checkpoint.deinit(alloc);
@@ -1827,6 +1914,7 @@ fn currentAcpState(
     const history = try session.session_rt.snapshotHistory(alloc);
     types.freeHistoryTurnSlice(alloc, state.history);
     state.history = history;
+    state.context_history_start = session.session_rt.contextHistoryStart();
     const permission_state = try session.session_rt.snapshotPermissionState(alloc);
     state.permission_state.deinit(alloc);
     state.permission_state = permission_state;
@@ -3394,6 +3482,13 @@ fn initTestAcpState(alloc: Allocator, workspace_root: []const u8, mode: Permissi
             .pending_prompt_id = null,
         },
     };
+}
+
+test "ACP recognizes only the exact compact slash command" {
+    try std.testing.expect(isCompactCommand("/compact"));
+    try std.testing.expect(isCompactCommand("  /compact\n"));
+    try std.testing.expect(!isCompactCommand("/compact now"));
+    try std.testing.expect(!isCompactCommand("explain /compact"));
 }
 
 test "stripAnsiAlloc returns the original slice for clean text and strips escapes" {

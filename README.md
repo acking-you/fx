@@ -23,6 +23,15 @@ It's open source (Apache-2.0), model-agnostic, and suitable for both local and c
 
 This is the `byok` branch of a fork of upstream [`vercel-labs/fx`](https://github.com/vercel-labs/fx). Upstream stays the source of truth for the shared codebase and is merged in regularly; this branch exists for the work upstream would not take, aimed at three goals.
 
+> [!IMPORTANT]
+> **Long-term maintenance commitment for BYOK and third-party OAuth**
+>
+> This branch is maintained as a daily-use distribution, not a one-time experiment. The maintainer uses it for real fx work, continuously exercises BYOK, ChatGPT Codex OAuth, xAI Grok OAuth, remote compaction, tool calls, permission review, token refresh, and session resume, and fixes regressions found through that use. The commitment is to keep these supported paths working across provider changes and future upstream merges, with focused regression coverage for failures already seen.
+>
+> Upstream remains the source of truth for shared fx development, but BYOK and third-party OAuth are not its primary maintenance focus, and fixes in these paths can move slowly. For example, merging a recent upstream revision reintroduced a Codex Responses request that failed to provide valid input, even though this branch had already fixed that failure class. Owning and repairing independent provider behavior without waiting for upstream is a central reason this fork and the `byok` branch exist.
+>
+> This is a promise of ongoing ownership rather than a claim that external providers will never change. Regressions in supported BYOK and OAuth paths are treated as branch bugs: they are reproduced against real runtime behavior, fixed here, and kept under regression coverage.
+
 **1. Remove every hard binding to Vercel.** Upstream is model-agnostic in principle but is wired to one hosted path in practice. The intended end state is to keep Vercel fully supported without requiring its account, gateway, key, catalog, or request endpoint.
 
 **2. Support any BYOK provider.** The target is to bring the key you already pay for and point fx at a compatible commercial, corporate, self-hosted, or local endpoint. That requires configurable base URLs, multiple credential sources, provider protocols, and model catalogs.

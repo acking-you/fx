@@ -47,6 +47,36 @@ else
     struct {};
 const TranscriptEntry = transcript_runtime.TranscriptEntry;
 
+const CompactHistoryNotice = struct {
+    tone: types.NoticeTone,
+    body: []const u8,
+};
+
+fn compactHistoryNotice(outcome: app_session_runtime.CompactHistoryOutcome) CompactHistoryNotice {
+    return switch (outcome) {
+        .unchanged => .{
+            .tone = .neutral,
+            .body = "Context is already compacted.",
+        },
+        .compacted_locally => .{
+            .tone = .neutral,
+            .body = "Context compacted locally.",
+        },
+        .remote_started => .{
+            .tone = .neutral,
+            .body = "Remote context compaction started.",
+        },
+        .remote_busy => .{
+            .tone = .neutral,
+            .body = "Remote context compaction is already in progress.",
+        },
+        .local_after_remote_failure => .{
+            .tone = .warning,
+            .body = "Remote context compaction could not be started; context was compacted locally.",
+        },
+    };
+}
+
 fn finish_trace_notice(app: anytype, entry_id: u32, tone: types.NoticeTone, body: []const u8) !void {
     const notice: types.SemanticNotice = .{
         .topic = "",
@@ -1559,11 +1589,12 @@ pub fn Handlers(comptime App: type) type {
 
         fn commandCompactHistory(ctx: *anyopaque) !void {
             const app: *App = @ptrCast(@alignCast(ctx));
-            _ = try app_session_runtime.Runtime(App).compactHistory(app);
+            const outcome = try app_session_runtime.Runtime(App).compactHistory(app);
+            const notice = compactHistoryNotice(outcome);
             try app.writeDomainNotice(.{
                 .topic = "context",
-                .tone = .neutral,
-                .body = "Context compacted.",
+                .tone = notice.tone,
+                .body = notice.body,
             }, true);
         }
 
@@ -2642,6 +2673,26 @@ fn renderThematicRuleTimelineBody(alloc: std.mem.Allocator, text: []const u8) ![
     defer alloc.free(stripped);
     const trimmed = std.mem.trimEnd(u8, stripped, " \t\r\n");
     return std.fmt.allocPrint(alloc, "  {s}\n", .{trimmed});
+}
+
+test "compact command reports asynchronous and settled outcomes accurately" {
+    const cases = [_]struct {
+        outcome: app_session_runtime.CompactHistoryOutcome,
+        tone: types.NoticeTone,
+        body: []const u8,
+    }{
+        .{ .outcome = .unchanged, .tone = .neutral, .body = "Context is already compacted." },
+        .{ .outcome = .compacted_locally, .tone = .neutral, .body = "Context compacted locally." },
+        .{ .outcome = .remote_started, .tone = .neutral, .body = "Remote context compaction started." },
+        .{ .outcome = .remote_busy, .tone = .neutral, .body = "Remote context compaction is already in progress." },
+        .{ .outcome = .local_after_remote_failure, .tone = .warning, .body = "Remote context compaction could not be started; context was compacted locally." },
+    };
+
+    for (cases) |case| {
+        const notice = compactHistoryNotice(case.outcome);
+        try std.testing.expectEqual(case.tone, notice.tone);
+        try std.testing.expectEqualStrings(case.body, notice.body);
+    }
 }
 
 test "workspace slash parser preserves paths with spaces and rejects incomplete actions" {

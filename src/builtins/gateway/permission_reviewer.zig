@@ -2,12 +2,14 @@ const std = @import("std");
 const gateway_client = @import("../../gateway/client.zig");
 const gateway_json = @import("../../core/gateway/gateway_json.zig");
 const provider_route = @import("../../core/gateway/provider_route.zig");
+const responses_compaction_binding = @import("../../core/gateway/responses_compaction_binding.zig");
 const responses_protocol = @import("../../core/gateway/responses_protocol.zig");
 const stream_provider = @import("../../core/agent/stream_provider.zig");
 const permission_auto_classifier = @import("../../core/permissions/auto_classifier.zig");
 const session_usage = @import("../../core/session/session_usage.zig");
 const debug_trace = @import("../../core/shared/debug_trace.zig");
 const types = @import("../../core/shared/types.zig");
+const openai_codex_models = @import("../../gateway/openai_codex_models.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -20,6 +22,8 @@ const StreamFn = *const fn (
     []const u8,
     ?[]const u8,
     ?types.CredentialSource,
+    ?[]const u8,
+    ?[]const u8,
     []const u8,
     usize,
     []const u8,
@@ -35,6 +39,7 @@ const GatewayConfig = struct {
     api_key: []const u8,
     team: ?[]const u8 = null,
     credential_source: ?types.CredentialSource = null,
+    account_id: ?[]const u8 = null,
     session_id: ?[]const u8 = null,
     chat_url: []const u8,
     cancel_flag: ?*std.atomic.Value(bool) = null,
@@ -56,6 +61,7 @@ fn reviewGateway(
         .api_key = input.credential,
         .team = input.tenant,
         .credential_source = input.credential_source,
+        .account_id = input.account_id,
         .session_id = input.session_id,
         .chat_url = input.endpoint,
         .cancel_flag = input.cancel_flag,
@@ -70,7 +76,11 @@ fn reviewGatewayConfig(
     request: permission_auto_classifier.ReviewRequest,
 ) !permission_auto_classifier.ParseOutcome {
     var local = config;
-    return permission_auto_classifier.Reviewer.withTransport(
+    const reviewer_model = if (routeForSource(local.credential_source) == .codex_responses_oauth)
+        openai_codex_models.reviewer_model
+    else
+        permission_auto_classifier.gateway_reviewer_model;
+    return permission_auto_classifier.Reviewer.withTransportModel(
         .{
             .context = @ptrCast(&local),
             .build_fn = buildProviderReviewPayload,
@@ -78,6 +88,7 @@ fn reviewGatewayConfig(
         },
         local.cancel_flag,
         permission_auto_classifier.Reviewer.default_timeout_ms,
+        reviewer_model,
     ).review(alloc, request);
 }
 
@@ -106,21 +117,14 @@ fn buildProviderReviewPayload(
         );
     }
 
-    const pending_index = messages.len - 2;
-    const pending = messages[pending_index];
-    const expanded_len = try std.math.add(usize, messages.len, pending.tool_calls.len);
-    const expanded = try alloc.alloc(types.ChatMessage, expanded_len);
+    const expanded = try gateway_json.expandPendingToolReviewMessages(
+        alloc,
+        messages,
+        target_call_id,
+        deadline,
+        cancel_flag,
+    );
     defer alloc.free(expanded);
-    @memcpy(expanded[0 .. pending_index + 1], messages[0 .. pending_index + 1]);
-    for (pending.tool_calls, 0..) |call, index| {
-        expanded[pending_index + 1 + index] = .{
-            .role = .tool,
-            .content = "Tool call has not executed; it is pending permission review.",
-            .tool_call_id = call.id,
-            .tool_name = call.name,
-        };
-    }
-    expanded[expanded.len - 1] = messages[messages.len - 1];
 
     const prompt_cache_key = if (config.session_id) |session_id|
         try std.fmt.allocPrint(
@@ -209,6 +213,8 @@ fn sendGatewayReview(
         config.api_key,
         config.team,
         config.credential_source,
+        config.account_id,
+        config.session_id,
         wire_model,
         single_transport_attempt,
         config.chat_url,
@@ -325,6 +331,8 @@ fn streamGatewayReviewer(
     api_key: []const u8,
     team: ?[]const u8,
     credential_source: ?types.CredentialSource,
+    account_id: ?[]const u8,
+    session_id: ?[]const u8,
     model: []const u8,
     retry_count: usize,
     chat_url: []const u8,
@@ -333,12 +341,30 @@ fn streamGatewayReviewer(
     delivery: *gateway_client.DeliveryCertainty,
     cancel_flag: *std.atomic.Value(bool),
 ) !gateway_client.StreamResult {
+    const binding: ?types.ResponsesCompactionProviderBinding = if (credential_source) |source|
+        if (provider_route.fromCredentialSource(source)) |route|
+            if (route.contract().wire_api == .openai_responses)
+                try responses_compaction_binding.buildFromEnvironmentAlloc(
+                    alloc,
+                    source,
+                    api_key,
+                    account_id,
+                )
+            else
+                null
+        else
+            null
+    else
+        null;
+    defer if (binding) |owned| types.freeResponsesCompactionProviderBinding(alloc, owned);
     return gateway_client.streamGatewayRequiredToolCompletionBounded(
         alloc,
         .{
             .api_key = api_key,
             .team = team,
             .credential_source = credential_source,
+            .responses_compaction_binding = if (binding) |owned| owned.view() else null,
+            .session_id = session_id,
             .model = model,
             .retry_count = retry_count,
             .chat_url = chat_url,
@@ -383,6 +409,8 @@ const FakeStream = struct {
         _: []const u8,
         _: ?[]const u8,
         source: ?types.CredentialSource,
+        _: ?[]const u8,
+        _: ?[]const u8,
         model: []const u8,
         retry_count: usize,
         _: []const u8,
@@ -397,9 +425,11 @@ const FakeStream = struct {
         self.saw_expected_model_only = self.saw_expected_model_only and std.mem.eql(u8, model, self.expected_model);
         self.saw_expected_source_only = self.saw_expected_source_only and source == self.expected_source;
         if (self.expect_responses_payload) {
+            const expected_model = try std.fmt.allocPrint(alloc, "\"model\":\"{s}\"", .{self.expected_model});
+            defer alloc.free(expected_model);
             self.saw_responses_payload = self.saw_responses_payload and
                 std.mem.find(u8, payload, "\"input\":[") != null and
-                std.mem.find(u8, payload, "\"model\":\"gpt-5.4\"") != null and
+                std.mem.find(u8, payload, expected_model) != null and
                 std.mem.find(u8, payload, "\"tool_choice\":\"required\"") != null;
         }
         if (self.expected_prompt_cache_key) |expected| {
@@ -562,6 +592,33 @@ test "direct automatic reviewer uses Responses route without Gateway reconciliat
     try std.testing.expectEqual(session_usage.Availability.incomplete, snapshot.billing);
     try std.testing.expectEqual(@as(usize, 1), snapshot.incidents.len);
     try std.testing.expectEqual(@as(usize, 0), snapshot.models.len);
+}
+
+test "Codex automatic reviewer uses the shared Responses route and reviewer model" {
+    const alloc = std.testing.allocator;
+    var fake = FakeStream{
+        .outcomes = &.{.valid},
+        .expected_model = openai_codex_models.reviewer_model,
+        .expected_source = .chatgpt_subscription,
+        .expected_prompt_cache_key = "guardian:codex-parent-session",
+        .expect_responses_payload = true,
+    };
+    const config = GatewayConfig{
+        .api_key = "codex-test-token",
+        .credential_source = .chatgpt_subscription,
+        .account_id = "codex-account",
+        .session_id = "codex-parent-session",
+        .chat_url = "https://ai-gateway.vercel.sh/v3/ai/language-model",
+        .stream_ctx = @ptrCast(&fake),
+        .stream_fn = FakeStream.execute,
+    };
+
+    var outcome = try reviewGatewayConfig(config, alloc, testRequest());
+    defer outcome.deinit(alloc);
+    try std.testing.expect(fake.saw_expected_source_only);
+    try std.testing.expect(fake.saw_expected_model_only);
+    try std.testing.expect(fake.saw_responses_payload);
+    try std.testing.expect(fake.saw_expected_prompt_cache_key);
 }
 
 test "gateway automatic reviewer records its generation in session usage" {

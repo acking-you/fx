@@ -53,7 +53,6 @@ const builtin_context = @import("builtins/context.zig");
 const builtin_gateway = @import("builtins/gateway.zig");
 const builtin_providers = @import("builtins/providers.zig");
 const openai_codex_models = @import("gateway/openai_codex_models.zig");
-const openai_codex_permission_reviewer = @import("gateway/openai_codex_permission_reviewer.zig");
 const xai_grok_models = @import("gateway/xai_grok_models.zig");
 const xai_grok_permission_reviewer = @import("gateway/xai_grok_permission_reviewer.zig");
 const gateway_provider = @import("core/gateway/gateway_provider.zig");
@@ -1640,7 +1639,7 @@ const App = struct {
                 else
                     builtin_providers.agentStream(.codex),
                 .permission_reviewer_provider = if (comptime host_profile.tools and !host_target.is_wasm)
-                    openai_codex_permission_reviewer.provider
+                    builtin_gateway.permission_reviewer.provider
                 else
                     null,
             },
@@ -3360,7 +3359,7 @@ fn fullEntryConfig() app_entry_runtime.Config {
         .load_mcp_runtime = builtin_mcp.loadRuntime,
         .acp_runner = .{ .run_fn = runAcpServer },
         .permission_reviewer_provider = builtin_gateway.permission_reviewer.provider,
-        .codex_permission_reviewer_provider = openai_codex_permission_reviewer.provider,
+        .codex_permission_reviewer_provider = builtin_gateway.permission_reviewer.provider,
         .grok_permission_reviewer_provider = xai_grok_permission_reviewer.provider,
     };
 }
@@ -3920,6 +3919,7 @@ test {
     _ = @import("ui/settings_screen.zig");
     _ = @import("builtins/context.zig");
     _ = @import("builtins/gateway.zig");
+    _ = @import("builtins/providers.zig");
     _ = @import("builtins/gateway/permission_reviewer.zig");
     _ = @import("core/shared/debug_trace.zig");
     _ = @import("core/output/diff.zig");
@@ -3929,8 +3929,6 @@ test {
     _ = @import("core/auth/chatgpt_oauth.zig");
     _ = @import("core/auth/provider_catalog.zig");
     _ = @import("gateway/openai_codex_models.zig");
-    _ = @import("gateway/openai_codex.zig");
-    _ = @import("gateway/openai_codex_permission_reviewer.zig");
     _ = @import("core/auth/grok_session.zig");
     _ = @import("core/auth/grok_oauth.zig");
     _ = @import("gateway/xai_grok_models.zig");

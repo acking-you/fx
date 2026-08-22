@@ -3198,8 +3198,24 @@ pub fn Runtime(comptime App: type) type {
             return true;
         }
 
+        pub fn responsesCompactionActive(app: *const App) bool {
+            if (comptime !@hasField(App, "session_persistence")) return false;
+            return app.session_persistence.responses_compaction_tasks.isActive();
+        }
+
         pub fn compactHistory(app: *App) !CompactHistoryOutcome {
-            return compactHistoryWithTrigger(app, false);
+            if (responsesCompactionActive(app)) return .remote_busy;
+            const turn_start_held = if (comptime @hasField(App, "worker") and
+                @hasDecl(@TypeOf(app.worker), "tryHoldTurnStart"))
+                app.worker.tryHoldTurnStart()
+            else
+                false;
+            if (!turn_start_held) return .remote_busy;
+            errdefer app.worker.releaseTurnStartHold();
+
+            const outcome = try compactHistoryWithTrigger(app, false);
+            if (outcome != .remote_started) app.worker.releaseTurnStartHold();
+            return outcome;
         }
 
         pub fn autoCompactHistory(app: *App) !CompactHistoryOutcome {
@@ -3445,7 +3461,11 @@ pub fn Runtime(comptime App: type) type {
             // Publishing is the final worker action. Joining here cannot hold
             // a persistence/session lock and normally only reaps the thread.
             task.deinit();
-            defer if (event.automatic) resumePromptAfterAutomaticCompaction(app);
+            defer if (event.automatic)
+                resumePromptAfterAutomaticCompaction(app)
+            else if (comptime @hasField(App, "worker") and
+                @hasDecl(@TypeOf(app.worker), "releaseTurnStartHold"))
+                app.worker.releaseTurnStartHold();
 
             if (!optionalStringsEqual(activeSessionId(app), event.session_id)) {
                 debug_trace.logf(
@@ -5921,6 +5941,7 @@ const FakeWorker = struct {
     model: std.ArrayList(u8) = .empty,
     effort: types.ReasoningEffort = .auto,
     fast_mode: bool = false,
+    turn_start_held: bool = false,
     responses_compaction_events: std.ArrayList(types.ResponsesCompactionWorkerEvent) = .empty,
 
     fn deinit(self: *FakeWorker, alloc: Allocator) void {
@@ -5948,6 +5969,16 @@ const FakeWorker = struct {
     pub fn queuedPromptCount(self: *const FakeWorker) usize {
         _ = self;
         return 0;
+    }
+
+    fn tryHoldTurnStart(self: *FakeWorker) bool {
+        if (self.turn_start_held) return false;
+        self.turn_start_held = true;
+        return true;
+    }
+
+    fn releaseTurnStartHold(self: *FakeWorker) void {
+        self.turn_start_held = false;
     }
 
     fn syncQueuedPromptModel(
@@ -10962,6 +10993,7 @@ test "same-session stale remote compaction falls back locally exactly once" {
 
     const task = try makeInertResponsesCompactionTask(11, null);
     app.session_persistence.responses_compaction_tasks.active = task;
+    app.worker.turn_start_held = true;
     const event = types.ResponsesCompactionWorkerEvent{
         .generation = 11,
         .expected_history_generation = before_generation + 1,
@@ -10983,6 +11015,7 @@ test "same-session stale remote compaction falls back locally exactly once" {
     try std.testing.expectEqual(@as(usize, 3), app.session.contextHistoryStart());
     try std.testing.expectEqual(before_generation + 1, app.session.historyGeneration());
     try std.testing.expectEqual(@as(usize, 1), app.notices.items.len);
+    try std.testing.expect(!app.worker.turn_start_held);
 
     // A duplicate result has no active generation to consume and therefore
     // cannot compact or notify a second time.
