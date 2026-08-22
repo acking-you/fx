@@ -109,7 +109,7 @@ pub fn compact(alloc: Allocator, request: Request) !Result {
         .build_request = .{
             .credential_source = source,
             .provider_credential = request.credential,
-            .credential_account_id = request.account_id,
+            .account_id = request.account_id,
             .responses_compaction_binding = binding.view(),
             .session_id = request.session_id,
             .model = request.model,
@@ -277,7 +277,7 @@ test "context overflow recognizes 413 and OpenAI 400 details" {
 }
 
 test "automatic compaction supports OAuth and Responses BYOK only" {
-    try std.testing.expect(supportsAutomaticCompaction(.codex_oauth));
+    try std.testing.expect(supportsAutomaticCompaction(.chatgpt_subscription));
     try std.testing.expect(supportsAutomaticCompaction(.openai_api_key));
     try std.testing.expect(!supportsAutomaticCompaction(.ai_gateway_api_key));
     try std.testing.expect(!supportsAutomaticCompaction(null));

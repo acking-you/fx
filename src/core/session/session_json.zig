@@ -1602,7 +1602,7 @@ fn parseResponsesCompactionCheckpoint(
     const credential_source = types.parseCredentialSource(source_raw) orelse
         return error.InvalidSessionFormat;
     switch (credential_source) {
-        .openai_api_key, .codex_oauth => {},
+        .openai_api_key, .chatgpt_subscription => {},
         else => return error.InvalidSessionFormat,
     }
 

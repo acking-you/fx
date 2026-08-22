@@ -181,7 +181,8 @@ pub fn fromCredentialSource(source: types.CredentialSource) ?ProviderRoute {
     return switch (source) {
         .vercel_oidc_token, .ai_gateway_api_key, .fx_login, .stored_key => .vercel_gateway,
         .openai_api_key => .openai_responses_byok,
-        .codex_oauth => .codex_responses_oauth,
+        .chatgpt_subscription => .codex_responses_oauth,
+        .grok_subscription => null,
     };
 }
 
@@ -472,11 +473,16 @@ fn isLoopbackHost(host: []const u8) bool {
 
 test "credential sources map to one typed provider route" {
     for (std.meta.tags(types.CredentialSource)) |source| {
+        if (source == .grok_subscription) {
+            try std.testing.expect(fromCredentialSource(source) == null);
+            continue;
+        }
         const route = fromCredentialSource(source) orelse return error.UnmappedCredentialSource;
         const expected: ProviderRoute = switch (source) {
             .vercel_oidc_token, .ai_gateway_api_key, .fx_login, .stored_key => .vercel_gateway,
             .openai_api_key => .openai_responses_byok,
-            .codex_oauth => .codex_responses_oauth,
+            .chatgpt_subscription => .codex_responses_oauth,
+            .grok_subscription => unreachable,
         };
         try std.testing.expectEqual(expected, route);
     }
@@ -518,14 +524,14 @@ test "credential source model projection uses its assigned route" {
     );
     try std.testing.expectEqualStrings(
         "gpt-5.6-sol",
-        wireModelForCredentialSource(.codex_oauth, fx_default_model),
+        wireModelForCredentialSource(.chatgpt_subscription, fx_default_model),
     );
 }
 
 test "route default reconciliation normalizes only known defaults" {
     try std.testing.expectEqualStrings(
         codex_default_model,
-        reconciledDefaultModel(.codex_oauth, fx_default_model, false).?,
+        reconciledDefaultModel(.chatgpt_subscription, fx_default_model, false).?,
     );
     try std.testing.expectEqualStrings(
         openai_default_model,
@@ -537,11 +543,11 @@ test "route default reconciliation normalizes only known defaults" {
     );
     try std.testing.expectEqualStrings(
         codex_default_model,
-        reconciledDefaultModel(.codex_oauth, "openai/" ++ openai_default_model, false).?,
+        reconciledDefaultModel(.chatgpt_subscription, "openai/" ++ openai_default_model, false).?,
     );
-    try std.testing.expect(reconciledDefaultModel(.codex_oauth, "company/custom-model", false) == null);
-    try std.testing.expect(reconciledDefaultModel(.codex_oauth, fx_default_model, true) == null);
-    try std.testing.expect(reconciledDefaultModel(.codex_oauth, codex_default_model, false) == null);
+    try std.testing.expect(reconciledDefaultModel(.chatgpt_subscription, "company/custom-model", false) == null);
+    try std.testing.expect(reconciledDefaultModel(.chatgpt_subscription, fx_default_model, true) == null);
+    try std.testing.expect(reconciledDefaultModel(.chatgpt_subscription, codex_default_model, false) == null);
 }
 
 test "Responses base URLs normalize to their model catalog endpoint" {

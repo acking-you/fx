@@ -527,7 +527,7 @@ test "Codex OAuth host route fails before serializing or sending its credential"
     try std.testing.expectError(error.CodexCredentialUnavailable, stream(&context, std.testing.allocator, .{
         .api_key = "codex-secret-must-not-leave",
         .team = null,
-        .credential_source = .codex_oauth,
+        .credential_source = .chatgpt_subscription,
         .model = "gpt-5.6-sol",
         .retry_count = 1,
         .chat_url = "https://ai-gateway.vercel.sh/v3/ai/language-model",

@@ -28,8 +28,8 @@ const system_prompt =
 pub const Config = struct {
     stream_provider: agent_stream_provider.Provider,
     api_key: []const u8,
-    gateway_team: ?[]const u8,
     credential_source: ?types.CredentialSource = null,
+    gateway_team: ?[]const u8,
     session_id: ?[]const u8 = null,
     retry_count: usize,
     chat_url: []const u8,
@@ -281,8 +281,8 @@ fn runBatchAttempt(
         .{
             .stream_provider = config.stream_provider,
             .api_key = config.api_key,
-            .gateway_team = config.gateway_team,
             .credential_source = config.credential_source,
+            .gateway_team = config.gateway_team,
             .session_id = config.session_id,
             .retry_count = config.retry_count,
             .chat_url = config.chat_url,

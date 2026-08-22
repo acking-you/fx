@@ -269,7 +269,7 @@ test "provider binding separates account key origin organization and project" {
 
     const codex_a = try buildAlloc(
         alloc,
-        .codex_oauth,
+        .chatgpt_subscription,
         "access-token-not-persisted",
         "account-a",
         .{ .endpoint_overrides = .{ .codex_base_url = "https://codex-a.example/api" } },
@@ -277,7 +277,7 @@ test "provider binding separates account key origin organization and project" {
     defer types.freeResponsesCompactionProviderBinding(alloc, codex_a);
     const codex_b = try buildAlloc(
         alloc,
-        .codex_oauth,
+        .chatgpt_subscription,
         "other-access-token-not-persisted",
         "account-b",
         .{ .endpoint_overrides = .{ .codex_base_url = "https://codex-a.example/api" } },

@@ -336,7 +336,9 @@ pub fn decodeResponse(alloc: Allocator, body: []const u8) !DecodedResponse {
     const id = try optionalStringField(root, "id");
     const object_type = try optionalStringField(root, "object");
     if (object_type) |value| {
-        if (!std.mem.eql(u8, value, "response.compaction")) {
+        if (!std.mem.eql(u8, value, "response.compaction") and
+            !std.mem.eql(u8, value, "response"))
+        {
             return error.UnexpectedResponsesCompactObject;
         }
     }
@@ -716,7 +718,7 @@ test "Responses compact decoder separates envelope and semantic errors" {
     }
     try std.testing.expectError(
         error.UnexpectedResponsesCompactObject,
-        decodeResponse(alloc, "{\"object\":\"response\",\"output\":[]}"),
+        decodeResponse(alloc, "{\"object\":\"unexpected\",\"output\":[]}"),
     );
 
     {

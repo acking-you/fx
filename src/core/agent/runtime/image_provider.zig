@@ -16,8 +16,8 @@ const gateway_image_model = "google/gemini-2.5-flash";
 pub const Request = struct {
     stream_provider: agent_stream_provider.Provider,
     api_key: []const u8,
-    gateway_team: ?[]const u8,
     credential_source: ?types.CredentialSource = null,
+    gateway_team: ?[]const u8,
     session_id: ?[]const u8 = null,
     retry_count: usize,
     chat_url: []const u8,
@@ -81,8 +81,9 @@ pub fn inspect(
         request.stream_provider,
         alloc,
         request.api_key,
-        request.gateway_team,
         request.credential_source,
+        null,
+        request.gateway_team,
         null,
         request.session_id,
         wire_model,
@@ -188,5 +189,5 @@ test "image fallback uses one route model for capability payload and telemetry" 
     try std.testing.expectEqualStrings(gateway_image_model, inspectionModel(null));
     try std.testing.expectEqualStrings(gateway_image_model, inspectionModel(.ai_gateway_api_key));
     try std.testing.expectEqualStrings(provider_route.openai_default_model, inspectionModel(.openai_api_key));
-    try std.testing.expectEqualStrings(provider_route.codex_default_model, inspectionModel(.codex_oauth));
+    try std.testing.expectEqualStrings(provider_route.codex_default_model, inspectionModel(.chatgpt_subscription));
 }

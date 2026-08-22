@@ -72,7 +72,7 @@ test "provider preserves the typed route and opaque replacement contract" {
         ) !Outcome {
             const self: *@This() = @ptrCast(@alignCast(raw.?));
             self.calls += 1;
-            try std.testing.expectEqual(types.CredentialSource.codex_oauth, request.build_request.credential_source.?);
+            try std.testing.expectEqual(types.CredentialSource.chatgpt_subscription, request.build_request.credential_source.?);
             try std.testing.expectEqualStrings("access", request.credential);
             try std.testing.expectEqualStrings("account", request.account_id.?);
             try std.testing.expectEqualStrings(
@@ -80,7 +80,7 @@ test "provider preserves the typed route and opaque replacement contract" {
                 request.provider_binding.normalized_origin,
             );
             return .{ .compacted = .{
-                .credential_source = .codex_oauth,
+                .credential_source = .chatgpt_subscription,
                 .wire_model = try alloc.dupe(u8, "gpt-5.6-sol"),
                 .input_json = try alloc.dupe(u8, "[{\"type\":\"compaction\",\"encrypted_content\":\"opaque\"}]"),
             } };
@@ -97,7 +97,7 @@ test "provider preserves the typed route and opaque replacement contract" {
             .account_id = "account",
         },
         .build_request = .{
-            .credential_source = .codex_oauth,
+            .credential_source = .chatgpt_subscription,
             .model = "gpt-5.6-sol",
             .serialized_tools = "[]",
             .messages = &.{},

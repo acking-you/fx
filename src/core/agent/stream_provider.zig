@@ -101,7 +101,7 @@ pub const BuildRequest = struct {
     /// providers hash this credential to validate opaque compaction replay;
     /// it is never serialized into the payload or checkpoint.
     provider_credential: ?[]const u8 = null,
-    credential_account_id: ?[]const u8 = null,
+    account_id: ?[]const u8 = null,
     session_id: ?[]const u8 = null,
     model: []const u8,
     tool_registry: tool_dispatch.Registry = .{},
@@ -136,8 +136,10 @@ pub const BuildRequest = struct {
 
 pub const Request = struct {
     api_key: []const u8,
-    team: ?[]const u8,
     credential_source: ?types.CredentialSource = null,
+    /// Borrowed provider account identity captured with the admitted credential.
+    account_id: ?[]const u8 = null,
+    team: ?[]const u8,
     /// Exact non-secret identity snapshot used when the payload was built.
     /// The transport revalidates it against the credential and sends the
     /// request only to this binding's endpoint.
@@ -150,6 +152,9 @@ pub const Request = struct {
     payload: []const u8,
     trace_ctx: debug_trace.TraceContext,
     content_capture_limit: ?usize,
+    /// Optional absolute provider deadline. Transports that support bounded
+    /// execution must stop in-flight I/O before returning `error.Timeout`.
+    deadline: ?std.Io.Clock.Timestamp = null,
     cooperative_pulse: ?CooperativePulse = null,
     delivery: *DeliveryCertainty,
     attempt_evidence: *AttemptEvidence,
@@ -209,6 +214,7 @@ pub const Result = struct {
             if (self.completion.billing) |billing| alloc.free(@constCast(billing.model));
             types.freeToolCallSlice(alloc, @constCast(self.completion.tool_calls));
             if (self.completion.provider_failure_detail) |detail| alloc.free(@constCast(detail));
+            if (self.completion.provider_state_json) |state| alloc.free(@constCast(state));
             if (self.failure_schema) |schema| alloc.free(schema);
             if (self.failure_request_shape) |shape| alloc.free(shape);
         }

@@ -286,7 +286,7 @@ test "host catalog rejects Codex OAuth before opening its transport" {
     var fixture: CatalogFixture = .{};
     var context = initContext(fixture.transport());
     const result = try provider(&context).fetch(std.testing.allocator, .{
-        .access = credentials.catalogAccessForCredential(.codex_oauth, "codex-secret-must-not-leave", null),
+        .access = credentials.catalogAccessForCredential(.chatgpt_subscription, "codex-secret-must-not-leave", null),
         .endpoint = "/v1/models",
     });
     switch (result) {

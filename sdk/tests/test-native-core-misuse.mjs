@@ -70,7 +70,7 @@ assert.throws(
 for (const [options, message] of [
   [{ apiKey: "x".repeat(64 * 1024 + 1), home: "/tmp", workspaceRoot: "/tmp" }, /apiKey/],
   [{ apiKey: "key", model: "x".repeat(1025), home: "/tmp", workspaceRoot: "/tmp" }, /model/],
-  [{ apiKey: "key", credentialSource: "codex_oauth", home: "/tmp", workspaceRoot: "/tmp" }, /credentialSource/],
+  [{ apiKey: "key", credentialSource: "chatgpt_subscription", home: "/tmp", workspaceRoot: "/tmp" }, /credentialSource/],
   [{ apiKey: "key", credentialSource: "unknown", home: "/tmp", workspaceRoot: "/tmp" }, /credentialSource/],
   [{ apiKey: "key", home: "x".repeat(16 * 1024 + 1), workspaceRoot: "/tmp" }, /home/],
   [{ apiKey: "key", home: "/tmp", workspaceRoot: "/tmp", gatewayChatUrl: "http://attacker.example/chat" }, /gatewayChatUrl/],

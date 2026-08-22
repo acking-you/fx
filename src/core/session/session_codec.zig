@@ -7,11 +7,13 @@ const responses_output_items = @import("../shared/responses_output_items.zig");
 const responses_compaction = @import("../gateway/responses_compaction.zig");
 const responses_compaction_binding = @import("../gateway/responses_compaction_binding.zig");
 const captured_command = @import("../tooling/captured_command.zig");
+const model_provider = @import("../config/model_provider.zig");
 
 const Allocator = std.mem.Allocator;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
 pub const DurableSessionPreferences = struct {
+    provider: model_provider.ProviderId = .gateway,
     model: []u8,
     effort: types.ReasoningEffort,
     fast_mode: bool,
@@ -23,6 +25,7 @@ pub const DurableSessionPreferences = struct {
 
     pub fn dupe(self: DurableSessionPreferences, alloc: Allocator) !DurableSessionPreferences {
         return .{
+            .provider = self.provider,
             .model = try alloc.dupe(u8, self.model),
             .effort = self.effort,
             .fast_mode = self.fast_mode,
@@ -47,6 +50,7 @@ pub const RecoveryCheckpoint = struct {
     action: types.ModelRecoveryAction,
     tool_state: RecoveryToolState = .none,
     route_model: []u8,
+    route_provider: model_provider.ProviderId = .gateway,
     requested_fast_mode: bool,
     fast_mode: bool,
     max_provider_attempts: usize,
@@ -79,6 +83,7 @@ pub const RecoveryCheckpoint = struct {
             .action = self.action,
             .tool_state = self.tool_state,
             .route_model = route_model,
+            .route_provider = self.route_provider,
             .requested_fast_mode = self.requested_fast_mode,
             .fast_mode = self.fast_mode,
             .max_provider_attempts = self.max_provider_attempts,
@@ -747,7 +752,7 @@ fn parseResponsesCompactionCheckpoint(
     const credential_source = types.parseCredentialSource(source_raw) orelse
         return error.InvalidSessionFormat;
     switch (credential_source) {
-        .openai_api_key, .codex_oauth => {},
+        .openai_api_key, .chatgpt_subscription => {},
         else => return error.InvalidSessionFormat,
     }
 
@@ -844,6 +849,13 @@ fn isCapturedCommandToolCall(alloc: Allocator, call: types.ToolCall) !bool {
 }
 
 pub fn validateState(state: DurableSessionState) !void {
+    return validateStateWithPermissionMigration(state, false);
+}
+
+fn validateStateWithPermissionMigration(
+    state: DurableSessionState,
+    allow_legacy_permission_state: bool,
+) !void {
     try validateSessionId(state.id);
     try validateWorkspaceRoot(state.origin_workspace_root);
     try validateWorkspaceRoot(state.workspace_root);
@@ -860,8 +872,13 @@ pub fn validateState(state: DurableSessionState) !void {
         }
     }
     if (state.usage) |usage| try session_usage.validateSnapshot(usage);
-    session_permission_state.validate(state.permission_state) catch
-        return error.InvalidDurableField;
+    if (allow_legacy_permission_state and state.permission_state.version == 1) {
+        session_permission_state.validateSchema(state.permission_state, 1) catch
+            return error.InvalidDurableField;
+    } else {
+        session_permission_state.validate(state.permission_state) catch
+            return error.InvalidDurableField;
+    }
     if (state.recovery_checkpoint) |checkpoint| {
         if (checkpoint.version != 1 or
             checkpoint.turn_id == 0 or
@@ -902,9 +919,11 @@ fn writeState(writer: *std.Io.Writer, state: DurableSessionState) !void {
     try writeJsonString(writer, state.preferences.model);
     try writer.writeAll(",\"effort\":");
     try writeJsonString(writer, state.preferences.effort.label());
-    try writer.print(",\"fast_mode\":{s}}},\"history\":[", .{
+    try writer.print(",\"fast_mode\":{s},\"provider\":", .{
         if (state.preferences.fast_mode) "true" else "false",
     });
+    try writeJsonString(writer, @tagName(state.preferences.provider));
+    try writer.writeAll("},\"history\":[");
     for (state.history, 0..) |turn, i| {
         if (i > 0) try writer.writeByte(',');
         try writeHistoryTurn(writer, turn);
@@ -1024,7 +1043,7 @@ fn parsePermissionState(
             .generation = try requireU64(rule_object, "generation"),
         });
     }
-    session_permission_state.validate(state) catch
+    session_permission_state.validateSchema(state, version) catch
         return error.InvalidDurableField;
     return state;
 }
@@ -1047,6 +1066,8 @@ pub fn writeRecoveryCheckpoint(writer: *std.Io.Writer, checkpoint: RecoveryCheck
     try writeJsonString(writer, @tagName(checkpoint.tool_state));
     try writer.writeAll(",\"route_model\":");
     try writeDurableBytes(writer, checkpoint.route_model);
+    try writer.writeAll(",\"route_provider\":");
+    try writeJsonString(writer, @tagName(checkpoint.route_provider));
     try writer.print(",\"requested_fast_mode\":{s},\"fast_mode\":{s},\"max_provider_attempts\":{d},\"consumed_provider_attempts\":{d},\"outstanding_reservation\":{s}}}", .{
         if (checkpoint.requested_fast_mode) "true" else "false",
         if (checkpoint.fast_mode) "true" else "false",
@@ -1091,6 +1112,13 @@ fn decodeStateImpl(alloc: Allocator, source: *std.Io.Reader, limits: DecodeLimit
         return error.InvalidDurableField;
     try expectKey(&json_reader, alloc, "fast_mode");
     const fast_mode = try readBool(&json_reader);
+    var provider: model_provider.ProviderId = .gateway;
+    if (try json_reader.peekNextTokenType() != .object_end) {
+        try expectKey(&json_reader, alloc, "provider");
+        const provider_raw = try readStringOwned(&json_reader, alloc, 16);
+        defer alloc.free(provider_raw);
+        provider = model_provider.parse(provider_raw) orelse return error.InvalidDurableField;
+    }
     try expectToken(try json_reader.next(), .object_end);
 
     try expectKey(&json_reader, alloc, "history");
@@ -1199,6 +1227,7 @@ fn decodeStateImpl(alloc: Allocator, source: *std.Io.Reader, limits: DecodeLimit
         .updated_at_ms = updated_at_ms,
         .conversation_language = conversation_language,
         .preferences = .{
+            .provider = provider,
             .model = model,
             .effort = effort,
             .fast_mode = fast_mode,
@@ -1212,27 +1241,47 @@ fn decodeStateImpl(alloc: Allocator, source: *std.Io.Reader, limits: DecodeLimit
         .usage = usage,
         .recovery_checkpoint = recovery_checkpoint,
     };
-    try validateState(state);
+    try validateStateWithPermissionMigration(state, true);
     return state;
 }
 
 pub fn parseRecoveryCheckpoint(alloc: Allocator, value: std.json.Value) !RecoveryCheckpoint {
-    const object = try exactObject(value, &.{
-        "version",
-        "turn_id",
-        "user",
-        "assistant_source",
-        "execution",
-        "cause",
-        "action",
-        "tool_state",
-        "route_model",
-        "requested_fast_mode",
-        "fast_mode",
-        "max_provider_attempts",
-        "consumed_provider_attempts",
-        "outstanding_reservation",
-    });
+    const raw_object = try requireObject(value);
+    const object = if (raw_object.get("route_provider") != null)
+        try exactObject(value, &.{
+            "version",
+            "turn_id",
+            "user",
+            "assistant_source",
+            "execution",
+            "cause",
+            "action",
+            "tool_state",
+            "route_model",
+            "route_provider",
+            "requested_fast_mode",
+            "fast_mode",
+            "max_provider_attempts",
+            "consumed_provider_attempts",
+            "outstanding_reservation",
+        })
+    else
+        try exactObject(value, &.{
+            "version",
+            "turn_id",
+            "user",
+            "assistant_source",
+            "execution",
+            "cause",
+            "action",
+            "tool_state",
+            "route_model",
+            "requested_fast_mode",
+            "fast_mode",
+            "max_provider_attempts",
+            "consumed_provider_attempts",
+            "outstanding_reservation",
+        });
     const version = try requireU64(object, "version");
     if (version != 1) return error.InvalidDurableField;
     const user = try parseUserTurn(alloc, object.get("user") orelse return error.InvalidSessionFormat);
@@ -1260,6 +1309,10 @@ pub fn parseRecoveryCheckpoint(alloc: Allocator, value: std.json.Value) !Recover
         .tool_state = std.meta.stringToEnum(RecoveryToolState, try requireString(object, "tool_state")) orelse
             return error.InvalidDurableField,
         .route_model = route_model,
+        .route_provider = if (object.get("route_provider")) |provider_value| blk: {
+            if (provider_value != .string) return error.InvalidDurableField;
+            break :blk model_provider.parse(provider_value.string) orelse return error.InvalidDurableField;
+        } else .gateway,
         .requested_fast_mode = try requireBool(object, "requested_fast_mode"),
         .fast_mode = try requireBool(object, "fast_mode"),
         .max_provider_attempts = max_provider_attempts,
@@ -3399,7 +3452,7 @@ test "compacted history codec round trips a bound opaque Responses checkpoint" {
         .removed_turn_count = 4,
         .compaction_count = 2,
         .responses_compaction = .{
-            .credential_source = .codex_oauth,
+            .credential_source = .chatgpt_subscription,
             .wire_model = @constCast("gpt-5.6-sol"),
             .input_json = @constCast(replay_json),
             .provider_binding = .{
@@ -3422,7 +3475,7 @@ test "compacted history codec round trips a bound opaque Responses checkpoint" {
     const restored = try parseHistoryTurn(alloc, parsed.value);
     defer session.freeHistoryTurn(alloc, restored);
     const checkpoint = restored.compacted_summary.responses_compaction.?;
-    try std.testing.expectEqual(types.CredentialSource.codex_oauth, checkpoint.credential_source);
+    try std.testing.expectEqual(types.CredentialSource.chatgpt_subscription, checkpoint.credential_source);
     try std.testing.expectEqualStrings("gpt-5.6-sol", checkpoint.wire_model);
     try std.testing.expectEqualStrings(replay_json, checkpoint.input_json);
     try std.testing.expectEqualStrings(
@@ -3433,7 +3486,7 @@ test "compacted history codec round trips a bound opaque Responses checkpoint" {
 
     const legacy_without_binding =
         "{\"kind\":\"compacted_summary\",\"summary\":\"summary\",\"removed_turn_count\":1," ++
-        "\"compaction_count\":1,\"responses_compaction\":{\"credential_source\":\"codex_oauth\"," ++
+        "\"compaction_count\":1,\"responses_compaction\":{\"credential_source\":\"chatgpt_subscription\"," ++
         "\"wire_model\":\"gpt-5.6-sol\",\"input_json\":\"[{\\\"type\\\":\\\"compaction\\\",\\\"encrypted_content\\\":\\\"opaque\\\"}]\"}}";
     var legacy = try std.json.parseFromSlice(std.json.Value, alloc, legacy_without_binding, .{});
     defer legacy.deinit();
@@ -3771,6 +3824,7 @@ fn expectStateEqual(expected: DurableSessionState, actual: DurableSessionState) 
     try std.testing.expectEqual(expected.updated_at_ms, actual.updated_at_ms);
     try std.testing.expectEqualStrings(expected.conversation_language.view(), actual.conversation_language.view());
     try std.testing.expectEqualStrings(expected.preferences.model, actual.preferences.model);
+    try std.testing.expectEqual(expected.preferences.provider, actual.preferences.provider);
     try std.testing.expectEqual(expected.preferences.effort, actual.preferences.effort);
     try std.testing.expectEqual(expected.preferences.fast_mode, actual.preferences.fast_mode);
     try std.testing.expectEqual(expected.context_history_start, actual.context_history_start);
@@ -4070,7 +4124,8 @@ test "recovery checkpoint round trips while legacy state stays absent" {
         .cause = .response_interrupted,
         .action = .continuing_response,
         .tool_state = .confirmed,
-        .route_model = @constCast("openai/gpt-test"),
+        .route_model = @constCast("gpt-5.4-mini"),
+        .route_provider = .codex,
         .requested_fast_mode = true,
         .fast_mode = true,
         .max_provider_attempts = 10,
@@ -4085,7 +4140,8 @@ test "recovery checkpoint round trips while legacy state stays absent" {
         .updated_at_ms = 2,
         .conversation_language = session.ConversationLanguage.literal("en"),
         .preferences = .{
-            .model = @constCast("openai/gpt-test"),
+            .provider = .codex,
+            .model = @constCast("gpt-5.4-mini"),
             .effort = .auto,
             .fast_mode = false,
         },
@@ -4109,6 +4165,8 @@ test "recovery checkpoint round trips while legacy state stays absent" {
     try std.testing.expectEqual(types.ModelRecoveryCause.response_interrupted, restored.cause);
     try std.testing.expectEqual(types.ModelRecoveryAction.continuing_response, restored.action);
     try std.testing.expectEqual(RecoveryToolState.confirmed, restored.tool_state);
+    try std.testing.expectEqual(model_provider.ProviderId.codex, restored.route_provider);
+    try std.testing.expectEqual(model_provider.ProviderId.codex, decoded.preferences.provider);
     try std.testing.expect(restored.requested_fast_mode);
     try std.testing.expect(restored.fast_mode);
     try std.testing.expectEqual(@as(usize, 4), restored.consumed_provider_attempts);
@@ -4119,6 +4177,7 @@ test "recovery checkpoint round trips while legacy state stays absent" {
     var legacy_source = std.Io.Reader.fixed(legacy);
     var legacy_state = try decodeState(alloc, &legacy_source, .{});
     defer legacy_state.deinit(alloc);
+    try std.testing.expectEqual(model_provider.ProviderId.gateway, legacy_state.preferences.provider);
     try std.testing.expectEqual(@as(?RecoveryCheckpoint, null), legacy_state.recovery_checkpoint);
 }
 
@@ -4211,6 +4270,46 @@ test "recovery checkpoint rejects an outstanding attempt beyond its budget" {
         },
     };
     try std.testing.expectError(error.InvalidDurableField, validateState(invalid));
+}
+
+test "permission state schema two round trips before activation" {
+    const alloc = std.testing.allocator;
+    var state: session_permission_state.State = .{
+        .version = session_permission_state.schema_version,
+        .next_generation = 2,
+    };
+    defer state.deinit(alloc);
+    const key = try session_permission_state.commandKeyV2(
+        alloc,
+        "git status",
+        "/workspace",
+        "foreground",
+        "macos",
+    );
+    try state.rules.append(alloc, .{
+        .id = .{ .value = 1 },
+        .key = key,
+        .display_identity = try alloc.dupe(u8, "git status"),
+        .decision = .deny,
+        .generation = 1,
+    });
+
+    var encoded: std.Io.Writer.Allocating = .init(alloc);
+    defer encoded.deinit();
+    try writePermissionState(&encoded.writer, state);
+    var json = try std.json.parseFromSlice(
+        std.json.Value,
+        alloc,
+        encoded.written(),
+        .{},
+    );
+    defer json.deinit();
+    var decoded = try parsePermissionState(alloc, json.value);
+    defer decoded.deinit(alloc);
+
+    try std.testing.expectEqual(session_permission_state.schema_version, decoded.version);
+    try std.testing.expectEqual(@as(usize, 1), decoded.rules.items.len);
+    try std.testing.expectEqual(session_permission_state.StateDecision.deny, session_permission_state.decide(decoded, key));
 }
 
 test "durable session optional fields handle fuzzed ownership paths" {

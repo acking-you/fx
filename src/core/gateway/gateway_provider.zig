@@ -62,8 +62,8 @@ pub const CliModelCatalogProvider = struct {
 
 pub const CreditsLookupInput = struct {
     credential: ?[]const u8,
-    tenant: ?[]const u8,
     credential_source: ?credentials.Source = null,
+    tenant: ?[]const u8,
 };
 
 pub const FetchCreditsFn = *const fn (
@@ -179,7 +179,7 @@ test "account usage lookup dispatches the bound Codex identity" {
         ) output_contracts.CodexAccountUsageSnapshot {
             const self: *@This() = @ptrCast(@alignCast(raw.?));
             self.calls += 1;
-            self.saw_identity = input.credential_source == .codex_oauth and
+            self.saw_identity = input.credential_source == .chatgpt_subscription and
                 std.mem.eql(u8, input.credential orelse "", "access") and
                 std.mem.eql(u8, input.account_id orelse "", "account");
             return .{};
@@ -194,7 +194,7 @@ test "account usage lookup dispatches the bound Codex identity" {
     var snapshot = provider.fetch(std.testing.allocator, .{
         .credential = "access",
         .account_id = "account",
-        .credential_source = .codex_oauth,
+        .credential_source = .chatgpt_subscription,
     });
     defer snapshot.deinit(std.testing.allocator);
 
@@ -296,6 +296,17 @@ pub const CapabilityResolver = struct {
     pub fn catalogEntries(self: *const CapabilityResolver) ?[]const model_catalog.ModelCatalogEntry {
         if (self.state != .ready) return null;
         return self.catalog.items;
+    }
+
+    pub fn adoptOwnedCatalog(
+        self: *CapabilityResolver,
+        alloc: Allocator,
+        owned_catalog: *std.ArrayList(model_catalog.ModelCatalogEntry),
+    ) void {
+        model_catalog.freeModelCatalog(alloc, &self.catalog);
+        self.catalog = owned_catalog.*;
+        owned_catalog.* = .empty;
+        self.state = .ready;
     }
 };
 

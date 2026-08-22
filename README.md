@@ -34,10 +34,11 @@ This is the `byok` branch of a fork of upstream [`vercel-labs/fx`](https://githu
 Goals 1 and 2 remain in progress. The branch currently supports these model-access paths:
 
 - Vercel through `fx login`, `fx setup`, `VERCEL_OIDC_TOKEN`, or `AI_GATEWAY_API_KEY`.
-- ChatGPT Codex through device-code OAuth with `fx login --codex`.
+- ChatGPT Codex through OAuth with `fx login codex`.
+- Grok through xAI OAuth with `fx login grok`.
 - Direct Responses API access with `OPENAI_API_KEY`, using OpenAI by default or a configurable Responses-compatible base URL.
 
-The direct API-key and Codex OAuth paths share the same Responses request conversion and streaming behavior. This means work on the `v1/responses` protocol benefits both routes; it does not mean every OpenAI-compatible or provider-specific protocol is supported. Chat Completions endpoints, broader provider-specific authentication, and additional catalogs and credential stores are still in progress.
+The direct API-key, Codex, and Grok paths all use the Responses protocol, with provider-specific authentication and transport boundaries. This does not mean every OpenAI-compatible or provider-specific protocol is supported. Chat Completions endpoints, broader provider-specific authentication, and additional catalogs and credential stores are still in progress.
 
 For direct API-key access, `FX_RESPONSES_BASE_URL` takes precedence over `OPENAI_BASE_URL`. fx appends `/responses` unless the configured URL already ends with it. Remote bases must use HTTPS; loopback HTTP is accepted only with an explicit port. These generic variables never redirect a Codex OAuth credential away from ChatGPT. `FX_CODEX_BASE_URL` is the separate explicit Codex override.
 
@@ -53,25 +54,29 @@ curl -fsSL https://fx.sh/setup.sh | bash
 
 ## Run fx
 
-Sign in with Vercel:
+Sign in with Vercel AI Gateway:
 
 ```bash
 fx login
 ```
 
-Or sign in to ChatGPT Codex with a device code:
+Or use an eligible ChatGPT subscription through OpenAI Codex OAuth:
 
 ```bash
-fx login --codex
+fx login codex
+fx
 ```
 
-Successful Codex login saves the OAuth session in the standard Codex auth file and makes it the global active credential in fx. `FX_CODEX_AUTH_FILE` selects an exact file; otherwise fx uses `$CODEX_HOME/auth.json`, then `~/.codex/auth.json`. An existing workspace-specific credential choice still has higher precedence. When several sources are available, open `/setup` and choose **Switch credential**.
-
-To remove the saved Codex tokens and attempt remote revocation:
+Or use an eligible Grok subscription through xAI OAuth:
 
 ```bash
-fx logout --codex
+fx login grok
+fx
 ```
+
+`fx login codex` and `fx login grok` select that provider and a model from its authenticated catalog. Inside fx, open `/setup` and choose **Switch provider** to move between Gateway, Codex, and Grok. Direct OpenAI Responses remains available through `OPENAI_API_KEY` when the Gateway provider is selected. `/model` lists the active provider's fetched models. Use `/logout codex` or `/logout grok` to remove that subscription session without affecting other providers.
+
+The Codex OAuth session is stored privately at `~/.fx/chatgpt-auth.json`; the Grok session is stored at `~/.fx/grok-auth.json`. Both are refreshed when needed and their tokens are sent only to their corresponding provider.
 
 For direct BYOK access to the Responses API, set an OpenAI API key:
 
@@ -89,15 +94,6 @@ fx
 ```
 
 `OPENAI_BASE_URL` is also supported when `FX_RESPONSES_BASE_URL` is unset. This path expects the Responses API, not the Chat Completions protocol.
-
-Query the live limits and token activity for the Codex account saved in the Codex auth file:
-
-```bash
-fx usage --codex
-fx usage --codex --json
-```
-
-This is separate from `fx usage`, which reports only the local fx usage ledger. The Codex form reads the provider's current rate-limit windows, reset times, credits, spend controls, and account token statistics. Because `--codex` explicitly selects the ChatGPT account surface, it works even when a workspace currently uses another credential source.
 
 Inside the interactive app, run `/model` to browse the active provider's catalog. After choosing a model, the same picker offers only the reasoning efforts and Fast mode supported by that catalog entry. The **Model** row in `/settings` uses the same flow. `/effort` shows or sets the current reasoning effort, while `/fast` toggles Fast mode for the current model. ACP clients receive the same `model`, `effort`, and `fast_mode` configuration options; the JavaScript SDK exposes `setModel`, `setEffort`, and `setFastMode`. On the Responses wire, Fast mode uses the `priority` service tier. Selecting a model that does not support the current effort or Fast mode clears that stale setting instead of sending an invalid request.
 
@@ -117,7 +113,7 @@ For a saved conversation, `/compact` uses the active direct Responses provider's
 
 For Codex OAuth models, fx also consumes the model catalog's context-budget metadata. The effective context display reserves the model-declared headroom, defaulting to 95% of the raw window, and automatic compaction starts before the next turn when the latest provider-reported total usage reaches the model limit, defaulting to 90% of the raw window. The queued prompt remains held until the replacement checkpoint is installed or the local fallback completes.
 
-You can also add a Vercel AI Gateway API key interactively:
+To use an AI Gateway API key instead:
 
 ```bash
 fx setup
@@ -131,6 +127,16 @@ fx
 ```
 
 The current directory becomes the primary workspace. Enter a prompt, or run `/help` to browse interactive commands.
+
+The status line hides the workspace path and Git branch by default. Enable the `Status line workspace` option in `/settings`, run `/statusline workspace`, or set it in `~/.fx/settings.json`:
+
+```json
+{
+  "statusLine": {
+    "workspace": true
+  }
+}
+```
 
 List saved sessions with `fx sessions`. Resume the latest session for the current workspace, or select an exact session ID, through the same command group:
 
@@ -174,7 +180,7 @@ The WebAssembly SDK is experimental. See the [WebAssembly SDK](sdk/README.md) an
 
 ## Extend fx
 
-Add reusable instructions with [skills](https://fx.sh/docs/capabilities/skills), connect external tools through [MCP](https://fx.sh/docs/capabilities/mcp), or delegate independent work to [subagents](https://fx.sh/docs/capabilities/subagents). Project instruction files may link within their scope, and read-only workspace or compatibility skill directories may link within their owning workspace or home; managed skills, `SKILL.md` files, resources, and escaping links remain no-follow. Skills installed via symlinks that resolve outside home or workspace (e.g. Nix store paths) are loaded when their resolved target is inside a directory listed in the `FX_SKILL_SYMLINK_AUTHORITIES` environment variable (colon-separated absolute paths). `fx status` and `fx doctor` report an invalid trusted MCP profile without starting its servers.
+Add reusable instructions with [skills](https://fx.sh/docs/capabilities/skills), connect external tools through [MCP](https://fx.sh/docs/capabilities/mcp), or delegate independent work to [subagents](https://fx.sh/docs/capabilities/subagents). Project instruction files may link within their scope, and read-only workspace or compatibility skill directories and their primary `SKILL.md` files may link within their owning workspace or home; managed skills, secondary resources, and escaping links remain no-follow. Skills installed via symlinks that resolve outside home or workspace (e.g. Nix store paths) are loaded when their resolved target is inside a directory listed in the `FX_SKILL_SYMLINK_AUTHORITIES` environment variable (colon-separated absolute paths). `fx status` and `fx doctor` report an invalid trusted MCP profile without starting its servers.
 
 ## Documentation
 

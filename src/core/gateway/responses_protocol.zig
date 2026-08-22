@@ -2402,7 +2402,7 @@ test "Responses checkpoint replays only for its exact provider and wire model" {
             .role = .system,
             .content = "portable local summary",
             .responses_compaction = .{
-                .credential_source = .codex_oauth,
+                .credential_source = .chatgpt_subscription,
                 .wire_model = "gpt-5.6-sol",
                 .input_json = replay_json,
                 .provider_binding = .{
@@ -2415,7 +2415,7 @@ test "Responses checkpoint replays only for its exact provider and wire model" {
     };
     var exact = testRequest(&messages, "[]");
     exact.model = "gpt-5.6-sol";
-    exact.credential_source = .codex_oauth;
+    exact.credential_source = .chatgpt_subscription;
     exact.responses_compaction_binding = .{
         .normalized_origin = "https://chatgpt.com/backend-api/codex/responses",
         .account_id = "account-a",
@@ -2474,13 +2474,13 @@ test "Responses checkpoint replays only for its exact provider and wire model" {
 
     var legacy_messages = messages;
     legacy_messages[1].responses_compaction = .{
-        .credential_source = .codex_oauth,
+        .credential_source = .chatgpt_subscription,
         .wire_model = "gpt-5.6-sol",
         .input_json = replay_json,
     };
     var legacy_request = testRequest(&legacy_messages, "[]");
     legacy_request.model = "gpt-5.6-sol";
-    legacy_request.credential_source = .codex_oauth;
+    legacy_request.credential_source = .chatgpt_subscription;
     legacy_request.responses_compaction_binding = exact.responses_compaction_binding;
     const legacy_body = try buildRequest(alloc, legacy_request, .{});
     defer alloc.free(legacy_body);

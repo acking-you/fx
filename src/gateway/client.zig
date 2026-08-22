@@ -1,7 +1,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const build_options = @import("build_options");
-const codex_auth = @import("../core/auth/codex_auth.zig");
+const chatgpt_oauth = @import("../core/auth/chatgpt_oauth.zig");
+const oauth_transport = @import("../core/auth/oauth_transport.zig");
 const secret = @import("../core/auth/secret.zig");
 const agent_stream_provider = @import("../core/agent/stream_provider.zig");
 const debug_trace = @import("../core/shared/debug_trace.zig");
@@ -403,7 +404,7 @@ const CodexJsonOperation = struct {
             .url = self.request.url,
             .credential = self.request.access_token,
             .account_id = identity.account_id,
-            .fedramp = identity.fedramp,
+            .fedramp = false,
             .payload = self.request.payload,
             .cancel_flag = self.cancel_flag,
             .max_response_bytes = self.request.max_response_bytes,
@@ -791,7 +792,7 @@ fn fetchGatewayJsonAtUrlCore(
         provider_route.fromCredentialSource(source) orelse return error.UnsupportedCredentialSource
     else
         provider_route.ProviderRoute.vercel_gateway;
-    var codex_identity: ?codex_auth.Loaded = null;
+    var codex_identity: ?chatgpt_oauth.Access = null;
     defer if (codex_identity) |*identity| identity.deinit(alloc);
     if (route == .codex_responses_oauth) {
         codex_identity = try loadCodexRequestIdentity(
@@ -817,7 +818,7 @@ fn fetchGatewayJsonAtUrlCore(
         route,
         gateway_team,
         if (codex_identity) |identity| identity.account_id else null,
-        if (codex_identity) |identity| identity.fedramp else false,
+        false,
         null,
     );
 
@@ -834,7 +835,7 @@ fn fetchGatewayJsonAtUrlCore(
 
     var cancel_watch_done = std.atomic.Value(bool).init(false);
     const cancel_watcher = if (req.connection) |conn|
-        try spawn_gateway_cancel_watcher(&cancel_watch_done, cancel_flag, null, conn.stream_writer.stream)
+        try spawn_gateway_cancel_watcher(&cancel_watch_done, cancel_flag, null, null, conn.stream_writer.stream)
     else
         null;
     defer {
@@ -879,8 +880,8 @@ fn loadCodexRequestIdentity(
     alloc: std.mem.Allocator,
     expected_access_token: []const u8,
     expected_account_id: ?[]const u8,
-) !codex_auth.Loaded {
-    var identity = (try codex_auth.loadStored(alloc, .{})) orelse
+) !chatgpt_oauth.Access {
+    var identity = (try chatgpt_oauth.loadAccess(alloc, oauth_transport.unavailable_provider, .stored)) orelse
         return error.CodexCredentialUnavailable;
     errdefer identity.deinit(alloc);
     if (!std.mem.eql(u8, identity.access_token, expected_access_token)) {
@@ -1536,7 +1537,7 @@ fn streamGatewayCompletionCoreWithOptions(
     } else try resolveE2eGatewayUrl(e2e_gateway_chat_url_env, request.chat_url);
     const uri = try std.Uri.parse(request_url);
 
-    var codex_identity: ?codex_auth.Loaded = null;
+    var codex_identity: ?chatgpt_oauth.Access = null;
     defer if (codex_identity) |*identity| identity.deinit(alloc);
     if (route == .codex_responses_oauth) {
         codex_identity = try loadCodexRequestIdentity(
@@ -1555,7 +1556,7 @@ fn streamGatewayCompletionCoreWithOptions(
             &extra_headers_buf,
             route,
             if (codex_identity) |identity| identity.account_id else null,
-            if (codex_identity) |identity| identity.fedramp else false,
+            false,
             request.session_id,
             if (provider_binding) |binding| .{
                 .organization = binding.organization,
@@ -1652,7 +1653,7 @@ fn streamGatewayCompletionCoreWithOptions(
         var system_resumed = std.atomic.Value(bool).init(false);
         const cancel_watcher = if (watch_connected_socket)
             if (req.connection) |conn|
-                spawn_gateway_cancel_watcher(&cancel_watch_done, cancel_flag, &system_resumed, conn.stream_writer.stream) catch |err| {
+                spawn_gateway_cancel_watcher(&cancel_watch_done, cancel_flag, &system_resumed, null, conn.stream_writer.stream) catch |err| {
                     debug_trace.eventf("gateway", "cancel_watcher_spawn_error", trace_ctx, "attempt={d} err={s}", .{ attempt + 1, @errorName(err) });
                     return @as(anyerror!StreamResult, err);
                 }
@@ -2149,7 +2150,7 @@ test "direct Responses stream pins provider binding to request credential and en
     );
 
     var wrong_source = request;
-    wrong_source.credential_source = .codex_oauth;
+    wrong_source.credential_source = .chatgpt_subscription;
     try std.testing.expectError(
         error.InvalidResponsesCompactionProviderBinding,
         validatedStreamProviderBinding(wrong_source, .codex_responses_oauth),
@@ -2422,6 +2423,7 @@ const GatewayCancelWatcher = struct {
         done: *std.atomic.Value(bool),
         cancel_flag: *std.atomic.Value(bool),
         system_resumed: ?*std.atomic.Value(bool),
+        deadline: ?std.Io.Clock.Timestamp,
         stream: std.Io.net.Stream,
     ) void {
         var previous = SuspendClockSample.now();
@@ -2429,6 +2431,13 @@ const GatewayCancelWatcher = struct {
             if (cancel_flag.load(.seq_cst)) {
                 stream.shutdown(io_mod.getIo(), .both) catch {};
                 return;
+            }
+            if (deadline) |limit| {
+                const now = std.Io.Clock.Timestamp.now(io_mod.getIo(), .awake);
+                if (!std.Io.Clock.Timestamp.compare(now, .lt, limit)) {
+                    stream.shutdown(io_mod.getIo(), .both) catch {};
+                    return;
+                }
             }
             io_mod.sleep(10 * std.time.ns_per_ms);
             const current = SuspendClockSample.now();
@@ -2468,16 +2477,40 @@ fn suspendGapDetected(previous: SuspendClockSample, current: SuspendClockSample)
     return boot_elapsed - awake_elapsed > suspend_gap_tolerance_ns;
 }
 
+pub fn spawnHttpCancelWatcher(
+    done: *std.atomic.Value(bool),
+    cancel_flag: *std.atomic.Value(bool),
+    stream: std.Io.net.Stream,
+) !std.Thread {
+    return spawn_gateway_cancel_watcher(done, cancel_flag, null, null, stream);
+}
+
+pub fn spawnHttpCancelWatcherBounded(
+    done: *std.atomic.Value(bool),
+    cancel_flag: *std.atomic.Value(bool),
+    deadline: std.Io.Clock.Timestamp,
+    stream: std.Io.net.Stream,
+) !std.Thread {
+    return spawn_gateway_cancel_watcher(done, cancel_flag, null, deadline, stream);
+}
+
 fn spawn_gateway_cancel_watcher(
     done: *std.atomic.Value(bool),
     cancel_flag: *std.atomic.Value(bool),
     system_resumed: ?*std.atomic.Value(bool),
+    deadline: ?std.Io.Clock.Timestamp,
     stream: std.Io.net.Stream,
 ) !std.Thread {
     if (builtin.is_test) {
         if (test_cancel_watcher_spawn_error) |err| return err;
     }
-    return std.Thread.spawn(.{}, GatewayCancelWatcher.run, .{ done, cancel_flag, system_resumed, stream });
+    return std.Thread.spawn(.{}, GatewayCancelWatcher.run, .{
+        done,
+        cancel_flag,
+        system_resumed,
+        deadline,
+        stream,
+    });
 }
 
 test "suspend gap classification compares boot and awake clocks" {

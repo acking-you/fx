@@ -93,8 +93,9 @@ pub const CredentialSource = enum {
     ai_gateway_api_key,
     openai_api_key,
     fx_login,
-    codex_oauth,
     stored_key,
+    chatgpt_subscription,
+    grok_subscription,
 };
 
 pub fn parseCredentialSource(text: []const u8) ?CredentialSource {
@@ -1071,6 +1072,9 @@ pub const ChatMessage = struct {
     tool_call_id: ?[]const u8 = null,
     tool_name: ?[]const u8 = null,
     tool_calls: []const ToolCall = &.{},
+    /// Provider-owned opaque response items needed only for stateless within-turn continuation.
+    /// The value is a validated JSON array and is never sent across provider routes.
+    provider_state_json: ?[]const u8 = null,
     tool_result_status: ?PersistedToolStatus = null,
     tool_result_memory: ?ToolResultMemory = null,
     responses_message_output_index: ?u32 = null,
@@ -1208,6 +1212,8 @@ pub const GatewayCompletion = struct {
     provider_result_identity_failure: ?ProviderResultIdentityFailure = null,
     provider_failure_detail: ?[]const u8 = null,
     provider_failure_metadata: ?ProviderFailureMetadata = null,
+    /// Provider-owned opaque response items for the next stateless request in this turn.
+    provider_state_json: ?[]const u8 = null,
     finish_reason: ?ProviderFinishReason = null,
     usage: Usage = .{},
 };
@@ -1795,37 +1801,10 @@ pub const RuleDecision = enum {
 
 pub const ContentHash = [std.crypto.hash.sha2.Sha256.digest_length]u8;
 
-pub const BackendKind = enum {
-    macos,
-    vercel,
-    just_bash,
-    none,
-    auto,
-
-    pub fn parse(raw: []const u8) ?BackendKind {
-        const trimmed = std.mem.trim(u8, raw, " \t\r\n");
-        if (std.ascii.eqlIgnoreCase(trimmed, "macos")) return .macos;
-        if (std.ascii.eqlIgnoreCase(trimmed, "vercel")) return .vercel;
-        if (std.ascii.eqlIgnoreCase(trimmed, "just-bash")) return .just_bash;
-        if (std.ascii.eqlIgnoreCase(trimmed, "none")) return .none;
-        if (std.ascii.eqlIgnoreCase(trimmed, "auto")) return .auto;
-        return null;
-    }
-
-    pub fn label(self: BackendKind) []const u8 {
-        return switch (self) {
-            .macos => "macos",
-            .vercel => "vercel",
-            .just_bash => "just-bash",
-            .none => "none",
-            .auto => "auto",
-        };
-    }
-};
-
 pub const ToolChoice = enum {
     auto,
     none,
+    required,
 
     pub fn label(self: ToolChoice) []const u8 {
         return @tagName(self);
@@ -2085,6 +2064,23 @@ pub fn dupeHistoryTurn(alloc: std.mem.Allocator, turn: HistoryTurn) !HistoryTurn
                 alloc,
                 entry.permission_feedback,
             );
+            errdefer freePermissionFeedback(alloc, permission_feedback);
+            const responses_compaction = if (entry.responses_compaction) |checkpoint| checkpoint_blk: {
+                const wire_model = try alloc.dupe(u8, checkpoint.wire_model);
+                errdefer alloc.free(wire_model);
+                const input_json = try alloc.dupe(u8, checkpoint.input_json);
+                errdefer alloc.free(input_json);
+                const provider_binding = if (checkpoint.provider_binding) |binding|
+                    try dupeResponsesCompactionProviderBinding(alloc, binding.view())
+                else
+                    null;
+                break :checkpoint_blk ResponsesCompactionCheckpoint{
+                    .credential_source = checkpoint.credential_source,
+                    .wire_model = wire_model,
+                    .input_json = input_json,
+                    .provider_binding = provider_binding,
+                };
+            } else null;
             break :blk .{ .compacted_summary = .{
                 .summary = summary,
                 .removed_turn_count = entry.removed_turn_count,
@@ -2093,6 +2089,7 @@ pub fn dupeHistoryTurn(alloc: std.mem.Allocator, turn: HistoryTurn) !HistoryTurn
                 .root_user_messages_complete = entry.root_user_messages_complete,
                 .permission_feedback = permission_feedback,
                 .permission_feedback_complete = entry.permission_feedback_complete,
+                .responses_compaction = responses_compaction,
             } };
         },
         .assistant => |entry| blk: {
@@ -3034,6 +3031,15 @@ test "HistoryTurn helpers duplicate and free owned turns" {
         .root_user_messages_complete = false,
         .permission_feedback = summary_feedback,
         .permission_feedback_complete = false,
+        .responses_compaction = .{
+            .credential_source = .chatgpt_subscription,
+            .wire_model = try alloc.dupe(u8, "gpt-5.6-sol"),
+            .input_json = try alloc.dupe(u8, "[{\"type\":\"compaction\",\"encrypted_content\":\"opaque\"}]"),
+            .provider_binding = .{
+                .normalized_origin = try alloc.dupe(u8, "https://chatgpt.com/backend-api/codex/responses"),
+                .account_id = try alloc.dupe(u8, "acct-a"),
+            },
+        },
     } };
     const summary_copy = try dupeHistoryTurn(alloc, summary_original);
     try std.testing.expectEqualStrings("summary", summary_copy.compacted_summary.summary);
@@ -3047,6 +3053,15 @@ test "HistoryTurn helpers duplicate and free owned turns" {
     try std.testing.expect(
         summary_copy.compacted_summary.permission_feedback[0].ptr !=
             summary_original.compacted_summary.permission_feedback[0].ptr,
+    );
+    const copied_checkpoint = summary_copy.compacted_summary.responses_compaction.?;
+    const original_checkpoint = summary_original.compacted_summary.responses_compaction.?;
+    try std.testing.expectEqualStrings("gpt-5.6-sol", copied_checkpoint.wire_model);
+    try std.testing.expectEqualStrings("acct-a", copied_checkpoint.provider_binding.?.account_id.?);
+    try std.testing.expect(copied_checkpoint.input_json.ptr != original_checkpoint.input_json.ptr);
+    try std.testing.expect(
+        copied_checkpoint.provider_binding.?.normalized_origin.ptr !=
+            original_checkpoint.provider_binding.?.normalized_origin.ptr,
     );
     try std.testing.expect(summary_copy.compacted_summary.summary.ptr != summary_original.compacted_summary.summary.ptr);
     freeHistoryTurn(alloc, summary_copy);

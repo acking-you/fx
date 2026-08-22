@@ -3,9 +3,9 @@ const auth_runtime = @import("../auth/auth_runtime.zig");
 const credentials = @import("../auth/credentials.zig");
 const background_store = @import("../background/background_store.zig");
 const doctor_runtime = @import("../cli/doctor_runtime.zig");
+const model_provider = @import("../config/model_provider.zig");
 const codex_usage = @import("../gateway/codex_usage.zig");
 const permissions = @import("../permissions/permissions.zig");
-const sandbox = @import("../permissions/sandbox.zig");
 const session_display_metadata = @import("../session/session_display_metadata.zig");
 const session_json = @import("../session/session_json.zig");
 const session_store = @import("../session/session_store.zig");
@@ -16,6 +16,19 @@ const workspace_access = @import("../workspace/workspace_access.zig");
 const workspace_commands = @import("../workspace/workspace_commands.zig");
 
 const Allocator = std.mem.Allocator;
+
+/// Compatibility snapshot for the fork's provider usage adapter. The latest
+/// CLI no longer renders this surface directly, but the typed provider contract
+/// remains useful to embedders until usage moves onto the provider runtime.
+pub const CodexAccountUsageSnapshot = struct {
+    data: ?codex_usage.Snapshot = null,
+    failure: ?codex_usage.Failure = null,
+
+    pub fn deinit(self: *CodexAccountUsageSnapshot, _: Allocator) void {
+        if (self.data) |*data| data.deinit();
+        self.* = undefined;
+    }
+};
 
 fn permissionModeLabel(mode: types.PermissionMode) []const u8 {
     return permissions.permissionModeLabel(mode);
@@ -361,8 +374,41 @@ fn writeTerminalSafe(writer: *std.Io.Writer, alloc: Allocator, raw: []const u8) 
     try writer.writeAll(encoded.bytes);
 }
 
+fn gatewayProviderConnected(auth: auth_runtime.StatusSnapshot) bool {
+    const source = auth.active_source orelse return auth.gateway_connected;
+    return auth.gateway_connected or (source != .chatgpt_subscription and source != .grok_subscription);
+}
+
+fn chatGptProviderConnected(auth: auth_runtime.StatusSnapshot) bool {
+    return auth.chatgpt_connected or auth.active_source == .chatgpt_subscription;
+}
+
+fn grokProviderConnected(auth: auth_runtime.StatusSnapshot) bool {
+    return auth.grok_connected or auth.active_source == .grok_subscription;
+}
+
+fn writeConnectedProvidersText(writer: *std.Io.Writer, auth: auth_runtime.StatusSnapshot) !void {
+    var wrote_provider = false;
+    if (gatewayProviderConnected(auth)) {
+        try writer.writeAll("Vercel AI Gateway");
+        wrote_provider = true;
+    }
+    if (chatGptProviderConnected(auth)) {
+        if (wrote_provider) try writer.writeAll(", Codex");
+        if (!wrote_provider) try writer.writeAll("Codex");
+        wrote_provider = true;
+    }
+    if (grokProviderConnected(auth)) {
+        if (wrote_provider) try writer.writeAll(", Grok");
+        if (!wrote_provider) try writer.writeAll("Grok");
+        wrote_provider = true;
+    }
+    if (!wrote_provider) try writer.writeAll("none");
+}
+
 pub const StatusSnapshot = struct {
     model: []const u8,
+    provider: model_provider.ProviderId = .gateway,
     update_channel: []const u8 = "stable",
     build_channel: []const u8 = "stable",
     build_revision: []const u8 = "",
@@ -370,7 +416,6 @@ pub const StatusSnapshot = struct {
     auth_help: ?[]const u8 = null,
     mcp_config_error: ?[]const u8 = null,
     permission_mode: types.PermissionMode,
-    sandbox_backend: sandbox.BackendKind = .none,
     workspace_root: []const u8,
     history_turns: usize,
     session_permission_grants: usize,
@@ -388,6 +433,9 @@ pub const StatusSnapshot = struct {
         defer out.deinit();
 
         try out.writer.print("[status] model={s}\n", .{self.model});
+        if (self.provider != .gateway) {
+            try out.writer.print("[status] model_source={s}\n", .{model_provider.label(self.provider)});
+        }
         try out.writer.print("[status] update_channel={s}\n", .{self.update_channel});
         try out.writer.print("[status] build_channel={s}\n", .{self.build_channel});
         if (self.build_revision.len > 0) {
@@ -397,6 +445,11 @@ pub const StatusSnapshot = struct {
             try out.writer.print("[status] mcp_config_error={s}\n", .{error_name});
         }
         try out.writer.print("[status] auth={s}\n", .{self.auth.activeSourceLabel()});
+        if (self.provider != .gateway) {
+            try out.writer.writeAll("[status] connected_providers=");
+            try writeConnectedProvidersText(&out.writer, self.auth);
+            try out.writer.writeByte('\n');
+        }
         try out.writer.print("[status] auth_refreshable={}\n", .{self.auth.refreshable()});
         if (self.auth.expired) try out.writer.writeAll("[status] auth_expired=true\n");
         if (self.auth_help) |help| {
@@ -406,7 +459,6 @@ pub const StatusSnapshot = struct {
             try out.writer.print("[status] team={s}\n", .{team});
         }
         try out.writer.print("[status] permission_mode={s}\n", .{permissionModeLabel(self.permission_mode)});
-        try out.writer.print("[status] sandbox={s}\n", .{sandbox.publicModeForBackend(self.sandbox_backend).label()});
         try out.writer.print("[status] workspace={s}\n", .{self.workspace_root});
         try out.writer.print("[status] history_turns={d}\n", .{self.history_turns});
         try out.writer.print("[status] session_permission_grants={d}\n", .{self.session_permission_grants});
@@ -419,18 +471,25 @@ pub const StatusSnapshot = struct {
         defer out.deinit();
 
         try out.writer.print("model={s}\n", .{self.model});
+        if (self.provider != .gateway) {
+            try out.writer.print("model_source={s}\n", .{model_provider.label(self.provider)});
+        }
         try out.writer.print("update_channel={s}\n", .{self.update_channel});
         try out.writer.print("build_channel={s}\n", .{self.build_channel});
         if (self.build_revision.len > 0) {
             try out.writer.print("build_revision={s}\n", .{self.build_revision});
         }
         try out.writer.print("auth={s}\n", .{self.auth.activeSourceLabel()});
+        if (self.provider != .gateway) {
+            try out.writer.writeAll("connected_providers=");
+            try writeConnectedProvidersText(&out.writer, self.auth);
+            try out.writer.writeByte('\n');
+        }
         try out.writer.print("auth_refreshable={}\n", .{self.auth.refreshable()});
         if (self.auth.expired) try out.writer.writeAll("auth_expired=true\n");
         if (self.auth_help) |help| try out.writer.print("auth_help={s}\n", .{help});
         if (self.auth.team) |team| try out.writer.print("team={s}\n", .{team});
         try out.writer.print("permission_mode={s}\n", .{permissionModeLabel(self.permission_mode)});
-        try out.writer.print("sandbox={s}\n", .{sandbox.publicModeForBackend(self.sandbox_backend).label()});
         try out.writer.print("workspace={s}\n", .{self.workspace_root});
         try out.writer.print("history_turns={d}\n", .{self.history_turns});
         try out.writer.print("session_permission_grants={d}\n", .{self.session_permission_grants});
@@ -449,6 +508,10 @@ pub const StatusSnapshot = struct {
     pub fn writeJson(self: StatusSnapshot, writer: *std.Io.Writer) !void {
         try writer.writeAll("{\"kind\":\"status\",\"model\":");
         try std.json.Stringify.value(self.model, .{}, writer);
+        if (self.provider != .gateway) {
+            try writer.writeAll(",\"model_source\":");
+            try std.json.Stringify.value(model_provider.label(self.provider), .{}, writer);
+        }
         try writer.writeAll(",\"update_channel\":");
         try std.json.Stringify.value(self.update_channel, .{}, writer);
         try writer.writeAll(",\"build_channel\":");
@@ -461,6 +524,24 @@ pub const StatusSnapshot = struct {
         }
         try writer.writeAll(",\"auth\":");
         try std.json.Stringify.value(self.auth.activeSourceLabel(), .{}, writer);
+        if (self.provider != .gateway) {
+            try writer.writeAll(",\"connected_providers\":[");
+            var wrote_provider = false;
+            if (gatewayProviderConnected(self.auth)) {
+                try std.json.Stringify.value("vercel-ai-gateway", .{}, writer);
+                wrote_provider = true;
+            }
+            if (chatGptProviderConnected(self.auth)) {
+                if (wrote_provider) try writer.writeByte(',');
+                try std.json.Stringify.value("codex", .{}, writer);
+                wrote_provider = true;
+            }
+            if (grokProviderConnected(self.auth)) {
+                if (wrote_provider) try writer.writeByte(',');
+                try std.json.Stringify.value("grok", .{}, writer);
+            }
+            try writer.writeByte(']');
+        }
         try writer.print(",\"auth_refreshable\":{}", .{self.auth.refreshable()});
         if (self.auth.expired) try writer.writeAll(",\"auth_expired\":true");
         if (self.auth_help) |help| {
@@ -473,8 +554,6 @@ pub const StatusSnapshot = struct {
         }
         try writer.writeAll(",\"permission_mode\":");
         try std.json.Stringify.value(permissionModeLabel(self.permission_mode), .{}, writer);
-        try writer.writeAll(",\"sandbox\":");
-        try std.json.Stringify.value(sandbox.publicModeForBackend(self.sandbox_backend).label(), .{}, writer);
         try writer.writeAll(",\"workspace\":");
         try std.json.Stringify.value(self.workspace_root, .{}, writer);
         try writer.print(",\"history_turns\":{d}", .{self.history_turns});
@@ -581,6 +660,7 @@ pub const PermissionsSnapshot = struct {
 
 pub const ModelListSnapshot = struct {
     ids: []const []const u8,
+    provider: model_provider.ProviderId = .gateway,
     limit: ?usize = null,
     private_models_hidden: bool = false,
     public_only_reason: ?credentials.CatalogPublicOnlyReason = null,
@@ -594,10 +674,11 @@ pub const ModelListSnapshot = struct {
 
     pub fn renderText(self: ModelListSnapshot, alloc: Allocator) ![]u8 {
         if (self.ids.len == 0) {
+            const provider_name = self.emptyCatalogProviderName();
             if (self.catalogExplanation()) |explanation| {
-                return std.fmt.allocPrint(alloc, "[models] no models returned by gateway\n[models] {s}\n", .{explanation});
+                return std.fmt.allocPrint(alloc, "[models] no models returned by {s}\n[models] {s}\n", .{ provider_name, explanation });
             }
-            return std.fmt.allocPrint(alloc, "[models] no models returned by gateway\n", .{});
+            return std.fmt.allocPrint(alloc, "[models] no models returned by {s}\n", .{provider_name});
         }
 
         var out: std.Io.Writer.Allocating = .init(alloc);
@@ -607,7 +688,11 @@ pub const ModelListSnapshot = struct {
 
         const shown = self.shownCount();
         for (self.ids[0..shown]) |id| {
-            try out.writer.print(" - {s}\n", .{id});
+            if (self.provider != .gateway) {
+                try out.writer.print(" - {s} · {s}\n", .{ id, model_provider.label(self.provider) });
+            } else {
+                try out.writer.print(" - {s}\n", .{id});
+            }
         }
         if (self.ids.len > shown) {
             try out.writer.print(" ... and {d} more\n", .{self.ids.len - shown});
@@ -619,17 +704,24 @@ pub const ModelListSnapshot = struct {
 
     pub fn renderInteractiveBody(self: ModelListSnapshot, alloc: Allocator) ![]u8 {
         if (self.ids.len == 0) {
+            const provider_name = self.emptyCatalogProviderName();
             if (self.catalogExplanation()) |explanation| {
-                return std.fmt.allocPrint(alloc, "no models returned by gateway\n{s}", .{explanation});
+                return std.fmt.allocPrint(alloc, "no models returned by {s}\n{s}", .{ provider_name, explanation });
             }
-            return alloc.dupe(u8, "no models returned by gateway");
+            return std.fmt.allocPrint(alloc, "no models returned by {s}", .{provider_name});
         }
 
         var out: std.Io.Writer.Allocating = .init(alloc);
         defer out.deinit();
         try out.writer.print("{d} available", .{self.ids.len});
         const shown = self.shownCount();
-        for (self.ids[0..shown]) |id| try out.writer.print("\n - {s}", .{id});
+        for (self.ids[0..shown]) |id| {
+            if (self.provider != .gateway) {
+                try out.writer.print("\n - {s} · {s}", .{ id, model_provider.label(self.provider) });
+            } else {
+                try out.writer.print("\n - {s}", .{id});
+            }
+        }
         if (self.ids.len > shown) try out.writer.print("\n ... and {d} more", .{self.ids.len - shown});
         if (self.catalogExplanation()) |explanation| try out.writer.print("\n{s}", .{explanation});
         return try out.toOwnedSlice();
@@ -648,12 +740,31 @@ pub const ModelListSnapshot = struct {
             if (i > 0) try out.writer.writeByte(',');
             try std.json.Stringify.value(id, .{}, &out.writer);
         }
+        if (self.provider != .gateway) {
+            try out.writer.writeAll("],\"models\":[");
+            for (self.ids[0..shown], 0..) |id, i| {
+                if (i > 0) try out.writer.writeByte(',');
+                try out.writer.writeAll("{\"id\":");
+                try std.json.Stringify.value(id, .{}, &out.writer);
+                try out.writer.writeAll(",\"source\":");
+                try std.json.Stringify.value(model_provider.label(self.provider), .{}, &out.writer);
+                try out.writer.writeByte('}');
+            }
+        }
         try out.writer.writeAll("]}");
         return try out.toOwnedSlice();
     }
 
     fn shownCount(self: ModelListSnapshot) usize {
         return if (self.limit) |value| @min(self.ids.len, value) else self.ids.len;
+    }
+
+    fn emptyCatalogProviderName(self: ModelListSnapshot) []const u8 {
+        return switch (self.provider) {
+            .gateway => "gateway",
+            .codex => model_provider.label(.codex),
+            .grok => model_provider.label(.grok),
+        };
     }
 
     fn catalogExplanation(self: ModelListSnapshot) ?[]const u8 {
@@ -663,9 +774,10 @@ pub const ModelListSnapshot = struct {
             .no_credential => "Using the public model catalog; sign in with Vercel or use an AI Gateway API key for team-private models.",
             .fx_login_team_required => "Choose a Vercel team to load its private models.",
             .fx_login_refresh_required => "Vercel sign-in must refresh before team-private models can load.",
-            .codex_oauth_refresh_required => "Codex sign-in must refresh before its model catalog can load.",
             .credential_refresh_failed => "Vercel sign-in refresh failed; using the public model catalog.",
             .authenticated_credential_rejected => "Your Gateway credential was rejected; using the public model catalog.",
+            .chatgpt_subscription => "Codex models require an authenticated Codex catalog.",
+            .grok_subscription => "Grok models require an authenticated Grok catalog.",
         };
     }
 };
@@ -1105,6 +1217,7 @@ pub const SessionRecoverySnapshot = struct {
 pub const DoctorSnapshot = struct {
     workspace_root: []const u8,
     model: []const u8,
+    provider: model_provider.ProviderId = .gateway,
     auth: auth_runtime.StatusSnapshot = .{},
     permission_mode: types.PermissionMode,
     agent_step_limit: usize,
@@ -1128,6 +1241,9 @@ pub const DoctorSnapshot = struct {
         );
         try out.writer.print("[doctor] workspace={s}\n", .{self.workspace_root});
         try out.writer.print("[doctor] model={s}\n", .{self.model});
+        if (self.provider != .gateway) {
+            try out.writer.print("[doctor] model_source={s}\n", .{model_provider.label(self.provider)});
+        }
         try out.writer.print("[doctor] auth={s}\n", .{self.auth.activeSourceLabel()});
         try out.writer.print("[doctor] auth_refreshable={}\n", .{self.auth.refreshable()});
         if (self.auth.expired) try out.writer.writeAll("[doctor] auth_expired=true\n");
@@ -1162,6 +1278,10 @@ pub const DoctorSnapshot = struct {
         try std.json.Stringify.value(self.workspace_root, .{}, writer);
         try writer.writeAll(",\"model\":");
         try std.json.Stringify.value(self.model, .{}, writer);
+        if (self.provider != .gateway) {
+            try writer.writeAll(",\"model_source\":");
+            try std.json.Stringify.value(model_provider.label(self.provider), .{}, writer);
+        }
         try writer.writeAll(",\"auth\":");
         try std.json.Stringify.value(self.auth.activeSourceLabel(), .{}, writer);
         try writer.print(",\"auth_refreshable\":{}", .{self.auth.refreshable()});
@@ -1329,197 +1449,6 @@ pub const BackgroundDetailSnapshot = struct {
         return try out.toOwnedSlice();
     }
 };
-
-pub const CodexAccountUsageSnapshot = struct {
-    data: ?codex_usage.Snapshot = null,
-    failure: ?codex_usage.Failure = null,
-
-    pub fn deinit(self: *CodexAccountUsageSnapshot, _: Allocator) void {
-        if (self.data) |*data| data.deinit();
-        self.* = undefined;
-    }
-
-    pub fn render(
-        self: *const CodexAccountUsageSnapshot,
-        alloc: Allocator,
-        format: OutputFormat,
-    ) ![]u8 {
-        return switch (format) {
-            .text => self.renderText(alloc),
-            .json => self.renderJson(alloc),
-        };
-    }
-
-    pub fn renderText(self: *const CodexAccountUsageSnapshot, alloc: Allocator) ![]u8 {
-        var out: std.Io.Writer.Allocating = .init(alloc);
-        defer out.deinit();
-
-        if (self.failure) |failure| {
-            try out.writer.print("[codex usage] error: {s}", .{codexUsageFailureMessage(failure.kind)});
-            if (failure.http_status) |status| {
-                try out.writer.print(" (HTTP {d})", .{@intFromEnum(status)});
-            }
-            try out.writer.writeByte('\n');
-            return out.toOwnedSlice();
-        }
-        const data = self.data orelse {
-            try out.writer.writeAll("[codex usage] no data returned\n");
-            return out.toOwnedSlice();
-        };
-
-        try out.writer.writeAll("Codex account usage\n");
-        try out.writer.print("Fetched at (ms): {d}\n", .{data.fetched_at_ms});
-        try out.writer.print("Plan: {s}\n", .{data.plan_type});
-        try out.writer.writeAll("Rate limits:\n");
-        for (data.rate_limits) |limit| {
-            try out.writer.print("  {s}", .{limit.id});
-            if (limit.name) |name| try out.writer.print(" ({s})", .{name});
-            if (limit.allowed) |allowed| {
-                try out.writer.print(" allowed={s}", .{if (allowed) "true" else "false"});
-            }
-            if (limit.limit_reached) |reached| {
-                try out.writer.print(" limit_reached={s}", .{if (reached) "true" else "false"});
-            }
-            try out.writer.writeByte('\n');
-            if (limit.primary_window) |window| {
-                try writeCodexUsageWindowText(&out.writer, "primary", window);
-            }
-            if (limit.secondary_window) |window| {
-                try writeCodexUsageWindowText(&out.writer, "secondary", window);
-            }
-        }
-        if (data.credits) |credits| {
-            try out.writer.print("Credits: has_credits={s} unlimited={s}", .{
-                if (credits.has_credits) "true" else "false",
-                if (credits.unlimited) "true" else "false",
-            });
-            if (credits.balance) |balance| try out.writer.print(" balance={s}", .{balance});
-            try out.writer.writeByte('\n');
-        }
-        if (data.spend_control) |control| {
-            try out.writer.print("Spend control: reached={s}\n", .{if (control.reached) "true" else "false"});
-            if (control.individual_limit) |limit| {
-                if (limit.source) |source| {
-                    try out.writer.print("  source={s}\n", .{source});
-                }
-                try out.writer.print(
-                    "  individual limit={s} used={s} remaining={s} used_percent={d} remaining_percent={d} reset_after_seconds={d} reset_at={d}\n",
-                    .{
-                        limit.limit,
-                        limit.used,
-                        limit.remaining,
-                        limit.used_percent,
-                        limit.remaining_percent,
-                        limit.reset_after_seconds,
-                        limit.reset_at,
-                    },
-                );
-            }
-        }
-        if (data.rate_limit_reached_type) |reached_type| {
-            try out.writer.print("Rate limit reached type: {s}\n", .{reached_type});
-        }
-        if (data.rate_limit_reset_credits_available) |available| {
-            try out.writer.print("Rate limit reset credits: {d}\n", .{available});
-        }
-
-        const stats = data.token_usage;
-        try out.writer.writeAll("Token activity:");
-        var wrote_stat = false;
-        inline for (.{
-            .{ "lifetime_tokens", stats.lifetime_tokens },
-            .{ "peak_daily_tokens", stats.peak_daily_tokens },
-            .{ "longest_running_turn_sec", stats.longest_running_turn_sec },
-            .{ "current_streak_days", stats.current_streak_days },
-            .{ "longest_streak_days", stats.longest_streak_days },
-        }) |field| {
-            if (field[1]) |value| {
-                try out.writer.print(" {s}={d}", .{ field[0], value });
-                wrote_stat = true;
-            }
-        }
-        if (!wrote_stat) try out.writer.writeAll(" unavailable");
-        try out.writer.writeByte('\n');
-        for (data.daily_usage_buckets) |bucket| {
-            try out.writer.print("  {s}: {d} tokens\n", .{ bucket.start_date, bucket.tokens });
-        }
-        return out.toOwnedSlice();
-    }
-
-    pub fn renderJson(self: *const CodexAccountUsageSnapshot, alloc: Allocator) ![]u8 {
-        var out: std.Io.Writer.Allocating = .init(alloc);
-        defer out.deinit();
-
-        if (self.failure) |failure| {
-            try out.writer.writeAll("{\"kind\":\"codex_account_usage\",\"schema_version\":1,\"error\":{\"code\":");
-            try std.json.Stringify.value(@tagName(failure.kind), .{}, &out.writer);
-            try out.writer.writeAll(",\"http_status\":");
-            if (failure.http_status) |status| {
-                try out.writer.print("{d}", .{@intFromEnum(status)});
-            } else {
-                try out.writer.writeAll("null");
-            }
-            try out.writer.writeAll("}}");
-            return out.toOwnedSlice();
-        }
-        const data = self.data orelse {
-            try out.writer.writeAll("{\"kind\":\"codex_account_usage\",\"schema_version\":1,\"error\":{\"code\":\"invalid_response\",\"http_status\":null}}");
-            return out.toOwnedSlice();
-        };
-        try std.json.Stringify.value(.{
-            .kind = "codex_account_usage",
-            .schema_version = @as(u8, 1),
-            .fetched_at_ms = data.fetched_at_ms,
-            .plan_type = data.plan_type,
-            .rate_limits = data.rate_limits,
-            .credits = data.credits,
-            .spend_control = data.spend_control,
-            .rate_limit_reached_type = data.rate_limit_reached_type,
-            .rate_limit_reset_credits_available = data.rate_limit_reset_credits_available,
-            .token_usage = data.token_usage,
-            .daily_usage_buckets = data.daily_usage_buckets,
-        }, .{}, &out.writer);
-        return out.toOwnedSlice();
-    }
-};
-
-fn writeCodexUsageWindowText(
-    writer: *std.Io.Writer,
-    label: []const u8,
-    window: codex_usage.Window,
-) !void {
-    try writer.print(
-        "    {s}: used_percent={d} window_seconds={d} reset_after_seconds={d} reset_at={d}\n",
-        .{
-            label,
-            window.used_percent,
-            window.limit_window_seconds,
-            window.reset_after_seconds,
-            window.reset_at,
-        },
-    );
-}
-
-fn codexUsageFailureMessage(kind: codex_usage.FailureKind) []const u8 {
-    return switch (kind) {
-        .unsupported_credential_source => "available only with Codex OAuth",
-        .missing_credential => "Codex access token is missing",
-        .missing_account_id => "Codex account identity is missing",
-        .credential_unavailable => "stored Codex credential is unavailable",
-        .credential_changed => "Codex credential changed during the request",
-        .unauthorized => "Codex authentication failed",
-        .forbidden => "Codex account usage is forbidden",
-        .rate_limited => "Codex account usage request was rate limited",
-        .http_error => "Codex account usage request failed",
-        .invalid_endpoint => "Codex account usage endpoint is invalid",
-        .response_too_large => "Codex account usage response is too large",
-        .invalid_response => "Codex account usage response is invalid",
-        .timeout => "Codex account usage request timed out",
-        .cancelled => "Codex account usage request was cancelled",
-        .transport => "Codex account usage transport failed",
-        .resource_exhausted => "insufficient memory for Codex account usage",
-    };
-}
 
 pub const CreditsSnapshot = struct {
     balance: ?[]const u8 = null,
@@ -2043,7 +1972,7 @@ test "command failure snapshot renders stable escaped json" {
 test "core status snapshot text and json stay stable" {
     const snapshot = StatusSnapshot{
         .model = "alpha",
-        .auth_help = credentials.missing_credential_message,
+        .auth_help = "Fx needs access to Vercel AI Gateway. Run fx login to sign in, fx setup to use an API key, or set AI_GATEWAY_API_KEY.",
         .permission_mode = .ask,
         .workspace_root = "/tmp/fx",
         .history_turns = 3,
@@ -2054,14 +1983,14 @@ test "core status snapshot text and json stay stable" {
     const text = try snapshot.renderText(std.testing.allocator);
     defer std.testing.allocator.free(text);
     try std.testing.expectEqualStrings(
-        "[status] model=alpha\n[status] update_channel=stable\n[status] build_channel=stable\n[status] auth=missing\n[status] auth_refreshable=false\n[status] auth_help=" ++ credentials.missing_credential_message ++ "\n[status] permission_mode=ask\n[status] sandbox=none\n[status] workspace=/tmp/fx\n[status] history_turns=3\n[status] session_permission_grants=1\n[status] agent_step_limit=24\n",
+        "[status] model=alpha\n[status] update_channel=stable\n[status] build_channel=stable\n[status] auth=missing\n[status] auth_refreshable=false\n[status] auth_help=Fx needs access to Vercel AI Gateway. Run fx login to sign in, fx setup to use an API key, or set AI_GATEWAY_API_KEY.\n[status] permission_mode=ask\n[status] workspace=/tmp/fx\n[status] history_turns=3\n[status] session_permission_grants=1\n[status] agent_step_limit=24\n",
         text,
     );
 
     const json = try snapshot.renderJson(std.testing.allocator);
     defer std.testing.allocator.free(json);
     try std.testing.expectEqualStrings(
-        "{\"kind\":\"status\",\"model\":\"alpha\",\"update_channel\":\"stable\",\"build_channel\":\"stable\",\"build_revision\":\"\",\"auth\":\"missing\",\"auth_refreshable\":false,\"auth_help\":\"" ++ credentials.missing_credential_message ++ "\",\"permission_mode\":\"ask\",\"sandbox\":\"none\",\"workspace\":\"/tmp/fx\",\"history_turns\":3,\"session_permission_grants\":1,\"agent_step_limit\":24}",
+        "{\"kind\":\"status\",\"model\":\"alpha\",\"update_channel\":\"stable\",\"build_channel\":\"stable\",\"build_revision\":\"\",\"auth\":\"missing\",\"auth_refreshable\":false,\"auth_help\":\"Fx needs access to Vercel AI Gateway. Run fx login to sign in, fx setup to use an API key, or set AI_GATEWAY_API_KEY.\",\"permission_mode\":\"ask\",\"workspace\":\"/tmp/fx\",\"history_turns\":3,\"session_permission_grants\":1,\"agent_step_limit\":24}",
         json,
     );
 }
@@ -2080,16 +2009,42 @@ test "core status snapshot includes selected team when present" {
     const text = try snapshot.renderText(std.testing.allocator);
     defer std.testing.allocator.free(text);
     try std.testing.expectEqualStrings(
-        "[status] model=alpha\n[status] update_channel=stable\n[status] build_channel=stable\n[status] auth=fx login\n[status] auth_refreshable=true\n[status] team=example-team\n[status] permission_mode=ask\n[status] sandbox=none\n[status] workspace=/tmp/fx\n[status] history_turns=0\n[status] session_permission_grants=0\n[status] agent_step_limit=24\n",
+        "[status] model=alpha\n[status] update_channel=stable\n[status] build_channel=stable\n[status] auth=fx login\n[status] auth_refreshable=true\n[status] team=example-team\n[status] permission_mode=ask\n[status] workspace=/tmp/fx\n[status] history_turns=0\n[status] session_permission_grants=0\n[status] agent_step_limit=24\n",
         text,
     );
 
     const json = try snapshot.renderJson(std.testing.allocator);
     defer std.testing.allocator.free(json);
     try std.testing.expectEqualStrings(
-        "{\"kind\":\"status\",\"model\":\"alpha\",\"update_channel\":\"stable\",\"build_channel\":\"stable\",\"build_revision\":\"\",\"auth\":\"fx login\",\"auth_refreshable\":true,\"team\":\"example-team\",\"permission_mode\":\"ask\",\"sandbox\":\"none\",\"workspace\":\"/tmp/fx\",\"history_turns\":0,\"session_permission_grants\":0,\"agent_step_limit\":24}",
+        "{\"kind\":\"status\",\"model\":\"alpha\",\"update_channel\":\"stable\",\"build_channel\":\"stable\",\"build_revision\":\"\",\"auth\":\"fx login\",\"auth_refreshable\":true,\"team\":\"example-team\",\"permission_mode\":\"ask\",\"workspace\":\"/tmp/fx\",\"history_turns\":0,\"session_permission_grants\":0,\"agent_step_limit\":24}",
         json,
     );
+}
+
+test "status distinguishes the selected model route from connected providers" {
+    const snapshot = StatusSnapshot{
+        .model = "gpt-5.4",
+        .provider = .codex,
+        .auth = .{
+            .active_source = .chatgpt_subscription,
+            .gateway_connected = true,
+            .chatgpt_connected = true,
+        },
+        .permission_mode = .auto,
+        .workspace_root = "/tmp/fx",
+        .history_turns = 0,
+        .session_permission_grants = 0,
+        .agent_step_limit = 24,
+    };
+    const text = try snapshot.renderText(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.find(u8, text, "model_source=Codex subscription") != null);
+    try std.testing.expect(std.mem.find(u8, text, "connected_providers=Vercel AI Gateway, Codex") != null);
+
+    const json = try snapshot.renderJson(std.testing.allocator);
+    defer std.testing.allocator.free(json);
+    try std.testing.expect(std.mem.find(u8, json, "\"model_source\":\"Codex subscription\"") != null);
+    try std.testing.expect(std.mem.find(u8, json, "\"connected_providers\":[\"vercel-ai-gateway\",\"codex\"]") != null);
 }
 
 test "MCP config diagnostic renders in status text and JSON but not interactive body" {
@@ -2184,6 +2139,11 @@ test "model list explains public-only and rejected-credential catalogs" {
             .snapshot = .{ .ids = &.{}, .private_models_hidden = true, .public_only_reason = .authenticated_credential_rejected },
             .text = "[models] no models returned by gateway\n[models] Your Gateway credential was rejected; using the public model catalog.\n",
             .body = "no models returned by gateway\nYour Gateway credential was rejected; using the public model catalog.",
+        },
+        .{
+            .snapshot = .{ .ids = &.{}, .provider = .codex },
+            .text = "[models] no models returned by Codex subscription\n",
+            .body = "no models returned by Codex subscription",
         },
     };
 
@@ -2854,50 +2814,6 @@ test "core credits snapshot renders parsed, raw, and empty fallbacks" {
     const empty_text = try (CreditsSnapshot{}).renderText(std.testing.allocator);
     defer std.testing.allocator.free(empty_text);
     try std.testing.expectEqualStrings("[credits] no data returned by gateway\n", empty_text);
-}
-
-test "Codex account usage snapshot renders the same typed data as text and JSON" {
-    var snapshot = CodexAccountUsageSnapshot{ .data = try codex_usage.parseSnapshot(
-        std.testing.allocator,
-        "{\"plan_type\":\"pro\",\"rate_limit\":{\"allowed\":true,\"limit_reached\":false,\"primary_window\":{\"used_percent\":20,\"limit_window_seconds\":18000,\"reset_after_seconds\":600,\"reset_at\":2000}},\"credits\":{\"has_credits\":true,\"unlimited\":false,\"balance\":\"5\"},\"spend_control\":{\"reached\":false,\"individual_limit\":{\"source\":\"user\",\"limit\":\"10\",\"used\":\"2\",\"remaining\":\"8\",\"used_percent\":20,\"remaining_percent\":80,\"reset_after_seconds\":600,\"reset_at\":2000}}}",
-        "{\"stats\":{\"lifetime_tokens\":123,\"daily_usage_buckets\":[{\"start_date\":\"2026-08-20\",\"tokens\":45}]}}",
-        1000,
-    ) };
-    defer snapshot.deinit(std.testing.allocator);
-
-    const text = try snapshot.renderText(std.testing.allocator);
-    defer std.testing.allocator.free(text);
-    try std.testing.expect(std.mem.find(u8, text, "Fetched at (ms): 1000\n") != null);
-    try std.testing.expect(std.mem.find(u8, text, "Plan: pro\n") != null);
-    try std.testing.expect(std.mem.find(u8, text, "primary: used_percent=20") != null);
-    try std.testing.expect(std.mem.find(u8, text, "source=user\n") != null);
-    try std.testing.expect(std.mem.find(u8, text, "lifetime_tokens=123") != null);
-    try std.testing.expect(std.mem.find(u8, text, "2026-08-20: 45 tokens") != null);
-
-    const json = try snapshot.renderJson(std.testing.allocator);
-    defer std.testing.allocator.free(json);
-    try std.testing.expect(std.mem.find(u8, json, "\"kind\":\"codex_account_usage\"") != null);
-    try std.testing.expect(std.mem.find(u8, json, "\"plan_type\":\"pro\"") != null);
-    try std.testing.expect(std.mem.find(u8, json, "\"lifetime_tokens\":123") != null);
-    try std.testing.expect(std.mem.find(u8, json, "\"start_date\":\"2026-08-20\"") != null);
-}
-
-test "Codex account usage snapshot renders structured failures" {
-    const snapshot = CodexAccountUsageSnapshot{
-        .failure = .{ .kind = .unauthorized, .http_status = .unauthorized },
-    };
-    const text = try snapshot.renderText(std.testing.allocator);
-    defer std.testing.allocator.free(text);
-    try std.testing.expectEqualStrings(
-        "[codex usage] error: Codex authentication failed (HTTP 401)\n",
-        text,
-    );
-    const json = try snapshot.renderJson(std.testing.allocator);
-    defer std.testing.allocator.free(json);
-    try std.testing.expectEqualStrings(
-        "{\"kind\":\"codex_account_usage\",\"schema_version\":1,\"error\":{\"code\":\"unauthorized\",\"http_status\":401}}",
-        json,
-    );
 }
 
 test "core upgrade snapshot renders errors and statuses" {

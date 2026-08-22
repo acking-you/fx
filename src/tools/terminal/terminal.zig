@@ -752,7 +752,6 @@ fn buildRequest(
             .workspace_root = ctx.workspace_root,
             .cwd = cwd,
             .transport_role = ctx.terminal_transport_role,
-            .sandbox_backend = ctx.sandbox_backend,
             .backend = input.backend orelse .native,
             .actor = .agent,
             .controls = .full(),
@@ -776,7 +775,6 @@ fn buildRequest(
                 .durable_session_id = durable_session_id,
                 .workspace_root = ctx.workspace_root,
                 .transport_role = ctx.terminal_transport_role,
-                .sandbox_backend = ctx.sandbox_backend,
                 .actor = .agent,
             },
         );
@@ -801,7 +799,6 @@ fn buildRequest(
         .durable_session_id = durable_session_id,
         .workspace_root = ctx.workspace_root,
         .transport_role = ctx.terminal_transport_role,
-        .sandbox_backend = ctx.sandbox_backend,
         .actor = .agent,
     });
     errdefer authority.deinit();
@@ -1229,10 +1226,15 @@ pub fn mapAuthorizedResult(
         .success => return result,
         .failure => |failure| failure.code,
     };
-    if (code != .path_outside_workspace) return result;
-
     var mapped = result;
-    mapped.status_detail = try alloc.dupe(u8, "path is outside the workspace");
+    mapped.status_detail = switch (code) {
+        .path_outside_workspace => try alloc.dupe(u8, "path is outside the workspace"),
+        .authority_retired => try alloc.dupe(
+            u8,
+            "saved terminal authority is from an older fx version; start a new terminal",
+        ),
+        else => return result,
+    };
     return mapped;
 }
 
@@ -1265,6 +1267,7 @@ fn mapErrorCode(err: anyerror) contracts.StructuredErrorCode {
         error.InvalidHolderProof,
         error.ControlDenied,
         => .authority_denied,
+        error.TerminalAuthorityRetired => .authority_retired,
         error.Cancelled => .cancelled,
         else => .invalid_request,
     };
@@ -1276,6 +1279,106 @@ pub fn readsOnly(erased: tool_dispatch.ToolInput) bool {
         .read, .screen, .list => true,
         .inspect => input.acknowledge_event_id == null,
         else => false,
+    };
+}
+
+pub fn presentation(args: std.json.ObjectMap) ?tool_dispatch.CallPresentation {
+    const action_text = tool_args.optionalStringArg(args, "action") orelse return null;
+    const action = std.meta.stringToEnum(Action, action_text) orelse return null;
+    return switch (action) {
+        .exec => callPresentation("Running", "Ran", .command, "command"),
+        .start => blk: {
+            const command = tool_args.optionalStringArg(args, "command");
+            break :blk callPresentation(
+                "Starting",
+                "Started",
+                if (command != null and command.?.len > 0) .command else .none,
+                "interactive shell",
+            );
+        },
+        .read => sessionPresentation("Reading output from", "Read output from"),
+        .screen => sessionPresentation("Capturing screen from", "Captured screen from"),
+        .write => writePresentation(args),
+        .wait => sessionPresentation("Waiting for", "Finished waiting for"),
+        .monitor => monitorPresentation(args),
+        .inspect => sessionPresentation("Inspecting", "Inspected"),
+        .list => callPresentation("Listing", "Listed", .none, "terminal sessions"),
+        .resize => sessionPresentation("Resizing", "Resized"),
+        .signal => signalPresentation(args),
+        .close => closePresentation(args),
+    };
+}
+
+fn callPresentation(
+    active: []const u8,
+    completed: []const u8,
+    target_kind: tool_dispatch.LabelArgKind,
+    target_default: []const u8,
+) tool_dispatch.CallPresentation {
+    return .{
+        .activity_kind = .command,
+        .action_label = active,
+        .completed_action_label = completed,
+        .label_arg_kind = target_kind,
+        .label_arg_default = target_default,
+    };
+}
+
+fn sessionPresentation(
+    active: []const u8,
+    completed: []const u8,
+) tool_dispatch.CallPresentation {
+    return callPresentation(
+        active,
+        completed,
+        .session_id,
+        "terminal session",
+    );
+}
+
+fn writePresentation(args: std.json.ObjectMap) ?tool_dispatch.CallPresentation {
+    const lease_text = tool_args.optionalStringArg(args, "lease") orelse "use";
+    const lease = std.meta.stringToEnum(contracts.WriteLeaseIntent, lease_text) orelse return null;
+    return switch (lease) {
+        .use => sessionPresentation("Sending input to", "Sent input to"),
+        .acquire => sessionPresentation("Acquiring control of", "Acquired control of"),
+        .release => sessionPresentation("Releasing control of", "Released control of"),
+        .revoke => sessionPresentation("Revoking control of", "Revoked control of"),
+    };
+}
+
+fn monitorPresentation(args: std.json.ObjectMap) ?tool_dispatch.CallPresentation {
+    const monitor_value = args.get("monitor") orelse return null;
+    if (monitor_value != .object) return null;
+    const kind_text = tool_args.optionalStringArg(monitor_value.object, "kind") orelse return null;
+    const kind = std.meta.stringToEnum(MonitorOperationKind, kind_text) orelse return null;
+    return switch (kind) {
+        .add => sessionPresentation("Adding monitor to", "Added monitor to"),
+        .update => sessionPresentation("Updating monitor for", "Updated monitor for"),
+        .pause => sessionPresentation("Pausing monitor for", "Paused monitor for"),
+        .@"resume" => sessionPresentation("Resuming monitor for", "Resumed monitor for"),
+        .remove => sessionPresentation("Removing monitor from", "Removed monitor from"),
+    };
+}
+
+fn signalPresentation(args: std.json.ObjectMap) ?tool_dispatch.CallPresentation {
+    const signal_text = tool_args.optionalStringArg(args, "signal") orelse return null;
+    const signal = std.meta.stringToEnum(contracts.Signal, signal_text) orelse return null;
+    return switch (signal) {
+        .hangup => sessionPresentation("Sending hangup to", "Sent hangup to"),
+        .interrupt => sessionPresentation("Sending interrupt to", "Sent interrupt to"),
+        .quit => sessionPresentation("Sending quit to", "Sent quit to"),
+        .terminate => sessionPresentation("Sending terminate to", "Sent terminate to"),
+        .kill => sessionPresentation("Sending kill to", "Sent kill to"),
+    };
+}
+
+fn closePresentation(args: std.json.ObjectMap) ?tool_dispatch.CallPresentation {
+    const policy_text = tool_args.optionalStringArg(args, "close_policy") orelse return null;
+    const policy = std.meta.stringToEnum(contracts.ClosePolicy, policy_text) orelse return null;
+    return switch (policy) {
+        .graceful => sessionPresentation("Closing", "Closed"),
+        .force => sessionPresentation("Killing", "Killed"),
     };
 }
 
@@ -1314,6 +1417,54 @@ test "terminal decoder accepts every public action and owns its input" {
                 );
             },
         }
+    }
+}
+
+test "terminal presentation maps every action to operation-first labels" {
+    const alloc = std.testing.allocator;
+    const cases = [_]struct {
+        arguments_json: []const u8,
+        active: []const u8,
+        completed: []const u8,
+        target_kind: tool_dispatch.LabelArgKind,
+        target_default: []const u8,
+    }{
+        .{ .arguments_json = "{\"action\":\"exec\",\"command\":\"zig build\"}", .active = "Running", .completed = "Ran", .target_kind = .command, .target_default = "command" },
+        .{ .arguments_json = "{\"action\":\"start\",\"command\":\"npm run dev\"}", .active = "Starting", .completed = "Started", .target_kind = .command, .target_default = "interactive shell" },
+        .{ .arguments_json = "{\"action\":\"start\"}", .active = "Starting", .completed = "Started", .target_kind = .none, .target_default = "interactive shell" },
+        .{ .arguments_json = "{\"action\":\"read\",\"session_id\":\"terminal-a\"}", .active = "Reading output from", .completed = "Read output from", .target_kind = .session_id, .target_default = "terminal session" },
+        .{ .arguments_json = "{\"action\":\"screen\",\"session_id\":\"terminal-a\"}", .active = "Capturing screen from", .completed = "Captured screen from", .target_kind = .session_id, .target_default = "terminal session" },
+        .{ .arguments_json = "{\"action\":\"write\",\"session_id\":\"terminal-a\"}", .active = "Sending input to", .completed = "Sent input to", .target_kind = .session_id, .target_default = "terminal session" },
+        .{ .arguments_json = "{\"action\":\"write\",\"session_id\":\"terminal-a\",\"lease\":\"acquire\"}", .active = "Acquiring control of", .completed = "Acquired control of", .target_kind = .session_id, .target_default = "terminal session" },
+        .{ .arguments_json = "{\"action\":\"write\",\"session_id\":\"terminal-a\",\"lease\":\"release\"}", .active = "Releasing control of", .completed = "Released control of", .target_kind = .session_id, .target_default = "terminal session" },
+        .{ .arguments_json = "{\"action\":\"write\",\"session_id\":\"terminal-a\",\"lease\":\"revoke\"}", .active = "Revoking control of", .completed = "Revoked control of", .target_kind = .session_id, .target_default = "terminal session" },
+        .{ .arguments_json = "{\"action\":\"wait\",\"session_id\":\"terminal-a\"}", .active = "Waiting for", .completed = "Finished waiting for", .target_kind = .session_id, .target_default = "terminal session" },
+        .{ .arguments_json = "{\"action\":\"monitor\",\"session_id\":\"terminal-a\",\"monitor\":{\"kind\":\"add\"}}", .active = "Adding monitor to", .completed = "Added monitor to", .target_kind = .session_id, .target_default = "terminal session" },
+        .{ .arguments_json = "{\"action\":\"monitor\",\"session_id\":\"terminal-a\",\"monitor\":{\"kind\":\"update\"}}", .active = "Updating monitor for", .completed = "Updated monitor for", .target_kind = .session_id, .target_default = "terminal session" },
+        .{ .arguments_json = "{\"action\":\"monitor\",\"session_id\":\"terminal-a\",\"monitor\":{\"kind\":\"pause\"}}", .active = "Pausing monitor for", .completed = "Paused monitor for", .target_kind = .session_id, .target_default = "terminal session" },
+        .{ .arguments_json = "{\"action\":\"monitor\",\"session_id\":\"terminal-a\",\"monitor\":{\"kind\":\"resume\"}}", .active = "Resuming monitor for", .completed = "Resumed monitor for", .target_kind = .session_id, .target_default = "terminal session" },
+        .{ .arguments_json = "{\"action\":\"monitor\",\"session_id\":\"terminal-a\",\"monitor\":{\"kind\":\"remove\"}}", .active = "Removing monitor from", .completed = "Removed monitor from", .target_kind = .session_id, .target_default = "terminal session" },
+        .{ .arguments_json = "{\"action\":\"inspect\",\"session_id\":\"terminal-a\"}", .active = "Inspecting", .completed = "Inspected", .target_kind = .session_id, .target_default = "terminal session" },
+        .{ .arguments_json = "{\"action\":\"list\"}", .active = "Listing", .completed = "Listed", .target_kind = .none, .target_default = "terminal sessions" },
+        .{ .arguments_json = "{\"action\":\"resize\",\"session_id\":\"terminal-a\"}", .active = "Resizing", .completed = "Resized", .target_kind = .session_id, .target_default = "terminal session" },
+        .{ .arguments_json = "{\"action\":\"signal\",\"session_id\":\"terminal-a\",\"signal\":\"hangup\"}", .active = "Sending hangup to", .completed = "Sent hangup to", .target_kind = .session_id, .target_default = "terminal session" },
+        .{ .arguments_json = "{\"action\":\"signal\",\"session_id\":\"terminal-a\",\"signal\":\"interrupt\"}", .active = "Sending interrupt to", .completed = "Sent interrupt to", .target_kind = .session_id, .target_default = "terminal session" },
+        .{ .arguments_json = "{\"action\":\"signal\",\"session_id\":\"terminal-a\",\"signal\":\"quit\"}", .active = "Sending quit to", .completed = "Sent quit to", .target_kind = .session_id, .target_default = "terminal session" },
+        .{ .arguments_json = "{\"action\":\"signal\",\"session_id\":\"terminal-a\",\"signal\":\"terminate\"}", .active = "Sending terminate to", .completed = "Sent terminate to", .target_kind = .session_id, .target_default = "terminal session" },
+        .{ .arguments_json = "{\"action\":\"signal\",\"session_id\":\"terminal-a\",\"signal\":\"kill\"}", .active = "Sending kill to", .completed = "Sent kill to", .target_kind = .session_id, .target_default = "terminal session" },
+        .{ .arguments_json = "{\"action\":\"close\",\"session_id\":\"terminal-a\",\"close_policy\":\"graceful\"}", .active = "Closing", .completed = "Closed", .target_kind = .session_id, .target_default = "terminal session" },
+        .{ .arguments_json = "{\"action\":\"close\",\"session_id\":\"terminal-a\",\"close_policy\":\"force\"}", .active = "Killing", .completed = "Killed", .target_kind = .session_id, .target_default = "terminal session" },
+    };
+
+    for (cases) |case| {
+        var parsed = try std.json.parseFromSlice(std.json.Value, alloc, case.arguments_json, .{});
+        defer parsed.deinit();
+        const value = presentation(parsed.value.object) orelse return error.TestExpectedEqual;
+        try std.testing.expect(value.activity_kind == .command);
+        try std.testing.expectEqualStrings(case.active, value.action_label);
+        try std.testing.expectEqualStrings(case.completed, value.completed_action_label);
+        try std.testing.expectEqual(case.target_kind, value.label_arg_kind);
+        try std.testing.expectEqualStrings(case.target_default, value.label_arg_default);
     }
 }
 
@@ -1987,7 +2138,7 @@ test "registered terminal validation enforces action-specific input before execu
     }
 }
 
-test "terminal result mapper adds detail only for workspace path failures" {
+test "terminal result mapper adds detail for actionable failures" {
     const alloc = std.testing.allocator;
     const cases = [_]struct {
         status: tool_dispatch.DispatchResult.Status,
@@ -2003,6 +2154,11 @@ test "terminal result mapper adds detail only for workspace path failures" {
             .status = .failure,
             .body = "{\"failure\":{\"action\":\"start\",\"code\":\"invalid_request\",\"session_id\":null,\"retryable\":false}}",
             .expected_detail = null,
+        },
+        .{
+            .status = .failure,
+            .body = "{\"failure\":{\"action\":\"read\",\"code\":\"authority_retired\",\"session_id\":\"terminal-old\",\"retryable\":false}}",
+            .expected_detail = "saved terminal authority is from an older fx version; start a new terminal",
         },
         .{ .status = .failure, .body = "not json", .expected_detail = null },
         .{

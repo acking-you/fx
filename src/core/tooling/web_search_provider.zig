@@ -9,7 +9,7 @@ const Allocator = std.mem.Allocator;
 pub const Inputs = struct {
     api_key: []const u8,
     credential_source: types.CredentialSource = .ai_gateway_api_key,
-    credential_account_id: ?[]const u8 = null,
+    account_id: ?[]const u8 = null,
     gateway_team: ?[]const u8 = null,
     worker_model: []const u8,
     gateway_retry_count: usize,

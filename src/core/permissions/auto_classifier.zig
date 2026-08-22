@@ -12,7 +12,7 @@ const types = @import("../shared/types.zig");
 pub const tool_name = "permission_decision";
 const max_rationale_bytes: usize = 240;
 const max_review_packet_bytes: usize = 16 * 1024;
-const reviewer_model = "zai/glm-5.2";
+pub const gateway_reviewer_model = "zai/glm-5.2";
 
 pub const Risk = enum {
     low,
@@ -59,11 +59,6 @@ pub const ParseOutcome = union(enum) {
     }
 };
 
-pub const SandboxScope = enum {
-    restricted,
-    broader,
-};
-
 pub const ReviewPhase = enum {
     initial,
     preflight,
@@ -74,9 +69,7 @@ pub const CommandAction = struct {
     command: []const u8,
     resolved_cwd: []const u8,
     background: bool,
-    backend: types.BackendKind,
     target_os: std.Target.Os.Tag,
-    scope: SandboxScope = .restricted,
 };
 
 pub const FileMutationAction = struct {
@@ -95,24 +88,10 @@ pub const ToolAction = struct {
     schema_required: bool = false,
 };
 
-pub const SandboxWideningAction = struct {
-    command: []const u8,
-    resolved_cwd: []const u8,
-    background: bool,
-    backend: types.BackendKind,
-    target_os: std.Target.Os.Tag,
-    prior_scope: SandboxScope,
-    requested_scope: SandboxScope,
-    reason: []const u8,
-    restricted_result: ?[]const u8 = null,
-    restricted_command_result: ?[]const u8 = null,
-};
-
 pub const Action = union(enum) {
     command: CommandAction,
     file_mutation: FileMutationAction,
     tool: ToolAction,
-    sandbox_widening: SandboxWideningAction,
 };
 
 pub const ReviewOrigin = enum {
@@ -169,19 +148,7 @@ pub const TransportOutcome = union(enum) {
 };
 
 pub const Transport = struct {
-    pub const BuildFn = *const fn (
-        *anyopaque,
-        std.mem.Allocator,
-        []const u8,
-        []const u8,
-        []const types.ChatMessage,
-        []const u8,
-        std.Io.Clock.Timestamp,
-        *std.atomic.Value(bool),
-    ) anyerror![]u8;
-
     context: *anyopaque,
-    build_fn: BuildFn = buildGatewayReviewPayload,
     send_fn: *const fn (
         *anyopaque,
         std.mem.Allocator,
@@ -190,28 +157,16 @@ pub const Transport = struct {
         std.Io.Clock.Timestamp,
         *std.atomic.Value(bool),
     ) anyerror!TransportOutcome,
-
-    pub fn build(
-        self: Transport,
-        alloc: std.mem.Allocator,
-        model: []const u8,
-        tools_json: []const u8,
-        messages: []const types.ChatMessage,
-        target_call_id: []const u8,
-        deadline: std.Io.Clock.Timestamp,
-        cancel_flag: *std.atomic.Value(bool),
-    ) ![]u8 {
-        return self.build_fn(
-            self.context,
-            alloc,
-            model,
-            tools_json,
-            messages,
-            target_call_id,
-            deadline,
-            cancel_flag,
-        );
-    }
+    build_fn: ?*const fn (
+        *anyopaque,
+        std.mem.Allocator,
+        []const u8,
+        []const u8,
+        []const types.ChatMessage,
+        []const u8,
+        std.Io.Clock.Timestamp,
+        *std.atomic.Value(bool),
+    ) anyerror![]u8 = null,
 
     pub fn send(
         self: Transport,
@@ -225,28 +180,6 @@ pub const Transport = struct {
     }
 };
 
-fn buildGatewayReviewPayload(
-    _: *anyopaque,
-    alloc: std.mem.Allocator,
-    _: []const u8,
-    tools_json: []const u8,
-    messages: []const types.ChatMessage,
-    target_call_id: []const u8,
-    deadline: std.Io.Clock.Timestamp,
-    cancel_flag: *std.atomic.Value(bool),
-) ![]u8 {
-    return gateway_json.buildGatewayPendingToolReviewRequestBodyWithMaxOutputTokens(
-        alloc,
-        tools_json,
-        messages,
-        target_call_id,
-        .{},
-        2048,
-        deadline,
-        cancel_flag,
-    );
-}
-
 pub const OverrideFn = *const fn (
     *anyopaque,
     std.mem.Allocator,
@@ -258,8 +191,9 @@ pub const OverrideFn = *const fn (
 /// returns.
 pub const ProviderInput = struct {
     credential: []const u8 = "",
-    tenant: ?[]const u8 = null,
     credential_source: ?types.CredentialSource = null,
+    account_id: ?[]const u8 = null,
+    tenant: ?[]const u8 = null,
     endpoint: []const u8 = "",
     cancel_flag: ?*std.atomic.Value(bool) = null,
     usage: ?*session_usage.Usage = null,
@@ -286,6 +220,7 @@ pub const Reviewer = struct {
     override_fn: ?OverrideFn = null,
     cancel_flag: ?*std.atomic.Value(bool) = null,
     timeout_ms: u32 = default_timeout_ms,
+    model: []const u8 = gateway_reviewer_model,
 
     pub const default_timeout_ms: u32 = 15_000;
 
@@ -306,6 +241,20 @@ pub const Reviewer = struct {
             .transport = transport,
             .cancel_flag = cancel_flag,
             .timeout_ms = timeout_ms,
+        };
+    }
+
+    pub fn withTransportModel(
+        transport: Transport,
+        cancel_flag: ?*std.atomic.Value(bool),
+        timeout_ms: u32,
+        model: []const u8,
+    ) Reviewer {
+        return .{
+            .transport = transport,
+            .cancel_flag = cancel_flag,
+            .timeout_ms = timeout_ms,
+            .model = model,
         };
     }
 
@@ -341,7 +290,7 @@ pub const Reviewer = struct {
             .{
                 @tagName(review_turn.origin),
                 review_turn.model,
-                reviewer_model,
+                self.model,
                 review_turn.pending_assistant.tool_calls.len,
                 review_turn.current_root_request.len,
                 review_turn.target_call_id,
@@ -394,15 +343,28 @@ pub const Reviewer = struct {
         message_index += 1;
         messages[message_index] = .{ .role = .system, .content = instruction };
 
-        const payload = transport.build(
-            alloc,
-            reviewer_model,
-            tools_json,
-            messages,
-            review_turn.target_call_id,
-            deadline,
-            cancel_flag,
-        ) catch |err| return constructionFailure(err);
+        const payload = if (transport.build_fn) |build_fn|
+            build_fn(
+                transport.context,
+                alloc,
+                self.model,
+                tools_json,
+                messages,
+                review_turn.target_call_id,
+                deadline,
+                cancel_flag,
+            ) catch |err| return constructionFailure(err)
+        else
+            gateway_json.buildGatewayPendingToolReviewRequestBodyWithMaxOutputTokens(
+                alloc,
+                tools_json,
+                messages,
+                review_turn.target_call_id,
+                .{},
+                2048,
+                deadline,
+                cancel_flag,
+            ) catch |err| return constructionFailure(err);
         defer alloc.free(payload);
         debug_trace.logf(
             "permission",
@@ -418,7 +380,7 @@ pub const Reviewer = struct {
         );
         var transport_outcome = transport.send(
             alloc,
-            reviewer_model,
+            self.model,
             payload,
             deadline,
             cancel_flag,
@@ -539,8 +501,8 @@ fn serializeEvidence(
             try writeBoundedField(&out.writer, alloc, "command", command.command, max_action_field_bytes, &action_complete);
             try writeBoundedField(&out.writer, alloc, "cwd", command.resolved_cwd, max_action_field_bytes, &action_complete);
             try out.writer.print(
-                "background: {}\nbackend: {s}\ntarget_os: {s}\nsandbox_scope: {s}\n",
-                .{ command.background, @tagName(command.backend), @tagName(command.target_os), @tagName(command.scope) },
+                "background: {}\ntarget_os: {s}\n",
+                .{ command.background, @tagName(command.target_os) },
             );
         },
         .file_mutation => |file| {
@@ -590,34 +552,6 @@ fn serializeEvidence(
             } else if (tool.schema_required) {
                 action_complete = false;
                 try out.writer.writeAll("schema_json: [evidence unavailable]\n");
-            }
-        },
-        .sandbox_widening => |widening| {
-            try out.writer.writeAll("action: sandbox_widening\n");
-            try writeBoundedField(&out.writer, alloc, "command", widening.command, max_action_field_bytes, &action_complete);
-            try writeBoundedField(&out.writer, alloc, "cwd", widening.resolved_cwd, max_action_field_bytes, &action_complete);
-            try out.writer.print(
-                "background: {}\nbackend: {s}\ntarget_os: {s}\nprior_scope: {s}\nrequested_scope: {s}\n",
-                .{
-                    widening.background,
-                    @tagName(widening.backend),
-                    @tagName(widening.target_os),
-                    @tagName(widening.prior_scope),
-                    @tagName(widening.requested_scope),
-                },
-            );
-            try writeBoundedField(&out.writer, alloc, "reason", widening.reason, max_action_field_bytes, &action_complete);
-            if (widening.restricted_result) |result| {
-                try writeBoundedField(&out.writer, alloc, "restricted_result", result, max_action_field_bytes, &action_complete);
-            } else if (request.phase == .reactive) {
-                action_complete = false;
-                try out.writer.writeAll("restricted_result: [evidence unavailable]\n");
-            }
-            if (widening.restricted_command_result) |result| {
-                try writeBoundedField(&out.writer, alloc, "restricted_command_result", result, max_action_field_bytes, &action_complete);
-            } else if (request.phase == .reactive) {
-                action_complete = false;
-                try out.writer.writeAll("restricted_command_result: [evidence unavailable]\n");
             }
         },
     }
@@ -1199,7 +1133,6 @@ test "automatic review does not send redacted action evidence" {
             .command = "printf API_KEY=super-secret",
             .resolved_cwd = "/tmp/workspace",
             .background = false,
-            .backend = .none,
             .target_os = .linux,
         } },
         .escalation_reason = "command_requires_approval",
@@ -1334,7 +1267,7 @@ test "automatic review serializes the pending call structurally" {
             self.saw_pending_results =
                 std.mem.count(u8, payload, "\"role\":\"tool\"") == 1 and
                 std.mem.count(u8, payload, "Tool call has not executed; it is pending permission review.") == 1;
-            self.saw_reviewer_model = std.mem.eql(u8, model, reviewer_model);
+            self.saw_reviewer_model = std.mem.eql(u8, model, gateway_reviewer_model);
             self.saw_review_settings =
                 std.mem.find(u8, payload, "\"maxOutputTokens\":2048") != null and
                 std.mem.find(u8, payload, "\"toolChoice\":{\"type\":\"required\"}") != null and
@@ -1394,7 +1327,6 @@ test "automatic review serializes the pending call structurally" {
             .command = "pnpm install",
             .resolved_cwd = "/tmp/workspace",
             .background = false,
-            .backend = .none,
             .target_os = .linux,
         } },
         .escalation_reason = "command_requires_approval",
@@ -1470,7 +1402,6 @@ test "subagent automatic review sends only the current root request" {
             .command = "rm README.md",
             .resolved_cwd = "/tmp/workspace",
             .background = false,
-            .backend = .none,
             .target_os = .linux,
         } },
         .escalation_reason = "command_requires_approval",
@@ -1524,7 +1455,6 @@ test "automatic review rejects an oversized complete packet without sending" {
             .command = "touch file",
             .resolved_cwd = "/tmp/workspace",
             .background = false,
-            .backend = .none,
             .target_os = .linux,
         } },
         .escalation_reason = "command_requires_approval",
@@ -1661,7 +1591,6 @@ test "automatic review excludes assistant preamble and images" {
             .command = "printf safe",
             .resolved_cwd = "/tmp/workspace",
             .background = false,
-            .backend = .none,
             .target_os = .linux,
         } },
         .escalation_reason = "command_requires_approval",
@@ -1716,7 +1645,6 @@ test "automatic review ignores legacy authority completeness" {
             .command = "touch file",
             .resolved_cwd = "/tmp/workspace",
             .background = false,
-            .backend = .none,
             .target_os = .linux,
         } },
         .escalation_reason = "command_requires_approval",
@@ -1742,7 +1670,6 @@ test "automatic review ignores legacy authority completeness" {
             .command = "touch file",
             .resolved_cwd = "/tmp/workspace",
             .background = false,
-            .backend = .none,
             .target_os = .linux,
         } },
         .escalation_reason = "command_requires_approval",
@@ -1857,7 +1784,6 @@ test "expired review budget fails closed before transport" {
             .command = "true",
             .resolved_cwd = "/tmp/workspace",
             .background = false,
-            .backend = .none,
             .target_os = .linux,
         } },
         .escalation_reason = "command_requires_approval",

@@ -6485,7 +6485,7 @@ test "remote checkpoint remains atomic across turn and token budgets" {
         "{\"type\":\"compaction\",\"encrypted_content\":\"opaque-checkpoint\"}]";
     try std.testing.expect(try runtime.installResponsesCompaction(
         alloc,
-        .codex_oauth,
+        .chatgpt_subscription,
         "gpt-5.6-sol",
         replay_json,
         .{
@@ -6501,7 +6501,7 @@ test "remote checkpoint remains atomic across turn and token budgets" {
     try std.testing.expectEqual(@as(usize, 2), context.len);
     try std.testing.expect(context[0] == .compacted_summary);
     const checkpoint = context[0].compacted_summary.responses_compaction.?;
-    try std.testing.expectEqual(core_types.CredentialSource.codex_oauth, checkpoint.credential_source);
+    try std.testing.expectEqual(core_types.CredentialSource.chatgpt_subscription, checkpoint.credential_source);
     try std.testing.expectEqualStrings("gpt-5.6-sol", checkpoint.wire_model);
     try std.testing.expectEqualStrings(replay_json, checkpoint.input_json);
     try std.testing.expectEqualStrings("four", context[1].assistant.user.text);
@@ -6537,7 +6537,7 @@ test "remote compaction accepts one completed turn and not an idle checkpoint" {
     try std.testing.expect(runtime.hasRemoteCompactionCandidate());
     try std.testing.expect(try runtime.installResponsesCompaction(
         alloc,
-        .codex_oauth,
+        .chatgpt_subscription,
         "gpt-5.6-sol",
         "[{\"type\":\"compaction\",\"encrypted_content\":\"opaque\"}]",
         .{

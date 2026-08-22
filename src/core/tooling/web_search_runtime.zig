@@ -36,7 +36,7 @@ pub const Config = struct {
     policy: ?web_search_policy.WebSearchPolicy = null,
     api_key: []const u8 = "",
     credential_source: types.CredentialSource = .ai_gateway_api_key,
-    credential_account_id: ?[]const u8 = null,
+    account_id: ?[]const u8 = null,
     gateway_team: ?[]const u8 = null,
     worker_model: []const u8 = "",
     gateway_retry_count: usize = 3,
@@ -50,7 +50,7 @@ pub const Inputs = web_search_provider.Inputs;
 const OwnedInputs = struct {
     api_key: []u8,
     credential_source: types.CredentialSource,
-    credential_account_id: ?[]u8 = null,
+    account_id: ?[]u8 = null,
     gateway_team: ?[]u8 = null,
     worker_model: []u8,
     gateway_retry_count: usize,
@@ -61,7 +61,7 @@ const OwnedInputs = struct {
 
     fn deinit(self: *OwnedInputs, alloc: Allocator) void {
         alloc.free(self.api_key);
-        if (self.credential_account_id) |account_id| alloc.free(account_id);
+        if (self.account_id) |account_id| alloc.free(account_id);
         if (self.gateway_team) |team| alloc.free(team);
         alloc.free(self.worker_model);
         alloc.free(self.gateway_chat_url);
@@ -72,7 +72,7 @@ const OwnedInputs = struct {
         return .{
             .api_key = self.api_key,
             .credential_source = self.credential_source,
-            .credential_account_id = self.credential_account_id,
+            .account_id = self.account_id,
             .gateway_team = self.gateway_team,
             .worker_model = self.worker_model,
             .gateway_retry_count = self.gateway_retry_count,
@@ -91,7 +91,7 @@ pub const Runtime = struct {
     policy: web_search_policy.WebSearchPolicy,
     api_key: []const u8,
     credential_source: types.CredentialSource,
-    credential_account_id: ?[]const u8 = null,
+    account_id: ?[]const u8 = null,
     gateway_team: ?[]const u8 = null,
     worker_model: []const u8,
     gateway_retry_count: usize,
@@ -108,7 +108,7 @@ pub const Runtime = struct {
             .policy = config.policy orelse if (config.provider) |provider| provider.policy else .{},
             .api_key = config.api_key,
             .credential_source = config.credential_source,
-            .credential_account_id = config.credential_account_id,
+            .account_id = config.account_id,
             .gateway_team = config.gateway_team,
             .worker_model = config.worker_model,
             .gateway_retry_count = config.gateway_retry_count,
@@ -125,7 +125,7 @@ pub const Runtime = struct {
         defer self.config_mutex.unlock(io_mod.getIo());
         self.api_key = inputs.api_key;
         self.credential_source = inputs.credential_source;
-        self.credential_account_id = inputs.credential_account_id;
+        self.account_id = inputs.account_id;
         self.gateway_team = inputs.gateway_team;
         self.worker_model = inputs.worker_model;
         self.gateway_retry_count = inputs.gateway_retry_count;
@@ -244,8 +244,8 @@ pub const Runtime = struct {
         defer self.config_mutex.unlock(io_mod.getIo());
         const api_key = try alloc.dupe(u8, self.api_key);
         errdefer alloc.free(api_key);
-        const credential_account_id = if (self.credential_account_id) |account_id| try alloc.dupe(u8, account_id) else null;
-        errdefer if (credential_account_id) |account_id| alloc.free(account_id);
+        const account_id = if (self.account_id) |account_id| try alloc.dupe(u8, account_id) else null;
+        errdefer if (account_id) |value| alloc.free(value);
         const gateway_team = if (self.gateway_team) |team| try alloc.dupe(u8, team) else null;
         errdefer if (gateway_team) |team| alloc.free(team);
         const worker_model = try alloc.dupe(u8, self.worker_model);
@@ -254,7 +254,7 @@ pub const Runtime = struct {
         return .{
             .api_key = api_key,
             .credential_source = self.credential_source,
-            .credential_account_id = credential_account_id,
+            .account_id = account_id,
             .gateway_team = gateway_team,
             .worker_model = worker_model,
             .gateway_retry_count = self.gateway_retry_count,

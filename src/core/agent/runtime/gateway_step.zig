@@ -28,8 +28,9 @@ pub fn streamGatewayCompletion(
     provider: agent_stream_provider.Provider,
     alloc: Allocator,
     api_key: []const u8,
-    team: ?[]const u8,
     credential_source: ?types.CredentialSource,
+    account_id: ?[]const u8,
+    team: ?[]const u8,
     responses_compaction_binding: ?types.ResponsesCompactionProviderBindingView,
     session_id: ?[]const u8,
     model: []const u8,
@@ -57,8 +58,9 @@ pub fn streamGatewayCompletion(
     attempt_evidence.provider_admitted = true;
     var result = provider.stream(alloc, .{
         .api_key = api_key,
-        .team = team,
         .credential_source = credential_source,
+        .account_id = account_id,
+        .team = team,
         .responses_compaction_binding = responses_compaction_binding,
         .session_id = session_id,
         .model = model,
@@ -119,7 +121,11 @@ pub fn streamGatewayCompletion(
     if (comptime @import("builtin").os.tag != .wasi) {
         if (result.reconcile_generation_usage) {
             if (usage) |ledger| {
-                ledger.startReconciliation(usage_allocator, api_key);
+                if (credential_source == .chatgpt_subscription or credential_source == .grok_subscription) {
+                    ledger.clearReconciliationCredential();
+                } else {
+                    ledger.startReconciliation(usage_allocator, api_key);
+                }
             }
         }
     }
@@ -170,6 +176,8 @@ pub fn streamGatewayCompletion(
     errdefer if (generation_id) |owned| alloc.free(owned);
     const provider_failure_detail = if (result.completion.provider_failure_detail) |detail| try alloc.dupe(u8, detail) else null;
     errdefer if (provider_failure_detail) |owned| alloc.free(owned);
+    const provider_state_json = if (result.completion.provider_state_json) |state| try alloc.dupe(u8, state) else null;
+    errdefer if (provider_state_json) |owned| alloc.free(owned);
     const err_body = if (result.err_body) |body| try alloc.dupe(u8, body) else null;
     errdefer if (err_body) |owned| alloc.free(owned);
 
@@ -200,6 +208,7 @@ pub fn streamGatewayCompletion(
             .provider_result_identity_failure = provider_result_identity_failure,
             .provider_failure_detail = provider_failure_detail,
             .provider_failure_metadata = result.completion.provider_failure_metadata,
+            .provider_state_json = provider_state_json,
             .finish_reason = finish_reason,
             .usage = completion_usage,
         },
@@ -220,6 +229,7 @@ fn recordGatewayResultMetric(
 ) void {
     var response_bytes: u64 = 0;
     if (completion.content) |content| response_bytes += content.len;
+    if (completion.provider_state_json) |state| response_bytes += state.len;
     for (completion.tool_calls) |call| {
         response_bytes += call.id.len + call.name.len + call.arguments_json.len;
         if (call.provider_result) |pr| response_bytes += pr.len;
@@ -409,6 +419,7 @@ test "pre-send gateway failure settles usage as unbilled" {
         null,
         null,
         null,
+        null,
         "test/model",
         1,
         "not a valid URL",
@@ -484,8 +495,9 @@ test "direct Responses accounting records terminal usage without reconciliation"
         .{ .stream_fn = Gateway.stream },
         alloc,
         "openai-test-key",
-        null,
         .openai_api_key,
+        null,
+        null,
         null,
         null,
         "gpt-5.4",
@@ -566,8 +578,9 @@ fn directAccountingSnapshotForTest(
         .{ .context = &fixture, .stream_fn = DirectAccountingTestFixture.stream },
         alloc,
         "openai-test-key",
-        null,
         .openai_api_key,
+        null,
+        null,
         null,
         null,
         "gpt-5.4",
@@ -668,6 +681,7 @@ test "possibly sent gateway failure marks billing incomplete" {
         .{ .stream_fn = Gateway.stream },
         alloc,
         "test-key",
+        null,
         null,
         null,
         null,

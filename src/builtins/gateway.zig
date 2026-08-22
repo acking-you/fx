@@ -6,7 +6,7 @@ pub const permission_reviewer = @import("gateway/permission_reviewer.zig");
 
 const api_key_validator_contract = @import("../core/auth/api_key_validator.zig");
 const agent_stream_provider_contract = @import("../core/agent/stream_provider.zig");
-const codex_auth = @import("../core/auth/codex_auth.zig");
+const chatgpt_oauth = @import("../core/auth/chatgpt_oauth.zig");
 const credentials = @import("../core/auth/credentials.zig");
 const oauth_transport = @import("../core/auth/oauth_transport.zig");
 const secret = @import("../core/auth/secret.zig");
@@ -338,7 +338,7 @@ pub fn buildAgentRequest(
                 if (!responses_compaction_binding.credentialMatches(
                     source,
                     credential,
-                    request.credential_account_id,
+                    request.account_id,
                     binding,
                 )) return error.ResponsesCompactionProviderBindingMismatch;
             }
@@ -348,7 +348,7 @@ pub fn buildAgentRequest(
                 alloc,
                 request.credential_source.?,
                 credential,
-                request.credential_account_id,
+                request.account_id,
             );
             routed_request.responses_compaction_binding = owned_provider_binding.?.view();
         } else {
@@ -752,7 +752,7 @@ test "direct Responses request maps Gateway search and omits unknown provider to
 test "Codex Responses request advertises latest web namespace instead of hosted search" {
     const messages = [_]shared_types.ChatMessage{.{ .role = .user, .content = "research Zig" }};
     const body = try agent_stream_provider.build(std.testing.allocator, .{
-        .credential_source = .codex_oauth,
+        .credential_source = .chatgpt_subscription,
         .model = "gpt-5.6-sol",
         .serialized_tools = "[{\"type\":\"provider\",\"id\":\"gateway.perplexity_search\",\"name\":\"perplexity_search\",\"args\":{}}]",
         .messages = &messages,
@@ -779,7 +779,7 @@ test "Codex Responses request advertises latest web namespace instead of hosted 
 test "direct Responses request rejects selected provider-owned schemas" {
     const messages = [_]shared_types.ChatMessage{.{ .role = .user, .content = "question" }};
     try std.testing.expectError(error.DirectProviderToolUnsupported, agent_stream_provider.build(std.testing.allocator, .{
-        .credential_source = .codex_oauth,
+        .credential_source = .chatgpt_subscription,
         .model = "gpt-5.6-sol",
         .serialized_tools = "[]",
         .selected_dynamic_tool_schemas = &.{"{\"type\":\"provider\",\"id\":\"gateway.future\"}"},
@@ -869,6 +869,9 @@ fn streamAgentCompletion(
     alloc: Allocator,
     request: agent_stream_provider_contract.Request,
 ) anyerror!agent_stream_provider_contract.Result {
+    if (request.credential_source == .chatgpt_subscription or request.credential_source == .grok_subscription) {
+        return error.SubscriptionCredentialCannotAuthorizeGateway;
+    }
     const result = gateway_client.streamGatewayCompletion(
         alloc,
         .{
@@ -952,7 +955,7 @@ fn fetchAccountUsage(
     alloc: Allocator,
     input: gateway_provider.AccountUsageLookupInput,
 ) output_contracts.CodexAccountUsageSnapshot {
-    if (input.credential_source != .codex_oauth) {
+    if (input.credential_source != .chatgpt_subscription) {
         return codexAccountUsageFailure(.unsupported_credential_source, null);
     }
     const access_token = input.credential orelse
@@ -995,7 +998,7 @@ const AccountUsageRetryDependencies = struct {
         ?*anyopaque,
         Allocator,
         AccountUsageCredentialRetryMode,
-    ) anyerror!?codex_auth.Loaded = loadCodexAuthForUsageRetry,
+    ) anyerror!?chatgpt_oauth.Access = loadCodexAuthForUsageRetry,
 };
 
 const AccountUsageCredentialRetryMode = enum {
@@ -1051,10 +1054,10 @@ fn loadCodexAuthForUsageRetry(
     _: ?*anyopaque,
     alloc: Allocator,
     mode: AccountUsageCredentialRetryMode,
-) !?codex_auth.Loaded {
+) !?chatgpt_oauth.Access {
     return switch (mode) {
-        .reload => codex_auth.loadStored(alloc, .{}),
-        .force_refresh => codex_auth.refresh(alloc, oauth_transport_provider, .{}),
+        .reload => chatgpt_oauth.loadAccess(alloc, oauth_transport_provider, .stored),
+        .force_refresh => chatgpt_oauth.loadAccess(alloc, oauth_transport_provider, .force),
     };
 }
 
@@ -1190,7 +1193,7 @@ test "account usage provider rejects unbound and non-Codex credentials before tr
     var missing_account = fetchAccountUsage(null, std.testing.allocator, .{
         .credential = "access",
         .account_id = null,
-        .credential_source = .codex_oauth,
+        .credential_source = .chatgpt_subscription,
     });
     defer missing_account.deinit(std.testing.allocator);
     try std.testing.expectEqual(
@@ -1245,7 +1248,7 @@ test "account usage provider refreshes once and retries the complete pair for th
             raw: ?*anyopaque,
             alloc: Allocator,
             mode: AccountUsageCredentialRetryMode,
-        ) !?codex_auth.Loaded {
+        ) !?chatgpt_oauth.Access {
             const self: *@This() = @ptrCast(@alignCast(raw.?));
             self.refresh_calls += 1;
             self.saw_force_refresh = mode == .force_refresh;
@@ -1254,9 +1257,7 @@ test "account usage provider refreshes once and retries the complete pair for th
             return .{
                 .access_token = access_token,
                 .account_id = try alloc.dupe(u8, self.refresh_account),
-                .fedramp = false,
-                .refresh_after_ms = null,
-                .refreshable = true,
+                .refresh_after_ms = 0,
             };
         }
     };
@@ -1309,7 +1310,7 @@ test "account usage provider rejects a cross-account refresh without retrying" {
             raw: ?*anyopaque,
             alloc: Allocator,
             mode: AccountUsageCredentialRetryMode,
-        ) !?codex_auth.Loaded {
+        ) !?chatgpt_oauth.Access {
             const self: *@This() = @ptrCast(@alignCast(raw.?));
             self.refresh_calls += 1;
             try std.testing.expectEqual(AccountUsageCredentialRetryMode.force_refresh, mode);
@@ -1318,9 +1319,7 @@ test "account usage provider rejects a cross-account refresh without retrying" {
             return .{
                 .access_token = access_token,
                 .account_id = try alloc.dupe(u8, "other-account"),
-                .fedramp = true,
-                .refresh_after_ms = null,
-                .refreshable = true,
+                .refresh_after_ms = 0,
             };
         }
     };
@@ -1374,7 +1373,7 @@ test "account usage provider reloads a concurrently replaced same-account creden
             raw: ?*anyopaque,
             alloc: Allocator,
             mode: AccountUsageCredentialRetryMode,
-        ) !?codex_auth.Loaded {
+        ) !?chatgpt_oauth.Access {
             const self: *@This() = @ptrCast(@alignCast(raw.?));
             self.load_calls += 1;
             self.saw_reload = mode == .reload;
@@ -1383,9 +1382,7 @@ test "account usage provider reloads a concurrently replaced same-account creden
             return .{
                 .access_token = access_token,
                 .account_id = try alloc.dupe(u8, "account"),
-                .fedramp = false,
-                .refresh_after_ms = null,
-                .refreshable = true,
+                .refresh_after_ms = 0,
             };
         }
     };
@@ -1545,7 +1542,12 @@ const OAuthHttpOperation = struct {
                 },
                 .user_agent = .{ .override = gateway_client.user_agent },
                 .accept_encoding = .omit,
+                .authorization = if (self.request.authorization) |value|
+                    .{ .override = value }
+                else
+                    .default,
             },
+            .redirect_behavior = .unhandled,
             .response_writer = &response_writer,
         }) catch |err| switch (err) {
             error.WriteFailed => return error.OAuthResponseTooLarge,
@@ -1616,7 +1618,7 @@ fn resolvePreferredWebSearchBackends(
     _: ?*anyopaque,
     inputs: web_search_provider.Inputs,
 ) !?[]const web_search_contract.SearchBackendId {
-    if (inputs.credential_source == .codex_oauth) return &codex_search_backend;
+    if (inputs.credential_source == .chatgpt_subscription) return &codex_search_backend;
     return preferredWebSearchBackendsOverride(io_mod.getenv("FX_WEB_SEARCH_BACKEND"));
 }
 
@@ -1637,7 +1639,7 @@ fn executeWebSearchProvider(
             progress_ctx,
         );
     }
-    if (inputs.credential_source == .codex_oauth) {
+    if (inputs.credential_source == .chatgpt_subscription) {
         return error.InvalidWebSearchBackend;
     }
     return executeGatewayWorker(alloc, .{
@@ -1658,9 +1660,9 @@ fn executeCodexStandaloneSearch(
     on_progress: ?ProgressFn,
     progress_ctx: ?*anyopaque,
 ) !Response {
-    if (inputs.credential_source != .codex_oauth) return error.InvalidWebSearchBackend;
+    if (inputs.credential_source != .chatgpt_subscription) return error.InvalidWebSearchBackend;
     if (inputs.api_key.len == 0) return error.MissingGatewaySearchConfiguration;
-    const account_id = inputs.credential_account_id orelse
+    const account_id = inputs.account_id orelse
         return error.CodexCredentialChanged;
     if (request.cancel_flag.load(.seq_cst)) return error.Cancelled;
     if (on_progress) |progress| progress(
@@ -2884,7 +2886,7 @@ test "built-in credits provider names the team query only when valid" {
 }
 
 test "direct provider credentials are never sent to the Vercel credits endpoint" {
-    for ([_]shared_types.CredentialSource{ .openai_api_key, .codex_oauth }) |source| {
+    for ([_]shared_types.CredentialSource{ .openai_api_key, .chatgpt_subscription }) |source| {
         var snapshot = fetchCredits(null, std.testing.allocator, .{
             .credential = "must-not-leave-process",
             .tenant = "must-not-cross-provider-boundary",
@@ -3037,7 +3039,7 @@ test "model catalog request plan keeps direct credentials off the Vercel route" 
 
     var codex = try prepareModelCatalogRequest(
         alloc,
-        credentials.catalogAccessForCredential(.codex_oauth, "codex-secret", "team_must_not_cross"),
+        credentials.catalogAccessForCredential(.chatgpt_subscription, "codex-secret", "team_must_not_cross"),
         models_path,
         "http://127.0.0.1:43123",
         .{ .codex_base_url = "https://codex-proxy.example/backend-api/codex" },
@@ -3116,8 +3118,8 @@ test "built-in gateway web search override selects one backend and rejects unkno
 test "Codex web search selects standalone backend and projects legacy filters" {
     const selected = (try resolvePreferredWebSearchBackends(null, .{
         .api_key = "access",
-        .credential_source = .codex_oauth,
-        .credential_account_id = "acct",
+        .credential_source = .chatgpt_subscription,
+        .account_id = "acct",
         .worker_model = "gpt-5.6-sol",
         .gateway_retry_count = 1,
         .gateway_chat_url = default_chat_url,
@@ -3267,10 +3269,15 @@ fn fetchCatalogForProvider(
         input.access,
         input.endpoint,
         input.cancel_flag,
-    ) catch |err| return .{ .failure = catalogRequestFailure(err) };
+    ) catch |err| {
+        if (err == error.OutOfMemory) return error.OutOfMemory;
+        return .{ .failure = catalogRequestFailure(err) };
+    };
     const json_text = switch (response) {
         .success => |body| body,
-        .http_status => |status| return .{ .failure = model_catalog.failureForHttpStatus(status) },
+        .http_status => |status| return .{
+            .failure = model_catalog.failureForHttpStatus(status),
+        },
     };
     defer alloc.free(json_text);
 
