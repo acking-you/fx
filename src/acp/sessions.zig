@@ -13,6 +13,7 @@ const js_host_session_store = @import("../core/session/js_host_session_store.zig
 const session_runtime = @import("../core/session/session.zig");
 const mcp_runtime = @import("../core/mcp/mcp_runtime.zig");
 const model_catalog = @import("../core/gateway/model_catalog.zig");
+const model_capabilities = @import("../core/config/model_capabilities.zig");
 const host = @import("../core/hosts/host.zig");
 const host_target = @import("../core/hosts/target.zig");
 const credentials = @import("../core/auth/credentials.zig");
@@ -261,6 +262,11 @@ fn writeNewSessionResponse(
         state.active_session.?.model,
         state.capability_resolver.catalogEntries(),
     );
+    try out.writer.writeAll(",");
+    const active_capabilities = state.capability_resolver.available(state.active_session.?.model);
+    try writeEffortConfigOption(&out.writer, state.active_session.?.effort, active_capabilities);
+    try out.writer.writeAll(",");
+    try writeFastModeConfigOption(&out.writer, state.active_session.?.fast_mode, active_capabilities.supports_fast_mode);
     try out.writer.writeAll(",");
     try writeModeConfigOption(
         &out.writer,
@@ -551,7 +557,7 @@ fn handleRestoreSession(
     const sid_copy = try alloc.dupe(u8, writable.state.id);
     var sid_owned = true;
     defer if (sid_owned) alloc.free(sid_copy);
-    const effective_provider = if (state.process_model_override)
+    const effective_provider = if (state.process_provider_override)
         state.provider
     else
         writable.state.preferences.provider;
@@ -704,6 +710,12 @@ fn writeLoadSessionResponse(
         model,
         state.capability_resolver.catalogEntries(),
     );
+    try out.writer.writeAll(",");
+    const active = &state.active_session.?;
+    const active_capabilities = state.capability_resolver.available(model);
+    try writeEffortConfigOption(&out.writer, active.effort, active_capabilities);
+    try out.writer.writeAll(",");
+    try writeFastModeConfigOption(&out.writer, active.fast_mode, active_capabilities.supports_fast_mode);
     try out.writer.writeAll(",");
     try writeModeConfigOption(
         &out.writer,
@@ -1027,6 +1039,7 @@ fn buildSlashCommandsJson(alloc: Allocator) ![]u8 {
         .{ .name = "help", .description = "Show available commands", .hint = null },
         .{ .name = "status", .description = "Show current status", .hint = null },
         .{ .name = "model", .description = "Switch model", .hint = "model name" },
+        .{ .name = "effort", .description = "Show or set reasoning effort", .hint = "auto or supported level" },
         .{ .name = "permissions", .description = "Show permission settings", .hint = null },
         .{ .name = "allowlist", .description = "Manage persistent allow rules", .hint = "add command \"git *\"" },
         .{ .name = "rules", .description = "Show active rules", .hint = null },
@@ -1100,6 +1113,40 @@ pub fn writeModelConfigOption(
         try w.writeAll(",\"name\":");
         try writeJsonStr(current, w);
         try w.writeAll("}");
+    }
+    try w.writeAll("]}");
+}
+
+pub fn writeEffortConfigOption(
+    w: *std.Io.Writer,
+    current: types.ReasoningEffort,
+    capabilities: model_capabilities.Capabilities,
+) !void {
+    const effective_current = if (model_capabilities.reasoningEffortSupported(capabilities, current)) current else types.ReasoningEffort.auto;
+    try w.writeAll("{\"id\":\"effort\",\"name\":\"Reasoning Effort\",\"description\":\"Controls how deeply the selected model reasons\",\"category\":\"model\",\"type\":\"select\",\"currentValue\":");
+    try writeJsonStr(effective_current.label(), w);
+    try w.writeAll(",\"options\":[{\"value\":\"auto\",\"name\":\"Default\"}");
+    for (capabilities.reasoning_efforts.slice()) |effort| {
+        if (effort.isDefault()) continue;
+        try w.writeAll(",{\"value\":");
+        try writeJsonStr(effort.label(), w);
+        try w.writeAll(",\"name\":");
+        try writeJsonStr(effort.displayLabel(), w);
+        try w.writeAll("}");
+    }
+    try w.writeAll("]}");
+}
+
+pub fn writeFastModeConfigOption(
+    w: *std.Io.Writer,
+    current: bool,
+    supports_fast_mode: bool,
+) !void {
+    try w.writeAll("{\"id\":\"fast_mode\",\"name\":\"Fast Mode\",\"description\":\"Uses the provider's lower-latency service tier when supported\",\"category\":\"model\",\"type\":\"select\",\"currentValue\":");
+    try writeJsonStr(if (current and supports_fast_mode) "fast" else "normal", w);
+    try w.writeAll(",\"options\":[{\"value\":\"normal\",\"name\":\"Normal\"}");
+    if (supports_fast_mode) {
+        try w.writeAll(",{\"value\":\"fast\",\"name\":\"Fast\"}");
     }
     try w.writeAll("]}");
 }
@@ -1180,10 +1227,10 @@ test "buildSlashCommandsJson includes all expected commands" {
     defer alloc.free(json);
 
     const expected_commands = [_][]const u8{
-        "compact",   "undo",  "changes",  "review",  "clear",
-        "reset",     "help",  "status",   "model",   "permissions",
-        "allowlist", "rules", "settings", "credits", "mcp",
-        "skills",    "fast",
+        "compact",     "undo",      "changes", "review",   "clear",
+        "reset",       "help",      "status",  "model",    "effort",
+        "permissions", "allowlist", "rules",   "settings", "credits",
+        "mcp",         "skills",    "fast",
     };
     for (expected_commands) |cmd| {
         try std.testing.expect(std.mem.find(u8, json, cmd) != null);
@@ -1196,6 +1243,7 @@ test "buildSlashCommandsJson includes input hint for model" {
     const json = try buildSlashCommandsJson(alloc);
     defer alloc.free(json);
     try std.testing.expect(std.mem.find(u8, json, "\"input\":{\"hint\":\"model name\"}") != null);
+    try std.testing.expect(std.mem.find(u8, json, "\"input\":{\"hint\":\"auto or supported level\"}") != null);
 }
 
 test "formatIso8601 produces known timestamp" {
@@ -1247,6 +1295,33 @@ test "writeModelConfigOption appends current model when not in cached list" {
     try std.testing.expect(std.mem.find(u8, items, "\"currentValue\":\"custom/my-model\"") != null);
     try std.testing.expect(std.mem.find(u8, items, "anthropic/claude-opus-4.6") != null);
     try std.testing.expect(std.mem.find(u8, items, "custom/my-model") != null);
+}
+
+test "writeEffortConfigOption advertises default and provider-supported values" {
+    const efforts = [_]types.ReasoningEffort{
+        types.ReasoningEffort.literal("low"),
+        types.ReasoningEffort.literal("high"),
+    };
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try writeEffortConfigOption(
+        &out.writer,
+        types.ReasoningEffort.literal("high"),
+        .{ .reasoning_efforts = .fromSlice(&efforts) },
+    );
+    const json = out.writer.buffered();
+    try std.testing.expect(std.mem.find(u8, json, "\"currentValue\":\"high\"") != null);
+    try std.testing.expect(std.mem.find(u8, json, "\"value\":\"auto\"") != null);
+    try std.testing.expect(std.mem.find(u8, json, "\"value\":\"low\"") != null);
+}
+
+test "writeFastModeConfigOption hides unsupported Fast selection" {
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try writeFastModeConfigOption(&out.writer, true, false);
+    const json = out.writer.buffered();
+    try std.testing.expect(std.mem.find(u8, json, "\"currentValue\":\"normal\"") != null);
+    try std.testing.expect(std.mem.find(u8, json, "\"value\":\"fast\"") == null);
 }
 
 test "writeModeConfigOption produces valid json with all modes" {

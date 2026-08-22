@@ -16,6 +16,7 @@ const builtin_tools = @import("../builtins/tools.zig");
 const credentials = @import("../core/auth/credentials.zig");
 const secret = @import("../core/auth/secret.zig");
 const auth_runtime = @import("../core/auth/auth_runtime.zig");
+const model_capabilities = @import("../core/config/model_capabilities.zig");
 const model_provider = @import("../core/config/model_provider.zig");
 const debug_trace = @import("../core/shared/debug_trace.zig");
 const gateway_provider = @import("../core/gateway/gateway_provider.zig");
@@ -222,6 +223,7 @@ pub const ServerState = struct {
     selected_model: []u8 = &.{},
     provider: model_provider.ProviderId = .gateway,
     configured_model: []u8 = &.{},
+    process_provider_override: bool = false,
     process_model_override: bool = false,
     permission_mode: types.PermissionMode = .ask,
     permission_rules: types.PermissionRuleSet = .{},
@@ -342,8 +344,8 @@ pub fn selectCredentialForProvider(
 
     var credential = if (provider == .gateway and state.cfg.credential_override != null)
         credentials.Credential{
-            .token = try state.alloc.dupe(u8, state.cfg.credential_override.?),
-            .source = .ai_gateway_api_key,
+            .token = try state.alloc.dupe(u8, state.cfg.credential_override.?.token),
+            .source = state.cfg.credential_override.?.source,
         }
     else blk: {
         const resolution = try credentials.resolveForProvider(
@@ -1347,7 +1349,8 @@ fn handleInitialize(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message
         state.selected_model = startup.takeSelectedModel();
         state.process_model_override = startup.model_source == .process_override;
     }
-    state.provider = startup.provider;
+    state.provider = state.cfg.provider_override orelse startup.provider;
+    state.process_provider_override = state.cfg.provider_override != null;
     state.configured_model = try alloc.dupe(u8, startup.configured_model);
 
     var startup_credential = startup.takeCredential();
@@ -1360,8 +1363,8 @@ fn handleInitialize(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message
         false;
     const credential: *credentials.Credential = if (state.provider == .gateway and state.cfg.credential_override != null) override: {
         routed_credential = .{
-            .token = try alloc.dupe(u8, state.cfg.credential_override.?),
-            .source = .ai_gateway_api_key,
+            .token = try alloc.dupe(u8, state.cfg.credential_override.?.token),
+            .source = state.cfg.credential_override.?.source,
         };
         break :override &routed_credential.?;
     } else if (startup_matches_model)
@@ -1544,11 +1547,12 @@ fn handleSetConfigOption(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Me
         return state.writer.writeError(alloc, msg.id, .{ .code = ErrorCode.invalid_params, .message = "Missing value" });
     };
 
+    const session = if (state.active_session) |*active| active else return state.writer.writeError(alloc, msg.id, .{
+        .code = ErrorCode.invalid_request,
+        .message = "No active session",
+    });
+
     if (std.mem.eql(u8, config_id, "model")) {
-        const session = if (state.active_session) |*active| active else return state.writer.writeError(alloc, msg.id, .{
-            .code = ErrorCode.invalid_request,
-            .message = "No active session",
-        });
         session_codec.validateModelPreference(value) catch
             return state.writer.writeError(alloc, msg.id, .{
                 .code = ErrorCode.invalid_params,
@@ -1582,58 +1586,33 @@ fn handleSetConfigOption(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Me
                 }
             }
         }
+        const controls = normalizeModelControls(
+            session.effort,
+            session.fast_mode,
+            state.capability_resolver.available(value),
+        );
         if (host_target.is_wasm and session.writable == null) {
-            const next_model = alloc.dupe(u8, value) catch
-                return state.writer.writeError(alloc, msg.id, .{
-                    .code = ErrorCode.internal_error,
-                    .message = "Failed to update session model",
-                });
-            const previous_model = session.model;
-            session.model = next_model;
-            sessions.commitWasmSession(alloc, session) catch {
-                session.model = previous_model;
-                alloc.free(next_model);
-                return state.writer.writeError(alloc, msg.id, .{
-                    .code = ErrorCode.internal_error,
-                    .message = "Failed to persist session model",
-                });
-            };
-            alloc.free(previous_model);
-        } else commitActiveSessionModel(
+            commitWasmSessionPreferences(alloc, session, .{
+                .model = value,
+                .effort = controls.effort,
+                .fast_mode = controls.fast_mode,
+            }) catch return writeConfigPersistenceError(state, alloc, msg);
+        } else commitActiveSessionPreferences(
             alloc,
             session,
-            value,
+            .{
+                .model = value,
+                .effort = controls.effort,
+                .fast_mode = controls.fast_mode,
+            },
             session_test_controls.logOptions(),
-        ) catch |err| {
-            if (modelCommitFailureTerminatesConnection(err)) {
-                try state.writer.writeError(alloc, msg.id, .{
-                    .code = ErrorCode.internal_error,
-                    .message = "Failed to persist session model",
-                });
-                state.terminate_connection = true;
-                return;
-            }
-            return state.writer.writeError(alloc, msg.id, .{
-                .code = if (err == error.InvalidDurableField)
-                    ErrorCode.invalid_params
-                else
-                    ErrorCode.internal_error,
-                .message = if (err == error.InvalidDurableField)
-                    "Invalid session model"
-                else
-                    "Failed to persist session model",
-            });
-        };
+        ) catch |err| return writeConfigCommitError(state, alloc, msg, err, "Invalid session model");
     } else if (std.mem.eql(u8, config_id, "provider")) {
         const target = model_provider.parse(value) orelse
             return state.writer.writeError(alloc, msg.id, .{
                 .code = ErrorCode.invalid_params,
                 .message = "Invalid provider",
             });
-        const session = if (state.active_session) |*active| active else return state.writer.writeError(alloc, msg.id, .{
-            .code = ErrorCode.invalid_request,
-            .message = "No active session",
-        });
         if (target != session.provider) {
             if (host_target.is_wasm) {
                 return state.writer.writeError(alloc, msg.id, .{
@@ -1643,8 +1622,8 @@ fn handleSetConfigOption(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Me
             }
             var staged_credential = if (target == .gateway and state.cfg.credential_override != null)
                 credentials.Credential{
-                    .token = try alloc.dupe(u8, state.cfg.credential_override.?),
-                    .source = .ai_gateway_api_key,
+                    .token = try alloc.dupe(u8, state.cfg.credential_override.?.token),
+                    .source = state.cfg.credential_override.?.source,
                 }
             else credential: {
                 const resolution = try credentials.resolveForProvider(
@@ -1741,16 +1720,67 @@ fn handleSetConfigOption(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Me
             state.capability_resolver.adoptOwnedCatalog(alloc, &catalog);
             adoptServerCredential(state, &staged_credential);
         }
-    } else if (std.mem.eql(u8, config_id, "mode")) {
-        if (state.active_session) |*session| {
-            state.subagent_authority_mutex.lockUncancelable(io_mod.getIo());
-            defer state.subagent_authority_mutex.unlock(io_mod.getIo());
-            applySessionMode(state.cfg.mode_registry, session, value);
+    } else if (std.mem.eql(u8, config_id, "effort")) {
+        const effort = parseEffortConfig(value) orelse
+            return state.writer.writeError(alloc, msg.id, .{
+                .code = ErrorCode.invalid_params,
+                .message = "Invalid reasoning effort",
+            });
+        if (!model_capabilities.reasoningEffortSupported(
+            state.capability_resolver.available(session.model),
+            effort,
+        )) return state.writer.writeError(alloc, msg.id, .{
+            .code = ErrorCode.invalid_params,
+            .message = "Reasoning effort is not supported by the selected model",
+        });
+        if (host_target.is_wasm and session.writable == null) {
+            commitWasmSessionPreferences(alloc, session, .{ .effort = effort }) catch
+                return writeConfigPersistenceError(state, alloc, msg);
+        } else commitActiveSessionPreferences(
+            alloc,
+            session,
+            .{ .effort = effort },
+            session_test_controls.logOptions(),
+        ) catch |err| return writeConfigCommitError(state, alloc, msg, err, "Invalid reasoning effort");
+    } else if (std.mem.eql(u8, config_id, "fast_mode")) {
+        const fast_mode = parseFastModeConfig(value) orelse
+            return state.writer.writeError(alloc, msg.id, .{
+                .code = ErrorCode.invalid_params,
+                .message = "Invalid Fast mode",
+            });
+        if (fast_mode and !state.capability_resolver.available(session.model).supports_fast_mode) {
+            return state.writer.writeError(alloc, msg.id, .{
+                .code = ErrorCode.invalid_params,
+                .message = "Fast mode is not supported by the selected model",
+            });
         }
+        if (host_target.is_wasm and session.writable == null) {
+            commitWasmSessionPreferences(alloc, session, .{ .fast_mode = fast_mode }) catch
+                return writeConfigPersistenceError(state, alloc, msg);
+        } else commitActiveSessionPreferences(
+            alloc,
+            session,
+            .{ .fast_mode = fast_mode },
+            session_test_controls.logOptions(),
+        ) catch |err| return writeConfigCommitError(state, alloc, msg, err, "Invalid Fast mode");
+    } else if (std.mem.eql(u8, config_id, "mode")) {
+        if (state.cfg.mode_registry.lookup(value) == null) return state.writer.writeError(alloc, msg.id, .{
+            .code = ErrorCode.invalid_params,
+            .message = "Invalid session mode",
+        });
+        state.subagent_authority_mutex.lockUncancelable(io_mod.getIo());
+        defer state.subagent_authority_mutex.unlock(io_mod.getIo());
+        applySessionMode(state.cfg.mode_registry, session, value);
+    } else {
+        return state.writer.writeError(alloc, msg.id, .{
+            .code = ErrorCode.invalid_params,
+            .message = "Unknown configId",
+        });
     }
 
-    const current_model = if (state.active_session) |s| s.model else state.selected_model;
-    const current_mode: []const u8 = if (state.active_session) |s| s.mode else state.cfg.mode_registry.default_mode_id;
+    const current_model = session.model;
+    const current_mode = session.mode;
+    const current_capabilities = state.capability_resolver.available(current_model);
 
     var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();
@@ -1758,7 +1788,7 @@ fn handleSetConfigOption(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Me
     if (comptime !host_target.is_wasm) {
         try sessions.writeProviderConfigOption(
             &out.writer,
-            if (state.active_session) |session| session.provider else state.provider,
+            session.provider,
         );
         try out.writer.writeAll(",");
     }
@@ -1768,9 +1798,97 @@ fn handleSetConfigOption(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Me
         state.capability_resolver.catalogEntries(),
     );
     try out.writer.writeAll(",");
+    try sessions.writeEffortConfigOption(&out.writer, session.effort, current_capabilities);
+    try out.writer.writeAll(",");
+    try sessions.writeFastModeConfigOption(&out.writer, session.fast_mode, current_capabilities.supports_fast_mode);
+    try out.writer.writeAll(",");
     try sessions.writeModeConfigOption(&out.writer, state.cfg.mode_registry, current_mode);
     try out.writer.writeAll("]}");
     try state.writer.writeResponse(alloc, msg.id, out.writer.buffered());
+}
+
+const SessionPreferenceUpdate = struct {
+    model: ?[]const u8 = null,
+    effort: ?types.ReasoningEffort = null,
+    fast_mode: ?bool = null,
+};
+
+const ModelControls = struct {
+    effort: types.ReasoningEffort,
+    fast_mode: bool,
+};
+
+fn normalizeModelControls(
+    effort: types.ReasoningEffort,
+    fast_mode: bool,
+    capabilities: model_capabilities.Capabilities,
+) ModelControls {
+    return .{
+        .effort = if (model_capabilities.reasoningEffortSupported(capabilities, effort)) effort else .auto,
+        .fast_mode = fast_mode and capabilities.supports_fast_mode,
+    };
+}
+
+fn parseFastModeConfig(value: []const u8) ?bool {
+    if (std.mem.eql(u8, value, "normal")) return false;
+    if (std.mem.eql(u8, value, "fast")) return true;
+    return null;
+}
+
+fn parseEffortConfig(value: []const u8) ?types.ReasoningEffort {
+    if (std.mem.eql(u8, value, "auto")) return .auto;
+    const effort = types.ReasoningEffort.parse(value) orelse return null;
+    return if (effort.isDefault()) null else effort;
+}
+
+fn commitWasmSessionPreferences(
+    alloc: Allocator,
+    session: *ActiveSessionState,
+    update: SessionPreferenceUpdate,
+) !void {
+    const next_model = if (update.model) |model| try alloc.dupe(u8, model) else null;
+    errdefer if (next_model) |model| alloc.free(model);
+    const previous_model = session.model;
+    const previous_effort = session.effort;
+    const previous_fast_mode = session.fast_mode;
+    if (next_model) |model| session.model = model;
+    if (update.effort) |effort| session.effort = effort;
+    if (update.fast_mode) |fast_mode| session.fast_mode = fast_mode;
+    sessions.commitWasmSession(alloc, session) catch |err| {
+        session.model = previous_model;
+        session.effort = previous_effort;
+        session.fast_mode = previous_fast_mode;
+        return err;
+    };
+    if (next_model != null) alloc.free(previous_model);
+}
+
+fn writeConfigPersistenceError(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message) !void {
+    return state.writer.writeError(alloc, msg.id, .{
+        .code = ErrorCode.internal_error,
+        .message = "Failed to persist session configuration",
+    });
+}
+
+fn writeConfigCommitError(
+    state: *ServerState,
+    alloc: Allocator,
+    msg: *jsonrpc.Message,
+    err: anyerror,
+    invalid_message: []const u8,
+) !void {
+    if (modelCommitFailureTerminatesConnection(err)) {
+        try state.writer.writeError(alloc, msg.id, .{
+            .code = ErrorCode.internal_error,
+            .message = "Failed to persist session configuration",
+        });
+        state.terminate_connection = true;
+        return;
+    }
+    return state.writer.writeError(alloc, msg.id, .{
+        .code = if (err == error.InvalidDurableField) ErrorCode.invalid_params else ErrorCode.internal_error,
+        .message = if (err == error.InvalidDurableField) invalid_message else "Failed to persist session configuration",
+    });
 }
 
 fn commitActiveSessionProvider(
@@ -1824,6 +1942,21 @@ fn commitActiveSessionModel(
     );
 }
 
+fn commitActiveSessionPreferences(
+    alloc: Allocator,
+    session: *ActiveSessionState,
+    update: SessionPreferenceUpdate,
+    options: session_log.Options,
+) !void {
+    session.session_write_mutex.lockUncancelable(io_mod.getIo());
+    defer session.session_write_mutex.unlock(io_mod.getIo());
+    const writable = if (session.writable) |*active|
+        active
+    else
+        return error.SessionPersistenceUnavailable;
+    try commitSessionPreferences(alloc, writable, session, update, options);
+}
+
 fn commitSessionModel(
     alloc: Allocator,
     writable: *session_store.LoadedWritableSession,
@@ -1842,6 +1975,35 @@ fn commitSessionModel(
     );
     alloc.free(active_model.*);
     active_model.* = staged_model;
+}
+
+fn commitSessionPreferences(
+    alloc: Allocator,
+    writable: *session_store.LoadedWritableSession,
+    active: *ActiveSessionState,
+    update: SessionPreferenceUpdate,
+    options: session_log.Options,
+) !void {
+    if (update.model == null and update.effort == null and update.fast_mode == null) return;
+    const staged_model = if (update.model) |model| try alloc.dupe(u8, model) else null;
+    errdefer if (staged_model) |model| alloc.free(model);
+    _ = try writable.appendEvent(
+        alloc,
+        .{ .preferences_changed = .{
+            .model = if (update.model) |model| @constCast(model) else null,
+            .effort = update.effort,
+            .fast_mode = update.fast_mode,
+        } },
+        io_mod.milliTimestamp(),
+        .rollback_before_adapter_continue,
+        options,
+    );
+    if (staged_model) |model| {
+        alloc.free(active.model);
+        active.model = model;
+    }
+    if (update.effort) |effort| active.effort = effort;
+    if (update.fast_mode) |fast_mode| active.fast_mode = fast_mode;
 }
 
 fn modelCommitFailureTerminatesConnection(err: anyerror) bool {
@@ -2377,6 +2539,92 @@ test "ACP model commit rolls back before later request can succeed" {
         "accepted-model",
         writable.state.preferences.model,
     );
+}
+
+test "ACP effort and Fast preferences commit atomically with the model" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io_mod.getIo(), "home");
+    try tmp.dir.createDirPath(io_mod.getIo(), "workspace");
+    const home = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "home");
+    defer alloc.free(home);
+    const workspace = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "workspace");
+    defer alloc.free(workspace);
+
+    var store = try session_store.Store.initFromHome(alloc, home, workspace);
+    defer store.deinit(alloc);
+    var state = try acpModelTestState(alloc, "acp-controls-atomic", workspace);
+    defer state.deinit(alloc);
+    var writable = try store.startWritableSession(alloc, state);
+    defer writable.deinit(alloc);
+    var active: ActiveSessionState = undefined;
+    active.model = try alloc.dupe(u8, "old-model");
+    defer alloc.free(active.model);
+    active.effort = .auto;
+    active.fast_mode = false;
+
+    var failing = std.testing.FailingAllocator.init(alloc, .{ .fail_index = 0 });
+    try std.testing.expectError(
+        error.OutOfMemory,
+        commitSessionPreferences(
+            failing.allocator(),
+            &writable,
+            &active,
+            .{
+                .model = "oom-model",
+                .effort = types.ReasoningEffort.literal("high"),
+                .fast_mode = true,
+            },
+            .{},
+        ),
+    );
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expectEqualStrings("old-model", active.model);
+    try std.testing.expect(active.effort.isDefault());
+    try std.testing.expect(!active.fast_mode);
+    try std.testing.expectEqualStrings("old-model", writable.state.preferences.model);
+
+    var failure = AcpModelBoundaryFailure{ .target = .after_event_sync };
+    try std.testing.expectError(
+        error.SessionPersistenceDegraded,
+        commitSessionPreferences(
+            alloc,
+            &writable,
+            &active,
+            .{
+                .model = "rejected-model",
+                .effort = types.ReasoningEffort.literal("high"),
+                .fast_mode = true,
+            },
+            failure.options(),
+        ),
+    );
+    try std.testing.expectEqualStrings("old-model", active.model);
+    try std.testing.expect(active.effort.isDefault());
+    try std.testing.expect(!active.fast_mode);
+    try std.testing.expectEqualStrings("old-model", writable.state.preferences.model);
+    try std.testing.expect(writable.state.preferences.effort.isDefault());
+    try std.testing.expect(!writable.state.preferences.fast_mode);
+    try std.testing.expect(writable.degradedTail() == null);
+
+    try commitSessionPreferences(
+        alloc,
+        &writable,
+        &active,
+        .{
+            .model = "accepted-model",
+            .effort = types.ReasoningEffort.literal("high"),
+            .fast_mode = true,
+        },
+        .{},
+    );
+    try std.testing.expectEqualStrings("accepted-model", active.model);
+    try std.testing.expect(active.effort.eql(types.ReasoningEffort.literal("high")));
+    try std.testing.expect(active.fast_mode);
+    try std.testing.expectEqualStrings("accepted-model", writable.state.preferences.model);
+    try std.testing.expect(writable.state.preferences.effort.eql(types.ReasoningEffort.literal("high")));
+    try std.testing.expect(writable.state.preferences.fast_mode);
 }
 
 test "ACP indeterminate model commit leaves staged runtime value unapplied" {

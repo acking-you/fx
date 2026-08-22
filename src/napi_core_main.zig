@@ -480,6 +480,7 @@ const Runtime = struct {
                 .max_history_turns = 100,
                 .context_registry = .{ .default_provider = builtin_context.provider },
                 .mode_registry = builtin_modes.registry,
+                .provider_override = .gateway,
                 .credential_override = .{
                     .token = self.credential,
                     .source = self.credential_source,
