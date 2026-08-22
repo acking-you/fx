@@ -194,6 +194,9 @@ pub const ProviderInput = struct {
     credential_source: ?types.CredentialSource = null,
     account_id: ?[]const u8 = null,
     tenant: ?[]const u8 = null,
+    /// Stable parent conversation identity used to scope provider prompt
+    /// caching for repeated automatic reviews.
+    session_id: ?[]const u8 = null,
     endpoint: []const u8 = "",
     cancel_flag: ?*std.atomic.Value(bool) = null,
     usage: ?*session_usage.Usage = null,
@@ -938,6 +941,7 @@ test "automatic reviewer classifier routes through the registered provider" {
             const self: *@This() = @ptrCast(@alignCast(raw_ctx orelse return error.MissingProviderContext));
             self.saw_input = std.mem.eql(u8, input.credential, "test-key") and
                 std.mem.eql(u8, input.tenant orelse "", "team_1") and
+                std.mem.eql(u8, input.session_id orelse "", "session-1") and
                 std.mem.eql(u8, input.endpoint, "https://example.test/chat") and
                 std.mem.eql(u8, request.workspace_root, "/tmp/workspace");
             return .invalid;
@@ -951,6 +955,7 @@ test "automatic reviewer classifier routes through the registered provider" {
     }, .{
         .credential = "test-key",
         .tenant = "team_1",
+        .session_id = "session-1",
         .endpoint = "https://example.test/chat",
     });
     const outcome = try classifier.review(std.testing.allocator, .{

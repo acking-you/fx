@@ -12,6 +12,7 @@ const types = @import("../../core/shared/types.zig");
 const Allocator = std.mem.Allocator;
 
 const single_transport_attempt: usize = 1;
+const guardian_prompt_cache_key_prefix = "guardian:";
 
 const StreamFn = *const fn (
     *anyopaque,
@@ -34,6 +35,7 @@ const GatewayConfig = struct {
     api_key: []const u8,
     team: ?[]const u8 = null,
     credential_source: ?types.CredentialSource = null,
+    session_id: ?[]const u8 = null,
     chat_url: []const u8,
     cancel_flag: ?*std.atomic.Value(bool) = null,
     usage: ?*session_usage.Usage = null,
@@ -54,6 +56,7 @@ fn reviewGateway(
         .api_key = input.credential,
         .team = input.tenant,
         .credential_source = input.credential_source,
+        .session_id = input.session_id,
         .chat_url = input.endpoint,
         .cancel_flag = input.cancel_flag,
         .usage = input.usage,
@@ -119,6 +122,16 @@ fn buildProviderReviewPayload(
     }
     expanded[expanded.len - 1] = messages[messages.len - 1];
 
+    const prompt_cache_key = if (config.session_id) |session_id|
+        try std.fmt.allocPrint(
+            alloc,
+            guardian_prompt_cache_key_prefix ++ "{s}",
+            .{session_id},
+        )
+    else
+        null;
+    defer if (prompt_cache_key) |key| alloc.free(key);
+
     return responses_protocol.buildRequest(alloc, .{
         .credential_source = config.credential_source,
         .model = provider_route.wireModel(route, model),
@@ -135,6 +148,7 @@ fn buildProviderReviewPayload(
         .capabilities = .{
             .supports_max_output_tokens = route.contract().supports_max_output_tokens,
         },
+        .prompt_cache_key = prompt_cache_key,
         .tool_choice_json = "\"required\"",
         .reasoning_summary = if (route == .codex_responses_oauth) "auto" else null,
         .function_tools_strict = false,
@@ -356,8 +370,10 @@ const FakeStream = struct {
     saw_required_tool_payload: bool = true,
     saw_expected_source_only: bool = true,
     saw_responses_payload: bool = true,
+    saw_expected_prompt_cache_key: bool = true,
     expected_model: []const u8 = "zai/glm-5.2",
     expected_source: ?types.CredentialSource = null,
+    expected_prompt_cache_key: ?[]const u8 = null,
     expect_responses_payload: bool = false,
     deadlines: [2]?std.Io.Clock.Timestamp = .{ null, null },
 
@@ -385,6 +401,18 @@ const FakeStream = struct {
                 std.mem.find(u8, payload, "\"input\":[") != null and
                 std.mem.find(u8, payload, "\"model\":\"gpt-5.4\"") != null and
                 std.mem.find(u8, payload, "\"tool_choice\":\"required\"") != null;
+        }
+        if (self.expected_prompt_cache_key) |expected| {
+            var parsed = try std.json.parseFromSlice(std.json.Value, alloc, payload, .{});
+            defer parsed.deinit();
+            const actual = if (parsed.value == .object)
+                parsed.value.object.get("prompt_cache_key")
+            else
+                null;
+            self.saw_expected_prompt_cache_key = self.saw_expected_prompt_cache_key and
+                actual != null and
+                actual.? == .string and
+                std.mem.eql(u8, actual.?.string, expected);
         }
         self.saw_required_tool_payload = self.saw_required_tool_payload and
             std.mem.find(u8, payload, "permission_decision") != null;
@@ -507,11 +535,13 @@ test "direct automatic reviewer uses Responses route without Gateway reconciliat
         .outcomes = &.{.valid},
         .expected_model = "gpt-5.4",
         .expected_source = .openai_api_key,
+        .expected_prompt_cache_key = "guardian:parent-session-1",
         .expect_responses_payload = true,
     };
     const config = GatewayConfig{
         .api_key = "openai-test-key",
         .credential_source = .openai_api_key,
+        .session_id = "parent-session-1",
         .chat_url = "https://ai-gateway.vercel.sh/v3/ai/language-model",
         .usage = &usage,
         .usage_allocator = alloc,
@@ -524,6 +554,7 @@ test "direct automatic reviewer uses Responses route without Gateway reconciliat
     try std.testing.expect(fake.saw_expected_source_only);
     try std.testing.expect(fake.saw_expected_model_only);
     try std.testing.expect(fake.saw_responses_payload);
+    try std.testing.expect(fake.saw_expected_prompt_cache_key);
 
     var snapshot = try usage.snapshot(alloc);
     defer snapshot.deinit(alloc);

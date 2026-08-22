@@ -281,6 +281,7 @@ pub const Context = struct {
             .account_id = self.account_id,
             .tenant = self.gateway_team,
             .credential_source = self.credential_source,
+            .session_id = self.lifecycle_scope.session_id,
             .endpoint = self.gateway_chat_url,
             .cancel_flag = self.cancel_flag,
             .usage = &self.session.usage,
