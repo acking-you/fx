@@ -1343,6 +1343,8 @@ pub const StreamRequest = struct {
     team: ?[]const u8 = null,
     /// Borrowed until `streamGatewayCompletion` returns.
     session_id: ?[]const u8 = null,
+    /// Comma-separated Codex beta features advertised for this request.
+    codex_beta_features: ?[]const u8 = null,
     trace_ctx: debug_trace.TraceContext = .{},
     content_capture_limit: ?usize = null,
     delivery: ?*DeliveryCertainty = null,
@@ -1438,6 +1440,24 @@ pub fn streamGatewayProviderToolCompletionBounded(
     cancel_flag: *std.atomic.Value(bool),
 ) !StreamResult {
     return runBoundedCompletion(alloc, request, expected_provider_tool_name, deadline, cancel_flag);
+}
+
+pub fn streamResponsesCompactionBounded(
+    alloc: std.mem.Allocator,
+    request: StreamRequest,
+    deadline: ?std.Io.Clock.Timestamp,
+    cancel_flag: *std.atomic.Value(bool),
+) !StreamResult {
+    return runBoundedCompletion(
+        alloc,
+        request,
+        null,
+        deadline orelse std.Io.Clock.Timestamp.fromNow(io_mod.getIo(), .{
+            .clock = .awake,
+            .raw = .fromMilliseconds(codex_json_request_timeout_ms),
+        }),
+        cancel_flag,
+    );
 }
 
 fn runBoundedCompletion(
@@ -1562,6 +1582,7 @@ fn streamGatewayCompletionCoreWithOptions(
                 .organization = binding.organization,
                 .project = binding.project,
             } else null,
+            request.codex_beta_features,
         )
     else
         gatewayExtraHeaders(extra_headers_buf[0..9], model, request.team, request.session_id);
@@ -1936,6 +1957,7 @@ fn responsesExtraHeaders(
     fedramp: bool,
     session_id: ?[]const u8,
     openai_identity: ?OpenAIIdentityHeaders,
+    codex_beta_features: ?[]const u8,
 ) []const std.http.Header {
     std.debug.assert(buf.len >= 12);
     var len: usize = 0;
@@ -1943,6 +1965,12 @@ fn responsesExtraHeaders(
     len += 1;
     len = appendDirectProviderIdentityHeaders(buf, len, route, account_id, fedramp, openai_identity);
     if (route == .codex_responses_oauth) {
+        if (codex_beta_features) |features| {
+            if (features.len > 0) {
+                buf[len] = .{ .name = "x-codex-beta-features", .value = features };
+                len += 1;
+            }
+        }
         if (session_id) |id| {
             if (id.len > 0) {
                 buf[len] = .{ .name = "session-id", .value = id };
@@ -2234,12 +2262,17 @@ test "Codex streaming headers share the same account identity fields" {
         true,
         "session_123",
         null,
+        "remote_compaction_v2",
     );
     try std.testing.expectEqualStrings("text/event-stream", headerValue(headers, "accept").?);
     try std.testing.expectEqualStrings("account_123", headerValue(headers, "ChatGPT-Account-ID").?);
     try std.testing.expectEqualStrings("true", headerValue(headers, "X-OpenAI-Fedramp").?);
     try std.testing.expectEqualStrings("fx", headerValue(headers, "originator").?);
     try std.testing.expectEqualStrings("session_123", headerValue(headers, "session-id").?);
+    try std.testing.expectEqualStrings(
+        "remote_compaction_v2",
+        headerValue(headers, "x-codex-beta-features").?,
+    );
 }
 
 test "OpenAI streaming headers use the bound organization and project snapshot" {
@@ -2251,6 +2284,7 @@ test "OpenAI streaming headers use the bound organization and project snapshot" 
         false,
         null,
         .{ .organization = "org-snapshot", .project = "project-snapshot" },
+        null,
     );
     try std.testing.expectEqualStrings(
         "org-snapshot",

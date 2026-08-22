@@ -22,6 +22,7 @@ const gateway_generation_usage = @import("../gateway/generation_usage.zig");
 const gateway_provider = @import("../core/gateway/gateway_provider.zig");
 const provider_route = @import("../core/gateway/provider_route.zig");
 const responses_compaction_binding = @import("../core/gateway/responses_compaction_binding.zig");
+const responses_compaction = @import("../core/gateway/responses_compaction.zig");
 const responses_compaction_provider = @import("../core/gateway/responses_compaction_provider.zig");
 const responses_protocol = @import("../core/gateway/responses_protocol.zig");
 const responses_search = @import("../core/gateway/responses_search.zig");
@@ -220,6 +221,11 @@ fn fetchResponsesCompaction(
     request.responses_compaction_binding = input.provider_binding;
     const use_v2_trigger = route.contract().remote_compaction == .v2;
     request.responses_compaction_trigger = use_v2_trigger;
+    request.tool_choice = .auto;
+    request.responses_tool_choice_json = null;
+    request.max_output_tokens = null;
+    request.response_format = null;
+    request.vision_mode = .unavailable;
     if (request.provider_options.parallel_tool_calls == null) {
         request.provider_options.parallel_tool_calls = true;
     }
@@ -232,8 +238,8 @@ fn fetchResponsesCompaction(
             .supports_max_output_tokens = route.contract().supports_max_output_tokens,
         },
         .store = false,
-        .stream = false,
-        .include = &.{},
+        .stream = use_v2_trigger,
+        .include = if (use_v2_trigger) &responses_default_include else &.{},
         .prompt_cache_key = input.build_request.session_id,
         .reasoning_summary = if (route == .codex_responses_oauth or
             request.provider_options.reasoning != null)
@@ -256,29 +262,55 @@ fn fetchResponsesCompaction(
             input.provider_binding.normalized_origin,
         );
     defer alloc.free(endpoint);
-    var response = switch (route) {
-        .vercel_gateway => unreachable,
-        .codex_responses_oauth => try gateway_client.fetchCodexJsonBounded(alloc, .{
-            .method = .post_json,
-            .url = endpoint,
-            .access_token = input.credential,
-            .account_id = input.account_id orelse return error.MissingCodexAccountId,
-            .payload = payload,
-            .cancel_flag = if (input.build_request.budget) |budget| budget.cancel_flag else null,
-            .deadline = if (input.build_request.budget) |budget| budget.deadline else null,
-            .max_response_bytes = compact_response_max_bytes,
-        }),
-        .openai_responses_byok => try gateway_client.fetchOpenAIJsonBounded(alloc, .{
-            .url = endpoint,
-            .api_key = input.credential,
-            .payload = payload,
-            .organization = input.provider_binding.organization,
-            .project = input.provider_binding.project,
-            .cancel_flag = if (input.build_request.budget) |budget| budget.cancel_flag else null,
-            .deadline = if (input.build_request.budget) |budget| budget.deadline else null,
-            .max_response_bytes = compact_response_max_bytes,
-        }),
-    };
+    if (route == .codex_responses_oauth) {
+        var local_cancel = std.atomic.Value(bool).init(false);
+        const cancel_flag = if (input.build_request.budget) |budget|
+            budget.cancel_flag orelse &local_cancel
+        else
+            &local_cancel;
+        var response = try gateway_client.streamResponsesCompactionBounded(
+            alloc,
+            .{
+                .api_key = input.credential,
+                .credential_source = source,
+                .responses_compaction_binding = input.provider_binding,
+                .model = wire_model,
+                .retry_count = 1,
+                .chat_url = endpoint,
+                .payload = payload,
+                .session_id = input.build_request.session_id,
+                .codex_beta_features = responses_compaction.v2_beta_feature,
+            },
+            if (input.build_request.budget) |budget| budget.deadline else null,
+            cancel_flag,
+        );
+        defer response.deinit(alloc);
+        if (response.status.class() != .success) return .{ .rejected = response.status };
+
+        const input_json = try responses_compaction.replayInputJsonFromOutputItemsAlloc(
+            alloc,
+            response.completion.responses_provider_output_items,
+        );
+        errdefer alloc.free(input_json);
+        const model_copy = try alloc.dupe(u8, wire_model);
+        return .{ .compacted = .{
+            .credential_source = source,
+            .wire_model = model_copy,
+            .input_json = input_json,
+            .usage = response.completion.usage,
+        } };
+    }
+
+    var response = try gateway_client.fetchOpenAIJsonBounded(alloc, .{
+        .url = endpoint,
+        .api_key = input.credential,
+        .payload = payload,
+        .organization = input.provider_binding.organization,
+        .project = input.provider_binding.project,
+        .cancel_flag = if (input.build_request.budget) |budget| budget.cancel_flag else null,
+        .deadline = if (input.build_request.budget) |budget| budget.deadline else null,
+        .max_response_bytes = compact_response_max_bytes,
+    });
     defer response.deinit(alloc);
     if (response.status.class() != .success) return .{ .rejected = response.status };
 
@@ -355,7 +387,7 @@ pub fn buildAgentRequest(
             routed_request.responses_compaction_binding = null;
         }
         if (routed_request.provider_options.parallel_tool_calls == null) {
-            routed_request.provider_options.parallel_tool_calls = route == .openai_responses_byok;
+            routed_request.provider_options.parallel_tool_calls = true;
         }
         const summary: ?[]const u8 = if (route == .codex_responses_oauth or
             routed_request.provider_options.reasoning != null)
@@ -774,6 +806,7 @@ test "Codex Responses request advertises latest web namespace instead of hosted 
     const include = parsed.value.object.get("include").?.array.items;
     try std.testing.expectEqual(@as(usize, 1), include.len);
     try std.testing.expectEqualStrings("reasoning.encrypted_content", include[0].string);
+    try std.testing.expect(parsed.value.object.get("parallel_tool_calls").?.bool);
 }
 
 test "direct Responses request rejects selected provider-owned schemas" {

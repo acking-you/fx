@@ -51,6 +51,7 @@ pub fn main(init: std.process.Init) !void {
         .max_history_turns = 100,
         .context_registry = .{ .default_provider = builtin_context.provider },
         .mode_registry = builtin_modes.registry,
+        .provider_override = .gateway,
     });
 }
 

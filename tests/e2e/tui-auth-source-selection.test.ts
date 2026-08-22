@@ -379,6 +379,8 @@ function startFakeChatGptOAuth(
     path: string;
     authorization: string | null;
     body: string | null;
+    accept: string | null;
+    betaFeatures: string | null;
   }> = [];
   const server = Bun.serve({
     hostname: "127.0.0.1",
@@ -393,6 +395,8 @@ function startFakeChatGptOAuth(
         path: url.pathname,
         authorization: request.headers.get("authorization"),
         body,
+        accept: request.headers.get("accept"),
+        betaFeatures: request.headers.get("x-codex-beta-features"),
       });
       if (url.pathname === "/oauth/authorize") {
         const redirectUri = url.searchParams.get("redirect_uri");
@@ -425,20 +429,21 @@ function startFakeChatGptOAuth(
         if (options.responseDelayMs) await Bun.sleep(options.responseDelayMs);
         const parsedBody = JSON.parse(body ?? "{}") as {
           input?: Array<Record<string, unknown>>;
+          stream?: boolean;
         };
         const compactInput = parsedBody.input ?? [];
         if (compactInput.at(-1)?.type === "compaction_trigger") {
-          return Response.json({
-            id: "resp_compact_e2e",
-            object: "response",
-            created_at: 1,
-            output: [{
-              id: "cmp_e2e",
-              type: "compaction",
-              encrypted_content: "opaque-codex-compaction-e2e",
-            }],
-            usage: { input_tokens: 12, output_tokens: 3, total_tokens: 15 },
-          });
+          if (parsedBody.stream !== true) {
+            return Response.json(
+              { detail: "Stream must be set to true" },
+              { status: 400 },
+            );
+          }
+          return new Response(
+            'data: {"type":"response.output_item.done","output_index":0,"item":{"id":"cmp_e2e","type":"compaction","encrypted_content":"opaque-codex-compaction-e2e"}}\n\n' +
+              'data: {"type":"response.completed","response":{"id":"resp_compact_e2e","status":"completed","output":[],"usage":{"input_tokens":12,"output_tokens":3,"total_tokens":15}}}\n\n',
+            { headers: { "content-type": "text/event-stream" } },
+          );
         }
         return new Response(
           'data: {"type":"response.output_text.delta","delta":"CHATGPT_DIRECT_RESPONSE"}\n\n' +
@@ -2146,9 +2151,19 @@ tmuxTest(
     expect(compactRequest).toBeDefined();
     const compactBody = JSON.parse(compactRequest!.body!) as {
       input: Array<Record<string, unknown>>;
+      include: string[];
+      parallel_tool_calls: boolean;
+      stream: boolean;
+      tool_choice: string;
     };
     expect(compactBody.input.length).toBeGreaterThan(1);
     expect(compactBody.input.at(-1)?.type).toBe("compaction_trigger");
+    expect(compactBody.stream).toBe(true);
+    expect(compactBody.include).toContain("reasoning.encrypted_content");
+    expect(compactBody.parallel_tool_calls).toBe(true);
+    expect(compactBody.tool_choice).toBe("auto");
+    expect(compactRequest!.accept).toBe("text/event-stream");
+    expect(compactRequest!.betaFeatures?.split(",")).toContain("remote_compaction_v2");
 
     const resumed = await runFx(
       ["ask", "--json", "--auto", "--resume", "last", "resume after remote compaction"],

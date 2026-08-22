@@ -518,7 +518,13 @@ fn replaceProviderOutputItemsFromTerminal(
         alloc,
         maybe_output,
     );
-    if (!try terminalOutputCoversSemanticState(alloc, state, authoritative)) {
+    if (!try terminalOutputCoversSemanticState(alloc, state, authoritative) or
+        !try terminalOutputCoversCollectedProviderItems(
+            alloc,
+            state.provider_output_items.items,
+            authoritative,
+        ))
+    {
         const item_count = authoritative.len;
         responses_output_items.free(alloc, authoritative);
         debug_trace.logf(
@@ -531,6 +537,40 @@ fn replaceProviderOutputItemsFromTerminal(
     clearProviderOutputItems(alloc, state);
     state.provider_output_items = .fromOwnedSlice(authoritative);
     state.provider_output_sequence_complete = true;
+}
+
+fn terminalOutputCoversCollectedProviderItems(
+    alloc: Allocator,
+    collected: []const responses_output_items.Item,
+    authoritative: []const responses_output_items.Item,
+) !bool {
+    for (collected) |item| {
+        var parsed = std.json.parseFromSlice(std.json.Value, alloc, item.json, .{}) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return false,
+        };
+        defer parsed.deinit();
+        if (parsed.value != .object) return false;
+        const item_type = parsed.value.object.get("type") orelse return false;
+        if (item_type != .string or item_type.string.len == 0) return false;
+        const item_id = if (parsed.value.object.get("id")) |value|
+            if (value == .string) value.string else null
+        else
+            null;
+        const call_id = if (parsed.value.object.get("call_id")) |value|
+            if (value == .string) value.string else null
+        else
+            null;
+        if (!try terminalItemMatches(
+            alloc,
+            authoritative,
+            item.output_index,
+            item_type.string,
+            item_id,
+            call_id,
+        )) return false;
+    }
+    return true;
 }
 
 fn terminalOutputCoversSemanticState(
@@ -1836,6 +1876,33 @@ test "Responses terminal output authoritatively replaces the full fallback seque
     try std.testing.expectEqual(@as(u32, 1), item.output_index);
     try std.testing.expect(std.mem.find(u8, item.json, "\"results\"") != null);
     try std.testing.expect(std.mem.find(u8, item.json, "in_progress") == null);
+}
+
+test "Responses terminal empty output retains finalized compaction item" {
+    const payload =
+        "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"compaction\",\"id\":\"cmp_1\",\"encrypted_content\":\"opaque\"}}\n\n" ++
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":12,\"output_tokens\":3,\"total_tokens\":15}}}\n\n";
+    var reader = std.Io.Reader.fixed(payload);
+    var cancel = std.atomic.Value(bool).init(false);
+    const Noop = struct {
+        fn chunk(_: *anyopaque, _: []const u8) void {}
+    };
+    var context: u8 = 0;
+    var completion = try consume(std.testing.allocator, &reader, .{
+        .context = &context,
+        .on_content_chunk = Noop.chunk,
+    }, &cancel);
+    defer freeCompletion(std.testing.allocator, &completion);
+
+    try std.testing.expect(!completion.responses_output_sequence_complete);
+    try std.testing.expectEqual(@as(usize, 1), completion.responses_provider_output_items.len);
+    try std.testing.expectEqual(@as(u32, 0), completion.responses_provider_output_items[0].output_index);
+    try std.testing.expect(std.mem.find(
+        u8,
+        completion.responses_provider_output_items[0].json,
+        "\"type\":\"compaction\"",
+    ) != null);
+    try std.testing.expectEqual(@as(?u64, 15), completion.usage.total_tokens);
 }
 
 test "Responses terminal without output retains indexed incomplete projections" {
