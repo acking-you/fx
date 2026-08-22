@@ -1,10 +1,12 @@
 const std = @import("std");
+const responses_output_items = @import("../shared/responses_output_items.zig");
 
 const Allocator = std.mem.Allocator;
 const JsonValue = std.json.Value;
 
 pub const dedicated_path = "responses/compact";
 pub const v2_trigger_type = "compaction_trigger";
+pub const v2_beta_feature = "remote_compaction_v2";
 pub const output_item_type = "compaction";
 
 pub fn isCompactionOutputItemType(raw_type: []const u8) bool {
@@ -395,6 +397,28 @@ pub fn validateReplayInputJson(alloc: Allocator, raw: []const u8) !void {
     try validateReplayItems(parsed.value.array.items);
 }
 
+/// Serializes the finalized items collected from a V2 Responses stream into
+/// the durable replay contract shared with the dedicated compact endpoint.
+/// Output indices must be complete and wire ordered, and the final item must
+/// be the stream's single opaque compaction checkpoint.
+pub fn replayInputJsonFromOutputItemsAlloc(
+    alloc: Allocator,
+    items: []const responses_output_items.Item,
+) ![]u8 {
+    try responses_output_items.validateComplete(alloc, items);
+
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    errdefer out.deinit();
+    try out.writer.writeByte('[');
+    for (items, 0..) |item, index| {
+        if (index > 0) try out.writer.writeByte(',');
+        try responses_output_items.writeValidated(alloc, &out.writer, item);
+    }
+    try out.writer.writeByte(']');
+    try validateReplayInputJson(alloc, out.written());
+    return out.toOwnedSlice();
+}
+
 fn validateReplayItems(output: []const JsonValue) !void {
     if (output.len == 0) return error.MissingResponsesCompactionItem;
     _ = try findSingleCompactionItem(output);
@@ -522,6 +546,39 @@ test "Responses compact V2 helper appends one final typed trigger" {
     try std.testing.expectError(
         error.DuplicateResponsesCompactionTrigger,
         appendV2TriggerInputAlloc(alloc, "[{\"type\":\"compaction_trigger\"}]"),
+    );
+}
+
+test "Responses compact V2 stream items become validated replay input" {
+    const items = [_]responses_output_items.Item{
+        .{
+            .output_index = 0,
+            .json = "{\"id\":\"cmp_1\",\"type\":\"compaction\",\"encrypted_content\":\"opaque\",\"future\":true}",
+        },
+    };
+    const replay = try replayInputJsonFromOutputItemsAlloc(std.testing.allocator, &items);
+    defer std.testing.allocator.free(replay);
+    try std.testing.expectEqualStrings(
+        "[{\"id\":\"cmp_1\",\"type\":\"compaction\",\"encrypted_content\":\"opaque\",\"future\":true}]",
+        replay,
+    );
+
+    const wrong_index = [_]responses_output_items.Item{.{
+        .output_index = 1,
+        .json = items[0].json,
+    }};
+    try std.testing.expectError(
+        error.InvalidResponsesOutputOrder,
+        replayInputJsonFromOutputItemsAlloc(std.testing.allocator, &wrong_index),
+    );
+
+    const missing = [_]responses_output_items.Item{.{
+        .output_index = 0,
+        .json = "{\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}",
+    }};
+    try std.testing.expectError(
+        error.MissingResponsesCompactionItem,
+        replayInputJsonFromOutputItemsAlloc(std.testing.allocator, &missing),
     );
 }
 
