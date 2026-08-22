@@ -29,6 +29,10 @@ pub const Error = error{
 
 pub const max_url_bytes: usize = 2000;
 
+pub const Policy = struct {
+    require_public_addresses: bool = true,
+};
+
 pub const Scheme = enum {
     http,
     https,
@@ -97,6 +101,10 @@ const ParsedAuthority = struct {
 };
 
 pub fn normalize(alloc: Allocator, raw_url: []const u8) Error!ValidatedUrl {
+    return normalizeWithPolicy(alloc, raw_url, .{});
+}
+
+pub fn normalizeWithPolicy(alloc: Allocator, raw_url: []const u8, policy: Policy) Error!ValidatedUrl {
     if (raw_url.len == 0) return error.EmptyUrl;
     if (raw_url.len > max_url_bytes) return error.UrlTooLong;
     try rejectControlBytes(raw_url);
@@ -119,7 +127,7 @@ pub fn normalize(alloc: Allocator, raw_url: []const u8) Error!ValidatedUrl {
     if (std.mem.findScalar(u8, authority, '@') != null) return error.CredentialedUrl;
 
     const parsed_authority = try parseAuthority(authority);
-    const host_policy = try canonicalizeHost(alloc, parsed_authority.host, parsed_authority.is_ipv6_literal);
+    const host_policy = try canonicalizeHost(alloc, parsed_authority.host, parsed_authority.is_ipv6_literal, policy);
     defer alloc.free(host_policy.host);
 
     const scheme: Scheme = .https;
@@ -151,13 +159,22 @@ pub fn isPublicAddress(address: IpAddress) bool {
 }
 
 pub fn redirectTarget(alloc: Allocator, current: ValidatedUrl, location: []const u8) Error!RedirectDecision {
+    return redirectTargetWithPolicy(alloc, current, location, .{});
+}
+
+pub fn redirectTargetWithPolicy(
+    alloc: Allocator,
+    current: ValidatedUrl,
+    location: []const u8,
+    policy: Policy,
+) Error!RedirectDecision {
     if (location.len == 0) return error.MalformedLocation;
     try rejectControlBytes(location);
 
     const absolute = try absoluteRedirectUrl(alloc, current, location);
     defer alloc.free(absolute);
 
-    var target = normalize(alloc, absolute) catch |err| switch (err) {
+    var target = normalizeWithPolicy(alloc, absolute, policy) catch |err| switch (err) {
         error.UnsupportedScheme,
         error.CredentialedUrl,
         error.ScopeIdRejected,
@@ -243,7 +260,7 @@ const CanonicalHost = struct {
     literal_address: ?IpAddress = null,
 };
 
-fn canonicalizeHost(alloc: Allocator, raw_host: []const u8, is_ipv6_literal: bool) Error!CanonicalHost {
+fn canonicalizeHost(alloc: Allocator, raw_host: []const u8, is_ipv6_literal: bool, policy: Policy) Error!CanonicalHost {
     if (raw_host.len == 0) return error.MissingHost;
     if (std.mem.findScalar(u8, raw_host, '%') != null) return error.PercentEncodedHost;
 
@@ -256,7 +273,7 @@ fn canonicalizeHost(alloc: Allocator, raw_host: []const u8, is_ipv6_literal: boo
     if (is_ipv6_literal) {
         const ip6 = std.Io.net.Ip6Address.parse(raw_host, 0) catch return error.MalformedHost;
         const address: IpAddress = .{ .ip6 = ip6 };
-        if (!isPublicAddress(address)) return error.NonPublicAddress;
+        if (policy.require_public_addresses and !isPublicAddress(address)) return error.NonPublicAddress;
         const lower = try lowerAscii(alloc, raw_host);
         return .{ .host = lower, .literal_address = address };
     }
@@ -266,7 +283,7 @@ fn canonicalizeHost(alloc: Allocator, raw_host: []const u8, is_ipv6_literal: boo
 
     if (parseStrictIpv4(without_root)) |ip4| {
         const address: IpAddress = .{ .ip4 = .{ .bytes = ip4, .port = 0 } };
-        if (!isPublicAddress(address)) return error.NonPublicAddress;
+        if (policy.require_public_addresses and !isPublicAddress(address)) return error.NonPublicAddress;
         return .{ .host = try lowerAscii(alloc, without_root), .literal_address = address };
     } else |err| switch (err) {
         error.InvalidIpv4 => return error.InvalidIpv4,
@@ -274,11 +291,11 @@ fn canonicalizeHost(alloc: Allocator, raw_host: []const u8, is_ipv6_literal: boo
     }
 
     if (looksLikeAmbiguousIpv4(without_root)) return error.InvalidIpv4;
-    if (isSingleLabel(without_root)) return error.SingleLabelHost;
+    if (policy.require_public_addresses and isSingleLabel(without_root)) return error.SingleLabelHost;
 
     try validateHostnameGrammar(without_root);
     const lower = try lowerAscii(alloc, without_root);
-    if (isBlockedHostname(lower)) {
+    if (policy.require_public_addresses and isBlockedHostname(lower)) {
         alloc.free(lower);
         return error.NonPublicAddress;
     }
@@ -564,6 +581,23 @@ test "web_fetch rejects non http schemes credentials single label hosts and over
     defer alloc.free(overlong);
     @memset(overlong, 'a');
     try std.testing.expectError(error.UrlTooLong, normalize(alloc, overlong));
+}
+
+test "web_fetch policy explicitly permits private and single label hosts" {
+    const alloc = std.testing.allocator;
+    const policy = Policy{ .require_public_addresses = false };
+
+    var ipv4 = try normalizeWithPolicy(alloc, "https://127.0.0.1/status", policy);
+    defer ipv4.deinit(alloc);
+    try std.testing.expectEqualStrings("127.0.0.1", ipv4.canonical_host);
+
+    var ipv6 = try normalizeWithPolicy(alloc, "https://[::1]/status", policy);
+    defer ipv6.deinit(alloc);
+    try std.testing.expectEqualStrings("::1", ipv6.canonical_host);
+
+    var local = try normalizeWithPolicy(alloc, "https://localhost/status", policy);
+    defer local.deinit(alloc);
+    try std.testing.expectEqualStrings("localhost", local.canonical_host);
 }
 
 test "web_fetch canonicalizes ascii hostname root dot and rejects malformed percent encoded and unicode host bytes" {
