@@ -47,7 +47,7 @@ describe("web_fetch permission progress", () => {
       ]);
 
       expect(result.code).toBe(1);
-      expect(result.stderr).toContain("Fx needs a model credential. Use fx login for Vercel, fx login --codex for ChatGPT Codex, set OPENAI_API_KEY for a Responses API, or use fx setup or AI_GATEWAY_API_KEY for Vercel AI Gateway.");
+      expect(result.stderr).toContain("Fx needs a model credential. Use fx login for Vercel, fx login codex for ChatGPT Codex, fx login grok for Grok, set OPENAI_API_KEY for a Responses API, or use fx setup or AI_GATEWAY_API_KEY for Vercel AI Gateway.");
       expectNoFetchProgress(result.stderr);
     },
     TIMEOUT,

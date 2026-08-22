@@ -199,8 +199,8 @@ pub const LoadMode = enum { stored, refresh_if_needed };
 
 const FxLoginRefreshMode = enum { if_needed, force };
 
-pub const missing_credential_message = "Fx needs a model credential. Run fx login, fx setup, or set OPENAI_API_KEY or AI_GATEWAY_API_KEY.";
-pub const missing_interactive_credential_message = "Fx needs a model credential. Run /login, /setup, or set OPENAI_API_KEY or AI_GATEWAY_API_KEY.";
+pub const missing_credential_message = "Fx needs a model credential. Use fx login for Vercel, fx login codex for ChatGPT Codex, fx login grok for Grok, set OPENAI_API_KEY for a Responses API, or use fx setup or AI_GATEWAY_API_KEY for Vercel AI Gateway.";
+pub const missing_interactive_credential_message = "Fx needs a model credential. Use /login for Vercel, ChatGPT Codex, or Grok, set OPENAI_API_KEY for a Responses API, or use /setup or AI_GATEWAY_API_KEY for Vercel AI Gateway.";
 pub const missing_chatgpt_credential_message = "fx needs a Codex subscription login for this model. Run fx login codex.";
 pub const missing_chatgpt_interactive_credential_message = "Codex needs a subscription login. Run /login and choose Sign in with Codex.";
 pub const missing_grok_credential_message = "fx needs a Grok subscription login for this model. Run fx login grok.";

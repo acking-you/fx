@@ -40,7 +40,7 @@ const NO_GATEWAY_AUTH = {
   FX_CODEX_AUTH_FILE: undefined,
 };
 const MISSING_AUTH_MESSAGE =
-  "Fx needs a model credential. Use fx login for Vercel, fx login --codex for ChatGPT Codex, set OPENAI_API_KEY for a Responses API, or use fx setup or AI_GATEWAY_API_KEY for Vercel AI Gateway.";
+  "Fx needs a model credential. Use fx login for Vercel, fx login codex for ChatGPT Codex, fx login grok for Grok, set OPENAI_API_KEY for a Responses API, or use fx setup or AI_GATEWAY_API_KEY for Vercel AI Gateway.";
 
 const KEYCHAIN_SERVICE = "FX_AI_GATEWAY_API_KEY";
 
@@ -313,7 +313,7 @@ describe("cli: help", () => {
 Run one noninteractive request
 
 Usage:
-  fx ask [--auto|--yolo] [--image PATH] [--json] [--quiet] [--prompt-permissions] [--no-save] [--no-color] [--show-thinking] [--resume <last|id>|--resume-id <id>] [--continue-recovery] [--] <prompt>
+  fx ask [--auto|--yolo] [--image PATH] [--json] [--quiet] [--prompt-permissions] [--no-save] [--no-color] [--resume <last|id>|--resume-id <id>] [--continue-recovery] [--] <prompt>
 
 Options:
   --auto                Automatically review unresolved permission requests
@@ -324,7 +324,6 @@ Options:
   --prompt-permissions  Prompt for Y/N permission approval when stdin is a TTY
   --no-save             Do not save the session; incompatible with --resume and --resume-id
   --no-color            Render TTY output without colors or hyperlinks
-  --show-thinking       Write streamed model reasoning to stderr
   --resume <last|id>    Continue the last session or a session by id
   --resume-id <id>      Continue a session by exact id
   --continue-recovery   Resume the paused model response in the selected session
@@ -332,7 +331,7 @@ Options:
 
 The prompt may be passed as arguments or piped on stdin when no prompt args are given.
 TTY stdout uses the Minimal transcript presentation; redirected stdout emits raw assistant Markdown.
-Operational progress and diagnostics are written to stderr. JSON output keeps raw Markdown in \`output\` and streamed reasoning in \`thinking\` when present.
+Operational progress and diagnostics are written to stderr. JSON output keeps raw Markdown in \`output\`.
 With --prompt-permissions, JSON and quiet requests may prompt on stderr only when stdin is a TTY.
 `;
 
@@ -361,26 +360,6 @@ With --prompt-permissions, JSON and quiet requests may prompt on stderr only whe
         expect(r.stdout).toContain("session resume [last|<id>]");
         expect(r.stdout).toContain("session migrate <id>|--id <id>");
         expect(r.stdout).toContain("session recover <id>|--id <id>");
-      }
-    },
-    TIMEOUT,
-  );
-
-  test(
-    "fx login and logout help expose only the Codex flag syntax",
-    async () => {
-      for (const command of ["login", "logout"]) {
-        const help = await runFx([command, "--help"], { env: NO_GATEWAY_AUTH });
-        expect(help.code).toBe(0);
-        expect(help.stderr).toBe("");
-        expect(help.stdout).toContain(`Usage:\n  fx ${command} [--codex]`);
-        expect(help.stdout).toContain("--codex");
-
-        const positional = await runFx([command, "codex"], {
-          env: NO_GATEWAY_AUTH,
-        });
-        expect(positional.code).toBe(1);
-        expect(positional.stderr).toBe(`usage: fx ${command} [--codex]\n`);
       }
     },
     TIMEOUT,
@@ -1819,70 +1798,6 @@ describe("cli: logout", () => {
         });
         expect(logout.stdout).not.toContain(apiToken);
         expect(status.stdout).not.toContain(apiToken);
-      } finally {
-        rmSync(home, { recursive: true, force: true });
-      }
-    },
-    TIMEOUT,
-  );
-
-  test(
-    "fx logout --codex clears only a saved global Codex credential choice",
-    async () => {
-      const home = mkdtempSync(join(tmpdir(), "fx-e2e-codex-preference-"));
-      const fxDir = join(home, ".fx");
-      const settingsPath = join(fxDir, "settings.json");
-      const codexAuthPath = join(home, "codex-auth.json");
-      mkdirSync(fxDir, { recursive: true, mode: 0o700 });
-
-      const workspaceOverride = {
-        credential_source: "openai_api_key",
-        model: "workspace/model",
-      };
-      const env = {
-        ...NO_GATEWAY_AUTH,
-        HOME: realpathSync(home),
-        FX_CODEX_AUTH_FILE: codexAuthPath,
-        FX_DISABLE_KEYCHAIN: "1",
-      };
-
-      try {
-        writeFileSync(
-          settingsPath,
-          JSON.stringify({
-            credential_source: "chatgpt_subscription",
-            model: "global/model",
-            workspaces: { "/workspace": workspaceOverride },
-          }),
-          { mode: 0o600 },
-        );
-
-        const cleared = await runFx(["logout", "--codex"], { env });
-        expect(cleared.code).toBe(0);
-        expect(cleared.stdout).toBe("No Codex login found.\n");
-        expect(cleared.stderr).toBe("");
-        const afterClear = JSON.parse(readFileSync(settingsPath, "utf8"));
-        expect(afterClear.credential_source).toBeUndefined();
-        expect(afterClear.model).toBe("global/model");
-        expect(afterClear.workspaces["/workspace"]).toEqual(workspaceOverride);
-
-        writeFileSync(
-          settingsPath,
-          JSON.stringify({
-            credential_source: "openai_api_key",
-            model: "global/model",
-            workspaces: { "/workspace": workspaceOverride },
-          }),
-          { mode: 0o600 },
-        );
-
-        const preserved = await runFx(["logout", "--codex"], { env });
-        expect(preserved.code).toBe(0);
-        expect(preserved.stdout).toBe("No Codex login found.\n");
-        expect(preserved.stderr).toBe("");
-        const afterPreserve = JSON.parse(readFileSync(settingsPath, "utf8"));
-        expect(afterPreserve.credential_source).toBe("openai_api_key");
-        expect(afterPreserve.workspaces["/workspace"]).toEqual(workspaceOverride);
       } finally {
         rmSync(home, { recursive: true, force: true });
       }
