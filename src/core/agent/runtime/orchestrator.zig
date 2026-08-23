@@ -2765,12 +2765,132 @@ test "vision fallback is available only through Gateway" {
     );
 }
 
+const max_pending_steers_per_step: usize = 32;
+
+fn takePendingSteer(
+    deps: *const AgentRuntimeDeps,
+    turn_id: u64,
+    finish_if_empty: bool,
+) !?QueuedPrompt {
+    const take = deps.take_pending_steer orelse return null;
+    return take(deps.ctx, std.heap.c_allocator, turn_id, finish_if_empty);
+}
+
+fn appendPendingSteer(
+    arena: Allocator,
+    within_turn_suffix: *std.ArrayList(ChatMessage),
+    active_job: *QueuedPrompt,
+    steer: QueuedPrompt,
+) !void {
+    const prompt = try arena.dupe(u8, steer.prompt);
+    const images = try types.dupeImageAttachmentSlice(arena, steer.images);
+    try within_turn_suffix.append(arena, .{
+        .role = .user,
+        .content = prompt,
+        .images = images,
+    });
+
+    active_job.prompt = try std.fmt.allocPrint(
+        arena,
+        "{s}\n\n[Follow-up while you were working]\n{s}",
+        .{ active_job.prompt, steer.prompt },
+    );
+    if (steer.images.len > 0) {
+        const merged_images = try arena.alloc(
+            types.ImageAttachment,
+            active_job.images.len + steer.images.len,
+        );
+        std.mem.copyForwards(
+            types.ImageAttachment,
+            merged_images[0..active_job.images.len],
+            active_job.images,
+        );
+        const copied = try types.dupeImageAttachmentSlice(arena, steer.images);
+        std.mem.copyForwards(
+            types.ImageAttachment,
+            merged_images[active_job.images.len..],
+            copied,
+        );
+        active_job.images = merged_images;
+    }
+}
+
+fn drainPendingSteers(
+    deps: *const AgentRuntimeDeps,
+    arena: Allocator,
+    turn_id: u64,
+    within_turn_suffix: *std.ArrayList(ChatMessage),
+    active_job: *QueuedPrompt,
+    first: ?QueuedPrompt,
+) !usize {
+    var count: usize = 0;
+    var pending = first;
+    while (count < max_pending_steers_per_step) {
+        const steer = pending orelse (try takePendingSteer(deps, turn_id, false) orelse break);
+        pending = null;
+        defer worker_runtime.freeQueuedPrompt(std.heap.c_allocator, steer);
+        try appendPendingSteer(arena, within_turn_suffix, active_job, steer);
+        count += 1;
+    }
+    if (count > 0) {
+        debug_trace.eventf(
+            "agent",
+            "pending_steers_applied",
+            .{ .turn_id = turn_id },
+            "count={d}",
+            .{count},
+        );
+    }
+    return count;
+}
+
+test "pending steer becomes next-step user input and durable follow-up context" {
+    const alloc = std.testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(alloc);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var active = QueuedPrompt{
+        .prompt = @constCast("initial request"),
+        .images = @constCast(&.{}),
+        .model = @constCast("model"),
+        .api_key = @constCast("key"),
+        .permission_mode = .auto,
+        .history = @constCast(&.{}),
+        .grants = @constCast(&.{}),
+    };
+    const steer = QueuedPrompt{
+        .prompt = @constCast("also run the focused test"),
+        .images = @constCast(&.{}),
+        .model = @constCast("model"),
+        .api_key = @constCast("key"),
+        .permission_mode = .auto,
+        .history = @constCast(&.{}),
+        .grants = @constCast(&.{}),
+    };
+    var suffix: std.ArrayList(ChatMessage) = .empty;
+    defer suffix.deinit(arena);
+
+    try appendPendingSteer(arena, &suffix, &active, steer);
+
+    try std.testing.expectEqual(@as(usize, 1), suffix.items.len);
+    try std.testing.expectEqual(types.ChatRole.user, suffix.items[0].role);
+    try std.testing.expectEqualStrings(
+        "also run the focused test",
+        suffix.items[0].content.?,
+    );
+    try std.testing.expectEqualStrings(
+        "initial request\n\n[Follow-up while you were working]\nalso run the focused test",
+        active.prompt,
+    );
+}
+
 fn processQueuedPromptLoop(
     deps: *const AgentRuntimeDeps,
     semantic_presentation: ?runtime_assistant_stream.SemanticPresentationSink,
     lifecycle: LifecycleContext,
     config: Config,
-    job: QueuedPrompt,
+    initial_job: QueuedPrompt,
     wire_model: []const u8,
     request_capabilities: model_capabilities.Capabilities,
     base_nested_terminal_advertised: bool,
@@ -2789,6 +2909,7 @@ fn processQueuedPromptLoop(
     current_user_message: ChatMessage,
     stop_state: *CommonStopState,
 ) !void {
+    var job = initial_job;
     var stable_prefix = stable_prefix_ptr.*;
     defer stable_prefix_ptr.* = stable_prefix;
     const history_messages = history_messages_ptr.*;
@@ -2930,6 +3051,14 @@ fn processQueuedPromptLoop(
         }
         const auto_permission_phase: permission_auto_classifier.AutoPermissionPhase =
             .automatic_review;
+        _ = try drainPendingSteers(
+            deps,
+            arena,
+            turn_id,
+            &within_turn_suffix,
+            &job,
+            null,
+        );
         _ = overlay_arena_state.reset(.retain_capacity);
         const overlay_arena = overlay_arena_state.allocator();
         var ephemeral_overlay: std.ArrayList(ChatMessage) = .empty;
@@ -4773,6 +4902,30 @@ fn processQueuedPromptLoop(
         if (completion.tool_calls.len == 0) {
             const has_content =
                 std.mem.trim(u8, partial_assistant, " \t\r\n").len > 0;
+            if (try takePendingSteer(deps, turn_id, true)) |first_steer| {
+                try within_turn_suffix.append(arena, .{
+                    .role = .assistant,
+                    .content = if (completion.content) |content| content else partial_assistant,
+                    .responses_message_output_index = completion.responses_message_output_index,
+                    .reasoning = completion.reasoning,
+                    .reasoning_signature = completion.reasoning_signature,
+                    .reasoning_item_id = completion.reasoning_item_id,
+                    .reasoning_encrypted_content = completion.reasoning_encrypted_content,
+                    .reasoning_items = completion.reasoning_items,
+                    .responses_provider_output_items = completion.responses_provider_output_items,
+                    .responses_output_sequence_complete = completion.responses_output_sequence_complete,
+                });
+                _ = try drainPendingSteers(
+                    deps,
+                    arena,
+                    turn_id,
+                    &within_turn_suffix,
+                    &job,
+                    first_steer,
+                );
+                silent_tool_steps = 0;
+                continue;
+            }
             const needs_continuation =
                 disposition == .completed and
                 !continuation_injected and

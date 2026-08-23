@@ -56,6 +56,10 @@ pub const QueueReviewDraft = struct {
 
 pub const QueuedPrompt = struct {
     turn_id: u64 = 0,
+    /// When set, this input should steer the matching active turn at its next
+    /// model-step boundary. If that turn finishes first, normal queue draining
+    /// treats it as a follow-up turn instead of dropping user input.
+    steer_turn_id: ?u64 = null,
     prompt: []u8,
     images: []types.ImageAttachment,
     authorized_image_catalog: []types.ImageAttachment = &.{},
@@ -452,6 +456,9 @@ pub const PendingQuestionBatchSnapshot = struct {
 pub const WorkerEvent = union(enum) {
     begin_prompt: types.UserTurn,
     begin_prompt_with_skill_bindings: BeginPromptWithSkillBindings,
+    /// User input accepted into the currently running turn. The UI appends a
+    /// prompt card without resetting stream state.
+    append_prompt: types.UserTurn,
     append_user_feedback: []u8,
     assistant_presentation: assistant_presentation.Event,
     /// Provider reasoning. Queued so the UI thread owns transcript mutation;
@@ -765,6 +772,12 @@ pub const WorkerRuntime = struct {
             return error.RecoveryBusy;
         }
         queued.agent_settings = self.agent_turn_settings;
+        if (queued.recovery_checkpoint == null and
+            self.worker_processing and
+            self.active_turn_id != 0)
+        {
+            queued.steer_turn_id = self.active_turn_id;
+        }
         try self.queued_prompts.append(alloc, queued);
         self.queued_prompt_count += 1;
         debug_trace.logf(
@@ -1021,6 +1034,54 @@ pub const WorkerRuntime = struct {
         return true;
     }
 
+    /// Takes one input admitted while `turn_id` was active. The caller owns the
+    /// returned prompt and must release it with `freeQueuedPrompt` after copying
+    /// the fields needed by the active agent turn.
+    pub fn takePendingSteer(
+        self: *WorkerRuntime,
+        alloc: std.mem.Allocator,
+        turn_id: u64,
+    ) !?QueuedPrompt {
+        self.worker_mutex.lockUncancelable(io_mod.getIo());
+        defer self.worker_mutex.unlock(io_mod.getIo());
+
+        if (turn_id == 0 or self.active_turn_id != turn_id or
+            self.queue_admission != null)
+        {
+            return null;
+        }
+        for (self.queued_prompts.items, 0..) |queued, index| {
+            if (queued.steer_turn_id == null or
+                queued.steer_turn_id.? != turn_id)
+            {
+                continue;
+            }
+            const appended_prompt = try types.dupeUserTurn(
+                alloc,
+                .{ .text = queued.prompt, .images = queued.images },
+            );
+            errdefer types.freeUserTurn(alloc, appended_prompt);
+            try self.worker_events.append(
+                alloc,
+                .{ .append_prompt = appended_prompt },
+            );
+            var prompt = self.queued_prompts.orderedRemove(index);
+            freeQueueReviewDraftOpt(alloc, prompt.review_draft);
+            prompt.review_draft = null;
+            prompt.steer_turn_id = null;
+            if (self.queued_prompt_count > 0) self.queued_prompt_count -= 1;
+            debug_trace.eventf(
+                "worker",
+                "prompt_steer_take",
+                .{ .turn_id = turn_id },
+                "prompt_bytes={d} remaining_queue={d}",
+                .{ prompt.prompt.len, self.queued_prompt_count },
+            );
+            return prompt;
+        }
+        return null;
+    }
+
     pub fn waitAndTakeNextPrompt(self: *WorkerRuntime, alloc: std.mem.Allocator) !?QueuedPrompt {
         self.worker_mutex.lockUncancelable(io_mod.getIo());
         defer self.worker_mutex.unlock(io_mod.getIo());
@@ -1052,31 +1113,45 @@ pub const WorkerRuntime = struct {
         return self.takeNextPromptLocked(alloc);
     }
 
+    fn appendBeginPromptEventLocked(
+        self: *WorkerRuntime,
+        alloc: std.mem.Allocator,
+        queued: QueuedPrompt,
+    ) !void {
+        if (queued.recovery_checkpoint != null) return;
+        const begin_prompt = try types.dupeUserTurn(
+            alloc,
+            .{ .text = queued.prompt, .images = queued.images },
+        );
+        errdefer types.freeUserTurn(alloc, begin_prompt);
+        if (queued.skill_bindings.len > 0 or queued.skill_display_spans.len > 0) {
+            const skill_bindings = try dupeSkillBindings(alloc, queued.skill_bindings);
+            errdefer freeSkillBindings(alloc, skill_bindings);
+            const skill_display_spans = try dupeSkillDisplaySpans(
+                alloc,
+                queued.skill_display_spans,
+            );
+            errdefer freeSkillDisplaySpans(alloc, skill_display_spans);
+            try self.worker_events.append(alloc, .{
+                .begin_prompt_with_skill_bindings = .{
+                    .prompt = begin_prompt,
+                    .skill_bindings = skill_bindings,
+                    .skill_display_spans = skill_display_spans,
+                },
+            });
+        } else {
+            try self.worker_events.append(alloc, .{ .begin_prompt = begin_prompt });
+        }
+    }
+
     fn takeNextPromptLocked(self: *WorkerRuntime, alloc: std.mem.Allocator) !?QueuedPrompt {
         if (self.worker_stop_requested or self.queued_prompts.items.len == 0) return null;
 
         const queued = self.queued_prompts.items[0];
-        if (queued.recovery_checkpoint == null) {
-            const begin_prompt = try types.dupeUserTurn(alloc, .{ .text = queued.prompt, .images = queued.images });
-            errdefer types.freeUserTurn(alloc, begin_prompt);
-            if (queued.skill_bindings.len > 0 or queued.skill_display_spans.len > 0) {
-                const skill_bindings = try dupeSkillBindings(alloc, queued.skill_bindings);
-                errdefer freeSkillBindings(alloc, skill_bindings);
-                const skill_display_spans = try dupeSkillDisplaySpans(alloc, queued.skill_display_spans);
-                errdefer freeSkillDisplaySpans(alloc, skill_display_spans);
-                try self.worker_events.append(alloc, .{
-                    .begin_prompt_with_skill_bindings = .{
-                        .prompt = begin_prompt,
-                        .skill_bindings = skill_bindings,
-                        .skill_display_spans = skill_display_spans,
-                    },
-                });
-            } else {
-                try self.worker_events.append(alloc, .{ .begin_prompt = begin_prompt });
-            }
-        }
+        try self.appendBeginPromptEventLocked(alloc, queued);
 
         var job = self.queued_prompts.orderedRemove(0);
+        job.steer_turn_id = null;
         freeQueueReviewDraftOpt(alloc, job.review_draft);
         job.review_draft = null;
         if (self.queued_prompt_count > 0) self.queued_prompt_count -= 1;
@@ -2010,6 +2085,41 @@ fn appendHistoryTurnProjection(
     );
 }
 
+/// Builds the minimal owned queue value consumed by same-turn steering.
+/// Only `prompt` and `images` are model-visible; the remaining owned fields
+/// keep the common `freeQueuedPrompt` ownership contract intact.
+pub fn initSteerPrompt(
+    alloc: std.mem.Allocator,
+    prompt: []const u8,
+    images: []const types.ImageAttachment,
+) !QueuedPrompt {
+    const owned_prompt = try alloc.dupe(u8, prompt);
+    errdefer alloc.free(owned_prompt);
+    const owned_images = try types.dupeImageAttachmentSlice(alloc, images);
+    errdefer types.freeImageAttachmentSlice(alloc, owned_images);
+    const authorized_image_catalog = try alloc.alloc(types.ImageAttachment, 0);
+    errdefer alloc.free(authorized_image_catalog);
+    const model = try alloc.dupe(u8, "");
+    errdefer alloc.free(model);
+    const api_key = try alloc.dupe(u8, "");
+    errdefer secret.zeroAndFree(alloc, api_key);
+    const history = try alloc.alloc(types.HistoryTurn, 0);
+    errdefer alloc.free(history);
+    const grants = try alloc.alloc(types.PermissionGrant, 0);
+    errdefer alloc.free(grants);
+
+    return .{
+        .prompt = owned_prompt,
+        .images = owned_images,
+        .authorized_image_catalog = authorized_image_catalog,
+        .model = model,
+        .api_key = api_key,
+        .permission_mode = .auto,
+        .history = history,
+        .grants = grants,
+    };
+}
+
 pub fn freeQueuedPrompt(alloc: std.mem.Allocator, prompt: QueuedPrompt) void {
     alloc.free(prompt.prompt);
     types.freeImageAttachmentSlice(alloc, prompt.images);
@@ -2346,6 +2456,65 @@ fn checkHistoryPropagationAllocation(
     return true;
 }
 
+test "input admitted during processing steers the matching active turn" {
+    const alloc = std.testing.allocator;
+    var runtime: WorkerRuntime = .{};
+    defer runtime.deinit(alloc);
+
+    try runtime.enqueuePrompt(alloc, try makePrompt(alloc, "active", "model"));
+    const active = (try runtime.tryTakeNextPrompt(alloc)) orelse
+        return error.TestExpectedEqual;
+    const active_turn_id = active.turn_id;
+    freeQueuedPrompt(alloc, active);
+    var initial_events = runtime.takeEvents();
+    defer initial_events.deinit(alloc);
+    for (initial_events.items) |event| freeWorkerEvent(alloc, event);
+
+    try runtime.enqueuePrompt(alloc, try makePrompt(alloc, "steer now", "model"));
+    try std.testing.expectEqual(@as(usize, 1), runtime.queuedPromptCount());
+    try std.testing.expectEqual(
+        active_turn_id,
+        runtime.queued_prompts.items[0].steer_turn_id.?,
+    );
+
+    const steer = (try runtime.takePendingSteer(alloc, active_turn_id)) orelse
+        return error.TestExpectedEqual;
+    defer freeQueuedPrompt(alloc, steer);
+    try std.testing.expectEqualStrings("steer now", steer.prompt);
+    try std.testing.expectEqual(@as(?u64, null), steer.steer_turn_id);
+    try std.testing.expectEqual(@as(usize, 0), runtime.queuedPromptCount());
+
+    var events = runtime.takeEvents();
+    defer events.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 1), events.items.len);
+    try std.testing.expect(events.items[0] == .append_prompt);
+    try std.testing.expectEqualStrings(
+        "steer now",
+        events.items[0].append_prompt.text,
+    );
+    for (events.items) |event| freeWorkerEvent(alloc, event);
+}
+
+test "unconsumed steer falls back to the next queued turn" {
+    const alloc = std.testing.allocator;
+    var runtime: WorkerRuntime = .{};
+    defer runtime.deinit(alloc);
+
+    try runtime.enqueuePrompt(alloc, try makePrompt(alloc, "active", "model"));
+    const active = (try runtime.tryTakeNextPrompt(alloc)) orelse
+        return error.TestExpectedEqual;
+    freeQueuedPrompt(alloc, active);
+    runtime.discardEvents(alloc);
+
+    try runtime.enqueuePrompt(alloc, try makePrompt(alloc, "late follow-up", "model"));
+    runtime.finishProcessing();
+    const follow_up = (try runtime.tryTakeNextPrompt(alloc)) orelse
+        return error.TestExpectedEqual;
+    defer freeQueuedPrompt(alloc, follow_up);
+    try std.testing.expectEqualStrings("late follow-up", follow_up.prompt);
+    try std.testing.expectEqual(@as(?u64, null), follow_up.steer_turn_id);
+}
+
 test "multi-queue history propagation is allocation-failure atomic" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
@@ -2573,6 +2742,7 @@ pub fn dupeWorkerEvent(alloc: std.mem.Allocator, event: WorkerEvent) !WorkerEven
                 .skill_display_spans = skill_display_spans,
             } };
         },
+        .append_prompt => |prompt| .{ .append_prompt = try types.dupeUserTurn(alloc, prompt) },
         .append_user_feedback => |text| .{ .append_user_feedback = try alloc.dupe(u8, text) },
         .assistant_presentation => |presentation| .{
             .assistant_presentation = try presentation.clone(alloc),
@@ -2653,6 +2823,7 @@ pub fn freeWorkerEvent(alloc: std.mem.Allocator, event: WorkerEvent) void {
             freeSkillBindings(alloc, begin.skill_bindings);
             freeSkillDisplaySpans(alloc, begin.skill_display_spans);
         },
+        .append_prompt => |prompt| types.freeUserTurn(alloc, prompt),
         .append_user_feedback => |text| alloc.free(text),
         .assistant_presentation => |presentation| {
             var owned = presentation;

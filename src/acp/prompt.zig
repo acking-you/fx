@@ -61,6 +61,7 @@ else
     struct {};
 const types = @import("../core/shared/types.zig");
 const worker_runtime = @import("../core/agent/worker_runtime.zig");
+const terminal_tool = @import("../tools/terminal/terminal.zig");
 
 const Allocator = std.mem.Allocator;
 const ErrorCode = jsonrpc.ErrorCode;
@@ -669,8 +670,13 @@ pub fn handlePrompt(
     const authorized_image_catalog = try session.session_rt.snapshotImageCatalog(alloc, current_images);
     defer types.freeImageAttachmentSlice(alloc, authorized_image_catalog);
 
+    const turn_id = if (recovery_checkpoint) |checkpoint|
+        checkpoint.turn_id
+    else
+        debug_trace.nextTurnId();
+    if (state.active_prompt) |active_prompt| active_prompt.setTurnId(turn_id);
     const job: worker_runtime.QueuedPrompt = .{
-        .turn_id = if (recovery_checkpoint) |checkpoint| checkpoint.turn_id else 0,
+        .turn_id = turn_id,
         .prompt = @constCast(owned_prompt),
         .images = @constCast(current_images),
         .authorized_image_catalog = authorized_image_catalog,
@@ -732,6 +738,361 @@ pub fn handlePrompt(
     }
 
     return .{ .stop_reason = ctx.stop_reason };
+}
+
+fn writePromptResponse(
+    state: *server.ServerState,
+    alloc: Allocator,
+    id: ?jsonrpc.RequestId,
+    stop_reason: acp_types.StopReason,
+) !void {
+    var response: std.Io.Writer.Allocating = .init(alloc);
+    defer response.deinit();
+    try acp_types.writePromptResponse(&response.writer, stop_reason);
+    try state.writer.writeResponse(alloc, id, response.writer.buffered());
+}
+
+fn writeTurnId(writer: *std.Io.Writer, turn_id: u64) !void {
+    try writer.print("\"turn-{d}\"", .{turn_id});
+}
+
+fn parseExpectedTurnId(value: std.json.Value) ?u64 {
+    return switch (value) {
+        .integer => |turn_id| if (turn_id > 0) @intCast(turn_id) else null,
+        .string => |text| blk: {
+            const prefix = "turn-";
+            if (!std.mem.startsWith(u8, text, prefix)) break :blk null;
+            break :blk std.fmt.parseInt(u64, text[prefix.len..], 10) catch null;
+        },
+        else => null,
+    };
+}
+
+fn paramsMatchActiveSession(
+    state: *server.ServerState,
+    params: std.json.Value,
+) bool {
+    const active = state.active_session orelse return false;
+    if (params != .object) return false;
+    const value = params.object.get("sessionId") orelse return false;
+    return value == .string and std.mem.eql(u8, value.string, active.session_id);
+}
+
+fn rawParamsMatchActiveSession(
+    state: *server.ServerState,
+    alloc: Allocator,
+    params_raw: ?[]const u8,
+) bool {
+    const raw = params_raw orelse return false;
+    const params = std.json.parseFromSlice(std.json.Value, alloc, raw, .{}) catch
+        return false;
+    defer params.deinit();
+    return paramsMatchActiveSession(state, params.value);
+}
+
+pub fn handleTurnSteer(
+    state: *server.ServerState,
+    alloc: Allocator,
+    msg: *jsonrpc.Message,
+) !void {
+    const active_prompt = state.active_prompt orelse return state.writer.writeError(
+        alloc,
+        msg.id,
+        .{ .code = ErrorCode.invalid_request, .message = "No active turn" },
+    );
+    const params_raw = msg.params_raw orelse return state.writer.writeError(
+        alloc,
+        msg.id,
+        .{ .code = ErrorCode.invalid_params, .message = "Missing params" },
+    );
+    const params = std.json.parseFromSlice(std.json.Value, alloc, params_raw, .{}) catch
+        return state.writer.writeError(
+            alloc,
+            msg.id,
+            .{ .code = ErrorCode.invalid_params, .message = "Invalid params" },
+        );
+    defer params.deinit();
+    if (!paramsMatchActiveSession(state, params.value)) {
+        return state.writer.writeError(
+            alloc,
+            msg.id,
+            .{ .code = ErrorCode.invalid_request, .message = "Session does not own the active turn" },
+        );
+    }
+    const expected_value = params.value.object.get("expectedTurnId") orelse
+        return state.writer.writeError(
+            alloc,
+            msg.id,
+            .{ .code = ErrorCode.invalid_params, .message = "Missing expectedTurnId" },
+        );
+    const expected_turn_id = parseExpectedTurnId(expected_value) orelse
+        return state.writer.writeError(
+            alloc,
+            msg.id,
+            .{ .code = ErrorCode.invalid_params, .message = "Invalid expectedTurnId" },
+        );
+    var prompt_input = parsePromptInput(alloc, params_raw) catch |err| switch (err) {
+        error.UnsupportedPromptImage => return state.writer.writeError(
+            alloc,
+            msg.id,
+            .{ .code = ErrorCode.invalid_params, .message = "Image steer blocks are not supported" },
+        ),
+        else => return err,
+    };
+    defer prompt_input.deinit(alloc);
+    if (prompt_input.continue_recovery or prompt_input.text.len == 0) {
+        return state.writer.writeError(
+            alloc,
+            msg.id,
+            .{ .code = ErrorCode.invalid_params, .message = "Steer input must contain text" },
+        );
+    }
+
+    switch (try active_prompt.admitSteer(expected_turn_id, prompt_input.text)) {
+        .accepted => {},
+        .turn_not_ready => return state.writer.writeError(
+            alloc,
+            msg.id,
+            .{ .code = ErrorCode.invalid_request, .message = "Active turn is not ready for steering" },
+        ),
+        .turn_mismatch => return state.writer.writeError(
+            alloc,
+            msg.id,
+            .{ .code = ErrorCode.invalid_request, .message = "expectedTurnId does not match the active turn" },
+        ),
+        .turn_finished => return state.writer.writeError(
+            alloc,
+            msg.id,
+            .{ .code = ErrorCode.invalid_request, .message = "Active turn no longer accepts steering" },
+        ),
+    }
+
+    var response: std.Io.Writer.Allocating = .init(alloc);
+    defer response.deinit();
+    try response.writer.writeAll("{\"turnId\":");
+    try writeTurnId(&response.writer, expected_turn_id);
+    try response.writer.writeAll("}");
+    try state.writer.writeResponse(alloc, msg.id, response.writer.buffered());
+}
+
+fn writeTurnStatusJson(
+    writer: *std.Io.Writer,
+    state: *server.ServerState,
+) !void {
+    try writer.writeAll("{\"sessionId\":");
+    if (state.active_session) |session| {
+        try jsonrpc.writeJsonStr(session.session_id, writer);
+    } else {
+        try writer.writeAll("null");
+    }
+    if (state.active_prompt) |active_prompt| {
+        const snapshot = active_prompt.snapshot();
+        try writer.writeAll(",\"state\":\"running\",\"activeTurnId\":");
+        if (snapshot.turn_id == 0) {
+            try writer.writeAll("null");
+        } else {
+            try writeTurnId(writer, snapshot.turn_id);
+        }
+        try writer.print(
+            ",\"acceptingSteers\":{s},\"pendingSteers\":{d}",
+            .{ if (snapshot.accepting_steers) "true" else "false", snapshot.pending_steers },
+        );
+    } else {
+        try writer.writeAll(",\"state\":\"idle\",\"activeTurnId\":null,\"acceptingSteers\":false,\"pendingSteers\":0");
+    }
+    const cancel_requested = if (state.active_session) |session|
+        session.cancel_flag.load(.seq_cst)
+    else
+        false;
+    try writer.print(",\"cancelRequested\":{s}}}", .{
+        if (cancel_requested) "true" else "false",
+    });
+}
+
+pub fn handleTurnStatus(
+    state: *server.ServerState,
+    alloc: Allocator,
+    msg: *jsonrpc.Message,
+) !void {
+    if (state.active_session == null) {
+        return state.writer.writeError(alloc, msg.id, no_active_session_rpc_error);
+    }
+    if (!rawParamsMatchActiveSession(state, alloc, msg.params_raw)) {
+        return state.writer.writeError(
+            alloc,
+            msg.id,
+            .{ .code = ErrorCode.invalid_request, .message = "Session does not match the active session" },
+        );
+    }
+    var response: std.Io.Writer.Allocating = .init(alloc);
+    defer response.deinit();
+    try writeTurnStatusJson(&response.writer, state);
+    try state.writer.writeResponse(alloc, msg.id, response.writer.buffered());
+}
+
+fn refreshTerminalProjection(
+    state: *server.ServerState,
+    alloc: Allocator,
+) void {
+    const session = if (state.active_session) |*active| active else return;
+    const writable = if (session.writable) |*value| value else return;
+    const child_capability = writable.childCapability() catch return;
+    terminal_tool.refreshListProjection(.{
+        .allocator = alloc,
+        .workspace_root = state.workspace_root,
+        .access_scope = state.workspace_access.scope(state.workspace_root),
+        .session_child_capability = child_capability,
+        .terminal_client = &state.terminal_client,
+        .terminal_owner_session_id = session.session_id,
+        .terminal_transport_role = .acp,
+        .background_lifecycle_allocator = state.alloc,
+        .cancel_flag = &session.cancel_flag,
+    }) catch |err| {
+        debug_trace.logf(
+            "acp",
+            "terminal status refresh failed err={s}",
+            .{@errorName(err)},
+        );
+    };
+}
+
+fn terminalVisibleInProcessStatus(row: anytype) bool {
+    return row.lifecycle == .running or row.lifecycle == .starting;
+}
+
+fn writeBackgroundTerminalsJson(
+    writer: *std.Io.Writer,
+    state: *server.ServerState,
+    alloc: Allocator,
+) !void {
+    refreshTerminalProjection(state, alloc);
+    var terminal_snapshot = try state.terminal_client.terminalProjection(alloc);
+    defer terminal_snapshot.deinit();
+    var task_snapshot = try state.background.snapshotTasks(alloc);
+    defer task_snapshot.deinit(alloc);
+
+    try writer.writeAll("{\"data\":[");
+    var first = true;
+    for (terminal_snapshot.rows) |row| {
+        if (!terminalVisibleInProcessStatus(row)) continue;
+        if (!first) try writer.writeByte(',');
+        first = false;
+        try writer.writeAll("{\"kind\":\"terminal\",\"id\":");
+        try jsonrpc.writeJsonStr(row.session_id, writer);
+        try writer.writeAll(",\"command\":");
+        try jsonrpc.writeJsonStr(row.label, writer);
+        try writer.writeAll(",\"state\":");
+        try jsonrpc.writeJsonStr(@tagName(row.lifecycle), writer);
+        try writer.writeAll(",\"backend\":");
+        try jsonrpc.writeJsonStr(@tagName(row.backend), writer);
+        try writer.writeAll("}");
+    }
+    for (task_snapshot.items) |task| {
+        if (task.state != .running) continue;
+        if (!first) try writer.writeByte(',');
+        first = false;
+        try writer.writeAll("{\"kind\":\"background\",\"id\":");
+        try writer.print("\"background-{d}\",\"command\":", .{task.id});
+        try jsonrpc.writeJsonStr(task.command, writer);
+        try writer.writeAll(",\"state\":\"running\",\"cwd\":");
+        try jsonrpc.writeJsonStr(task.cwd, writer);
+        try writer.writeAll("}");
+    }
+    try writer.writeAll("],\"nextCursor\":null}");
+}
+
+pub fn handleBackgroundTerminalsList(
+    state: *server.ServerState,
+    alloc: Allocator,
+    msg: *jsonrpc.Message,
+) !void {
+    if (state.active_session == null) {
+        return state.writer.writeError(alloc, msg.id, no_active_session_rpc_error);
+    }
+    if (!rawParamsMatchActiveSession(state, alloc, msg.params_raw)) {
+        return state.writer.writeError(
+            alloc,
+            msg.id,
+            .{ .code = ErrorCode.invalid_request, .message = "Session does not match the active session" },
+        );
+    }
+    var response: std.Io.Writer.Allocating = .init(alloc);
+    defer response.deinit();
+    try writeBackgroundTerminalsJson(&response.writer, state, alloc);
+    try state.writer.writeResponse(alloc, msg.id, response.writer.buffered());
+}
+
+pub fn isProcessStatusPrompt(
+    alloc: Allocator,
+    params_raw: ?[]const u8,
+) !bool {
+    const params = params_raw orelse return false;
+    var input = parsePromptInput(alloc, params) catch return false;
+    defer input.deinit(alloc);
+    return std.mem.eql(u8, std.mem.trim(u8, input.text, " \t\r\n"), "/ps");
+}
+
+pub fn handleProcessStatusPrompt(
+    state: *server.ServerState,
+    alloc: Allocator,
+    msg: *jsonrpc.Message,
+) !void {
+    const session = if (state.active_session) |*active| active else return state.writer.writeError(alloc, msg.id, no_active_session_rpc_error);
+    refreshTerminalProjection(state, alloc);
+    var terminal_snapshot = try state.terminal_client.terminalProjection(alloc);
+    defer terminal_snapshot.deinit();
+    var task_snapshot = try state.background.snapshotTasks(alloc);
+    defer task_snapshot.deinit(alloc);
+
+    var text: std.Io.Writer.Allocating = .init(alloc);
+    defer text.deinit();
+    if (state.active_prompt) |active_prompt| {
+        const snapshot = active_prompt.snapshot();
+        if (snapshot.turn_id == 0) {
+            try text.writer.writeAll("Turn: starting\n");
+        } else {
+            try text.writer.print("Turn: running (turn-{d})\n", .{snapshot.turn_id});
+        }
+        try text.writer.print("Pending steers: {d}\n", .{snapshot.pending_steers});
+    } else {
+        try text.writer.writeAll("Turn: idle\nPending steers: 0\n");
+    }
+
+    var running_count: usize = 0;
+    for (terminal_snapshot.rows) |row| {
+        if (terminalVisibleInProcessStatus(row)) running_count += 1;
+    }
+    for (task_snapshot.items) |task| {
+        if (task.state == .running) running_count += 1;
+    }
+    if (running_count == 0) {
+        try text.writer.writeAll("Background processes: none");
+    } else {
+        try text.writer.print("Background processes: {d}\n", .{running_count});
+        for (terminal_snapshot.rows) |row| {
+            if (!terminalVisibleInProcessStatus(row)) continue;
+            try text.writer.print(
+                "- [{s}] {s} ({s}, {s})\n",
+                .{ row.session_id, row.label, @tagName(row.lifecycle), @tagName(row.backend) },
+            );
+        }
+        for (task_snapshot.items) |task| {
+            if (task.state != .running) continue;
+            try text.writer.print(
+                "- [background-{d}] {s} (running)\n",
+                .{ task.id, task.command },
+            );
+        }
+    }
+
+    var ctx = AcpContext{
+        .alloc = alloc,
+        .state = state,
+        .session_id = session.session_id,
+    };
+    defer ctx.deinitPublishedToolCalls();
+    try ctx.sendAgentText(text.writer.buffered());
+    try writePromptResponse(state, alloc, msg.id, .end_turn);
 }
 
 pub fn runSubagentChild(
@@ -918,6 +1279,7 @@ fn parsePromptInput(alloc: Allocator, params_json: []const u8) !ParsedPromptInpu
     };
 
     const prompt_arr = parsed.value.object.get("prompt") orelse
+        parsed.value.object.get("input") orelse
         return .{ .text = try alloc.dupe(u8, ""), .continue_recovery = continue_recovery };
     if (prompt_arr != .array) return .{ .text = try alloc.dupe(u8, ""), .continue_recovery = continue_recovery };
 
@@ -1090,6 +1452,7 @@ fn agentRuntimeDeps(ctx: *AcpContext) agent_runtime.AgentRuntimeDeps {
         .publish_committed_file_handoff = publishCommittedFileHandoff,
         .publish_deferred_tool_completion = publishDeferredToolCompletion,
         .propagate_history_turn = propagateHistoryTurn,
+        .take_pending_steer = takePendingSteer,
         .recovery_checkpoint = if (session.writable != null)
             .{
                 .set = setRecoveryCheckpoint,
@@ -1114,6 +1477,17 @@ fn agentRuntimeDeps(ctx: *AcpContext) agent_runtime.AgentRuntimeDeps {
         .usage = &session.session_rt.usage,
         .usage_allocator = ctx.state.alloc,
     };
+}
+
+fn takePendingSteer(
+    raw: *anyopaque,
+    alloc: Allocator,
+    turn_id: u64,
+    finish_if_empty: bool,
+) !?worker_runtime.QueuedPrompt {
+    const ctx: *AcpContext = @ptrCast(@alignCast(raw));
+    const active = ctx.state.active_prompt orelse return null;
+    return active.takeSteer(alloc, turn_id, finish_if_empty);
 }
 
 fn refreshGatewayCredential(
@@ -2855,6 +3229,28 @@ test "parsePromptInput extracts text blocks" {
     var result = try parsePromptInput(alloc, params);
     defer result.deinit(alloc);
     try std.testing.expectEqualStrings("Hello world", result.text);
+}
+
+test "parsePromptInput accepts fx steer input blocks" {
+    const alloc = std.testing.allocator;
+    var result = try parsePromptInput(
+        alloc,
+        "{\"input\":[{\"type\":\"text\",\"text\":\"steer now\"}]}",
+    );
+    defer result.deinit(alloc);
+    try std.testing.expectEqualStrings("steer now", result.text);
+}
+
+test "ACP recognizes the exact local process status command" {
+    const alloc = std.testing.allocator;
+    try std.testing.expect(try isProcessStatusPrompt(
+        alloc,
+        "{\"prompt\":[{\"type\":\"text\",\"text\":\" /ps \"}]}",
+    ));
+    try std.testing.expect(!(try isProcessStatusPrompt(
+        alloc,
+        "{\"prompt\":[{\"type\":\"text\",\"text\":\"/ps now\"}]}",
+    )));
 }
 
 test "parsePromptInput handles multiple text blocks" {

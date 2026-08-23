@@ -1815,6 +1815,77 @@ describe("acp: model-independent", () => {
   );
 
   test(
+    "ACP process status lists a yielded terminal exec",
+    async () => {
+      const root = createShortIsolatedRoot("fx-acp-terminal-status-");
+      const command = "printf ACP_YIELDED_TERMINAL; sleep 5";
+      const gateway = startFakeGateway([
+        fakeGatewayToolCall("acp_terminal_status_1", "terminal", {
+          action: "exec",
+          cwd: root.workspace,
+          command,
+          profile: "clean",
+          "yield_time_ms": 100,
+        }),
+        finalText("ACP yielded terminal started"),
+      ]);
+      try {
+        client = await AcpClient.create({
+          cwd: root.workspace,
+          env: {
+            ...fakeGatewayEnv(root, gateway),
+            FX_TERMINAL_HOST_IDLE_MS: "200",
+          },
+        });
+        client.setPermissionOption("allow_once");
+        const sessionId = await startCodeSession(client);
+        await client.request("session/set_mode", { modeId: "ask" }, 4);
+        const result = await runPrompt(
+          client,
+          "Start the long terminal fixture.",
+          TIMEOUT,
+        );
+        expect(result.promptResult.result.stopReason).toBe("end_turn");
+
+        const listed = await client.request(
+          "fx/backgroundTerminals/list",
+          { sessionId },
+          5,
+        ) as any;
+        expect(listed.error).toBeUndefined();
+        expect(listed.result.data).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              kind: "terminal",
+              command,
+              state: "running",
+              backend: "native",
+            }),
+          ]),
+        );
+
+        sendPrompt(client, 6, "/ps");
+        const messages: any[] = [];
+        let response: any = null;
+        while (!response) {
+          const message = await client.readLine(TIMEOUT) as any;
+          if (message.id === 6) response = message;
+          else messages.push(message);
+        }
+        expect(response.result.stopReason).toBe("end_turn");
+        expect(JSON.stringify(messages)).toContain("ACP_YIELDED_TERMINAL");
+        expect(client.stderr).toBe("");
+      } finally {
+        await client?.close();
+        gateway.stop();
+        await waitForTerminalHostExit(root.root);
+        rmSync(root.root, { recursive: true, force: true });
+      }
+    },
+    TIMEOUT,
+  );
+
+  test(
     "ACP added-root reads skip external deferral and added project instructions",
     async () => {
       const root = createIsolatedRoot("fx-acp-added-root-");
@@ -4723,6 +4794,96 @@ describe("acp: model-independent", () => {
   );
 
   test(
+    "fx ACP extensions report and steer an active turn",
+    async () => {
+      const root = createIsolatedRoot("fx-acp-turn-steer-");
+      const held = heldFakeGatewayFinalText();
+      const gateway = startFakeGateway([
+        () => held.response,
+        (body: string) => {
+          expect(acpPromptText(body)).toContain("Focus on the failing ACP test first.");
+          return finalText("steered prompt complete");
+        },
+      ]);
+      try {
+        client = await AcpClient.create({
+          cwd: root.workspace,
+          env: fakeGatewayEnv(root, gateway),
+        });
+        const sessionId = await startCodeSession(client);
+        sendPrompt(client, 88, "Hold this prompt until steering arrives.");
+        await waitForCondition(
+          "initial ACP gateway request",
+          () => gateway.requests.length === 1,
+          TIMEOUT,
+        );
+
+        client.send({
+          jsonrpc: "2.0",
+          id: 89,
+          method: "fx/turn/status",
+          params: { sessionId },
+        });
+        const running = await readResponse(client, 89) as any;
+        expect(running.error).toBeUndefined();
+        expect(running.result.state).toBe("running");
+        expect(running.result.activeTurnId).toMatch(/^turn-[1-9][0-9]*$/);
+        expect(running.result.acceptingSteers).toBe(true);
+
+        sendPrompt(client, 90, "/ps");
+        const psMessages: any[] = [];
+        let psResponse: any = null;
+        while (!psResponse) {
+          const message = await client.readLine(TIMEOUT) as any;
+          if (message.id === 90) psResponse = message;
+          else psMessages.push(message);
+        }
+        expect(psResponse.result.stopReason).toBe("end_turn");
+        expect(JSON.stringify(psMessages)).toContain("Turn: running");
+
+        client.send({
+          jsonrpc: "2.0",
+          id: 91,
+          method: "fx/turn/steer",
+          params: {
+            sessionId,
+            expectedTurnId: running.result.activeTurnId,
+            input: [
+              { type: "text", text: "Focus on the failing ACP test first." },
+            ],
+          },
+        });
+        const steered = await readResponse(client, 91) as any;
+        expect(steered.error).toBeUndefined();
+        expect(steered.result.turnId).toBe(running.result.activeTurnId);
+
+        held.release("Initial response before steer.");
+        const completed = await readResponse(client, 88, TIMEOUT);
+        expect(completed.error).toBeUndefined();
+        expect(completed.result.stopReason).toBe("end_turn");
+        expect(gateway.requests).toHaveLength(2);
+
+        client.send({
+          jsonrpc: "2.0",
+          id: 92,
+          method: "fx/turn/status",
+          params: { sessionId },
+        });
+        const idle = await readResponse(client, 92) as any;
+        expect(idle.result.state).toBe("idle");
+        expect(idle.result.activeTurnId).toBeNull();
+        expect(client.stderr).toBe("");
+      } finally {
+        held.dispose();
+        await client?.close();
+        gateway.stop();
+        rmSync(root.root, { recursive: true, force: true });
+      }
+    },
+    TIMEOUT,
+  );
+
+  test(
     "terminal prompt response admits immediate session/list before worker exit",
     async () => {
       const root = createIsolatedRoot("fx-acp-terminal-list-");
@@ -6318,6 +6479,7 @@ describe("acp: model-independent", () => {
         fakeGatewayToolCall("approved_command_1", "terminal", {
           action: "exec",
           command: `printf approved > '${marker}'`,
+          profile: "clean",
         }),
         finalText("command approval complete"),
       ]);

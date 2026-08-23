@@ -302,6 +302,10 @@ pub fn Bindings(comptime App: type) type {
                 .execute_tool_call = agentExecuteToolCall,
                 .publish_committed_file_handoff = agentPublishCommittedFileHandoff,
                 .propagate_history_turn = agentPropagateHistoryTurn,
+                .take_pending_steer = if (comptime @hasDecl(@TypeOf(app.worker), "takePendingSteer"))
+                    agentTakePendingSteer
+                else
+                    null,
                 .recovery_checkpoint = if (comptime @hasField(App, "session_persistence"))
                     if (app.session_persistence.writable != null)
                         .{
@@ -788,6 +792,17 @@ pub fn Bindings(comptime App: type) type {
         fn agentPropagateHistoryTurn(ctx: *anyopaque, turn: HistoryTurn) !void {
             const app: *App = @ptrCast(@alignCast(ctx));
             try app_worker_runtime.Runtime(App).propagateHistoryTurn(app, turn, app.session.max_history_turns);
+        }
+
+        fn agentTakePendingSteer(
+            ctx: *anyopaque,
+            alloc: std.mem.Allocator,
+            turn_id: u64,
+            finish_if_empty: bool,
+        ) !?worker_runtime.QueuedPrompt {
+            _ = finish_if_empty;
+            const app: *App = @ptrCast(@alignCast(ctx));
+            return app.worker.takePendingSteer(alloc, turn_id);
         }
 
         fn agentSetRecoveryCheckpoint(

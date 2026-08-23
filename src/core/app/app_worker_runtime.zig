@@ -223,6 +223,7 @@ pub fn Runtime(comptime App: type) type {
                 },
                 .begin_prompt,
                 .begin_prompt_with_skill_bindings,
+                .append_prompt,
                 .append_user_feedback,
                 .notification,
                 .question_requested,
@@ -729,6 +730,9 @@ pub fn Runtime(comptime App: type) type {
                         } else {
                             try handlers.write_user_prompt(handlers.ctx, begin.prompt);
                         }
+                    },
+                    .append_prompt => |prompt| {
+                        try handlers.write_user_prompt(handlers.ctx, prompt);
                     },
                     .append_user_feedback => |text| {
                         try handlers.write_user_prompt(handlers.ctx, .{ .text = text });

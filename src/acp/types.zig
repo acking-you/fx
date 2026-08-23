@@ -194,7 +194,11 @@ pub fn writeInitializeResponse(w: *std.Io.Writer) !void {
     try w.writeAll("},\"agentInfo\":{\"name\":\"fx\",\"title\":\"fx\",\"version\":");
     try writeJsonStr(build_options.app_version, w);
     try w.writeAll("},");
-    try w.writeAll("\"authMethods\":[]}");
+    try w.writeAll("\"authMethods\":[],");
+    try w.writeAll("\"_meta\":{\"fx\":{");
+    try w.writeAll("\"turnSteer\":true,\"turnStatus\":true,");
+    try w.writeAll("\"backgroundTerminals\":true,\"processStatusCommand\":\"/ps\"");
+    try w.writeAll("}}}");
 }
 
 pub fn writePromptResponse(w: *std.Io.Writer, reason: StopReason) !void {
@@ -329,6 +333,11 @@ test "writeInitializeResponse contains required fields" {
     try std.testing.expect(std.mem.find(u8, out.writer.buffered(), "\"close\":{}") != null);
     try std.testing.expect(mcp_capabilities.get("http").?.bool);
     try std.testing.expect(mcp_capabilities.get("sse").?.bool);
+    const fx_meta = parsed.value.object.get("_meta").?.object.get("fx").?.object;
+    try std.testing.expect(fx_meta.get("turnSteer").?.bool);
+    try std.testing.expect(fx_meta.get("turnStatus").?.bool);
+    try std.testing.expect(fx_meta.get("backgroundTerminals").?.bool);
+    try std.testing.expectEqualStrings("/ps", fx_meta.get("processStatusCommand").?.string);
 }
 
 test "writeUserMessageChunk produces valid json" {

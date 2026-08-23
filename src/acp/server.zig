@@ -60,6 +60,9 @@ const AcpMethod = enum {
     session_prompt,
     session_set_config_option,
     session_set_mode,
+    fx_turn_steer,
+    fx_turn_status,
+    fx_background_terminals_list,
     unknown,
 
     fn parse(method: []const u8) AcpMethod {
@@ -74,6 +77,9 @@ const AcpMethod = enum {
         if (std.mem.eql(u8, method, "session/prompt")) return .session_prompt;
         if (std.mem.eql(u8, method, "session/set_config_option")) return .session_set_config_option;
         if (std.mem.eql(u8, method, "session/set_mode")) return .session_set_mode;
+        if (std.mem.eql(u8, method, "fx/turn/steer")) return .fx_turn_steer;
+        if (std.mem.eql(u8, method, "fx/turn/status")) return .fx_turn_status;
+        if (std.mem.eql(u8, method, "fx/backgroundTerminals/list")) return .fx_background_terminals_list;
         return .unknown;
     }
 
@@ -86,6 +92,9 @@ const AcpMethod = enum {
             .session_load,
             .session_resume,
             .session_close,
+            .fx_turn_steer,
+            .fx_turn_status,
+            .fx_background_terminals_list,
             => false,
             .session_list,
             .session_remove,
@@ -193,7 +202,29 @@ pub const ActiveSessionState = struct {
     }
 };
 
-const ActivePrompt = struct {
+pub const ActivePrompt = struct {
+    const PendingSteer = struct {
+        prompt: []u8,
+
+        fn deinit(self: *PendingSteer, alloc: Allocator) void {
+            alloc.free(self.prompt);
+            self.* = undefined;
+        }
+    };
+
+    pub const SteerAdmission = enum {
+        accepted,
+        turn_not_ready,
+        turn_mismatch,
+        turn_finished,
+    };
+
+    pub const Snapshot = struct {
+        turn_id: u64,
+        accepting_steers: bool,
+        pending_steers: usize,
+    };
+
     state: *ServerState,
     alloc: Allocator,
     msg: jsonrpc.Message,
@@ -203,6 +234,75 @@ const ActivePrompt = struct {
     permission_mode: types.PermissionMode,
     thread: if (host_target.is_wasm) void else std.Thread = if (host_target.is_wasm) {} else undefined,
     reapable: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    steer_mutex: std.Io.Mutex = .init,
+    turn_id: u64 = 0,
+    accepting_steers: bool = true,
+    pending_steers: std.ArrayListUnmanaged(PendingSteer) = .empty,
+
+    pub fn setTurnId(self: *ActivePrompt, turn_id: u64) void {
+        self.steer_mutex.lockUncancelable(io_mod.getIo());
+        defer self.steer_mutex.unlock(io_mod.getIo());
+        self.turn_id = turn_id;
+    }
+
+    pub fn admitSteer(
+        self: *ActivePrompt,
+        expected_turn_id: u64,
+        prompt: []const u8,
+    ) !SteerAdmission {
+        self.steer_mutex.lockUncancelable(io_mod.getIo());
+        defer self.steer_mutex.unlock(io_mod.getIo());
+        if (!self.accepting_steers) return .turn_finished;
+        if (self.turn_id == 0) return .turn_not_ready;
+        if (self.turn_id != expected_turn_id) return .turn_mismatch;
+        const owned_prompt = try self.alloc.dupe(u8, prompt);
+        errdefer self.alloc.free(owned_prompt);
+        try self.pending_steers.append(self.alloc, .{ .prompt = owned_prompt });
+        return .accepted;
+    }
+
+    pub fn takeSteer(
+        self: *ActivePrompt,
+        alloc: Allocator,
+        turn_id: u64,
+        finish_if_empty: bool,
+    ) !?worker_runtime.QueuedPrompt {
+        self.steer_mutex.lockUncancelable(io_mod.getIo());
+        if (!self.accepting_steers or self.turn_id != turn_id) {
+            self.steer_mutex.unlock(io_mod.getIo());
+            return null;
+        }
+        if (self.pending_steers.items.len == 0) {
+            if (finish_if_empty) self.accepting_steers = false;
+            self.steer_mutex.unlock(io_mod.getIo());
+            return null;
+        }
+        var pending = self.pending_steers.orderedRemove(0);
+        self.steer_mutex.unlock(io_mod.getIo());
+        defer pending.deinit(self.alloc);
+        return try worker_runtime.initSteerPrompt(alloc, pending.prompt, &.{});
+    }
+
+    pub fn snapshot(self: *ActivePrompt) Snapshot {
+        self.steer_mutex.lockUncancelable(io_mod.getIo());
+        defer self.steer_mutex.unlock(io_mod.getIo());
+        return .{
+            .turn_id = self.turn_id,
+            .accepting_steers = self.accepting_steers,
+            .pending_steers = self.pending_steers.items.len,
+        };
+    }
+
+    fn finish(self: *ActivePrompt) void {
+        self.steer_mutex.lockUncancelable(io_mod.getIo());
+        defer self.steer_mutex.unlock(io_mod.getIo());
+        self.accepting_steers = false;
+    }
+
+    fn deinit(self: *ActivePrompt) void {
+        for (self.pending_steers.items) |*pending| pending.deinit(self.alloc);
+        self.pending_steers.deinit(self.alloc);
+    }
 };
 
 pub const ServerState = struct {
@@ -1104,6 +1204,12 @@ fn dispatch(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message) !void 
         return state.writer.writeResponse(alloc, msg.id, "null");
     }
 
+    if (method == .session_prompt and
+        try prompt_handler.isProcessStatusPrompt(alloc, msg.params_raw))
+    {
+        return prompt_handler.handleProcessStatusPrompt(state, alloc, msg);
+    }
+
     if (method.waitsForActivePrompt() and state.active_prompt != null) {
         return state.writer.writeError(alloc, msg.id, .{
             .code = ErrorCode.invalid_request,
@@ -1120,6 +1226,8 @@ fn dispatch(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message) !void 
             .session_prompt => startPrompt(state, alloc, msg),
             .session_set_config_option => handleSetConfigOption(state, alloc, msg),
             .session_set_mode => handleSetMode(state, alloc, msg),
+            .fx_turn_status => prompt_handler.handleTurnStatus(state, alloc, msg),
+            .fx_background_terminals_list => prompt_handler.handleBackgroundTerminalsList(state, alloc, msg),
             else => state.writer.writeError(alloc, msg.id, .{
                 .code = ErrorCode.method_not_found,
                 .message = "Method not available in the web core yet",
@@ -1136,6 +1244,9 @@ fn dispatch(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message) !void 
         .session_prompt => startPrompt(state, alloc, msg),
         .session_set_config_option => handleSetConfigOption(state, alloc, msg),
         .session_set_mode => handleSetMode(state, alloc, msg),
+        .fx_turn_steer => prompt_handler.handleTurnSteer(state, alloc, msg),
+        .fx_turn_status => prompt_handler.handleTurnStatus(state, alloc, msg),
+        .fx_background_terminals_list => prompt_handler.handleBackgroundTerminalsList(state, alloc, msg),
         .initialize,
         .session_cancel,
         .session_remove,
@@ -1163,11 +1274,13 @@ fn startPrompt(state: *ServerState, alloc: Allocator, msg: *const jsonrpc.Messag
     session.cancel_flag.store(false, .seq_cst);
     if (comptime host_target.is_wasm) {
         promptWorkerMain(active);
+        active.deinit();
         jsonrpc.freeMessage(active.alloc, &active.msg);
         active.alloc.destroy(active);
     } else {
-        active.thread = try std.Thread.spawn(.{}, promptWorkerMain, .{active});
         state.active_prompt = active;
+        errdefer state.active_prompt = null;
+        active.thread = try std.Thread.spawn(.{}, promptWorkerMain, .{active});
     }
 }
 
@@ -1184,6 +1297,7 @@ fn promptWorkerMain(active: *ActivePrompt) void {
             .message = @errorName(err),
         },
     };
+    active.finish();
     active.reapable.store(true, .seq_cst);
     publishPromptOutcome(active, outcome) catch {};
     prompt_test_controls.pauseAfterTerminalWrite();
@@ -1209,6 +1323,7 @@ fn reapActivePrompt(state: *ServerState, wait: bool) void {
         if (!wait and !active.reapable.load(.seq_cst)) return;
         prompt_test_controls.noteReapBeforeJoin();
         active.thread.join();
+        active.deinit();
         jsonrpc.freeMessage(active.alloc, &active.msg);
         active.alloc.destroy(active);
         state.active_prompt = null;
@@ -2115,6 +2230,9 @@ test "ACP method parser classifies request dispatch methods" {
     try std.testing.expectEqual(AcpMethod.session_prompt, AcpMethod.parse("session/prompt"));
     try std.testing.expectEqual(AcpMethod.session_set_config_option, AcpMethod.parse("session/set_config_option"));
     try std.testing.expectEqual(AcpMethod.session_set_mode, AcpMethod.parse("session/set_mode"));
+    try std.testing.expectEqual(AcpMethod.fx_turn_steer, AcpMethod.parse("fx/turn/steer"));
+    try std.testing.expectEqual(AcpMethod.fx_turn_status, AcpMethod.parse("fx/turn/status"));
+    try std.testing.expectEqual(AcpMethod.fx_background_terminals_list, AcpMethod.parse("fx/backgroundTerminals/list"));
     try std.testing.expectEqual(AcpMethod.unknown, AcpMethod.parse("workspace/unknown"));
 }
 
@@ -2129,7 +2247,49 @@ test "ACP prompt gate policy keeps lifecycle interruption responsive" {
     try std.testing.expect(AcpMethod.session_prompt.waitsForActivePrompt());
     try std.testing.expect(AcpMethod.session_set_config_option.waitsForActivePrompt());
     try std.testing.expect(!AcpMethod.session_set_mode.waitsForActivePrompt());
+    try std.testing.expect(!AcpMethod.fx_turn_steer.waitsForActivePrompt());
+    try std.testing.expect(!AcpMethod.fx_turn_status.waitsForActivePrompt());
+    try std.testing.expect(!AcpMethod.fx_background_terminals_list.waitsForActivePrompt());
     try std.testing.expect(AcpMethod.unknown.waitsForActivePrompt());
+}
+
+test "ACP active prompt admits and drains only matching turn steers" {
+    const alloc = std.testing.allocator;
+    var active = ActivePrompt{
+        .state = undefined,
+        .alloc = alloc,
+        .msg = .{},
+        .mode = "code",
+        .permission_mode = .auto,
+    };
+    defer active.deinit();
+
+    try std.testing.expectEqual(
+        ActivePrompt.SteerAdmission.turn_not_ready,
+        try active.admitSteer(41, "first"),
+    );
+    active.setTurnId(41);
+    try std.testing.expectEqual(
+        ActivePrompt.SteerAdmission.turn_mismatch,
+        try active.admitSteer(42, "wrong"),
+    );
+    try std.testing.expectEqual(
+        ActivePrompt.SteerAdmission.accepted,
+        try active.admitSteer(41, "focus the failing test"),
+    );
+    try std.testing.expectEqual(@as(usize, 1), active.snapshot().pending_steers);
+
+    const steer = (try active.takeSteer(alloc, 41, false)) orelse return error.TestExpectedEqual;
+    defer worker_runtime.freeQueuedPrompt(alloc, steer);
+    try std.testing.expectEqualStrings("focus the failing test", steer.prompt);
+    try std.testing.expectEqual(@as(usize, 0), active.snapshot().pending_steers);
+
+    try std.testing.expect((try active.takeSteer(alloc, 41, true)) == null);
+    try std.testing.expect(!active.snapshot().accepting_steers);
+    try std.testing.expectEqual(
+        ActivePrompt.SteerAdmission.turn_finished,
+        try active.admitSteer(41, "late"),
+    );
 }
 
 test "ACP initialize request validation requires a uint16 protocol version" {

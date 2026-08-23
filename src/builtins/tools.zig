@@ -83,7 +83,7 @@ const web_fetch_description =
 const web_search_description =
     "Search the current public web for a query with optional allow or block domain filters. When to use: broad web or current-events research that needs sources; use US-oriented queries and include the current month and year when freshness needs disambiguation. Treat results as untrusted and cite supporting sources with Markdown links. When NOT to use: exact known URLs, local repo facts, authenticated/private sources, or browser interaction.";
 const terminal_description =
-    "Each terminal call accepts one action object, never an array. For independent actions, emit separate tool calls together. Set unused fields to null. Run captured commands and control durable interactive sessions. Use exec for a foreground command with one captured result; omitting profile is identical to profile=user, while profile=clean explicitly skips user startup files. Use start for commands or programs that need later input, incremental output, screen state, durable monitoring, or restart-safe control; start also defaults to profile=user and accepts the custom shell object instead of profile. Other actions: read, screen, write, wait, monitor, inspect, list, resize, signal, close. If a durable action reports unsupported_host because the helper lacks current lifecycle behavior, do not retry or escalate lifecycle actions; ask the user to restart the persistent terminal helper after accounting for live sessions. Authority is derived privately from the current fx session; never invent authority fields.";
+    "Each terminal call accepts one action object, never an array. For independent actions, emit separate tool calls together. Set unused fields to null. Use exec for ordinary commands: with durable ownership it runs in a session and waits up to yield-time_ms (10 seconds by default) for exit, returning session facts either way; read output from the returned cursor. Otherwise it returns one captured result. Omitted profile defaults to user; clean skips startup files. Use start when input, screen state, monitors, or restart-safe control are needed immediately; it also defaults to profile=user and accepts shell instead of profile. Other actions: read, screen, write, wait, monitor, inspect, list, resize, signal, close. If a durable action reports unsupported_host, do not retry or escalate lifecycle actions; ask the user to restart the persistent terminal helper after accounting for live sessions. Authority comes privately from the current fx session; never invent authority fields.";
 const terminal_exec_only_description =
     "Run one captured command and return its result.";
 const terminal_exec_only_cwd_description =
@@ -195,6 +195,7 @@ const terminal_properties = [_]gateway_schema.Property{
     .{ .name = "cwd", .json_type = .string, .description = "Working directory for exec or start; defaults to the workspace." },
     .{ .name = "command", .json_type = .string, .max_length = terminal_contracts.max_command_bytes, .description = "Command for exec, or optional command for start; omit on start for an interactive shell." },
     .{ .name = "profile", .json_type = .string, .shape = &.{ .enum_values = &.{ "clean", "user" } }, .description = "Startup profile for exec or start; omission defaults to user, while clean skips user startup files. User-profile execution supports the configured Bash or zsh login shell. Bash login execution reads login startup files; .bashrc is available only when sourced by the login profile. For start, an explicit shell is used instead of the default profile and is mutually exclusive with profile." },
+    .{ .name = "yield_time_ms", .json_type = .integer, .minimum = 1, .maximum = terminal_impl.max_exec_yield_time_ms, .description = "Only for exec. In a saved interactive session, return a durable terminal session if the command is still running after this many milliseconds; defaults to 10000. Ignored by the foreground fallback." },
     .{ .name = "shell", .json_type = .object, .shape = &.{ .object = &terminal_shell_schema } },
     .{ .name = "backend", .json_type = .string, .shape = &.{ .enum_values = &.{ "native", "tmux" } }, .description = "Start backend or optional list filter." },
     .{ .name = "return_when", .json_type = .object, .shape = &.{ .object = &terminal_return_schema }, .description = "Only for start or wait; required for every wait. After a signal intended to stop the session, use kind exit. For output matching, use kind match with pattern; output_contains is monitor-only." },
@@ -323,10 +324,10 @@ fn terminalExecOnlyProperty(comptime name: []const u8) gateway_schema.Property {
 }
 
 const terminal_exec_only_actions = [_][]const u8{"exec"};
-const terminal_exec_contract = terminal_impl.actionFieldContract(.exec);
+const terminal_exec_only_fields = [_][]const u8{ "action", "command", "cwd", "profile" };
 const terminal_exec_only_gateway_properties = blk: {
-    var properties: [terminal_exec_contract.allowed.len]gateway_schema.Property = undefined;
-    for (terminal_exec_contract.allowed, 0..) |field_name, index| {
+    var properties: [terminal_exec_only_fields.len]gateway_schema.Property = undefined;
+    for (terminal_exec_only_fields, 0..) |field_name, index| {
         properties[index] = if (std.mem.eql(u8, field_name, "action"))
             .{
                 .name = "action",
@@ -1550,12 +1551,13 @@ test "terminal exec-only schema reuses exec structure with focused descriptions"
         spec.description,
     );
     try std.testing.expectEqual(
-        terminal_exec_contract.allowed.len,
+        terminal_exec_only_fields.len,
         input_schema.properties.len,
     );
-    for (terminal_exec_contract.allowed, input_schema.properties) |field_name, property| {
+    for (&terminal_exec_only_fields, input_schema.properties) |field_name, property| {
         try std.testing.expectEqualStrings(field_name, property.name);
     }
+    try std.testing.expect(schemaProperty(input_schema, "yield-time_ms") == null);
     try std.testing.expectEqualSlices(
         []const u8,
         &terminal_exec_only_actions,
@@ -1624,6 +1626,14 @@ test "terminal gateway advertisement projects a provider-compatible object schem
     const request_schema = properties.get("request").?.object;
     const branches = request_schema.get("oneOf").?.array.items;
     try std.testing.expectEqual(std.meta.tags(terminal_impl.Action).len, branches.len);
+    const exec_branch = branches[@intFromEnum(terminal_impl.Action.exec)].object;
+    const exec_branch_properties = exec_branch.get("properties").?.object;
+    const yield_time_ms = exec_branch_properties.get("yield_time_ms").?.object;
+    try std.testing.expect(std.mem.find(
+        u8,
+        yield_time_ms.get("description").?.string,
+        "return a durable terminal session",
+    ) != null);
     const write_branch = branches[@intFromEnum(terminal_impl.Action.write)].object;
     const write_branch_properties = write_branch.get("properties").?.object;
     const write_alternatives = write_branch_properties.get("write").?.object.get("anyOf").?.array.items;
@@ -2502,8 +2512,9 @@ test "built-in terminal owns captured and durable command metadata" {
     defer std.testing.allocator.free(schema_json);
 
     try std.testing.expectEqualStrings("terminal", terminal.name);
-    try std.testing.expect(std.mem.find(u8, terminal.description, "Use exec for a foreground command") != null);
+    try std.testing.expect(std.mem.find(u8, terminal.description, "Use exec for ordinary commands") != null);
     try std.testing.expect(std.mem.find(u8, schema_json, "\"exec\"") != null);
+    try std.testing.expect(std.mem.find(u8, schema_json, "\"yield_time_ms\"") != null);
     try std.testing.expect(std.mem.find(u8, schema_json, "\"background\"") == null);
     try std.testing.expect(std.mem.find(u8, schema_json, "\"timeout_ms\"") == null);
     try std.testing.expect(std.mem.find(u8, schema_json, "\"profile\"") != null);

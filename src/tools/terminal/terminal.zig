@@ -139,6 +139,10 @@ pub const Input = struct {
     cwd: ?[]const u8 = null,
     command: ?[]const u8 = null,
     profile: ?command_environment.Profile = null,
+    /// Foreground budget for exec before a durable terminal session is yielded.
+    /// When durable terminal ownership is unavailable, exec falls back to the
+    /// captured foreground backend and this value has no effect.
+    yield_time_ms: ?u64 = null,
     shell: ?ShellInput = null,
     backend: ?contracts.Backend = null,
     return_when: ?ReturnInput = null,
@@ -180,7 +184,7 @@ pub const ActionFieldContract = struct {
 pub fn actionFieldContract(action: Action) ActionFieldContract {
     return switch (action) {
         .exec => .{
-            .allowed = &.{ "action", "command", "cwd", "profile" },
+            .allowed = &.{ "action", "command", "cwd", "profile", "yield_time_ms" },
             .required = &.{ "action", "command" },
         },
         .start => .{
@@ -492,6 +496,11 @@ pub fn validate(
         if (input.command.?.len > contracts.max_command_bytes) {
             return try ctx.allocator.dupe(u8, "terminal exec arguments are invalid: InvalidCommand");
         }
+        if (input.yield_time_ms) |yield_time_ms| {
+            if (yield_time_ms == 0 or yield_time_ms > max_exec_yield_time_ms) {
+                return try ctx.allocator.dupe(u8, "terminal exec arguments are invalid: InvalidYieldTime");
+            }
+        }
         _ = resolveCwd(arena, ctx, input.cwd) catch |err| {
             return try std.fmt.allocPrint(
                 ctx.allocator,
@@ -533,17 +542,66 @@ pub fn call(
     erased: tool_dispatch.ToolInput,
 ) tool_dispatch.DispatchError!tool_dispatch.ToolResult {
     const input = &erased.as(OwnedInput).parsed.value;
-    if (input.action == .exec) return callExec(ctx, input);
+    if (input.action == .exec) {
+        if (canYieldExec(ctx)) return callYieldingExec(ctx, input);
+        return callExec(ctx, input);
+    }
+    return callDurable(ctx, input, durableAction(input.action).?);
+}
+
+pub const max_exec_yield_time_ms: u64 = 60_000;
+const default_exec_yield_time_ms: u64 = 10_000;
+
+fn canYieldExec(ctx: tool_dispatch.DispatchContext) bool {
+    return ctx.captured_command_host != .workspace_clean and
+        ctx.terminal_client != null and
+        ctx.session_child_capability != null and
+        ctx.terminal_owner_session_id != null;
+}
+
+fn yieldingExecInput(input: Input) Input {
+    var start_input = input;
+    start_input.action = .start;
+    start_input.return_when = .{ .kind = .exit };
+    start_input.wait_ceiling_ms = input.yield_time_ms orelse
+        default_exec_yield_time_ms;
+    start_input.yield_time_ms = null;
+    return start_input;
+}
+
+fn callYieldingExec(
+    ctx: tool_dispatch.DispatchContext,
+    input: *const Input,
+) tool_dispatch.DispatchError!tool_dispatch.ToolResult {
+    const start_input = yieldingExecInput(input.*);
+    return callDurable(ctx, &start_input, .start);
+}
+
+/// Refreshes the caller's terminal projection from the authoritative owner
+/// catalog without exposing the private owner authority on the public wire.
+pub fn refreshListProjection(
+    ctx: tool_dispatch.DispatchContext,
+) tool_dispatch.DispatchError!void {
+    var input: Input = .{ .action = .list };
+    var result = try callDurable(ctx, &input, .list);
+    result.deinit(ctx.allocator);
+}
+
+fn callDurable(
+    ctx: tool_dispatch.DispatchContext,
+    input: *const Input,
+    action: contracts.Action,
+) tool_dispatch.DispatchError!tool_dispatch.ToolResult {
     const runtime = ctx.terminal_client orelse return structuredFailure(
         ctx.allocator,
-        durableAction(input.action).?,
+        action,
         null,
         .unsupported_host,
         false,
     );
     const owner = ctx.session_child_capability orelse return structuredFailure(
         ctx.allocator,
-        durableAction(input.action).?,
+        action,
         null,
         .authority_denied,
         false,
@@ -551,7 +609,7 @@ pub fn call(
     const durable_session_id = ctx.terminal_owner_session_id orelse
         return structuredFailure(
             ctx.allocator,
-            durableAction(input.action).?,
+            action,
             null,
             .authority_denied,
             false,
@@ -562,7 +620,7 @@ pub fn call(
     var profile_user_buffer: [64]u8 = undefined;
     const profile_user = identity.profileUser(&profile_user_buffer) orelse return structuredFailure(
         ctx.allocator,
-        durableAction(input.action).?,
+        action,
         input.session_id,
         .unsupported_host,
         false,
@@ -590,7 +648,7 @@ pub fn call(
         }
         return structuredFailure(
             ctx.allocator,
-            durableAction(input.action).?,
+            action,
             input.session_id,
             mapErrorCode(err),
             false,
@@ -611,7 +669,7 @@ pub fn call(
         );
         return structuredFailure(
             ctx.allocator,
-            durableAction(input.action).?,
+            action,
             request.sessionId(),
             mapErrorCode(err),
             err == error.QueueFull,
@@ -625,7 +683,7 @@ pub fn call(
             defer completion.deinit();
             return resultFromCompletion(
                 ctx.allocator,
-                durableAction(input.action).?,
+                action,
                 request.sessionId(),
                 completion,
             );
@@ -1475,7 +1533,7 @@ test "terminal action field ownership is exact for every public action" {
         required: []const []const u8,
         conflicts: []const tool_result_errors.TerminalActionFieldConflict = &.{},
     }{
-        .{ .action = .exec, .fields = &.{ "action", "command", "cwd", "profile" }, .required = &.{ "action", "command" } },
+        .{ .action = .exec, .fields = &.{ "action", "command", "cwd", "profile", "yield_time_ms" }, .required = &.{ "action", "command" } },
         .{ .action = .start, .fields = &.{ "action", "cwd", "command", "profile", "shell", "backend", "return_when", "wait_ceiling_ms", "dimensions", "initial_monitors" }, .required = &.{"action"}, .conflicts = &.{.{ "profile", "shell" }} },
         .{ .action = .read, .fields = &.{ "action", "session_id", "cursor_segment", "cursor_offset" }, .required = &.{ "action", "session_id", "cursor_segment" } },
         .{ .action = .screen, .fields = &.{ "action", "session_id" }, .required = &.{ "action", "session_id" } },
@@ -1517,6 +1575,27 @@ test "terminal action field ownership is exact for every public action" {
             );
         }
     }
+}
+
+test "exec durable projection waits for exit up to the requested yield budget" {
+    const default_projected = yieldingExecInput(.{
+        .action = .exec,
+        .command = "zig build",
+    });
+    try std.testing.expectEqual(Action.start, default_projected.action);
+    try std.testing.expectEqual(ReturnKind.exit, default_projected.return_when.?.kind);
+    try std.testing.expectEqual(
+        @as(?u64, default_exec_yield_time_ms),
+        default_projected.wait_ceiling_ms,
+    );
+    try std.testing.expectEqual(@as(?u64, null), default_projected.yield_time_ms);
+
+    const custom_projected = yieldingExecInput(.{
+        .action = .exec,
+        .command = "zig build test",
+        .yield_time_ms = 2_500,
+    });
+    try std.testing.expectEqual(@as(?u64, 2_500), custom_projected.wait_ceiling_ms);
 }
 
 test "terminal decoder elides known null placeholders but structures unknown null fields" {
@@ -2540,6 +2619,33 @@ test "terminal public list rejects lifecycle and projects supported filters" {
                 ),
             );
         },
+    }
+}
+
+test "terminal exec validation bounds the durable yield budget" {
+    const alloc = std.testing.allocator;
+    inline for (.{
+        "{\"action\":\"exec\",\"command\":\"zig build\",\"yield_time_ms\":0}",
+        "{\"action\":\"exec\",\"command\":\"zig build\",\"yield_time_ms\":60001}",
+    }) |arguments_json| {
+        const decoded = try decode(.{ .allocator = alloc }, arguments_json);
+        switch (decoded) {
+            .failure => |message| {
+                defer alloc.free(message);
+                return error.TestUnexpectedResult;
+            },
+            .input => |input| {
+                defer input.deinit(alloc);
+                const reason = (try validate(.{
+                    .allocator = alloc,
+                    .workspace_root = "/tmp",
+                }, input)) orelse return error.TestUnexpectedResult;
+                defer alloc.free(reason);
+                try std.testing.expect(
+                    std.mem.find(u8, reason, "InvalidYieldTime") != null,
+                );
+            },
+        }
     }
 }
 

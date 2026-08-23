@@ -199,6 +199,15 @@ pub const AgentRuntimeDeps = struct {
     publish_committed_file_handoff: *const fn (ctx: *anyopaque, handoff: file_mutation.CommittedFileHandoff) tool_contracts.SecondaryPublicationReport,
     publish_deferred_tool_completion: ?*const fn (ctx: *anyopaque, completion: DeferredToolCompletion) TransportPublicationOutcome = null,
     propagate_history_turn: *const fn (ctx: *anyopaque, turn: HistoryTurn) anyerror!void,
+    /// Root interactive hosts may accept user input while a turn is running.
+    /// The runtime drains it only at model-step boundaries; returned ownership
+    /// belongs to the caller and follows `worker_runtime.freeQueuedPrompt`.
+    take_pending_steer: ?*const fn (
+        ctx: *anyopaque,
+        alloc: Allocator,
+        turn_id: u64,
+        finish_if_empty: bool,
+    ) anyerror!?worker_runtime.QueuedPrompt = null,
     recovery_checkpoint: ?RecoveryCheckpointEffect = null,
     propagate_grant: *const fn (ctx: *anyopaque, tool_name: []const u8, target_path: []const u8) anyerror!void,
     push_event: *const fn (ctx: *anyopaque, event: WorkerEvent) anyerror!void,
