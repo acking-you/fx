@@ -67,6 +67,36 @@ pub const CompactHistoryOutcome = enum {
     local_after_remote_failure,
 };
 
+const AutomaticCompactionNotice = struct {
+    tone: types.NoticeTone,
+    body: []const u8,
+};
+
+fn automaticCompactionNotice(outcome: CompactHistoryOutcome) AutomaticCompactionNotice {
+    return switch (outcome) {
+        .unchanged => .{
+            .tone = .neutral,
+            .body = "Automatic context compaction found no remaining context to compact.",
+        },
+        .compacted_locally => .{
+            .tone = .success,
+            .body = "Context limit reached; context compacted locally after the completed turn.",
+        },
+        .remote_started => .{
+            .tone = .information,
+            .body = "Context limit reached; compacting after the completed turn.",
+        },
+        .remote_busy => .{
+            .tone = .information,
+            .body = "Automatic context compaction is already in progress.",
+        },
+        .local_after_remote_failure => .{
+            .tone = .warning,
+            .body = "Remote context compaction could not be started; context was compacted locally.",
+        },
+    };
+}
+
 pub fn shouldBeginAutomaticCompaction(
     source: types.CredentialSource,
     has_remote_candidate: bool,
@@ -115,6 +145,26 @@ test "automatic compaction follows direct Responses total-token threshold" {
         244_800,
         capabilities,
     ));
+}
+
+test "post-turn automatic compaction reports every settled outcome" {
+    const cases = [_]struct {
+        outcome: CompactHistoryOutcome,
+        tone: types.NoticeTone,
+        body: []const u8,
+    }{
+        .{ .outcome = .unchanged, .tone = .neutral, .body = "Automatic context compaction found no remaining context to compact." },
+        .{ .outcome = .compacted_locally, .tone = .success, .body = "Context limit reached; context compacted locally after the completed turn." },
+        .{ .outcome = .remote_started, .tone = .information, .body = "Context limit reached; compacting after the completed turn." },
+        .{ .outcome = .remote_busy, .tone = .information, .body = "Automatic context compaction is already in progress." },
+        .{ .outcome = .local_after_remote_failure, .tone = .warning, .body = "Remote context compaction could not be started; context was compacted locally." },
+    };
+
+    for (cases) |case| {
+        const notice = automaticCompactionNotice(case.outcome);
+        try std.testing.expectEqual(case.tone, notice.tone);
+        try std.testing.expectEqualStrings(case.body, notice.body);
+    }
 }
 
 const BackgroundSessionPolicy = enum {
@@ -2786,6 +2836,8 @@ pub fn Runtime(comptime App: type) type {
                     "event=post_turn_auto_compaction outcome={s}",
                     .{@tagName(outcome)},
                 );
+                const notice = automaticCompactionNotice(outcome);
+                writeCompactionNotice(app, notice.tone, notice.body);
             }
         }
 

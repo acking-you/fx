@@ -365,6 +365,7 @@ function startFakeChatGptOAuth(
   options: {
     tokenDelayMs?: number;
     responseDelayMs?: number;
+    contextOverflowResponses?: number;
     unauthorizedResponses?: number;
     holdCompactionResponse?: boolean;
   } = {},
@@ -439,6 +440,15 @@ function startFakeChatGptOAuth(
           stream?: boolean;
         };
         const compactInput = parsedBody.input ?? [];
+        if (
+          compactInput.at(-1)?.type !== "compaction_trigger" &&
+          responseCount <= (options.contextOverflowResponses ?? 0)
+        ) {
+          return Response.json(
+            { error: { code: "context_length_exceeded", message: "maximum context length reached" } },
+            { status: 400 },
+          );
+        }
         if (compactInput.at(-1)?.type === "compaction_trigger") {
           if (parsedBody.stream !== true) {
             return Response.json(
@@ -2201,6 +2211,70 @@ tmuxTest(
     const replayTypes = replayInput.map((item) => item.type);
     expect(replayTypes).toContain("compaction");
     expect(replayTypes).not.toContain("compaction_trigger");
+    expect(readFileSync(stderrPath, "utf8")).toBe("");
+  },
+  60_000,
+);
+
+tmuxTest(
+  "automatic Codex overflow compaction is visible through settlement",
+  async () => {
+    home = mkdtempSync(join(tmpdir(), "fx-codex-auto-compact-visible-"));
+    stderrPath = join(home, "stderr.log");
+    writeFileSync(stderrPath, "");
+    writeSeededChatGptLogin(home);
+    writeFileSync(join(home, ".fx", "settings.json"), JSON.stringify({
+      provider: "codex",
+      codex_model: "gpt-5.6-sol",
+    }) + "\n");
+    chatgptOauth = startFakeChatGptOAuth({
+      holdCompactionResponse: true,
+      contextOverflowResponses: 1,
+    });
+    const env = {
+      HOME: home,
+      AI_GATEWAY_API_KEY: undefined,
+      VERCEL_OIDC_TOKEN: undefined,
+      FX_DISABLE_KEYCHAIN: "1",
+      FX_SKIP_ONBOARDING: "1",
+      FX_AUTO_UPGRADE: "0",
+      ...chatgptOauth.env,
+      FX_CODEX_BASE_URL: `${chatgptOauth.baseUrl}/chatgpt`,
+    };
+
+    session = await TmuxSession.create({
+      cmd: FX_BIN,
+      cwd: REPO_ROOT,
+      env,
+      stderrPath,
+      width: 100,
+      height: 30,
+    });
+    await session.waitForComposer(TIMEOUT);
+    await session.sendText("trigger visible automatic compaction");
+    await session.waitForText(
+      "Context limit reached; compacting before the next model step.",
+      TIMEOUT,
+    );
+    expect(await session.capturePane()).not.toContain("CHATGPT_DIRECT_RESPONSE");
+
+    chatgptOauth.releaseCompaction();
+    await session.waitForText(
+      "Context compacted with the active Responses provider.",
+      TIMEOUT,
+    );
+    await session.waitForText("CHATGPT_DIRECT_RESPONSE", TIMEOUT);
+    await session.waitForComposer(TIMEOUT);
+    await session.sendText("/quit");
+    await session.waitForSessionEnd(TIMEOUT);
+    session = null;
+
+    const compactRequest = chatgptOauth.requests.find((request) => {
+      if (request.path !== "/chatgpt/responses" || !request.body) return false;
+      const input = (JSON.parse(request.body) as { input?: Array<Record<string, unknown>> }).input;
+      return input?.at(-1)?.type === "compaction_trigger";
+    });
+    expect(compactRequest).toBeDefined();
     expect(readFileSync(stderrPath, "utf8")).toBe("");
   },
   60_000,

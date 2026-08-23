@@ -77,6 +77,37 @@ const TurnFinalizationGuard = runtime_finalization.TurnFinalizationGuard;
 const PromptFinishTrace = runtime_finalization.PromptFinishTrace;
 const ToolExecutionResult = runtime_tool_contracts.ToolExecutionResult;
 
+fn compactionNotice(tone: types.NoticeTone, body: []const u8) types.SemanticNotice {
+    return .{
+        .topic = "context",
+        .tone = tone,
+        .body = body,
+    };
+}
+
+fn pushVisibleCompactionNotice(
+    deps: *const AgentRuntimeDeps,
+    tone: types.NoticeTone,
+    body: []const u8,
+) !void {
+    const notice = compactionNotice(tone, body);
+    if (deps.push_interactive_notice) |push_notice| {
+        return push_notice(deps.ctx, notice);
+    }
+    return deps.push_system_notice(deps.ctx, notice.body);
+}
+
+test "automatic compaction notices are visible in the inline transcript" {
+    const notice = compactionNotice(.information, "Compacting context.");
+    try std.testing.expectEqualStrings("context", notice.topic);
+    try std.testing.expectEqual(types.NoticeTone.information, notice.tone);
+    try std.testing.expectEqualStrings("Compacting context.", notice.body);
+    try std.testing.expectEqual(
+        types.NoticeVisibility.compact_and_full,
+        notice.visibility,
+    );
+}
+
 fn terminal_request_schema_advertised(
     alloc: Allocator,
     tools_json: []const u8,
@@ -3326,7 +3357,11 @@ fn processQueuedPromptLoop(
             const provider_opts = model_capabilities.resolveProviderOptionsForCapabilities(request_capabilities, config.effort, route_fast_mode);
             runtime_telemetry.traceGatewayProviderOptions(step_ctx, gateway_model, route_fast_mode, config.effort, provider_opts);
             if (inline_auto_compaction_pending) {
-                try deps.pushContextNotice("Context limit reached; compacting before the next model step.");
+                try pushVisibleCompactionNotice(
+                    deps,
+                    .information,
+                    "Context limit reached; compacting before the next model step.",
+                );
                 const compacted = try runtime_compaction.compact(arena, .{
                     .provider = deps.responses_compaction_provider,
                     .credential_source = job.credential_source,
@@ -3345,10 +3380,14 @@ fn processQueuedPromptLoop(
                 inline_compaction_suffix_start = within_turn_suffix.items.len;
                 inline_auto_compaction_pending = false;
                 finalization.requestAutoCompaction(!used_remote);
-                try deps.pushContextNotice(if (used_remote)
-                    "Context compacted with the active Responses provider."
-                else
-                    "Remote context compaction is unavailable; continuing with local compacted context.");
+                try pushVisibleCompactionNotice(
+                    deps,
+                    if (used_remote) .success else .warning,
+                    if (used_remote)
+                        "Context compacted with the active Responses provider."
+                    else
+                        "Remote context compaction is unavailable; continuing with local compacted context.",
+                );
                 continue;
             }
             const tool_choice: types.ToolChoice = if (recovery_strategy == .reconcile_tool)

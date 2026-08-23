@@ -2174,6 +2174,10 @@ test "agent context and system notices share semantic transport with distinct fi
     try std.testing.expectEqualStrings("background", interactive.topic);
     try std.testing.expectEqual(types.NoticeTone.information, interactive.tone);
     try std.testing.expectEqualStrings("Command #1 started. Log: /tmp/run.log", interactive.body);
+    try std.testing.expectEqual(
+        types.NoticeVisibility.compact_and_full,
+        interactive.visibility,
+    );
 }
 
 test "worker bridge deps forward UI operations" {
