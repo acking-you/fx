@@ -8,6 +8,7 @@ const responses_compaction = @import("../gateway/responses_compaction.zig");
 const responses_compaction_binding = @import("../gateway/responses_compaction_binding.zig");
 const captured_command = @import("../tooling/captured_command.zig");
 const model_provider = @import("../config/model_provider.zig");
+const execution_retention = @import("execution_retention.zig");
 
 const Allocator = std.mem.Allocator;
 const Sha256 = std.crypto.hash.sha2.Sha256;
@@ -1711,7 +1712,13 @@ fn parseExecutionMemory(alloc: Allocator, value: std.json.Value) !session.Execut
     );
     errdefer session.freeExecutionMemory(alloc, .{ .tool_steps = tool_steps });
     const files = try parseFiles(alloc, object.get("files") orelse return error.InvalidSessionFormat);
-    return .{ .tool_steps = tool_steps, .files = files };
+    var execution: session.ExecutionMemory = .{ .tool_steps = tool_steps, .files = files };
+    execution_retention.boundFilePresentationBodies(
+        alloc,
+        &execution,
+        execution_retention.durable_file_body_policy,
+    );
+    return execution;
 }
 
 fn parseToolSteps(
@@ -3356,6 +3363,57 @@ test "execution memory codec preserves feedback and reads v1 results without it"
     try std.testing.expect(v2_decoded.assistant.execution.tool_steps[0].tool_results[0].committed_file_presentation == null);
     try std.testing.expect(v2_decoded.assistant.execution.tool_steps[0].tool_results[0].command_output_replay == null);
     try std.testing.expect(v2_decoded.assistant.execution.tool_steps[0].tool_results[0].command_process_presentation == null);
+}
+
+test "execution memory codec drops oversized durable file bodies but keeps preview" {
+    const alloc = std.testing.allocator;
+    const oversized = try alloc.alloc(
+        u8,
+        execution_retention.durable_file_body_policy.max_presentation_bytes + 1,
+    );
+    defer alloc.free(oversized);
+    @memset(oversized, 'x');
+    const presentation_lines = [_]types.CommittedFilePresentationLine{.{
+        .kind = .notice,
+        .text = "bounded preview",
+    }};
+    var results = [_]session.PersistedToolResult{.{
+        .tool_call_id = @constCast("call_large_edit"),
+        .tool_name = @constCast("edit_file"),
+        .status = .success,
+        .output = @constCast("edited"),
+        .output_bytes = 6,
+        .stored_output_bytes = 6,
+        .committed_file_presentation = .{
+            .path = "large.txt",
+            .kind = .edited,
+            .lines = &presentation_lines,
+            .additions = 1,
+            .deletions = 1,
+            .truncated = true,
+            .previous_content = oversized,
+        },
+    }};
+    var steps = [_]session.ToolExecutionStep{.{ .tool_results = &results }};
+    const turn: session.HistoryTurn = .{ .assistant = .{
+        .user = .{ .text = @constCast("edit the large file") },
+        .assistant = @constCast("done"),
+        .execution = .{ .tool_steps = &steps },
+    } };
+
+    var encoded: std.Io.Writer.Allocating = .init(alloc);
+    defer encoded.deinit();
+    try writeHistoryTurn(&encoded.writer, turn);
+    var parsed = try std.json.parseFromSlice(std.json.Value, alloc, encoded.written(), .{});
+    defer parsed.deinit();
+    const decoded = try parseHistoryTurn(alloc, parsed.value);
+    defer session.freeHistoryTurn(alloc, decoded);
+
+    const presentation = decoded.assistant.execution.tool_steps[0].tool_results[0]
+        .committed_file_presentation orelse return error.TestExpectedPresentation;
+    try std.testing.expect(presentation.previous_content == null);
+    try std.testing.expect(presentation.after_content == null);
+    try std.testing.expectEqualStrings("bounded preview", presentation.lines[0].text);
 }
 
 test "assistant history codec round trips Responses reasoning identity and accepts legacy turns" {

@@ -483,6 +483,7 @@ fn handleCompactCommand(
         .model = session.model,
         .serialized_tools = tool_projection.tools_json,
         .messages = messages.items,
+        .capabilities = capabilities,
         .provider_options = model_capabilities.resolveProviderOptionsForCapabilities(
             capabilities,
             session.effort,

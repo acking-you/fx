@@ -6,6 +6,7 @@ const responses_output_items = @import("../shared/responses_output_items.zig");
 const responses_compaction = @import("../gateway/responses_compaction.zig");
 const responses_compaction_binding = @import("../gateway/responses_compaction_binding.zig");
 const session = @import("session.zig");
+const execution_retention = @import("execution_retention.zig");
 
 const Allocator = std.mem.Allocator;
 const legacy_schema_v1: i64 = 1;
@@ -949,7 +950,13 @@ fn parseOptionalExecutionMemory(alloc: Allocator, maybe_value: ?std.json.Value) 
     );
     errdefer session.freeExecutionMemory(alloc, .{ .tool_steps = tool_steps });
     const files = try parseFileEvidenceSlice(alloc, object.get("files"));
-    return .{ .tool_steps = tool_steps, .files = files };
+    var execution: session.ExecutionMemory = .{ .tool_steps = tool_steps, .files = files };
+    execution_retention.boundFilePresentationBodies(
+        alloc,
+        &execution,
+        execution_retention.durable_file_body_policy,
+    );
+    return execution;
 }
 
 fn parseToolExecutionSteps(

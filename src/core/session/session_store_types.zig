@@ -279,10 +279,10 @@ pub const DoctorInspectionResult = struct {
 };
 
 /// Thresholds that decide when committed-log growth is reported as overdue or
-/// failed compaction. Defaults match the historical behavior.
+/// failed compaction. Defaults match the canonical log maintenance policy.
 pub const DoctorInspectionOptions = struct {
     compaction_frame_threshold: u64 = 4096,
-    compaction_byte_threshold: u64 = 128 * 1024 * 1024,
+    compaction_byte_threshold: u64 = session_log.default_compaction_byte_threshold,
 };
 
 /// Copyable store state shared with discovery and migration without introducing

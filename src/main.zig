@@ -154,6 +154,7 @@ const ui_subagents = @import("ui/subagent/controller.zig");
 const transcript_runtime = @import("ui/transcript/runtime.zig");
 const resume_projection = @import("ui/transcript/resume_projection.zig");
 const assistant_pacer = @import("ui/assistant/pacer.zig");
+const poll_cadence = @import("ui/poll_cadence.zig");
 const approval_prompt = @import("core/permissions/approval_prompt.zig");
 
 const Allocator = std.mem.Allocator;
@@ -187,8 +188,6 @@ const RawEnviron = io_mod.RawEnviron;
 const RuntimeContextSnapshot = background_runtime.RuntimeContextSnapshot;
 
 const footer_rows: u16 = 4;
-const active_poll_timeout_ms: i32 = 8;
-const idle_wasm_poll_timeout_ms: i32 = 16;
 const resize_debounce_ms: i64 = 100;
 const max_transcript_bytes: usize = 256 * 1024;
 const default_max_agent_steps: usize = agent_steps.default_max_agent_steps;
@@ -990,7 +989,7 @@ const App = struct {
             const exit_cause = try event_loop.run(
                 self.terminal,
                 &self.should_exit,
-                active_poll_timeout_ms,
+                poll_cadence.active_timeout_ms,
                 callbacks,
             );
             switch (exit_cause) {
@@ -1016,8 +1015,12 @@ const App = struct {
 
     pub fn loopPollTimeoutMs(ctx: *anyopaque, default_timeout_ms: i32) i32 {
         const self: *const App = @ptrCast(@alignCast(ctx));
-        if (comptime !host_target.is_wasm) return default_timeout_ms;
-        return if (self.pacer.hasPending()) default_timeout_ms else idle_wasm_poll_timeout_ms;
+        return poll_cadence.resolveTimeoutMs(
+            default_timeout_ms,
+            host_target.is_wasm,
+            self.stream.active,
+            self.pacer.hasPending(),
+        );
     }
 
     fn processNextCooperativePrompt(self: *App) !void {
