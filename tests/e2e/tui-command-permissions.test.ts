@@ -3091,7 +3091,11 @@ describe("effect-aware command permissions", () => {
         status: string;
         requested: { messages: Array<{ status: string }> };
       } | null = null;
-      let resumeOutcome: { ok: boolean; status: string } | null = null;
+      let resumeOutcome: {
+        ok: boolean;
+        status: string;
+        requested: { generation: number };
+      } | null = null;
       let releaseInspect!: (response: Response) => void;
       const inspectAfterPause = new Promise<Response>((resolve) => {
         releaseInspect = resolve;
@@ -3107,26 +3111,20 @@ describe("effect-aware command permissions", () => {
           resumeOutcome = JSON.parse(
             toolResultText(body, "failed_resume_1"),
           ) as typeof resumeOutcome;
-          return (async () => {
-            const deadline = Date.now() + TIMEOUT;
-            while (Date.now() < deadline) {
-              if (subagentState(root, childId) === "completed") {
-                return gatewayToolCall("subagent", {
-                  command: {
-                    inspect: {
-                      id: childId,
-                      sections: ["status", "messages"],
-                      limit: 20,
-                    },
-                  },
-                }, "failed_inspect_2");
-              }
-              await Bun.sleep(20);
-            }
-            throw new Error(
-              `Timed out waiting for recovered child=${childId} state=${subagentState(root, childId)}`,
-            );
-          })();
+          return gatewayToolCall("subagent", {
+            command: {
+              inspect: {
+                id: childId,
+                sections: ["status", "messages"],
+                limit: 20,
+                wait: {
+                  until: "settled",
+                  after_generation: resumeOutcome!.requested.generation,
+                  timeout_ms: TIMEOUT,
+                },
+              },
+            },
+          }, "failed_inspect_2");
         }
         if (body.includes('"toolCallId":"failed_inspect_1"')) {
           inspectedPause = JSON.parse(
