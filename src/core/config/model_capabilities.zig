@@ -73,31 +73,8 @@ pub const Resolver = struct {
     }
 };
 
-fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
-    if (needle.len == 0) return true;
-    if (needle.len > haystack.len) return false;
-
-    const last_start = haystack.len - needle.len;
-    var i: usize = 0;
-    while (i <= last_start) : (i += 1) {
-        if (std.ascii.eqlIgnoreCase(haystack[i .. i + needle.len], needle)) return true;
-    }
-    return false;
-}
-
-fn localCapabilitiesForModel(model: []const u8) Capabilities {
-    var capabilities: Capabilities = .{};
-    if (std.mem.startsWith(u8, model, "anthropic/")) {
-        capabilities.prompt_caching = true;
-    } else if (std.mem.startsWith(u8, model, "xai/")) {
-        capabilities.parallel_tool_calls = true;
-    }
-    capabilities.context_window = localContextWindowSize(model);
-    return capabilities;
-}
-
-pub fn resolveCapabilities(model: []const u8, gateway_metadata: ?GatewayMetadata) Capabilities {
-    var capabilities = localCapabilitiesForModel(model);
+pub fn mergeCapabilities(capabilities_value: Capabilities, gateway_metadata: ?GatewayMetadata) Capabilities {
+    var capabilities = capabilities_value;
     if (gateway_metadata) |metadata| {
         capabilities.supports_reasoning = metadata.supports_reasoning or metadata.reasoning_efforts.len > 0;
         capabilities.reasoning_efforts = metadata.reasoning_efforts;
@@ -114,6 +91,10 @@ pub fn resolveCapabilities(model: []const u8, gateway_metadata: ?GatewayMetadata
         if (metadata.effective_context_window_percent) |percent| capabilities.effective_context_window_percent = percent;
     }
     return capabilities;
+}
+
+pub fn resolveCapabilities(_: []const u8, gateway_metadata: ?GatewayMetadata) Capabilities {
+    return mergeCapabilities(.{}, gateway_metadata);
 }
 
 pub fn capabilitiesForModel(model: []const u8) Capabilities {
@@ -157,48 +138,6 @@ pub fn reasoningEffortOptionCount(capabilities: Capabilities) usize {
     return if (capabilities.reasoning_efforts.len == 0) 0 else capabilities.reasoning_efforts.len + 1;
 }
 
-fn localContextWindowSize(model: []const u8) ?u32 {
-    if (std.mem.startsWith(u8, model, "anthropic/")) {
-        const million_context_models = [_][]const u8{
-            "anthropic/claude-fable-5",
-            "anthropic/claude-opus-4.6",
-            "anthropic/claude-opus-4-6",
-            "anthropic/claude-opus-4.7",
-            "anthropic/claude-opus-4-7",
-            "anthropic/claude-opus-4.8",
-            "anthropic/claude-opus-4-8",
-            "anthropic/claude-sonnet-5",
-            "anthropic/claude-sonnet-4.6",
-            "anthropic/claude-sonnet-4-6",
-        };
-        for (million_context_models) |candidate| {
-            if (std.mem.eql(u8, model, candidate)) return 1_000_000;
-        }
-        return 200_000;
-    }
-    const openai_model = if (std.mem.startsWith(u8, model, "openai/"))
-        model["openai/".len..]
-    else
-        model;
-    if (std.mem.startsWith(u8, openai_model, "gpt-") or
-        std.mem.startsWith(u8, openai_model, "o1") or
-        std.mem.startsWith(u8, openai_model, "o3") or
-        std.mem.startsWith(u8, openai_model, "o4"))
-    {
-        if (containsIgnoreCase(openai_model, "gpt-5")) return 256_000;
-        if (containsIgnoreCase(openai_model, "o3") or containsIgnoreCase(openai_model, "o4") or containsIgnoreCase(openai_model, "o1"))
-            return 200_000;
-        return 128_000;
-    }
-    if (std.mem.startsWith(u8, model, "xai/")) return 131_072;
-    if (std.mem.startsWith(u8, model, "google/")) return 1_000_000;
-    return null;
-}
-
-pub fn contextWindowSize(model: []const u8) ?u32 {
-    return capabilitiesForModel(model).context_window;
-}
-
 pub fn effectiveContextWindowTokens(capabilities: Capabilities) ?u32 {
     const context_window = capabilities.context_window orelse return null;
     const percent = capabilities.effective_context_window_percent orelse return context_window;
@@ -215,24 +154,6 @@ pub fn autoCompactTokenLimit(capabilities: Capabilities) ?u32 {
         return if (configured) |value| @min(value, limit) else limit;
     }
     return configured;
-}
-
-test "Codex context budget reserves five percent and compacts at ninety percent" {
-    const capabilities: Capabilities = .{
-        .context_window = 272_000,
-        .auto_compact_token_limit = 250_000,
-        .effective_context_window_percent = 95,
-    };
-    try std.testing.expectEqual(@as(?u32, 258_400), effectiveContextWindowTokens(capabilities));
-    try std.testing.expectEqual(@as(?u32, 244_800), autoCompactTokenLimit(capabilities));
-    try std.testing.expectEqual(@as(?u32, 230_000), autoCompactTokenLimit(.{
-        .context_window = 272_000,
-        .auto_compact_token_limit = 230_000,
-    }));
-}
-
-pub fn resolveProviderOptions(model: []const u8, effort: types.ReasoningEffort, fast_mode: bool) ResolvedProviderOptions {
-    return resolveProviderOptionsForCapabilities(capabilitiesForModel(model), effort, fast_mode);
 }
 
 pub fn resolveProviderOptionsForCapabilities(
@@ -265,12 +186,26 @@ test "capabilities never infer reasoning or Fast controls from model IDs" {
     }
 }
 
-test "resolveCapabilities preserves Gateway controls and unrelated local policy" {
+test "Codex context budget reserves five percent and compacts at ninety percent" {
+    const capabilities: Capabilities = .{
+        .context_window = 272_000,
+        .auto_compact_token_limit = 250_000,
+        .effective_context_window_percent = 95,
+    };
+    try std.testing.expectEqual(@as(?u32, 258_400), effectiveContextWindowTokens(capabilities));
+    try std.testing.expectEqual(@as(?u32, 244_800), autoCompactTokenLimit(capabilities));
+    try std.testing.expectEqual(@as(?u32, 230_000), autoCompactTokenLimit(.{
+        .context_window = 272_000,
+        .auto_compact_token_limit = 230_000,
+    }));
+}
+
+test "mergeCapabilities preserves provider controls and supplied fallback policy" {
     const efforts = [_]types.ReasoningEffort{
         types.ReasoningEffort.literal("future-tier"),
         types.ReasoningEffort.literal("high"),
     };
-    const capabilities = resolveCapabilities("anthropic/claude-future", .{
+    const capabilities = mergeCapabilities(.{ .prompt_caching = true }, .{
         .reasoning_efforts = .fromSlice(&efforts),
         .supports_fast_mode = true,
         .supports_tool_use = true,
@@ -373,21 +308,8 @@ test "request controls remain safe across repeated state transitions" {
     }
 }
 
-test "local non-control capabilities remain available" {
-    const anthropic = capabilitiesForModel("anthropic/claude-any");
-    try std.testing.expect(anthropic.prompt_caching);
-    try std.testing.expectEqual(@as(?u32, 200_000), anthropic.context_window);
-
-    const xai = capabilitiesForModel("xai/grok-any");
-    try std.testing.expectEqual(@as(?bool, true), xai.parallel_tool_calls);
-    try std.testing.expectEqual(@as(?u32, 131_072), xai.context_window);
-
-    try std.testing.expectEqual(
-        @as(?u32, 256_000),
-        capabilitiesForModel("gpt-5.4").context_window,
-    );
-    try std.testing.expectEqual(
-        @as(?u32, 200_000),
-        capabilitiesForModel("o4-mini").context_window,
-    );
+test "generic fallback capabilities contain no vendor policy" {
+    const fallback = capabilitiesForModel("anthropic/claude-any");
+    try std.testing.expect(!fallback.prompt_caching);
+    try std.testing.expect(fallback.context_window == null);
 }

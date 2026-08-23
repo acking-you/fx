@@ -1,10 +1,8 @@
 const std = @import("std");
 const stream_provider = @import("../core/agent/stream_provider.zig");
-const provider_route = @import("../core/gateway/provider_route.zig");
-const secret = @import("../core/auth/secret.zig");
 const io_mod = @import("../core/shared/io.zig");
 const gateway_client = @import("client.zig");
-const responses_stream = @import("responses_stream.zig");
+const credential_authority = @import("../core/auth/credential_authority.zig");
 
 const Allocator = std.mem.Allocator;
 const max_error_body_bytes = 1024 * 1024;
@@ -17,71 +15,63 @@ pub const Transport = struct {
     next_fn: *const fn (?*anyopaque, i32, []u8) i32,
     close_fn: *const fn (?*anyopaque, i32) void,
 
-    pub fn open(self: Transport, method: []const u8, url: []const u8, headers: []const u8, body: []const u8) !i32 {
+    fn open(self: Transport, method: []const u8, url: []const u8, headers: []const u8, body: []const u8) !i32 {
         return self.open_fn(self.context, method, url, headers, body);
     }
 
-    pub fn status(self: Transport, handle: i32, status_out: *u16) i32 {
+    fn status(self: Transport, handle: i32, status_out: *u16) i32 {
         return self.status_fn(self.context, handle, status_out);
     }
 
-    pub fn next(self: Transport, handle: i32, out: []u8) i32 {
+    fn next(self: Transport, handle: i32, out: []u8) i32 {
         return self.next_fn(self.context, handle, out);
     }
 
-    pub fn close(self: Transport, handle: i32) void {
+    fn close(self: Transport, handle: i32) void {
         self.close_fn(self.context, handle);
     }
 };
 
 pub const ProviderContext = struct {
-    build_fn: stream_provider.BuildFn,
+    build_fn: *const fn (Allocator, stream_provider.RequestData) anyerror![]u8,
+    endpoint: Endpoint,
     transport: Transport,
-    endpoint_overrides: ?provider_route.EndpointOverrides = null,
+};
+
+pub const Endpoint = union(enum) {
+    fixed: []const u8,
+    resolve: *const fn () []const u8,
+
+    fn url(self: Endpoint) []const u8 {
+        return switch (self) {
+            .fixed => |fixed| fixed,
+            .resolve => |resolve| resolve(),
+        };
+    }
 };
 
 pub fn provider(context: *ProviderContext) stream_provider.Provider {
     return .{
         .context = context,
-        .build_fn = build,
         .stream_fn = stream,
     };
 }
 
-pub fn initContext(build_fn: stream_provider.BuildFn, transport: Transport) ProviderContext {
-    return .{ .build_fn = build_fn, .transport = transport };
+pub fn initContext(
+    build_fn: *const fn (Allocator, stream_provider.RequestData) anyerror![]u8,
+    endpoint: Endpoint,
+    transport: Transport,
+) ProviderContext {
+    return .{ .build_fn = build_fn, .endpoint = endpoint, .transport = transport };
 }
 
-fn build(raw: ?*anyopaque, alloc: Allocator, request: stream_provider.BuildRequest) anyerror![]u8 {
-    const context: *ProviderContext = @ptrCast(@alignCast(raw.?));
-    return context.build_fn(null, alloc, request);
-}
-
-fn stream(raw: ?*anyopaque, alloc: Allocator, request: stream_provider.Request) anyerror!stream_provider.Result {
+fn stream(raw: ?*anyopaque, alloc: Allocator, request: stream_provider.ModelRequest) anyerror!stream_provider.Result {
     const context: *ProviderContext = @ptrCast(@alignCast(raw.?));
     const transport = context.transport;
-    const route = if (request.credential_source) |source|
-        provider_route.fromCredentialSource(source) orelse return error.UnsupportedCredentialSource
-    else
-        provider_route.ProviderRoute.vercel_gateway;
-    // Codex OAuth credentials are paired with account identity in the native
-    // auth store. The JavaScript host has no such store, so it must reject the
-    // route before serializing the bearer token or opening a network request.
-    if (route == .codex_responses_oauth) return error.CodexCredentialUnavailable;
-
-    var owned_url: ?[]u8 = null;
-    defer if (owned_url) |url| alloc.free(url);
-    const request_url = if (route.contract().wire_api == .openai_responses) blk: {
-        owned_url = try provider_route.resolveEndpointAlloc(
-            alloc,
-            route,
-            context.endpoint_overrides orelse provider_route.EndpointOverrides.fromEnvironment(),
-        );
-        break :blk owned_url.?;
-    } else request.chat_url;
-
-    const auth = try std.fmt.allocPrint(alloc, "Bearer {s}", .{request.api_key});
-    defer secret.zeroAndFree(alloc, auth);
+    const payload = try context.build_fn(alloc, request.data());
+    defer alloc.free(payload);
+    const auth = try std.fmt.allocPrint(alloc, "Bearer {s}", .{request.credential.secret});
+    defer alloc.free(auth);
 
     const Header = struct { name: []const u8, value: []const u8 };
     var headers: std.ArrayList(Header) = .empty;
@@ -89,41 +79,27 @@ fn stream(raw: ?*anyopaque, alloc: Allocator, request: stream_provider.Request) 
     try headers.appendSlice(alloc, &.{
         .{ .name = "content-type", .value = "application/json" },
         .{ .name = "authorization", .value = auth },
+        .{ .name = "HTTP-Referer", .value = "https://github.com/vercel-labs/fx" },
+        .{ .name = "X-Title", .value = "fx" },
+        .{ .name = "ai-gateway-protocol-version", .value = "0.0.1" },
+        .{ .name = "ai-language-model-specification-version", .value = "4" },
+        .{ .name = "ai-language-model-id", .value = request.model },
+        .{ .name = "ai-language-model-streaming", .value = "true" },
     });
-    switch (route) {
-        .vercel_gateway => {
-            try headers.appendSlice(alloc, &.{
-                .{ .name = "HTTP-Referer", .value = "https://github.com/vercel-labs/fx" },
-                .{ .name = "X-Title", .value = "fx" },
-                .{ .name = "ai-gateway-protocol-version", .value = "0.0.1" },
-                .{ .name = "ai-language-model-specification-version", .value = "4" },
-                .{ .name = "ai-language-model-id", .value = request.model },
-                .{ .name = "ai-language-model-streaming", .value = "true" },
-            });
-            if (request.team) |team| if (team.len > 0) try headers.append(alloc, .{ .name = "x-vercel-ai-gateway-team", .value = team });
-            if (request.session_id) |session_id| if (session_id.len > 0) try headers.appendSlice(alloc, &.{
-                .{ .name = "x-session-id", .value = session_id },
-                .{ .name = "x-session-affinity", .value = session_id },
-            });
-        },
-        .openai_responses_byok => {
-            try headers.append(alloc, .{ .name = "accept", .value = "text/event-stream" });
-            if (io_mod.getenv("OPENAI_ORG_ID")) |organization| {
-                if (organization.len > 0) try headers.append(alloc, .{ .name = "OpenAI-Organization", .value = organization });
-            }
-            if (io_mod.getenv("OPENAI_PROJECT_ID")) |project| {
-                if (project.len > 0) try headers.append(alloc, .{ .name = "OpenAI-Project", .value = project });
-            }
-        },
-        .codex_responses_oauth => unreachable,
-    }
+    if (request.credential.tenant) |team| if (team.len > 0) try headers.append(alloc, .{ .name = "x-vercel-ai-gateway-team", .value = team });
+    if (request.session_id) |session_id| if (session_id.len > 0) try headers.appendSlice(alloc, &.{
+        .{ .name = "x-session-id", .value = session_id },
+        .{ .name = "x-session-affinity", .value = session_id },
+    });
 
     var headers_json: std.Io.Writer.Allocating = .init(alloc);
     defer headers_json.deinit();
     try std.json.Stringify.value(headers.items, .{}, &headers_json.writer);
 
+    const endpoint = context.endpoint.url();
+    try request.admission.admit();
     request.delivery.markPossiblySent();
-    const handle = try transport.open("POST", request_url, headers_json.writer.buffered(), request.payload);
+    const handle = try transport.open("POST", endpoint, headers_json.writer.buffered(), payload);
     if (handle < 0) return error.HostStreamFailed;
     defer transport.close(handle);
 
@@ -138,53 +114,97 @@ fn stream(raw: ?*anyopaque, alloc: Allocator, request: stream_provider.Request) 
     }
 
     const status: std.http.Status = @enumFromInt(status_code);
-    if (status != .ok) {
-        const err_body = try readBody(alloc, transport, handle, request.cancel_flag, request.cooperative_pulse);
-        errdefer alloc.free(err_body);
-        const retry_after_seconds = if (route.contract().wire_api == .openai_responses)
-            try gateway_client.responsesRetryAfterFromBody(alloc, status_code, err_body)
-        else
-            null;
-        return .{
-            .status = status,
-            .err_body = err_body,
-            .accounting = if (route.contract().usage == .response_body) .direct_usage else .gateway_generation,
-            .retry_after_seconds = retry_after_seconds,
-            .ownership = .owned,
-        };
-    }
+    if (status != .ok) return .{ .failed = .{
+        .kind = failureKind(status),
+        .detail = try readBody(alloc, transport, handle, request.cancel_flag, request.cooperative_pulse),
+        .ownership = .owned,
+    } };
 
     var reader: HostStreamReader = undefined;
     reader.init(transport, handle, request.cancel_flag, request.cooperative_pulse);
-    const completion = (switch (route.contract().wire_api) {
-        .vercel_ai_gateway => gateway_client.consumeGatewaySseStream(
-            alloc,
-            &reader.interface,
-            request.callback_ctx,
-            request.on_content_chunk,
-            request.on_tool_start,
-            request.on_reasoning_chunk,
-            request.cancel_flag,
-            request.content_capture_limit,
-        ),
-        .openai_responses => responses_stream.consume(alloc, &reader.interface, .{
-            .context = request.callback_ctx,
-            .on_content_chunk = request.on_content_chunk,
-            .on_tool_start = request.on_tool_start,
-            .on_reasoning_chunk = request.on_reasoning_chunk,
-            .on_tool_input_chunk = request.on_tool_input_chunk,
-            .on_unknown_event = request.on_unhandled_provider_event,
-            .content_capture_limit = request.content_capture_limit,
-        }, request.cancel_flag),
-    }) catch |err| switch (err) {
+    var events = request.events;
+    const completion = gateway_client.consumeGatewaySseStream(
+        alloc,
+        &reader.interface,
+        &events,
+        EventBridge.content,
+        EventBridge.toolStart,
+        EventBridge.reasoning,
+        request.cancel_flag,
+        request.content_capture_limit,
+    ) catch |err| switch (err) {
         error.ReadFailed => return if (request.cancel_flag.load(.seq_cst) or reader.aborted) error.Cancelled else error.HostStreamFailed,
         else => return err,
     };
-    return .{
-        .status = .ok,
+    return .{ .completed = .{
         .completion = completion,
-        .accounting = if (route.contract().usage == .response_body) .direct_usage else .gateway_generation,
+        .usage = gatewayUsageOutcome(request, completion),
         .ownership = .owned,
+    } };
+}
+
+fn gatewayUsageOutcome(
+    request: stream_provider.ModelRequest,
+    completion: @import("../core/shared/types.zig").ModelCompletion,
+) stream_provider.UsageOutcome {
+    const reference = gatewayUsageReference(request, completion) orelse
+        return .{ .unavailable = .possibly_billed };
+    return if (completion.billing != null)
+        .{ .immediate = reference }
+    else
+        .{ .deferred = reference };
+}
+
+fn gatewayUsageReference(
+    request: stream_provider.ModelRequest,
+    completion: @import("../core/shared/types.zig").ModelCompletion,
+) ?stream_provider.DeferredUsageReference {
+    const generation_id = completion.generation_id orelse return null;
+    const source = request.credential.source orelse return null;
+    return .{
+        .provider = .gateway,
+        .generation_id = generation_id,
+        .scope = gateway_client.generationBaseUrl(),
+        .tenant = request.credential.tenant,
+        .account_id = request.credential.account_id,
+        .credential_source = source,
+        .credential_identity = credential_authority.derive(
+            source,
+            request.credential.account_id,
+        ),
+    };
+}
+
+const EventBridge = struct {
+    fn sink(raw: *anyopaque) *stream_provider.EventSink {
+        return @ptrCast(@alignCast(raw));
+    }
+
+    fn content(raw: *anyopaque, chunk: []const u8) void {
+        sink(raw).emit(.{ .content_delta = chunk });
+    }
+
+    fn reasoning(raw: *anyopaque, chunk: []const u8) void {
+        sink(raw).emit(.{ .reasoning_delta = chunk });
+    }
+
+    fn toolStart(raw: *anyopaque, id: []const u8, name: []const u8, label: ?[]const u8) void {
+        sink(raw).emit(.{ .tool_started = .{ .id = id, .name = name, .label = label } });
+    }
+};
+
+fn failureKind(status: std.http.Status) stream_provider.FailureKind {
+    return switch (status) {
+        .bad_request => .invalid_request,
+        .unauthorized => .unauthorized,
+        .forbidden => .forbidden,
+        .payload_too_large => .request_too_large,
+        .too_many_requests => .rate_limited,
+        .internal_server_error => .server_error,
+        .bad_gateway => .bad_gateway,
+        .service_unavailable => .unavailable,
+        .gateway_timeout => .gateway_timeout,
+        else => .provider_error,
     };
 }
 
@@ -404,184 +424,4 @@ test "host stream reader throttles cooperative pulses" {
     try std.testing.expectEqual(@as(usize, 1), trace.calls);
     try reader.pulseIfDueAt(awake_timestamp(200));
     try std.testing.expectEqual(@as(usize, 2), trace.calls);
-}
-
-const HostRouteFixture = struct {
-    const responses_body =
-        "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"delta\":\"host direct\"}\n\n" ++
-        "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":7,\"output_tokens\":3,\"total_tokens\":10}}}\n\n";
-
-    open_calls: usize = 0,
-    status_code: u16 = 200,
-    body: []const u8 = responses_body,
-    offset: usize = 0,
-    url_buf: [1024]u8 = undefined,
-    url_len: usize = 0,
-    headers_buf: [4096]u8 = undefined,
-    headers_len: usize = 0,
-
-    fn transport(self: *@This()) Transport {
-        return .{
-            .context = self,
-            .open_fn = open,
-            .status_fn = status,
-            .next_fn = next,
-            .close_fn = close,
-        };
-    }
-
-    fn open(raw: ?*anyopaque, _: []const u8, request_url: []const u8, request_headers: []const u8, _: []const u8) anyerror!i32 {
-        const self: *@This() = @ptrCast(@alignCast(raw.?));
-        self.open_calls += 1;
-        if (request_url.len > self.url_buf.len or request_headers.len > self.headers_buf.len) return error.TestCaptureTooSmall;
-        @memcpy(self.url_buf[0..request_url.len], request_url);
-        self.url_len = request_url.len;
-        @memcpy(self.headers_buf[0..request_headers.len], request_headers);
-        self.headers_len = request_headers.len;
-        return 1;
-    }
-
-    fn status(raw: ?*anyopaque, _: i32, status_out: *u16) i32 {
-        const self: *@This() = @ptrCast(@alignCast(raw.?));
-        status_out.* = self.status_code;
-        return 1;
-    }
-
-    fn next(raw: ?*anyopaque, _: i32, out: []u8) i32 {
-        const self: *@This() = @ptrCast(@alignCast(raw.?));
-        const len = @min(out.len, self.body.len - self.offset);
-        if (len == 0) return 0;
-        @memcpy(out[0..len], self.body[self.offset..][0..len]);
-        self.offset += len;
-        return @intCast(len);
-    }
-
-    fn close(_: ?*anyopaque, _: i32) void {}
-
-    fn url(self: *const @This()) []const u8 {
-        return self.url_buf[0..self.url_len];
-    }
-
-    fn headers(self: *const @This()) []const u8 {
-        return self.headers_buf[0..self.headers_len];
-    }
-};
-
-fn noopChunk(_: *anyopaque, _: []const u8) void {}
-
-test "OpenAI host route uses scoped endpoint headers Responses decoder and direct usage" {
-    var fixture: HostRouteFixture = .{};
-    var context = ProviderContext{
-        .build_fn = undefined,
-        .transport = fixture.transport(),
-        .endpoint_overrides = .{ .responses_base_url = "http://127.0.0.1:43123/v1" },
-    };
-    var cancel_flag = std.atomic.Value(bool).init(false);
-    var delivery = stream_provider.DeliveryCertainty.init();
-    var attempt_evidence: stream_provider.AttemptEvidence = .{};
-    var callback_context: u8 = 0;
-    var result = try stream(&context, std.testing.allocator, .{
-        .api_key = "openai-secret",
-        .team = "must-not-cross-provider",
-        .credential_source = .openai_api_key,
-        .session_id = "session-private",
-        .model = "gpt-5.4",
-        .retry_count = 1,
-        .chat_url = "https://ai-gateway.vercel.sh/v3/ai/language-model",
-        .payload = "{}",
-        .trace_ctx = .{},
-        .content_capture_limit = null,
-        .delivery = &delivery,
-        .attempt_evidence = &attempt_evidence,
-        .callback_ctx = &callback_context,
-        .on_content_chunk = noopChunk,
-        .on_tool_start = null,
-        .on_reasoning_chunk = noopChunk,
-        .cancel_flag = &cancel_flag,
-    });
-    defer result.deinit(std.testing.allocator);
-
-    try std.testing.expectEqual(@as(usize, 1), fixture.open_calls);
-    try std.testing.expectEqualStrings("http://127.0.0.1:43123/v1/responses", fixture.url());
-    try std.testing.expect(std.mem.find(u8, fixture.headers(), "Bearer openai-secret") != null);
-    try std.testing.expect(std.mem.find(u8, fixture.headers(), "text/event-stream") != null);
-    try std.testing.expect(std.mem.find(u8, fixture.headers(), "ai-gateway-protocol-version") == null);
-    try std.testing.expect(std.mem.find(u8, fixture.headers(), "must-not-cross-provider") == null);
-    try std.testing.expect(std.mem.find(u8, fixture.headers(), "session-private") == null);
-    try std.testing.expectEqual(stream_provider.AccountingDisposition.direct_usage, result.accounting);
-    try std.testing.expectEqualStrings("host direct", result.completion.content.?);
-    try std.testing.expectEqual(@as(?u64, 7), result.completion.usage.input_tokens);
-    try std.testing.expectEqual(@as(?u64, 3), result.completion.usage.output_tokens);
-}
-
-test "Codex OAuth host route fails before serializing or sending its credential" {
-    var fixture: HostRouteFixture = .{};
-    var context = ProviderContext{
-        .build_fn = undefined,
-        .transport = fixture.transport(),
-    };
-    var cancel_flag = std.atomic.Value(bool).init(false);
-    var delivery = stream_provider.DeliveryCertainty.init();
-    var attempt_evidence: stream_provider.AttemptEvidence = .{};
-    var callback_context: u8 = 0;
-    try std.testing.expectError(error.CodexCredentialUnavailable, stream(&context, std.testing.allocator, .{
-        .api_key = "codex-secret-must-not-leave",
-        .team = null,
-        .credential_source = .chatgpt_subscription,
-        .model = "gpt-5.6-sol",
-        .retry_count = 1,
-        .chat_url = "https://ai-gateway.vercel.sh/v3/ai/language-model",
-        .payload = "{}",
-        .trace_ctx = .{},
-        .content_capture_limit = null,
-        .delivery = &delivery,
-        .attempt_evidence = &attempt_evidence,
-        .callback_ctx = &callback_context,
-        .on_content_chunk = noopChunk,
-        .on_tool_start = null,
-        .on_reasoning_chunk = noopChunk,
-        .cancel_flag = &cancel_flag,
-    }));
-    try std.testing.expectEqual(@as(usize, 0), fixture.open_calls);
-    try std.testing.expectEqual(stream_provider.DeliveryCertainty.State.definitely_unsent, delivery.load());
-}
-
-test "OpenAI host error keeps direct accounting and Responses retry metadata" {
-    var fixture = HostRouteFixture{
-        .status_code = 429,
-        .body = "{\"error\":{\"type\":\"rate_limit_error\",\"message\":\"slow down\",\"retry_after_seconds\":1.25}}",
-    };
-    var context = ProviderContext{
-        .build_fn = undefined,
-        .transport = fixture.transport(),
-        .endpoint_overrides = .{ .openai_base_url = "https://responses.example.test/v1" },
-    };
-    var cancel_flag = std.atomic.Value(bool).init(false);
-    var delivery = stream_provider.DeliveryCertainty.init();
-    var attempt_evidence: stream_provider.AttemptEvidence = .{};
-    var callback_context: u8 = 0;
-    var result = try stream(&context, std.testing.allocator, .{
-        .api_key = "openai-secret",
-        .team = null,
-        .credential_source = .openai_api_key,
-        .model = "gpt-5.4",
-        .retry_count = 1,
-        .chat_url = "https://ai-gateway.vercel.sh/v3/ai/language-model",
-        .payload = "{}",
-        .trace_ctx = .{},
-        .content_capture_limit = null,
-        .delivery = &delivery,
-        .attempt_evidence = &attempt_evidence,
-        .callback_ctx = &callback_context,
-        .on_content_chunk = noopChunk,
-        .on_tool_start = null,
-        .on_reasoning_chunk = noopChunk,
-        .cancel_flag = &cancel_flag,
-    });
-    defer result.deinit(std.testing.allocator);
-
-    try std.testing.expectEqual(std.http.Status.too_many_requests, result.status);
-    try std.testing.expectEqual(stream_provider.AccountingDisposition.direct_usage, result.accounting);
-    try std.testing.expectEqual(@as(?u64, 2), result.retry_after_seconds);
-    try std.testing.expectEqualStrings(fixture.body, result.err_body.?);
 }

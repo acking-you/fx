@@ -1,10 +1,11 @@
 const std = @import("std");
 const stream_provider = @import("../agent/stream_provider.zig");
+const responses_compaction_provider = @import("responses_compaction_provider.zig");
 const image_attachments = @import("../images/image_attachments.zig");
 const responses_output_items = @import("../shared/responses_output_items.zig");
 const types = @import("../shared/types.zig");
-const gateway_json = @import("gateway_json.zig");
-const gateway_schema = @import("../tooling/gateway_schema.zig");
+const gateway_json = @import("../../gateway/vercel_protocol.zig");
+const gateway_schema = @import("../tooling/model_tool_schema.zig");
 const compaction_binding = @import("responses_compaction_binding.zig");
 
 pub const compaction = @import("responses_compaction.zig");
@@ -13,6 +14,74 @@ const Allocator = std.mem.Allocator;
 const JsonValue = std.json.Value;
 const system_only_continuation_input =
     "Continue from the context in the instructions and complete the pending user request.";
+
+pub const PreparedTools = struct {
+    base_json: []u8,
+    dynamic_json: [][]u8,
+
+    pub fn deinit(self: *PreparedTools, alloc: Allocator) void {
+        alloc.free(self.base_json);
+        for (self.dynamic_json) |schema| alloc.free(schema);
+        alloc.free(self.dynamic_json);
+        self.* = undefined;
+    }
+};
+
+fn containsToolName(names: []const []const u8, expected: []const u8) bool {
+    for (names) |name| if (std.mem.eql(u8, name, expected)) return true;
+    return false;
+}
+
+/// Serializes one provider-neutral tool selection for any Responses route.
+/// Keeping this beside the shared request codec prevents OpenAI and Codex
+/// transports from drifting into distinct schema projections.
+pub fn prepareTools(
+    alloc: Allocator,
+    selection: stream_provider.ToolSelection,
+) !PreparedTools {
+    var base: std.Io.Writer.Allocating = .init(alloc);
+    errdefer base.deinit();
+    try base.writer.writeByte('[');
+    var count: usize = 0;
+    for (selection.advertised_names) |name| {
+        const schema = selection.advertisedFunction(name) orelse continue;
+        if (count > 0) try base.writer.writeByte(',');
+        try gateway_schema.writeBuiltinFunctionSchema(alloc, &base.writer, schema);
+        count += 1;
+    }
+    for (selection.additional_functions) |schema| {
+        if (containsToolName(selection.advertised_names, schema.name)) continue;
+        if (count > 0) try base.writer.writeByte(',');
+        try gateway_schema.writeBuiltinFunctionSchema(alloc, &base.writer, schema);
+        count += 1;
+    }
+    try base.writer.writeByte(']');
+    const base_json = try base.toOwnedSlice();
+    errdefer alloc.free(base_json);
+
+    var dynamic: std.ArrayList([]u8) = .empty;
+    errdefer {
+        for (dynamic.items) |schema| alloc.free(schema);
+        dynamic.deinit(alloc);
+    }
+    for (selection.selected_dynamic) |tool| {
+        if (containsToolName(selection.advertised_names, tool.name)) continue;
+        var schema: std.Io.Writer.Allocating = .init(alloc);
+        defer schema.deinit();
+        try std.json.Stringify.value(tool.input_schema, .{}, &schema.writer);
+        const encoded = try gateway_schema.dynamicFunctionSchemaJsonAlloc(
+            alloc,
+            tool.name,
+            tool.description,
+            schema.written(),
+        );
+        try dynamic.append(alloc, encoded);
+    }
+    return .{
+        .base_json = base_json,
+        .dynamic_json = try dynamic.toOwnedSlice(alloc),
+    };
+}
 
 // Request codec
 
@@ -51,7 +120,7 @@ pub const RequestOptions = struct {
 
 pub fn buildRequest(
     alloc: Allocator,
-    request: stream_provider.BuildRequest,
+    request: responses_compaction_provider.BuildRequest,
     options: RequestOptions,
 ) ![]u8 {
     try checkBudget(request.budget);
@@ -209,7 +278,7 @@ pub fn buildRequest(
 /// drift between the two product paths.
 pub fn buildCompactRequest(
     alloc: Allocator,
-    request: stream_provider.BuildRequest,
+    request: responses_compaction_provider.BuildRequest,
     options: RequestOptions,
 ) ![]u8 {
     if (request.responses_compaction_trigger) {
@@ -316,7 +385,7 @@ const ParsedRawRequestOptions = struct {
 
     fn init(
         alloc: Allocator,
-        request: stream_provider.BuildRequest,
+        request: responses_compaction_provider.BuildRequest,
         options: RequestOptions,
     ) !ParsedRawRequestOptions {
         var parsed: ParsedRawRequestOptions = .{};
@@ -404,7 +473,7 @@ fn hasMessageDerivedInput(messages: []const types.ChatMessage) bool {
 
 fn writeReasoningOptions(
     writer: *std.Io.Writer,
-    request: stream_provider.BuildRequest,
+    request: responses_compaction_provider.BuildRequest,
     options: RequestOptions,
     raw: ?std.json.Parsed(JsonValue),
 ) !void {
@@ -427,7 +496,7 @@ fn writeReasoningOptions(
 fn writeTextOptions(
     alloc: Allocator,
     writer: *std.Io.Writer,
-    request: stream_provider.BuildRequest,
+    request: responses_compaction_provider.BuildRequest,
     options: RequestOptions,
     raw: ?std.json.Parsed(JsonValue),
 ) !void {
@@ -481,7 +550,7 @@ fn checkBudget(budget: ?stream_provider.BuildBudget) !void {
 
 fn collectInstructions(
     alloc: Allocator,
-    request: stream_provider.BuildRequest,
+    request: responses_compaction_provider.BuildRequest,
 ) !?[]u8 {
     var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();
@@ -499,7 +568,7 @@ fn collectInstructions(
 }
 
 fn matchingCompactionCheckpoint(
-    request: stream_provider.BuildRequest,
+    request: responses_compaction_provider.BuildRequest,
     message: types.ChatMessage,
 ) ?types.ResponsesCompactionView {
     const checkpoint = message.responses_compaction orelse return null;
@@ -517,14 +586,14 @@ fn matchingCompactionCheckpoint(
     return checkpoint;
 }
 
-fn hasMatchingCompactionCheckpoint(request: stream_provider.BuildRequest) bool {
+fn hasMatchingCompactionCheckpoint(request: responses_compaction_provider.BuildRequest) bool {
     for (request.messages) |message| {
         if (matchingCompactionCheckpoint(request, message) != null) return true;
     }
     return false;
 }
 
-fn validateCompactionCheckpointProjection(request: stream_provider.BuildRequest) !void {
+fn validateCompactionCheckpointProjection(request: responses_compaction_provider.BuildRequest) !void {
     var matching: usize = 0;
     for (request.messages) |message| {
         if (matchingCompactionCheckpoint(request, message) == null) continue;
@@ -672,6 +741,19 @@ fn writeAssistantItems(
         );
     }
 
+    // Sessions written by the former Codex-only stream reducer stored
+    // encrypted reasoning as a JSON array instead of the typed Responses
+    // fields. Replay that bounded legacy shape while those sessions age out;
+    // every current direct Responses stream persists the typed form below.
+    if (message.reasoning_items.len == 0 and
+        message.reasoning_item_id == null and
+        message.reasoning_encrypted_content == null)
+    {
+        if (message.provider_state_json) |legacy_state| {
+            try writeLegacyReasoningState(alloc, writer, legacy_state, wrote_item);
+        }
+    }
+
     if (message.reasoning_items.len > 0) {
         for (message.reasoning_items) |item| {
             _ = try writeReasoningItem(writer, item, capabilities, wrote_item);
@@ -695,6 +777,28 @@ fn writeAssistantItems(
 
     for (message.tool_calls) |call| {
         try writeProjectedToolCall(writer, call, replay_web_namespace, wrote_item);
+    }
+}
+
+fn writeLegacyReasoningState(
+    alloc: Allocator,
+    writer: *std.Io.Writer,
+    state_json: []const u8,
+    wrote_item: *bool,
+) !void {
+    var parsed = std.json.parseFromSlice(JsonValue, alloc, state_json, .{}) catch
+        return error.InvalidResponsesProviderState;
+    defer parsed.deinit();
+    if (parsed.value != .array) return error.InvalidResponsesProviderState;
+    for (parsed.value.array.items) |item| {
+        if (item != .object or
+            !std.mem.eql(u8, stringField(item, "type") orelse "", "reasoning") or
+            stringField(item, "encrypted_content") == null)
+        {
+            return error.InvalidResponsesProviderState;
+        }
+        try writeComma(writer, wrote_item);
+        try std.json.Stringify.value(item, .{}, writer);
     }
 }
 
@@ -966,7 +1070,7 @@ fn writeFunctionCallOutput(
 fn writeTools(
     alloc: Allocator,
     writer: *std.Io.Writer,
-    request: stream_provider.BuildRequest,
+    request: responses_compaction_provider.BuildRequest,
     strict_default: ?bool,
 ) !void {
     var wrote = false;
@@ -1008,7 +1112,7 @@ fn writeTools(
             return error.VisionToolNotRegistered;
         const schema_json = try gateway_schema.builtinFunctionSchemaJsonAlloc(
             alloc,
-            vision.gateway_schema,
+            vision.model_schema,
         );
         defer alloc.free(schema_json);
         var parsed = try std.json.parseFromSlice(JsonValue, alloc, schema_json, .{});
@@ -1072,7 +1176,7 @@ fn writeResponseTool(writer: *std.Io.Writer, tool: JsonValue, strict_default: ?b
 fn writeStructuredOutputFormat(
     alloc: Allocator,
     writer: *std.Io.Writer,
-    format: stream_provider.StructuredResponseFormat,
+    format: responses_compaction_provider.StructuredResponseFormat,
     strict: bool,
 ) !void {
     var schema = std.json.parseFromSlice(JsonValue, alloc, format.schema_json, .{}) catch |err| switch (err) {
@@ -1795,7 +1899,7 @@ pub fn decodeErrorResponse(
 
 // Tests
 
-fn testRequest(messages: []const types.ChatMessage, serialized_tools: []const u8) stream_provider.BuildRequest {
+fn testRequest(messages: []const types.ChatMessage, serialized_tools: []const u8) responses_compaction_provider.BuildRequest {
     return .{
         .model = "gpt-5.4",
         .serialized_tools = serialized_tools,
@@ -1854,7 +1958,7 @@ test "Responses request preserves conversation semantics and controls" {
     const dynamic_tools = [_][]const u8{
         "{\"type\":\"function\",\"name\":\"lookup\",\"description\":\"Lookup\",\"inputSchema\":{\"type\":\"object\",\"properties\":{}}}",
     };
-    const request = stream_provider.BuildRequest{
+    const request = responses_compaction_provider.BuildRequest{
         .model = "gpt-5.4",
         .serialized_tools =
         \\[{"type":"function","name":"read_file","description":"Read a file","inputSchema":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}]

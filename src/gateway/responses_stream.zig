@@ -337,7 +337,7 @@ pub fn consume(
     reader: anytype,
     callbacks: Callbacks,
     cancel_flag: *std.atomic.Value(bool),
-) !types.GatewayCompletion {
+) !types.ModelCompletion {
     var state: Accumulator = .{};
     defer state.deinit(alloc);
     var frames: FrameReader = .{};
@@ -1070,8 +1070,8 @@ fn formatFailureDetail(
     return clipped;
 }
 
-fn materialize(alloc: Allocator, state: *Accumulator) !types.GatewayCompletion {
-    var completion: types.GatewayCompletion = .{};
+fn materialize(alloc: Allocator, state: *Accumulator) !types.ModelCompletion {
+    var completion: types.ModelCompletion = .{};
     errdefer freeCompletion(alloc, &completion);
     if (state.content.items.len > 0) completion.content = try alloc.dupe(u8, state.content.items);
     completion.responses_message_output_index = try optionalOutputIndex(state.message_output_index);
@@ -1304,7 +1304,7 @@ fn stringifyJsonStringOwned(alloc: Allocator, value: []const u8) ![]u8 {
     return out.toOwnedSlice();
 }
 
-fn freeCompletion(alloc: Allocator, completion: *types.GatewayCompletion) void {
+fn freeCompletion(alloc: Allocator, completion: *types.ModelCompletion) void {
     if (completion.content) |value| alloc.free(@constCast(value));
     if (completion.reasoning) |value| alloc.free(@constCast(value));
     if (completion.reasoning_item_id) |value| alloc.free(@constCast(value));

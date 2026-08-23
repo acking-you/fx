@@ -1,8 +1,6 @@
 const std = @import("std");
 const agent_stream_provider = @import("../stream_provider.zig");
 const image_attachments = @import("../../images/image_attachments.zig");
-const model_capabilities = @import("../../config/model_capabilities.zig");
-const provider_route = @import("../../gateway/provider_route.zig");
 const types = @import("../../shared/types.zig");
 const debug_trace = @import("../../shared/debug_trace.zig");
 const session_usage = @import("../../session/session_usage.zig");
@@ -11,7 +9,7 @@ const runtime_gateway_step = @import("gateway_step.zig");
 const Allocator = std.mem.Allocator;
 const ChatMessage = types.ChatMessage;
 
-const gateway_image_model = "google/gemini-2.5-flash";
+const model = "google/gemini-2.5-flash";
 
 pub const Request = struct {
     stream_provider: agent_stream_provider.Provider,
@@ -20,7 +18,6 @@ pub const Request = struct {
     gateway_team: ?[]const u8,
     session_id: ?[]const u8 = null,
     retry_count: usize,
-    chat_url: []const u8,
     cancel_flag: *std.atomic.Value(bool),
     usage: ?*session_usage.Usage = null,
     usage_allocator: Allocator = std.heap.c_allocator,
@@ -51,25 +48,6 @@ pub fn inspect(
         .{ .role = .system, .content = system_prompt },
         .{ .role = .user, .content = user_prompt },
     };
-    const wire_model = inspectionModel(request.credential_source);
-    const provider_opts = model_capabilities.resolveProviderOptions(wire_model, .auto, false);
-    const payload = try request.stream_provider.build(
-        alloc,
-        .{
-            .credential_source = request.credential_source,
-            .session_id = request.session_id,
-            .model = wire_model,
-            .serialized_tools = "[]",
-            .messages = &messages,
-            .tool_choice = .none,
-            .provider_options = provider_opts,
-            .budget = .{ .cancel_flag = request.cancel_flag },
-            .verified_images = images,
-            .response_format = request.response_format,
-        },
-    );
-    defer alloc.free(payload);
-
     var capture = StreamCapture{
         .alloc = alloc,
         .max_bytes = request.capture_limit_bytes,
@@ -77,42 +55,44 @@ pub fn inspect(
     defer capture.deinit();
     var delivery = runtime_gateway_step.DeliveryCertainty.init();
     var attempt_evidence: agent_stream_provider.AttemptEvidence = .{};
-    const streamed = try runtime_gateway_step.streamGatewayCompletion(
+    var streamed = try runtime_gateway_step.streamModelCompletion(
         request.stream_provider,
         alloc,
-        request.api_key,
-        request.credential_source,
-        null,
-        request.gateway_team,
-        null,
-        request.session_id,
-        wire_model,
-        request.retry_count,
-        request.chat_url,
-        payload,
-        null,
-        &delivery,
-        &attempt_evidence,
-        @ptrCast(&capture),
-        onContentChunk,
-        null,
-        null,
-        null,
-        request.cancel_flag,
+        .{
+            .credential = .{
+                .secret = request.api_key,
+                .source = request.credential_source,
+                .tenant = request.gateway_team,
+            },
+            .session_id = request.session_id,
+            .model = model,
+            .retry_count = request.retry_count,
+            .messages = &messages,
+            .tool_choice = .none,
+            .provider_options = .{},
+            .budget = .{ .cancel_flag = request.cancel_flag },
+            .verified_images = images,
+            .response_format = request.response_format,
+            .trace_ctx = request.trace_ctx,
+            .content_capture_limit = request.capture_limit_bytes,
+            .delivery = &delivery,
+            .attempt_evidence = &attempt_evidence,
+            .events = .{ .context = &capture, .emit_fn = onEvent },
+            .cancel_flag = request.cancel_flag,
+        },
         request.usage,
         request.usage_allocator,
-        request.trace_ctx,
-        request.capture_limit_bytes,
-        .transport,
     );
+    defer streamed.deinit(alloc);
 
     if (request.cancel_flag.load(.seq_cst)) return error.Cancelled;
-    if (streamed.status != .ok) return error.ImageProviderUnavailable;
+    if (std.meta.activeTag(streamed) == .failed) return error.ImageProviderUnavailable;
     if (capture.failed) return error.OutOfMemory;
+    const completion = streamed.completed.completion;
 
     const tool_usage = types.ToolUsage{
-        .input_tokens = streamed.completion.usage.input_tokens orelse 0,
-        .output_tokens = streamed.completion.usage.output_tokens orelse 0,
+        .input_tokens = completion.usage.input_tokens orelse 0,
+        .output_tokens = completion.usage.output_tokens orelse 0,
     };
     if (capture.saw_content) {
         return .{
@@ -121,7 +101,7 @@ pub fn inspect(
             .usage = tool_usage,
         };
     }
-    if (streamed.completion.content) |content| {
+    if (completion.content) |content| {
         const retained_len = @min(content.len, request.capture_limit_bytes);
         return .{
             .text = try alloc.dupe(u8, content[0..retained_len]),
@@ -130,17 +110,6 @@ pub fn inspect(
         };
     }
     return error.InvalidProviderResponse;
-}
-
-fn inspectionModel(source: ?types.CredentialSource) []const u8 {
-    const route = if (source) |credential_source|
-        provider_route.fromCredentialSource(credential_source) orelse unreachable
-    else
-        provider_route.ProviderRoute.vercel_gateway;
-    if (route.contract().wire_api == .openai_responses) {
-        return provider_route.wireModel(route, provider_route.fx_default_model);
-    }
-    return gateway_image_model;
 }
 
 const StreamCapture = struct {
@@ -171,6 +140,13 @@ fn onContentChunk(raw: *anyopaque, chunk: []const u8) void {
     };
 }
 
+fn onEvent(raw: *anyopaque, event: agent_stream_provider.Event) void {
+    switch (event) {
+        .content_delta => |chunk| onContentChunk(raw, chunk),
+        else => {},
+    }
+}
+
 test "shared image provider capture counts all streamed bytes while retaining its bound" {
     var capture = StreamCapture{
         .alloc = std.testing.allocator,
@@ -183,11 +159,4 @@ test "shared image provider capture counts all streamed bytes while retaining it
 
     try std.testing.expectEqual(@as(usize, "abc二xyz".len), capture.observed_bytes);
     try std.testing.expectEqualStrings("abc\xe4", capture.text.items);
-}
-
-test "image fallback uses one route model for capability payload and telemetry" {
-    try std.testing.expectEqualStrings(gateway_image_model, inspectionModel(null));
-    try std.testing.expectEqualStrings(gateway_image_model, inspectionModel(.ai_gateway_api_key));
-    try std.testing.expectEqualStrings(provider_route.openai_default_model, inspectionModel(.openai_api_key));
-    try std.testing.expectEqualStrings(provider_route.codex_default_model, inspectionModel(.chatgpt_subscription));
 }

@@ -245,7 +245,7 @@ var test_cancel_watcher_spawn_error: ?anyerror = null;
 
 pub const StreamResult = struct {
     status: std.http.Status,
-    completion: types.GatewayCompletion = .{},
+    completion: types.ModelCompletion = .{},
     err_body: ?[]u8 = null,
     retry_after_seconds: ?u64 = null,
 
@@ -1348,6 +1348,7 @@ pub const StreamRequest = struct {
     trace_ctx: debug_trace.TraceContext = .{},
     content_capture_limit: ?usize = null,
     delivery: ?*DeliveryCertainty = null,
+    admission: ?agent_stream_provider.Admission = null,
     on_reasoning_chunk: ?StreamCallback = null,
     on_tool_input_chunk: ?StreamCallback = null,
     /// Receives exact raw JSON for Responses events that the semantic fx
@@ -1587,6 +1588,7 @@ fn streamGatewayCompletionCoreWithOptions(
     else
         gatewayExtraHeaders(extra_headers_buf[0..9], model, request.team, request.session_id);
 
+    if (request.admission) |admission| try admission.admit();
     var attempt: usize = 0;
     var delivery_ambiguous = false;
     var request_body_possibly_sent = false;
@@ -2371,6 +2373,12 @@ pub fn runBoundedHttpOperation(
         return error.Timeout;
     }
 
+    // `std.Io.Select.cancel` interrupts test-I/O operations, but native sleep
+    // implementations are not required to observe that select cancellation.
+    // Give the cancellation watcher an explicit request-lifetime signal so a
+    // successful request can always join its control branches promptly.
+    var control_done: std.Io.Event = .unset;
+
     const Event = union(enum) {
         request: anyerror!Result,
         cancelled: anyerror!void,
@@ -2396,22 +2404,26 @@ pub fn runBoundedHttpOperation(
 
     var select_buffer: [3]Event = undefined;
     var select: std.Io.Select(Event) = .init(zio, &select_buffer);
-    select.concurrent(.cancelled, waitForBoundedCancellation, .{cancel_flag}) catch |err| {
+    select.concurrent(.cancelled, waitForBoundedCancellationOrDone, .{ cancel_flag, &control_done }) catch |err| {
         return err;
     };
-    select.concurrent(.deadline, waitForBoundedDeadline, .{deadline}) catch |err| {
+    select.concurrent(.deadline, waitForBoundedDeadlineOrDone, .{ deadline, &control_done }) catch |err| {
+        control_done.set(zio);
         select.cancelDiscard();
         return err;
     };
     select.concurrent(.request, Runner.run, .{operation}) catch |err| {
+        control_done.set(zio);
         select.cancelDiscard();
         return err;
     };
 
     const event = select.await() catch |err| {
+        control_done.set(zio);
         Cleanup.drain(alloc, &select);
         return err;
     };
+    control_done.set(zio);
     switch (event) {
         .request => |request_result| {
             Cleanup.drain(alloc, &select);
@@ -2446,6 +2458,31 @@ pub fn runBoundedHttpOperation(
             return error.Timeout;
         },
     }
+}
+
+fn waitForBoundedCancellationOrDone(
+    cancel_flag: *std.atomic.Value(bool),
+    control_done: *std.Io.Event,
+) anyerror!void {
+    while (!cancel_flag.load(.seq_cst)) {
+        control_done.waitTimeout(io_mod.getIo(), .{
+            .duration = .{ .clock = .awake, .raw = .fromMilliseconds(5) },
+        }) catch |err| switch (err) {
+            error.Timeout => continue,
+            else => return err,
+        };
+        return;
+    }
+}
+
+fn waitForBoundedDeadlineOrDone(
+    deadline: std.Io.Clock.Timestamp,
+    control_done: *std.Io.Event,
+) anyerror!void {
+    control_done.waitTimeout(io_mod.getIo(), .{ .deadline = deadline }) catch |err| switch (err) {
+        error.Timeout => return,
+        else => return err,
+    };
 }
 
 fn waitForBoundedCancellation(cancel_flag: *std.atomic.Value(bool)) anyerror!void {
@@ -3043,7 +3080,7 @@ fn stringifyJsonValueOwned(alloc: std.mem.Allocator, value: std.json.Value) ![]u
     return out.toOwnedSlice();
 }
 
-fn deinitGatewayCompletion(alloc: std.mem.Allocator, completion: *types.GatewayCompletion) void {
+fn deinitGatewayCompletion(alloc: std.mem.Allocator, completion: *types.ModelCompletion) void {
     if (completion.content) |content| alloc.free(content);
     if (completion.reasoning) |reasoning| alloc.free(@constCast(reasoning));
     if (completion.reasoning_signature) |signature| alloc.free(@constCast(signature));
@@ -3319,7 +3356,7 @@ fn parseSseBilling(
     root: std.json.Value,
     created_at_ms: ?i64,
     tools: []const SseToolCallAccumulator,
-) SseBillingParseError!types.GatewayBilling {
+) SseBillingParseError!types.ProviderBilling {
     const timestamp = created_at_ms orelse return error.InvalidSseBilling;
     const usage = if (root == .object)
         root.object.get("usage") orelse return error.InvalidSseBilling
@@ -3564,7 +3601,7 @@ fn consumeSseStream(
     on_content_chunk: StreamCallback,
     on_tool_start: ?ToolStartCallback,
     cancel_flag: *std.atomic.Value(bool),
-) !types.GatewayCompletion {
+) !types.ModelCompletion {
     return consumeSseStreamTraced(alloc, reader, callback_ctx, on_content_chunk, on_tool_start, null, null, cancel_flag, null, null, null);
 }
 
@@ -3582,7 +3619,7 @@ pub fn consumeGatewaySseStream(
     on_reasoning_chunk: ?StreamCallback,
     cancel_flag: *std.atomic.Value(bool),
     content_capture_limit: ?usize,
-) !types.GatewayCompletion {
+) !types.ModelCompletion {
     return consumeSseStreamTraced(
         alloc,
         reader,
@@ -3610,7 +3647,7 @@ fn consumeSseStreamTraced(
     resolved_model_trace: ?ResolvedModelTrace,
     expected_provider_tool_name: ?[]const u8,
     content_capture_limit: ?usize,
-) !types.GatewayCompletion {
+) !types.ModelCompletion {
     var content_buf: std.ArrayList(u8) = .empty;
     defer content_buf.deinit(alloc);
 
@@ -3633,7 +3670,7 @@ fn consumeSseStreamTraced(
 
     var finish_reason_holder: ?types.ProviderFinishReason = null;
     var finish_usage: types.Usage = .{};
-    var finish_billing: ?types.GatewayBilling = null;
+    var finish_billing: ?types.ProviderBilling = null;
     defer if (finish_billing) |billing| alloc.free(@constCast(billing.model));
     var generation_id: ?[]u8 = null;
     defer if (generation_id) |id| alloc.free(id);
@@ -4090,7 +4127,7 @@ fn consumeSseStreamTraced(
         }
     }
 
-    var completion: types.GatewayCompletion = .{};
+    var completion: types.ModelCompletion = .{};
     errdefer deinitGatewayCompletion(alloc, &completion);
 
     if (content_buf.items.len > 0) {

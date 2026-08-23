@@ -23,6 +23,7 @@ pub const Request = struct {
     session_id: ?[]const u8,
     model: []const u8,
     serialized_tools: []const u8,
+    selected_dynamic_tool_schemas: []const []const u8 = &.{},
     messages: []const types.ChatMessage,
     capabilities: model_capabilities.Capabilities = .{},
     provider_options: model_capabilities.ResolvedProviderOptions,
@@ -113,6 +114,7 @@ pub fn compact(alloc: Allocator, request: Request) !Result {
         alloc,
         request.messages,
         request.serialized_tools,
+        request.selected_dynamic_tool_schemas,
         request.capabilities,
     );
     defer prepared_messages.deinit(alloc);
@@ -129,6 +131,7 @@ pub fn compact(alloc: Allocator, request: Request) !Result {
             .session_id = request.session_id,
             .model = request.model,
             .serialized_tools = request.serialized_tools,
+            .selected_dynamic_tool_schemas = request.selected_dynamic_tool_schemas,
             .messages = prepared_messages.messages,
             .tool_choice = .auto,
             .provider_options = request.provider_options,
@@ -192,13 +195,18 @@ fn prepareRemoteMessagesAlloc(
     alloc: Allocator,
     messages: []const types.ChatMessage,
     serialized_tools: []const u8,
+    selected_dynamic_tool_schemas: []const []const u8,
     capabilities: model_capabilities.Capabilities,
 ) !PreparedRemoteMessages {
     const token_limit = model_capabilities.autoCompactTokenLimit(capabilities) orelse
         return .{ .messages = messages };
     if (token_limit == 0) return .{ .messages = messages };
 
-    var estimated_tokens = estimateRemoteCompactionTokens(messages, serialized_tools);
+    var estimated_tokens = estimateRemoteCompactionTokens(
+        messages,
+        serialized_tools,
+        selected_dynamic_tool_schemas,
+    );
     if (estimated_tokens <= token_limit) return .{ .messages = messages };
     const initial_estimated_tokens = estimated_tokens;
 
@@ -235,8 +243,12 @@ fn prepareRemoteMessagesAlloc(
 fn estimateRemoteCompactionTokens(
     messages: []const types.ChatMessage,
     serialized_tools: []const u8,
+    selected_dynamic_tool_schemas: []const []const u8,
 ) usize {
     var total = estimateTextTokens(serialized_tools);
+    for (selected_dynamic_tool_schemas) |schema| {
+        total +|= estimateTextTokens(schema);
+    }
     for (messages) |message| {
         total +|= 8;
         if (message.content) |content| total +|= estimateTextTokens(content);
@@ -415,6 +427,7 @@ test "remote compaction trims oversized tool outputs to the model budget" {
         std.testing.allocator,
         &messages,
         "[]",
+        &.{},
         .{ .context_window = 1000 },
     );
     defer prepared.deinit(std.testing.allocator);
@@ -492,6 +505,7 @@ test "remote compaction keeps messages untouched when they fit" {
         std.testing.allocator,
         &messages,
         "[]",
+        &.{},
         .{ .context_window = 1000 },
     );
     defer prepared.deinit(std.testing.allocator);

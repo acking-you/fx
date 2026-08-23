@@ -67,6 +67,8 @@ const web_search_contract = @import("web_search_contract.zig");
 const web_fetch_artifacts = @import("../session/web_fetch_artifacts.zig");
 const types = @import("../shared/types.zig");
 const model_provider = @import("../config/model_provider.zig");
+const provider_set = @import("../gateway/provider_set.zig");
+const credential_authority = @import("../auth/credential_authority.zig");
 const worker_runtime = @import("../agent/worker_runtime.zig");
 const context_contract = @import("../workspace/context_contract.zig");
 const test_builtin_tools = if (builtin.is_test)
@@ -139,6 +141,10 @@ pub const Context = struct {
     credential_source: ?types.CredentialSource = null,
     account_id: ?[]const u8 = null,
     provider: model_provider.ProviderId = .gateway,
+    provider_capabilities: provider_set.Bundle.Capabilities = .{
+        .fx_search = true,
+        .vision_fallback = true,
+    },
     oauth_transport: oauth_transport.Provider = oauth_transport.unavailable_provider,
     secret_store: host_mod.SecretStore = host_mod.unavailable_secret_store,
     model: []const u8,
@@ -281,6 +287,7 @@ pub const Context = struct {
             .account_id = self.account_id,
             .tenant = self.gateway_team,
             .credential_source = self.credential_source,
+            .model = self.model,
             .session_id = self.lifecycle_scope.session_id,
             .endpoint = self.gateway_chat_url,
             .cancel_flag = self.cancel_flag,
@@ -302,13 +309,13 @@ fn registeredToolSpec(ctx: Context, name: []const u8) ?*const tool_specs.ToolSpe
     return ctx.tool_registry.lookup(name);
 }
 
-fn providerDisablesTool(provider: model_provider.ProviderId, name: []const u8) bool {
+fn providerDisablesTool(capabilities: provider_set.Bundle.Capabilities, name: []const u8) bool {
     return std.mem.eql(u8, name, "vision") and
-        !model_provider.usesGatewayAuxiliaries(provider);
+        !capabilities.vision_fallback;
 }
 
 pub fn validateToolCall(ctx: Context, arena: Allocator, call: ToolCall) !tool_contracts.ToolCallValidationResult {
-    if (providerDisablesTool(ctx.provider, call.name)) {
+    if (providerDisablesTool(ctx.provider_capabilities, call.name)) {
         return .{ .failure = try arena.dupe(u8, "Unsupported tool: vision") };
     }
     const spec = registeredToolSpec(ctx, call.name) orelse {
@@ -340,7 +347,7 @@ pub fn validateToolCall(ctx: Context, arena: Allocator, call: ToolCall) !tool_co
 }
 
 pub fn checkToolAvailability(ctx: Context, arena: Allocator, call: ToolCall) !?[]const u8 {
-    if (providerDisablesTool(ctx.provider, call.name)) {
+    if (providerDisablesTool(ctx.provider_capabilities, call.name)) {
         return try arena.dupe(u8, "Unsupported tool: vision");
     }
     return tool_dispatch.localToolAvailabilityFailureForCall(
@@ -359,6 +366,9 @@ pub fn executeToolCallAuthorized(
         request.command_replay_capture.?.abort(request.result_allocator);
     };
     var execution_ctx = ctx;
+    if (request.permission_mode) |permission_mode| {
+        execution_ctx.permission_mode = permission_mode;
+    }
     if (request.live_authority) |authority| {
         if (!containsName(authority.tools, request.call.name) and
             !containsName(authority.integrations, request.call.name))
@@ -1031,7 +1041,6 @@ fn executeVisionRequest(
         .gateway_team = state.runtime.gateway_team,
         .session_id = state.runtime.lifecycle_scope.session_id,
         .retry_count = state.runtime.gateway_retry_count,
-        .chat_url = state.runtime.gateway_chat_url,
         .cancel_flag = state.runtime.cancel_flag,
         .usage = &state.runtime.session.usage,
         .usage_allocator = state.runtime.session_allocator,
@@ -2082,6 +2091,10 @@ const TestRuntime = struct {
     max_tool_result_bytes: usize = 64 * 1024,
     api_key: []const u8 = "",
     provider: model_provider.ProviderId = .gateway,
+    provider_capabilities: provider_set.Bundle.Capabilities = .{
+        .fx_search = true,
+        .vision_fallback = true,
+    },
     gateway_team: ?[]const u8 = null,
     gateway_retry_count: usize = 0,
     gateway_chat_url: []const u8 = "",
@@ -2132,6 +2145,7 @@ const TestRuntime = struct {
             .agent_stream_provider = self.agent_stream_provider,
             .gateway_team = self.gateway_team,
             .provider = self.provider,
+            .provider_capabilities = self.provider_capabilities,
             .model = self.model,
             .gateway_retry_count = self.gateway_retry_count,
             .gateway_chat_url = self.gateway_chat_url,
@@ -3345,9 +3359,8 @@ fn unexpectedTestPrompt(
 
 const TestAutoReview = struct {
     calls: usize = 0,
-    decision: permission_auto_classifier.Decision = .allow,
+    decision: permission_auto_classifier.Decision = .clear,
     risk: permission_auto_classifier.Risk = .low,
-    authorization: permission_auto_classifier.Authorization = .medium,
     rationale: []const u8 = "test automatic review",
     action_tag: ?std.meta.Tag(permission_auto_classifier.Action) = null,
     exact_command: ?[]const u8 = null,
@@ -3356,7 +3369,6 @@ const TestAutoReview = struct {
     file_additions: usize = 0,
     file_deletions: usize = 0,
     file_review_rows: usize = 0,
-    escalation_reason: ?[]const u8 = null,
     target_path: ?[]const u8 = null,
 
     fn review(
@@ -3365,11 +3377,7 @@ const TestAutoReview = struct {
         request: permission_auto_classifier.ReviewRequest,
     ) anyerror!permission_auto_classifier.ParseOutcome {
         const self: *@This() = @ptrCast(@alignCast(raw_ctx));
-        if (request.workspace_root.len == 0 or request.escalation_reason.len == 0) {
-            return error.TestExpectedReviewContext;
-        }
         self.calls += 1;
-        self.escalation_reason = request.escalation_reason;
         self.target_path = if (request.targets.len > 0)
             request.targets[0].path
         else
@@ -3389,7 +3397,6 @@ const TestAutoReview = struct {
         }
         return .{ .valid = .{
             .risk = self.risk,
-            .authorization = self.authorization,
             .decision = self.decision,
             .rationale = try alloc.dupe(u8, self.rationale),
         } };
@@ -5583,7 +5590,6 @@ test "request tool permission combines configured external copy target with work
         .arguments_json = "{\"source\":\"source.txt\",\"destination\":\"../external/copied.txt\"}",
     }, .auto, &.{})).decision);
     try std.testing.expectEqual(@as(usize, 1), reviewer.calls);
-    try std.testing.expectEqualStrings("tool_requires_approval", reviewer.escalation_reason.?);
     try std.testing.expect(rt.worker.pending_permission_request_shared == null);
 }
 
@@ -5622,7 +5628,7 @@ test "disabled automatic reviewer returns a recoverable denial without a human p
         .arguments_json = args,
     }, .auto, &.{});
     try std.testing.expectEqual(ToolPermissionDecision.deny, outcome.decision);
-    try std.testing.expectEqual(types.ToolPermissionDenialReason.auto_denied, outcome.denial_reason.?);
+    try std.testing.expectEqual(types.ToolPermissionDenialReason.review_unavailable, outcome.denial_reason.?);
     try std.testing.expect(outcome.requirement == null);
     try std.testing.expect(outcome.execution_authority == null);
     try std.testing.expect(outcome.auto_review_result == null);
@@ -6121,7 +6127,6 @@ test "run_command timeout returns model-visible failure" {
         .system_prompt = "",
         .gateway_retry_count = 0,
         .gateway_chat_url = "",
-        .gateway_tools_json = "[]",
         .agent_step_limit = 1,
         .cancel_flag = &cancel,
         .session_child_capability = &capability,
@@ -7910,7 +7915,6 @@ const VisionGatewayFixture = struct {
     last_team: ?[]const u8 = null,
     last_model: []const u8 = "",
     last_retry_count: usize = 0,
-    last_chat_url: []const u8 = "",
 
     fn deinit(self: *VisionGatewayFixture) void {
         for (self.payloads.items) |payload| self.alloc.free(payload);
@@ -7927,7 +7931,7 @@ const VisionGatewayFixture = struct {
     fn stream(
         context: ?*anyopaque,
         _: Allocator,
-        request: agent_stream_provider.Request,
+        request: agent_stream_provider.ModelRequest,
     ) anyerror!agent_stream_provider.Result {
         const self: *VisionGatewayFixture = @ptrCast(@alignCast(context.?));
         if (self.allocation_probe) |probe| {
@@ -7935,26 +7939,38 @@ const VisionGatewayFixture = struct {
         }
         const response_index = self.call_count;
         self.call_count += 1;
-        try self.payloads.append(self.alloc, try self.alloc.dupe(u8, request.payload));
-        self.last_api_key = request.api_key;
-        self.last_team = request.team;
+        const payload = try test_builtin_gateway.buildAgentRequest(self.alloc, request.data());
+        defer self.alloc.free(payload);
+        try self.payloads.append(self.alloc, try self.alloc.dupe(u8, payload));
+        self.last_api_key = request.credential.secret;
+        self.last_team = request.credential.tenant;
         self.last_model = request.model;
         self.last_retry_count = request.retry_count;
-        self.last_chat_url = request.chat_url;
         if (self.cancel_after_call == self.call_count) request.cancel_flag.store(true, .seq_cst);
         if (response_index >= self.responses.len) return error.UnexpectedVisionGatewayCall;
         const response = self.responses[response_index];
+        try request.admission.admit();
         request.delivery.markPossiblySent();
-        return .{
-            .status = response.status,
+        if (response.status != .ok) return .{ .failed = .{ .kind = .provider_error } };
+        return .{ .completed = .{
             .completion = .{
                 .content = response.content,
                 .generation_id = response.generation_id,
                 .finish_reason = .stop,
                 .usage = response.usage,
             },
-            .generation_origin = "https://ai-gateway.vercel.sh",
-        };
+            .usage = .{ .deferred = .{
+                .provider = .gateway,
+                .generation_id = response.generation_id orelse "gen_test",
+                .scope = "https://ai-gateway.vercel.sh",
+                .tenant = request.credential.tenant,
+                .credential_source = request.credential.source orelse .ai_gateway_api_key,
+                .credential_identity = credential_authority.derive(
+                    request.credential.source orelse .ai_gateway_api_key,
+                    request.credential.account_id,
+                ),
+            } },
+        } };
     }
 };
 
@@ -8122,6 +8138,7 @@ test "Codex vision calls fail before provider access" {
     defer fixture.deinit();
     var rt = TestRuntime{
         .provider = .codex,
+        .provider_capabilities = .{},
         .agent_stream_provider = fixture.provider(),
         .tool_registry = .{ .tools = vision_test_registry_tools[0..] },
         .session_allocator = alloc,
@@ -8508,7 +8525,6 @@ test "vision runtime resolves historical authorized images and batches twenty as
     try std.testing.expectEqualStrings("gateway-key", fixture.last_api_key);
     try std.testing.expectEqualStrings("team_vision", fixture.last_team.?);
     try std.testing.expectEqual(@as(usize, 2), fixture.last_retry_count);
-    try std.testing.expectEqualStrings("https://gateway.invalid/chat", fixture.last_chat_url);
     try expectContains(fixture.payloads.items[0], "Read the build state");
     try expectContains(fixture.payloads.items[0], "\"mediaType\":\"image/png\"");
     for (fixture.payloads.items) |payload| {

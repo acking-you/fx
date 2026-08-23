@@ -1,8 +1,46 @@
 const std = @import("std");
 const stream_provider = @import("../agent/stream_provider.zig");
+const model_capabilities = @import("../config/model_capabilities.zig");
+const image_attachments = @import("../images/image_attachments.zig");
 const types = @import("../shared/types.zig");
+const tool_dispatch = @import("../tooling/tool_dispatch.zig");
 
 const Allocator = std.mem.Allocator;
+
+pub const StructuredResponseFormat = struct {
+    name: []const u8,
+    description: []const u8,
+    schema_json: []const u8,
+};
+
+/// Provider-neutral input for a dedicated Responses compaction request.
+/// This is separate from a live `ModelRequest`: compaction has no event sink,
+/// delivery ledger, or retry ownership.
+pub const BuildRequest = struct {
+    credential_source: ?types.CredentialSource = null,
+    provider_credential: ?[]const u8 = null,
+    account_id: ?[]const u8 = null,
+    session_id: ?[]const u8 = null,
+    model: []const u8,
+    tool_registry: tool_dispatch.Registry = .{},
+    serialized_tools: []const u8,
+    messages: []const types.ChatMessage,
+    tool_choice: types.ToolChoice,
+    selected_dynamic_tool_schemas: []const []const u8 = &.{},
+    vision_mode: stream_provider.VisionMode = .unavailable,
+    provider_options: model_capabilities.ResolvedProviderOptions,
+    max_output_tokens: ?u32 = null,
+    budget: ?stream_provider.BuildBudget = null,
+    verified_images: ?[]const image_attachments.VerifiedSnapshot = null,
+    response_format: ?StructuredResponseFormat = null,
+    responses_input_json: ?[]const u8 = null,
+    responses_text_options_json: ?[]const u8 = null,
+    responses_reasoning_options_json: ?[]const u8 = null,
+    responses_tool_choice_json: ?[]const u8 = null,
+    responses_extra_fields_json: ?[]const u8 = null,
+    responses_compaction_binding: ?types.ResponsesCompactionProviderBindingView = null,
+    responses_compaction_trigger: bool = false,
+};
 
 /// Complete input for one dedicated Responses compaction attempt. Every slice
 /// is borrowed for the duration of `Provider.fetch`.
@@ -10,7 +48,7 @@ pub const Request = struct {
     credential: []const u8,
     account_id: ?[]const u8 = null,
     provider_binding: types.ResponsesCompactionProviderBindingView,
-    build_request: stream_provider.BuildRequest,
+    build_request: BuildRequest,
 };
 
 /// Provider-owned replacement history. `input_json` is the complete compact
