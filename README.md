@@ -135,7 +135,7 @@ cd your_project
 fx
 ```
 
-The current directory becomes the primary workspace. Enter a prompt, or run `/help` to browse interactive commands. Run `/ps` to inspect active durable terminals and background command history; open terminal output from the Ctrl+X process manager, or use `/background logs <id>` for legacy background tasks.
+The current directory becomes the primary workspace. Enter a prompt, or run `/help` to browse interactive commands. Press Ctrl+V to attach an image from the clipboard, or run `/paste`; macOS uses the native pasteboard, Linux uses `wl-paste` or `xclip`, and WSL can bridge through PowerShell. Run `/ps` to inspect active durable terminals and background command history; open terminal output from the Ctrl+X process manager, or use `/background logs <id>` for legacy background tasks.
 
 The status line hides the workspace path and Git branch by default. Enable the `Status line workspace` option in `/settings`, run `/statusline workspace`, or set it in `~/.fx/settings.json`:
 
@@ -167,7 +167,7 @@ fx ask "explain the changes in this repository"
 fx ask --show-thinking "explain the changes in this repository"
 ```
 
-Streamed model reasoning always appears in the interactive transcript, trimmed to its most recent lines so the answer stays in view. The full reasoning body is replayed to the provider as reasoning context for the remaining steps of the same turn, never truncated. ACP sessions always emit `agent_thought_chunk` updates. `fx ask` writes reasoning to stderr with `--show-thinking`, and `fx ask --json` includes a separate `thinking` field when reasoning is present; it is never merged into `output`.
+Streamed model reasoning always appears in the interactive transcript as a compact, dimmed reasoning summary. While a reasoning block is active, fx prefers its first completed bold activity header; after it settles, fx removes that header and retains the recent summary body so the answer stays in view. The full reasoning body is replayed to the provider as reasoning context for the remaining steps of the same turn, never truncated. ACP sessions always emit `agent_thought_chunk` updates. `fx ask` writes reasoning to stderr with `--show-thinking`, and `fx ask --json` includes a separate `thinking` field when reasoning is present; it is never merged into `output`.
 
 fx starts in `auto` permission mode. Routine understood development actions run directly; unresolved sensitive actions receive one bounded automatic review. A blocked action may return an exact approval request that the agent can send to fx's real permission screen. Ordinary question text never grants permission. See [Permissions](https://fx.sh/docs/configure-fx/permissions) for other modes and persistent rules.
 

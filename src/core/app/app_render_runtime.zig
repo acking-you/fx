@@ -359,6 +359,7 @@ pub fn Runtime(comptime App: type) type {
             return .{
                 .system_notice_label_style = ui_render.system_notice_label_style,
                 .system_notice_text_style = ui_render.system_notice_text_style,
+                .reasoning_summary_style = ui_render.reasoning_summary_style,
                 .reset_style = ui_render.reset_style,
                 .dim_style = ui_render.dim_style,
                 .red_style = ui_render.red_style,

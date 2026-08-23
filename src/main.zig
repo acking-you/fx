@@ -2121,15 +2121,21 @@ const App = struct {
         return self.shell.refreshReplaceableSemanticNotice(self.alloc, entry_id, notice);
     }
 
-    /// Renders the trailing window of the streamed reasoning. The transcript is
-    /// bounded because long reasoning would push the answer off screen; the
-    /// untruncated body still reaches the provider through
-    /// `ChatMessage.reasoning`, which the display never touches.
-    fn renderThoughtNotice(self: *App) types.SemanticNotice {
-        const visible = thought_presentation.visibleBody(
-            self.thought_body.items,
-            thought_presentation.default_visible_lines,
-        );
+    /// Renders a compact reasoning summary without changing the full reasoning
+    /// replayed through `ChatMessage.reasoning`. While streaming, a completed
+    /// bold provider header becomes the live activity label. Finalization drops
+    /// that header and retains the recent summary body.
+    fn renderThoughtNotice(self: *App, finalized: bool) types.SemanticNotice {
+        const visible = if (finalized)
+            thought_presentation.finalizedBody(
+                self.thought_body.items,
+                thought_presentation.default_visible_lines,
+            )
+        else
+            thought_presentation.activeBody(
+                self.thought_body.items,
+                thought_presentation.default_visible_lines,
+            );
         return .{
             .topic = "thinking",
             .tone = .neutral,
@@ -2146,7 +2152,7 @@ const App = struct {
             const copied = chunk[0..@min(chunk.len, remaining)];
             try self.thought_body.appendSlice(self.alloc, copied);
         }
-        const notice = self.renderThoughtNotice();
+        const notice = self.renderThoughtNotice(false);
         if (self.thought_entry_id) |entry_id| {
             _ = try self.refreshReplaceableDomainNotice(entry_id, notice);
             return;
@@ -2160,7 +2166,7 @@ const App = struct {
             return;
         };
         if (self.thought_body.items.len > 0) {
-            _ = self.replaceDomainNotice(entry_id, self.renderThoughtNotice()) catch |err| {
+            _ = self.replaceDomainNotice(entry_id, self.renderThoughtNotice(true)) catch |err| {
                 debug_trace.logf("ui", "thought display finalize failed err={s}", .{@errorName(err)});
             };
         }

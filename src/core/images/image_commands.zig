@@ -87,7 +87,15 @@ pub fn Commands(comptime App: type) type {
             var loaded = image_attachments.loadClipboardImageAttachment(app.alloc) catch |err| {
                 if (err == error.NoClipboardImage) {
                     try app.writeDomainNotice(.{ .topic = "images", .tone = .neutral, .body = "no image found on clipboard" }, true);
-                } else if (err != error.Unsupported) {
+                } else if (err == error.Unsupported) {
+                    try app.writeDomainNotice(.{
+                        .topic = "images",
+                        .tone = .neutral,
+                        .body = "clipboard image paste is unavailable; Linux requires wl-clipboard, xclip, or PowerShell under WSL",
+                    }, true);
+                } else if (err == error.ImageTooLarge) {
+                    try app.writeDomainNotice(.{ .topic = "images", .tone = .@"error", .body = image_attachments.image_too_large_notice }, true);
+                } else {
                     const line = try std.fmt.allocPrint(app.alloc, "failed to paste clipboard image: {s}", .{@errorName(err)});
                     defer app.alloc.free(line);
                     try app.writeDomainNotice(.{ .topic = "images", .tone = .@"error", .body = line }, true);
@@ -973,8 +981,9 @@ test "managePending reports empty lists populated lists and clear" {
     try std.testing.expectEqual(@as(usize, 0), app.pending_images.items.len);
 }
 
-test "attachClipboard is silent on unsupported platforms" {
-    if (@import("builtin").os.tag == .macos) return;
+test "attachClipboard explains unsupported platforms" {
+    const os_tag = @import("builtin").os.tag;
+    if (os_tag == .macos or os_tag == .linux) return;
 
     const alloc = std.testing.allocator;
     var app = FakeApp{ .alloc = alloc };
@@ -982,6 +991,6 @@ test "attachClipboard is silent on unsupported platforms" {
 
     try Commands(FakeApp).attachClipboard(&app);
 
-    try std.testing.expectEqual(@as(usize, 0), app.transcript.items.len);
-    try std.testing.expect(!app.shell.render_requests.hasReason(.footer));
+    try expectTranscriptContains(&app, "clipboard image paste is unavailable");
+    try std.testing.expectEqual(@as(usize, 0), app.pending_images.items.len);
 }
