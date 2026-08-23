@@ -3018,7 +3018,7 @@ describe("gateway stream lifecycle", () => {
           15_000,
         );
         await tui.sendText("/compact");
-        await tui.waitForText("Context compacted.", 15_000);
+        await tui.waitForText("Context compacted locally.", 15_000);
         await tui.sendText("/quit");
         await tui.waitForSessionEnd(15_000);
         tui = null;
@@ -3166,7 +3166,7 @@ describe("gateway stream lifecycle", () => {
           20_000,
         );
         await tui.sendText("/compact");
-        await tui.waitForText("Context compacted.", 15_000);
+        await tui.waitForText("Context compacted locally.", 15_000);
         await tui.sendText("Read the explicit skill after compaction.");
         await tui.waitForPane(
           (pane) =>

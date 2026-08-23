@@ -4,6 +4,7 @@ const model_capabilities = @import("../../config/model_capabilities.zig");
 const provider_route = @import("../../gateway/provider_route.zig");
 const responses_compaction_binding = @import("../../gateway/responses_compaction_binding.zig");
 const responses_compaction_provider = @import("../../gateway/responses_compaction_provider.zig");
+const debug_trace = @import("../../shared/debug_trace.zig");
 const types = @import("../../shared/types.zig");
 
 const Allocator = std.mem.Allocator;
@@ -11,6 +12,8 @@ const Allocator = std.mem.Allocator;
 const local_summary_max_bytes: usize = 16 * 1024;
 const local_summary_max_messages: usize = 24;
 const local_summary_max_message_bytes: usize = 2 * 1024;
+const remote_compaction_truncated_tool_output =
+    "[Tool output truncated before remote context compaction to fit the model context window.]";
 
 pub const Request = struct {
     provider: ?responses_compaction_provider.Provider,
@@ -21,6 +24,7 @@ pub const Request = struct {
     model: []const u8,
     serialized_tools: []const u8,
     messages: []const types.ChatMessage,
+    capabilities: model_capabilities.Capabilities = .{},
     provider_options: model_capabilities.ResolvedProviderOptions,
     cancel_flag: *std.atomic.Value(bool),
 };
@@ -96,11 +100,22 @@ pub fn compact(alloc: Allocator, request: Request) !Result {
         source,
         request.credential,
         request.account_id,
-    ) catch return localResult(local_summary);
+    ) catch |err| {
+        debug_trace.logf("compaction", "provider binding unavailable err={s}", .{@errorName(err)});
+        return localResult(local_summary);
+    };
     var owns_binding = true;
     errdefer if (owns_binding) {
         types.freeResponsesCompactionProviderBinding(alloc, binding);
     };
+
+    var prepared_messages = try prepareRemoteMessagesAlloc(
+        alloc,
+        request.messages,
+        request.serialized_tools,
+        request.capabilities,
+    );
+    defer prepared_messages.deinit(alloc);
 
     const outcome = provider.fetch(alloc, .{
         .credential = request.credential,
@@ -114,7 +129,7 @@ pub fn compact(alloc: Allocator, request: Request) !Result {
             .session_id = request.session_id,
             .model = request.model,
             .serialized_tools = request.serialized_tools,
-            .messages = request.messages,
+            .messages = prepared_messages.messages,
             .tool_choice = .auto,
             .provider_options = request.provider_options,
             .budget = .{ .cancel_flag = request.cancel_flag },
@@ -122,6 +137,7 @@ pub fn compact(alloc: Allocator, request: Request) !Result {
     }) catch |err| switch (err) {
         error.Cancelled => return error.Cancelled,
         else => {
+            debug_trace.logf("compaction", "remote request failed err={s}", .{@errorName(err)});
             types.freeResponsesCompactionProviderBinding(alloc, binding);
             owns_binding = false;
             return localResult(local_summary);
@@ -129,7 +145,14 @@ pub fn compact(alloc: Allocator, request: Request) !Result {
     };
 
     return switch (outcome) {
-        .unsupported, .rejected => {
+        .unsupported => {
+            debug_trace.logf("compaction", "remote request unsupported for active route", .{});
+            types.freeResponsesCompactionProviderBinding(alloc, binding);
+            owns_binding = false;
+            return localResult(local_summary);
+        },
+        .rejected => |status| {
+            debug_trace.logf("compaction", "remote request rejected status={d}", .{@intFromEnum(status)});
             types.freeResponsesCompactionProviderBinding(alloc, binding);
             owns_binding = false;
             return localResult(local_summary);
@@ -153,6 +176,110 @@ pub fn compact(alloc: Allocator, request: Request) !Result {
             };
         },
     };
+}
+
+const PreparedRemoteMessages = struct {
+    messages: []const types.ChatMessage,
+    owned_messages: ?[]types.ChatMessage = null,
+
+    fn deinit(self: *PreparedRemoteMessages, alloc: Allocator) void {
+        if (self.owned_messages) |messages| alloc.free(messages);
+        self.* = undefined;
+    }
+};
+
+fn prepareRemoteMessagesAlloc(
+    alloc: Allocator,
+    messages: []const types.ChatMessage,
+    serialized_tools: []const u8,
+    capabilities: model_capabilities.Capabilities,
+) !PreparedRemoteMessages {
+    const token_limit = model_capabilities.autoCompactTokenLimit(capabilities) orelse
+        return .{ .messages = messages };
+    if (token_limit == 0) return .{ .messages = messages };
+
+    var estimated_tokens = estimateRemoteCompactionTokens(messages, serialized_tools);
+    if (estimated_tokens <= token_limit) return .{ .messages = messages };
+    const initial_estimated_tokens = estimated_tokens;
+
+    const prepared = try alloc.dupe(types.ChatMessage, messages);
+    errdefer alloc.free(prepared);
+    const replacement_tokens = estimateTextTokens(remote_compaction_truncated_tool_output);
+    var rewritten_outputs: usize = 0;
+    var index = prepared.len;
+    while (index > 0 and estimated_tokens > token_limit) {
+        index -= 1;
+        const message = &prepared[index];
+        if (message.role != .tool) continue;
+        const content = message.content orelse continue;
+        const content_tokens = estimateTextTokens(content);
+        if (content_tokens <= replacement_tokens) continue;
+        message.content = remote_compaction_truncated_tool_output;
+        estimated_tokens = estimated_tokens -| content_tokens;
+        estimated_tokens +|= replacement_tokens;
+        rewritten_outputs += 1;
+    }
+
+    if (rewritten_outputs == 0) {
+        alloc.free(prepared);
+        return .{ .messages = messages };
+    }
+    debug_trace.logf(
+        "compaction",
+        "trimmed tool outputs before remote request rewritten={d} estimated_tokens_before={d} estimated_tokens_after={d} target={d}",
+        .{ rewritten_outputs, initial_estimated_tokens, estimated_tokens, token_limit },
+    );
+    return .{ .messages = prepared, .owned_messages = prepared };
+}
+
+fn estimateRemoteCompactionTokens(
+    messages: []const types.ChatMessage,
+    serialized_tools: []const u8,
+) usize {
+    var total = estimateTextTokens(serialized_tools);
+    for (messages) |message| {
+        total +|= 8;
+        if (message.content) |content| total +|= estimateTextTokens(content);
+        if (message.tool_call_id) |value| total +|= estimateTextTokens(value);
+        if (message.tool_name) |value| total +|= estimateTextTokens(value);
+        for (message.tool_calls) |call| {
+            total +|= 8;
+            total +|= estimateTextTokens(call.id);
+            total +|= estimateTextTokens(call.name);
+            total +|= estimateTextTokens(call.arguments_json);
+        }
+        if (message.provider_state_json) |value| total +|= estimateTextTokens(value);
+        if (message.reasoning) |value| total +|= estimateTextTokens(value);
+        if (message.reasoning_signature) |value| total +|= estimateTextTokens(value);
+        if (message.reasoning_item_id) |value| total +|= estimateTextTokens(value);
+        if (message.reasoning_encrypted_content) |value| total +|= estimateTextTokens(value);
+        for (message.reasoning_items) |item| {
+            if (item.id) |value| total +|= estimateTextTokens(value);
+            if (item.summary) |value| total +|= estimateTextTokens(value);
+            if (item.encrypted_content) |value| total +|= estimateTextTokens(value);
+        }
+        for (message.responses_provider_output_items) |item| {
+            total +|= estimateTextTokens(item.json);
+        }
+    }
+    return total;
+}
+
+fn estimateTextTokens(text: []const u8) usize {
+    var count: usize = 0;
+    var span_len: usize = 0;
+    for (text) |byte| {
+        if (std.ascii.isWhitespace(byte)) {
+            if (span_len > 0) {
+                count +|= (span_len + 3) / 4;
+                span_len = 0;
+            }
+        } else {
+            span_len +|= 1;
+        }
+    }
+    if (span_len > 0) count +|= (span_len + 3) / 4;
+    return count;
 }
 
 fn localResult(summary: []u8) Result {
@@ -266,6 +393,111 @@ test "auto compaction threshold uses provider total usage" {
     const capabilities: model_capabilities.Capabilities = .{ .context_window = 100_000 };
     try std.testing.expect(!shouldCompact(.{ .input_tokens = 89_000, .output_tokens = 999 }, capabilities));
     try std.testing.expect(shouldCompact(.{ .total_tokens = 90_000 }, capabilities));
+}
+
+test "remote compaction trims oversized tool outputs to the model budget" {
+    var oversized_output: [4096]u8 = undefined;
+    @memset(&oversized_output, 'x');
+    const messages = [_]types.ChatMessage{
+        .{ .role = .system, .content = "stable instructions" },
+        .{ .role = .assistant, .tool_calls = &.{.{ .id = "call", .name = "terminal", .arguments_json = "{}" }} },
+        .{
+            .role = .tool,
+            .tool_call_id = "call",
+            .tool_name = "terminal",
+            .content = &oversized_output,
+            .tool_result_status = .success,
+        },
+        .{ .role = .user, .content = "retain the newest user intent" },
+    };
+
+    var prepared = try prepareRemoteMessagesAlloc(
+        std.testing.allocator,
+        &messages,
+        "[]",
+        .{ .context_window = 1000 },
+    );
+    defer prepared.deinit(std.testing.allocator);
+
+    try std.testing.expect(prepared.owned_messages != null);
+    try std.testing.expectEqualStrings(
+        remote_compaction_truncated_tool_output,
+        prepared.messages[2].content.?,
+    );
+    try std.testing.expectEqualStrings("call", prepared.messages[2].tool_call_id.?);
+    try std.testing.expectEqualStrings("retain the newest user intent", prepared.messages[3].content.?);
+}
+
+test "remote compaction provider receives context-safe tool output" {
+    const Fake = struct {
+        fn fetch(
+            _: ?*anyopaque,
+            alloc: Allocator,
+            request: responses_compaction_provider.Request,
+        ) !responses_compaction_provider.Outcome {
+            try std.testing.expectEqual(@as(usize, 4), request.build_request.messages.len);
+            try std.testing.expectEqualStrings(
+                remote_compaction_truncated_tool_output,
+                request.build_request.messages[2].content.?,
+            );
+            try std.testing.expectEqualStrings(
+                "retain the newest user intent",
+                request.build_request.messages[3].content.?,
+            );
+            return .{ .compacted = .{
+                .credential_source = .openai_api_key,
+                .wire_model = try alloc.dupe(u8, "gpt-5.4"),
+                .input_json = try alloc.dupe(u8, "[{\"type\":\"compaction\",\"encrypted_content\":\"opaque\"}]"),
+            } };
+        }
+    };
+
+    var oversized_output: [4096]u8 = undefined;
+    @memset(&oversized_output, 'x');
+    const messages = [_]types.ChatMessage{
+        .{ .role = .system, .content = "stable instructions" },
+        .{ .role = .assistant, .tool_calls = &.{.{ .id = "call", .name = "terminal", .arguments_json = "{}" }} },
+        .{
+            .role = .tool,
+            .tool_call_id = "call",
+            .tool_name = "terminal",
+            .content = &oversized_output,
+        },
+        .{ .role = .user, .content = "retain the newest user intent" },
+    };
+    var cancel_flag = std.atomic.Value(bool).init(false);
+    var result = try compact(std.testing.allocator, .{
+        .provider = .{ .fetch_fn = Fake.fetch },
+        .credential_source = .openai_api_key,
+        .credential = "sk-test",
+        .account_id = null,
+        .session_id = "session",
+        .model = "gpt-5.4",
+        .serialized_tools = "[]",
+        .messages = &messages,
+        .capabilities = .{ .context_window = 1000 },
+        .provider_options = .{},
+        .cancel_flag = &cancel_flag,
+    });
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expect(result.used_remote);
+}
+
+test "remote compaction keeps messages untouched when they fit" {
+    const messages = [_]types.ChatMessage{
+        .{ .role = .system, .content = "stable instructions" },
+        .{ .role = .user, .content = "small request" },
+    };
+    var prepared = try prepareRemoteMessagesAlloc(
+        std.testing.allocator,
+        &messages,
+        "[]",
+        .{ .context_window = 1000 },
+    );
+    defer prepared.deinit(std.testing.allocator);
+
+    try std.testing.expect(prepared.owned_messages == null);
+    try std.testing.expect(prepared.messages.ptr == messages[0..].ptr);
 }
 
 test "context overflow recognizes 413 and OpenAI 400 details" {

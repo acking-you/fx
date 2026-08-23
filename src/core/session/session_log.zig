@@ -23,6 +23,9 @@ const private_file_permissions = std.Io.File.Permissions.fromMode(0o600);
 const lock_deadline_ms: u64 = 2000;
 const authority_max_bytes: usize = 16 * 1024;
 const authority_intent_max_bytes: usize = 32 * 1024;
+/// Bound append-only growth between atomic canonical-log rewrites. This keeps
+/// replay cost predictable even when recovery checkpoints replace a long turn.
+pub const default_compaction_byte_threshold: u64 = 32 * 1024 * 1024;
 const watermark_max_bytes: usize = 16 * 1024;
 const publication_intent_max_bytes: usize = 32 * 1024;
 const events_file = "events.jsonl";
@@ -88,7 +91,7 @@ pub const Options = struct {
     commit_lock_deadline_ms: u64 = lock_deadline_ms,
     checkpoint_interval: u64 = 32,
     compaction_frame_threshold: u64 = 4096,
-    compaction_byte_threshold: u64 = 128 * 1024 * 1024,
+    compaction_byte_threshold: u64 = default_compaction_byte_threshold,
     resolve_authority_intent: bool = true,
 };
 

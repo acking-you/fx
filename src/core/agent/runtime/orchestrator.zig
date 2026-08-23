@@ -1389,7 +1389,7 @@ fn persistRecoveryCheckpoint(
         arena,
         current_turn_messages,
     );
-    runtime_execution_memory.boundRecoveryCheckpointPresentation(&execution);
+    runtime_execution_memory.boundRecoveryCheckpointPresentation(arena, &execution);
     try effect.set(deps.ctx, .{
         .turn_id = job.turn_id,
         .user = .{
@@ -3371,6 +3371,7 @@ fn processQueuedPromptLoop(
                     .model = gateway_model,
                     .serialized_tools = config.gateway_tools_json,
                     .messages = request_messages,
+                    .capabilities = request_capabilities,
                     .provider_options = provider_opts,
                     .cancel_flag = config.cancel_flag,
                 });

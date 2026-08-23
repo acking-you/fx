@@ -10,6 +10,7 @@ const io_mod = @import("../../shared/io.zig");
 const file_mutation = @import("../../tooling/file_mutation.zig");
 const tool_result_errors = @import("../../tooling/tool_result_errors.zig");
 const tool_result_limits = @import("../../tooling/tool_result_limits.zig");
+const execution_retention = @import("../../session/execution_retention.zig");
 
 const runtime_config = @import("config.zig");
 const runtime_tool_contracts = @import("tool_contracts.zig");
@@ -33,25 +34,30 @@ pub fn classifyProviderExecutedResultStatus(output: []const u8) types.PersistedT
 }
 
 pub fn buildExecutionMemory(alloc: Allocator, within_turn_suffix: []const ChatMessage) !types.ExecutionMemory {
-    return execution_memory_helpers.buildNormalChatExecutionMemory(
+    var execution = try execution_memory_helpers.buildNormalChatExecutionMemory(
         alloc,
         within_turn_suffix,
     );
+    execution_retention.boundFilePresentationBodies(
+        alloc,
+        &execution,
+        execution_retention.durable_file_body_policy,
+    );
+    return execution;
 }
 
 /// Recovery checkpoints retain the bounded diff preview needed to explain file
 /// mutations after resume, but omit complete before/after file bodies. Those
 /// bodies are presentation-only and otherwise multiply checkpoint size for
 /// every edit of a large file, forcing multi-megabyte state replacements.
-pub fn boundRecoveryCheckpointPresentation(execution: *types.ExecutionMemory) void {
-    for (execution.tool_steps) |*step| {
-        for (step.tool_results) |*result| {
-            if (result.committed_file_presentation) |*presentation| {
-                presentation.previous_content = null;
-                presentation.after_content = null;
-            }
-        }
-    }
+pub fn boundRecoveryCheckpointPresentation(
+    alloc: Allocator,
+    execution: *types.ExecutionMemory,
+) void {
+    execution_retention.boundFilePresentationBodies(alloc, execution, .{
+        .max_presentation_bytes = 0,
+        .max_execution_bytes = 0,
+    });
 }
 
 pub fn buildInterruptedExecutionMemory(
@@ -836,6 +842,9 @@ test "transcript does not mark native web_search as provider resource placeholde
 }
 
 test "recovery checkpoint presentation omits full file bodies but keeps preview" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
     var lines = [_]types.CommittedFilePresentationLine{.{
         .kind = .addition,
         .new_line = 1,
@@ -855,15 +864,15 @@ test "recovery checkpoint presentation omits full file bodies but keeps preview"
             .additions = 1,
             .deletions = 1,
             .truncated = false,
-            .previous_content = "large before body",
-            .after_content = "large after body",
+            .previous_content = try alloc.dupe(u8, "large before body"),
+            .after_content = try alloc.dupe(u8, "large after body"),
             .lifecycle_id = .{ .turn_id = 7, .call_id = "call_edit" },
         },
     }};
     var steps = [_]types.ToolExecutionStep{.{ .tool_results = &results }};
     var execution: types.ExecutionMemory = .{ .tool_steps = &steps };
 
-    boundRecoveryCheckpointPresentation(&execution);
+    boundRecoveryCheckpointPresentation(alloc, &execution);
 
     const presentation = execution.tool_steps[0].tool_results[0].committed_file_presentation.?;
     try std.testing.expectEqualStrings("preview line", presentation.lines[0].text);
