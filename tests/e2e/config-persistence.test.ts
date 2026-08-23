@@ -1064,7 +1064,7 @@ describe.skipIf(!tmuxAvailable())("config persistence", () => {
         await session.sendText("/effort future-tier");
         await session.waitForText("● Effort: future-tier", TIMEOUT);
         expect(JSON.parse(readFileSync(settingsPath, "utf8"))).toMatchObject({
-          model: "openai/gpt-5.6-sol",
+          models: { gateway: "openai/gpt-5.6-sol" },
           effort: "future-tier",
           fast_mode: true,
         });
@@ -1148,7 +1148,7 @@ describe.skipIf(!tmuxAvailable())("config persistence", () => {
           models: { gateway: "anthropic/claude-fable-5" },
           effort: "xhigh",
         });
-        expect(stored).not.toHaveProperty("fast_mode");
+        expect(stored.fast_mode).toBe(false);
         expect(readFileSync(stderrPath, "utf8")).toBe("");
       } finally {
         gateway.stop();
@@ -1210,7 +1210,7 @@ describe.skipIf(!tmuxAvailable())("config persistence", () => {
         const stored = JSON.parse(readFileSync(join(home, ".fx", "settings.json"), "utf8"));
         expect(stored.models.gateway).toBe("xai/grok-build-1");
         expect(stored).not.toHaveProperty("effort");
-        expect(stored).not.toHaveProperty("fast_mode");
+        expect(stored.fast_mode).toBe(false);
 
         const scrollback = await session.captureFullScrollbackEscapes();
         expect(scrollback).toContain("grok-build-1");
@@ -1289,7 +1289,7 @@ describe.skipIf(!tmuxAvailable())("config persistence", () => {
 
         let stored = JSON.parse(readFileSync(join(home, ".fx", "settings.json"), "utf8"));
         expect(stored.models.gateway).toBe("provider/new-reasoning-model");
-        expect(stored).not.toHaveProperty("fast_mode");
+        expect(stored.fast_mode).toBe(false);
 
         await session.sendText("Use portable auto.");
         await session.waitForText("portable auto complete", TIMEOUT);
@@ -1350,7 +1350,7 @@ describe.skipIf(!tmuxAvailable())("config persistence", () => {
           models: { gateway: "provider/new-reasoning-model" },
           effort: "future-tier",
         });
-        expect(stored).not.toHaveProperty("fast_mode");
+        expect(stored.fast_mode).toBe(false);
         expect(readFileSync(stderrPath, "utf8")).toBe("");
       } finally {
         gateway.stop();

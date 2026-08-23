@@ -119,6 +119,7 @@ const browser_workspace_tools = @import("builtins/browser_workspace_tools.zig");
 const tool_admission = @import("core/tooling/tool_admission.zig");
 const tool_projection = @import("core/tooling/tool_projection.zig");
 const command_output_content = @import("core/tooling/command_output_content.zig");
+const thought_presentation = @import("core/output/thought_presentation.zig");
 const tool_dispatch = @import("core/tooling/tool_dispatch.zig");
 const tool_set_contract = @import("core/tooling/tool_set.zig");
 const tool_mcp_runtime = @import("core/tooling/tool_mcp_runtime.zig");
@@ -183,6 +184,7 @@ const RuntimeContextSnapshot = background_runtime.RuntimeContextSnapshot;
 
 const footer_rows: u16 = 4;
 const resize_debounce_ms: i64 = 100;
+const thought_display_max_bytes: usize = 64 * 1024;
 const max_transcript_bytes: usize = 256 * 1024;
 const default_max_agent_steps: usize = agent_steps.default_max_agent_steps;
 const native_gateway_provider = builtin_gateway.provider;
@@ -568,6 +570,8 @@ const App = struct {
     context_enabled: bool = true,
     context_limits: config_runtime.context_limits.Values = .{},
     fast_mode: bool = false,
+    thought_entry_id: ?u32 = null,
+    thought_body: std.ArrayList(u8) = .empty,
     auto_upgrade_enabled: bool = true,
     effort: ReasoningEffort = .auto,
     diff_entries: std.ArrayList(@import("core/output/diff.zig").DiffEntry) = .empty,
@@ -857,6 +861,7 @@ const App = struct {
         self.pacer.deinit(self.alloc);
         self.provider_selection.deinit();
         self.session_title.deinit(self.alloc);
+        self.thought_body.deinit(self.alloc);
         SessionAppRuntime.deinitPersistence(self);
         if (self.requested_resume) |*target| {
             target.deinit(self.alloc);
@@ -2110,6 +2115,53 @@ const App = struct {
 
     pub fn replaceDomainNotice(self: *App, entry_id: u32, notice: types.SemanticNotice) !bool {
         return self.shell.replaceSemanticNotice(self.alloc, entry_id, notice);
+    }
+
+    pub fn refreshReplaceableDomainNotice(self: *App, entry_id: u32, notice: types.SemanticNotice) !bool {
+        return self.shell.refreshReplaceableSemanticNotice(self.alloc, entry_id, notice);
+    }
+
+    /// Render only a bounded tail in the transcript. Provider replay uses the
+    /// separate, untruncated reasoning stored on the assistant message.
+    fn renderThoughtNotice(self: *App) types.SemanticNotice {
+        const visible = thought_presentation.visibleBody(
+            self.thought_body.items,
+            thought_presentation.default_visible_lines,
+        );
+        return .{
+            .topic = "thinking",
+            .tone = .neutral,
+            .body = visible.text,
+        };
+    }
+
+    pub fn pushThoughtDisplay(self: *App, chunk: []const u8) !void {
+        if (chunk.len == 0) return;
+        const remaining = thought_display_max_bytes -| self.thought_body.items.len;
+        if (remaining > 0) {
+            const copied = chunk[0..@min(chunk.len, remaining)];
+            try self.thought_body.appendSlice(self.alloc, copied);
+        }
+        const notice = self.renderThoughtNotice();
+        if (self.thought_entry_id) |entry_id| {
+            _ = try self.refreshReplaceableDomainNotice(entry_id, notice);
+            return;
+        }
+        self.thought_entry_id = try self.appendReplaceableDomainNotice(notice);
+    }
+
+    pub fn finalizeThoughtDisplay(self: *App) !void {
+        const entry_id = self.thought_entry_id orelse {
+            self.thought_body.clearRetainingCapacity();
+            return;
+        };
+        if (self.thought_body.items.len > 0) {
+            _ = self.replaceDomainNotice(entry_id, self.renderThoughtNotice()) catch |err| {
+                debug_trace.logf("ui", "thought display finalize failed err={s}", .{@errorName(err)});
+            };
+        }
+        self.thought_entry_id = null;
+        self.thought_body.clearRetainingCapacity();
     }
 
     pub fn writeCommandOutputChunk(self: *App, stream: command_output_content.Stream, text: []const u8, record: bool) !void {
@@ -3886,6 +3938,7 @@ test {
     _ = @import("core/mcp/features/completion.zig");
     _ = @import("core/config/model_capabilities.zig");
     _ = @import("core/output/output_contracts.zig");
+    _ = @import("core/output/thought_presentation.zig");
     _ = @import("core/workspace/pathing.zig");
     _ = @import("core/workspace/current_branch.zig");
     _ = @import("core/permissions/permission_gate.zig");

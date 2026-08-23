@@ -92,9 +92,6 @@ const terminal_exec_only_command_description =
     "Command to run.";
 const terminal_exec_only_profile_description =
     "Profile for exec; omission defaults to user, while clean skips user initialization files. User execution supports the configured Bash or zsh login shell. Bash login execution reads login initialization files; .bashrc is available only when sourced by the login profile.";
-const terminal_exec_only_yield_time_description =
-    "Return a durable terminal session if the command is still running after this many milliseconds; defaults to 10000.";
-
 const terminal_shell_schema = model_tool_schema.ObjectSchema{
     .properties = &.{
         .{ .name = "kind", .json_type = .string, .shape = &.{ .enum_values = &.{ "user_login", "executable" } } },
@@ -320,18 +317,16 @@ fn terminalExecOnlyProperty(comptime name: []const u8) model_tool_schema.Propert
         terminal_exec_only_command_description
     else if (std.mem.eql(u8, name, "profile"))
         terminal_exec_only_profile_description
-    else if (std.mem.eql(u8, name, "yield_time_ms"))
-        terminal_exec_only_yield_time_description
     else
         @compileError("terminal exec field is missing focused model guidance: " ++ name);
     return terminalNullableProperty(property);
 }
 
 const terminal_exec_only_actions = [_][]const u8{"exec"};
-const terminal_exec_contract = terminal_impl.actionFieldContract(.exec);
+const terminal_exec_only_fields = [_][]const u8{ "action", "command", "cwd", "profile" };
 const terminal_exec_only_gateway_properties = blk: {
-    var properties: [terminal_exec_contract.allowed.len]model_tool_schema.Property = undefined;
-    for (terminal_exec_contract.allowed, 0..) |field_name, index| {
+    var properties: [terminal_exec_only_fields.len]model_tool_schema.Property = undefined;
+    for (terminal_exec_only_fields, 0..) |field_name, index| {
         properties[index] = if (std.mem.eql(u8, field_name, "action"))
             .{
                 .name = "action",
@@ -1549,12 +1544,13 @@ test "terminal exec-only schema reuses exec structure with focused descriptions"
         spec.description,
     );
     try std.testing.expectEqual(
-        terminal_exec_contract.allowed.len,
+        terminal_exec_only_fields.len,
         input_schema.properties.len,
     );
-    for (terminal_exec_contract.allowed, input_schema.properties) |field_name, property| {
+    for (terminal_exec_only_fields, input_schema.properties) |field_name, property| {
         try std.testing.expectEqualStrings(field_name, property.name);
     }
+    try std.testing.expect(schemaProperty(input_schema, "yield_time_ms") == null);
     try std.testing.expectEqualSlices(
         []const u8,
         &terminal_exec_only_actions,
