@@ -425,7 +425,7 @@ pub const slash_specs = [_]SlashSpec{
     .{ .kind = .stats, .command = "/stats", .help_entry = "/stats", .completion_description = "show token and turn statistics", .presentation_category = .account },
     .{ .kind = .usage, .command = "/usage", .aliases = &.{"/cost"}, .help_entry = "/usage (/cost)", .completion_description = "show local fx tokens, models, and spend", .presentation_category = .account },
     .{ .kind = .status, .command = "/status", .help_entry = "/status", .completion_description = "show runtime configuration", .presentation_category = .general, .show_in_welcome = true },
-    .{ .kind = .background, .command = "/background", .help_entry = "/background [open|logs|stop <id|last>]", .completion_description = "inspect background command history", .presentation_category = .agents, .show_in_welcome = true, .has_args = true },
+    .{ .kind = .background, .command = "/background", .aliases = &.{"/ps"}, .help_entry = "/background (/ps) [open|logs|stop <id|last>]", .completion_description = "inspect background processes and command history", .presentation_category = .agents, .show_in_welcome = true, .has_args = true },
     .{ .kind = .background_stop, .command = "/background stop", .accepts_payload = true },
     .{ .kind = .background_open, .command = "/background open", .accepts_payload = true },
     .{ .kind = .background_logs, .command = "/background logs", .accepts_payload = true },
@@ -569,6 +569,9 @@ test "built-in slash registry resolves primary commands and aliases" {
 
     const usage = slash_registry.lookup("/usage") orelse return error.TestExpectedEqual;
     try std.testing.expectEqual(SlashKind.usage, usage.kind);
+
+    const processes = slash_registry.lookup("/ps") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(SlashKind.background, processes.kind);
 
     const quit = slash_registry.matchExact("/exit\t") orelse return error.TestExpectedEqual;
     try std.testing.expectEqual(SlashKind.quit, quit.command.kind);

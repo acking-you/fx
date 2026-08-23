@@ -1119,17 +1119,23 @@ async function expectSavedTerminalExec(
 }
 
 function normalizeVolatileStatusRows(grid: string[]): string[] {
-  return grid.map((line) =>
-    /^• Streaming \([^)]*\)$/.test(line) ||
-      isVolatileTokenStatusRow(line)
-      ? "<status>"
-      : line
-  );
+  return grid.map((line) => {
+    if (/^• Streaming \([^)]*\)$/.test(line) || isVolatileTokenStatusRow(line)) {
+      return "<status>";
+    }
+    return line.replace(
+      /\s+YOLO enabled: fx permission checks disabled$/,
+      "",
+    );
+  });
 }
 
 test("volatile token status rows normalize before transcript grid comparison", () => {
   expect(normalizeVolatileStatusRows(["  (↑10 ↓5)"])).toEqual(["<status>"]);
   expect(normalizeVolatileStatusRows(["  0s (↑10 ↓5)"])).toEqual(["<status>"]);
+  expect(normalizeVolatileStatusRows([
+    "YOLO · gpt-5                 YOLO enabled: fx permission checks disabled",
+  ])).toEqual(["YOLO · gpt-5"]);
 });
 
 describe("effect-aware command permissions", () => {

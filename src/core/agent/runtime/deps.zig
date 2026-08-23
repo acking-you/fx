@@ -199,9 +199,10 @@ pub const AgentRuntimeDeps = struct {
     publish_committed_file_handoff: *const fn (ctx: *anyopaque, handoff: file_mutation.CommittedFileHandoff) tool_contracts.SecondaryPublicationReport,
     publish_deferred_tool_completion: ?*const fn (ctx: *anyopaque, completion: DeferredToolCompletion) TransportPublicationOutcome = null,
     propagate_history_turn: *const fn (ctx: *anyopaque, turn: HistoryTurn) anyerror!void,
-    /// Root interactive hosts may accept user input while a turn is running.
-    /// The runtime drains it only at model-step boundaries; returned ownership
-    /// belongs to the caller and follows `worker_runtime.freeQueuedPrompt`.
+    /// Transports with explicit same-turn steering may supply prompts while a
+    /// turn is running. The runtime drains them only at model-step boundaries;
+    /// returned ownership belongs to the caller and follows
+    /// `worker_runtime.freeQueuedPrompt`.
     take_pending_steer: ?*const fn (
         ctx: *anyopaque,
         alloc: Allocator,

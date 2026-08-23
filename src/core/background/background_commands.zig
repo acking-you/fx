@@ -1,4 +1,5 @@
 const std = @import("std");
+const app_terminal_runtime = @import("../app/app_terminal_runtime.zig");
 const host = @import("../hosts/host.zig");
 const task_helpers = @import("../tasks/task_helpers.zig");
 const types = @import("../shared/types.zig");
@@ -46,9 +47,20 @@ fn parseSelectionOrUsage(app: anytype, target: []const u8, comptime usage: []con
     };
 }
 
+fn terminalVisibleInProcessStatus(row: anytype) bool {
+    return row.lifecycle == .running or row.lifecycle == .starting;
+}
+
 pub fn Commands(comptime App: type) type {
     return struct {
         pub fn show(app: *App) !void {
+            if (comptime @hasField(App, "terminal_client")) {
+                return showUnified(app);
+            }
+            return showLegacy(app);
+        }
+
+        fn showLegacy(app: *App) !void {
             const tasks = try app.background.snapshotTasks(app.alloc);
             defer tasks.deinit(app.alloc);
 
@@ -75,6 +87,64 @@ pub fn Commands(comptime App: type) type {
                     else => task_helpers.taskStateLabel(task.state),
                 };
 
+                try out.writer.print(" - #{d} [{s}] {s}\n", .{ task.id, state_text, task.command });
+                try out.writer.print("   cwd: {s}\n", .{task.cwd});
+                try out.writer.print("   log: {s}\n", .{task.log_path});
+                if (task.server_url) |url| {
+                    try out.writer.print("   url: {s}\n", .{url});
+                }
+            }
+
+            const text = try out.toOwnedSlice();
+            defer app.alloc.free(text);
+            try app.writeDomainNotice(.{
+                .topic = "background",
+                .tone = .neutral,
+                .body = std.mem.trimEnd(u8, text, "\n"),
+            }, true);
+        }
+
+        fn showUnified(app: *App) !void {
+            app_terminal_runtime.Runtime(App).refreshProjection(app);
+            var terminals = try app.terminal_client.terminalProjection(app.alloc);
+            defer terminals.deinit();
+            const tasks = try app.background.snapshotTasks(app.alloc);
+            defer tasks.deinit(app.alloc);
+
+            var terminal_count: usize = 0;
+            for (terminals.rows) |row| {
+                if (terminalVisibleInProcessStatus(row)) terminal_count += 1;
+            }
+            if (terminal_count == 0 and tasks.items.len == 0) {
+                try app.writeDomainNotice(.{
+                    .topic = "background",
+                    .tone = .neutral,
+                    .body = "no background processes for this workspace",
+                }, true);
+                return;
+            }
+
+            var out: std.Io.Writer.Allocating = .init(app.alloc);
+            defer out.deinit();
+            try out.writer.print("{d} tracked\n", .{terminal_count + tasks.items.len});
+            for (terminals.rows) |row| {
+                if (!terminalVisibleInProcessStatus(row)) continue;
+                try out.writer.print(
+                    " - [{s}] [{s}] {s}\n",
+                    .{ row.session_id, @tagName(row.lifecycle), row.label },
+                );
+                try out.writer.print("   backend: {s}\n", .{@tagName(row.backend)});
+                try out.writer.writeAll("   output: press Ctrl+X and select Processes\n");
+            }
+            for (tasks.items) |task| {
+                var state_buf: [32]u8 = undefined;
+                const state_text = switch (task.state) {
+                    .failed, .exited => if (task.exit_code) |code|
+                        std.fmt.bufPrint(&state_buf, "{s}({d})", .{ task_helpers.taskStateLabel(task.state), code }) catch task_helpers.taskStateLabel(task.state)
+                    else
+                        task_helpers.taskStateLabel(task.state),
+                    else => task_helpers.taskStateLabel(task.state),
+                };
                 try out.writer.print(" - #{d} [{s}] {s}\n", .{ task.id, state_text, task.command });
                 try out.writer.print("   cwd: {s}\n", .{task.cwd});
                 try out.writer.print("   log: {s}\n", .{task.log_path});

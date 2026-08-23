@@ -553,7 +553,8 @@ pub const max_exec_yield_time_ms: u64 = 60_000;
 const default_exec_yield_time_ms: u64 = 10_000;
 
 fn canYieldExec(ctx: tool_dispatch.DispatchContext) bool {
-    return ctx.captured_command_host != .workspace_clean and
+    return ctx.terminal_transport_role == .acp and
+        ctx.captured_command_host != .workspace_clean and
         ctx.terminal_client != null and
         ctx.session_child_capability != null and
         ctx.terminal_owner_session_id != null;
@@ -1575,6 +1576,20 @@ test "terminal action field ownership is exact for every public action" {
             );
         }
     }
+}
+
+test "exec durable projection is restricted to ACP transports" {
+    var ctx: tool_dispatch.DispatchContext = .{
+        .allocator = std.testing.allocator,
+        .terminal_client = @ptrFromInt(4096),
+        .session_child_capability = @ptrFromInt(4096),
+        .terminal_owner_session_id = "owner",
+    };
+    try std.testing.expect(!canYieldExec(ctx));
+    ctx.terminal_transport_role = .headless;
+    try std.testing.expect(!canYieldExec(ctx));
+    ctx.terminal_transport_role = .acp;
+    try std.testing.expect(canYieldExec(ctx));
 }
 
 test "exec durable projection waits for exit up to the requested yield budget" {

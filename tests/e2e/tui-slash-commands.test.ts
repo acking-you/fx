@@ -76,6 +76,30 @@ describe.skipIf(TMUX_SKIP)("tui: no-key slash commands", () => {
   );
 
   test(
+    "/ps lists a running durable terminal and points to its output view",
+    async () => {
+      const launched = await launchNoKeyAndWait();
+      session = launched.terminal;
+
+      await session.sendText("!sleep 8");
+      await session.waitForText("Running ", 25_000);
+      await session.sendText("/ps");
+      const pane = await session.waitForText(
+        "output: press Ctrl+X and select Processes",
+        10_000,
+      );
+      expect(pane).toContain("sleep 8");
+      expect(pane).toMatch(/\[(starting|running)\]/);
+
+      await Bun.sleep(8_500);
+      await session.sendText("/quit");
+      expect(await session.waitForSessionEnd(10_000)).toBe(true);
+      session = null;
+    },
+    45_000,
+  );
+
+  test(
     "/permissions shows state before switching usage and leaves a live composer",
     async () => {
       const launched = await launchNoKeyAndWait();
