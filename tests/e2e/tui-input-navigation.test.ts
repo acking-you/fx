@@ -1,5 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import {
+  chmodSync,
   copyFileSync,
   mkdirSync,
   mkdtempSync,
@@ -1519,6 +1520,50 @@ tmuxTest(
     expect(fullScrollback).not.toContain("ImageContextAdapterFailed");
     expectCleanStderr();
     expect(active.isAlive()).toBe(true);
+  },
+  TIMEOUT,
+);
+
+test.skipIf(!HAS_TMUX || process.platform !== "linux")(
+  "clipboard image paste uses the WSL PowerShell bridge",
+  async () => {
+    testHome = mkdtempSync(join(tmpdir(), "fx-tui-clipboard-"));
+    stderrPath = join(testHome, "stderr.log");
+    writeFileSync(stderrPath, "");
+    const fakeBin = join(testHome, "bin");
+    mkdirSync(fakeBin, { recursive: true });
+    const powershell = join(fakeBin, "powershell.exe");
+    writeFileSync(
+      powershell,
+      "#!/bin/sh\nexec /bin/cat \"$FX_TEST_CLIPBOARD_IMAGE\"\n",
+    );
+    chmodSync(powershell, 0o755);
+
+    const active = await TmuxSession.create({
+      cmd: FX_BIN,
+      env: {
+        HOME: testHome,
+        PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
+        WSL_INTEROP: "/run/WSL/fx-test-interop",
+        FX_TEST_CLIPBOARD_IMAGE: imageFixture,
+        FX_DISABLE_KEYCHAIN: "1",
+        FX_SKIP_ONBOARDING: "1",
+        FX_AUTO_UPGRADE: "0",
+        AI_GATEWAY_API_KEY: undefined,
+        VERCEL_OIDC_TOKEN: undefined,
+      },
+      width: 100,
+      height: 24,
+      stderrPath,
+    });
+    session = active;
+    await active.waitForComposer(READY_TIMEOUT);
+
+    await typeLiteral(active, "/paste");
+    await active.sendKeys("Enter");
+    await active.waitForPane((pane) => pane.includes("[Image 1]"), READY_TIMEOUT);
+    expect(active.isAlive()).toBe(true);
+    expectCleanStderr();
   },
   TIMEOUT,
 );

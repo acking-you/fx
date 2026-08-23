@@ -66,7 +66,7 @@ cd your_project
 fx
 ```
 
-The current directory becomes the primary workspace. Enter a prompt, or run `/help` to browse interactive commands.
+The current directory becomes the primary workspace. Enter a prompt, or run `/help` to browse interactive commands. Press Ctrl+V to attach an image from the clipboard, or run `/paste`; macOS uses the native pasteboard, Linux uses `wl-paste` or `xclip`, and WSL can bridge through PowerShell.
 
 The status line hides the workspace path and Git branch by default. Enable the `Status line workspace` option in `/settings`, run `/statusline workspace`, or set it in `~/.fx/settings.json`:
 

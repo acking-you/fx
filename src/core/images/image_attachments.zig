@@ -1714,50 +1714,210 @@ pub const ClipboardImageAttachment = struct {
     }
 };
 
+const ClipboardReadCommand = struct {
+    argv: []const []const u8,
+};
+
+const clipboard_command_timeout: std.Io.Timeout = .{
+    .duration = .{
+        .raw = .{ .nanoseconds = 10 * std.time.ns_per_s },
+        .clock = .awake,
+    },
+};
+
+const powershell_clipboard_script =
+    "$img = Get-Clipboard -Format Image; " ++
+    "if ($null -eq $img) { exit 1 }; " ++
+    "$stream = [Console]::OpenStandardOutput(); " ++
+    "$img.Save($stream, [System.Drawing.Imaging.ImageFormat]::Png); " ++
+    "$stream.Flush();";
+
+const mac_clipboard_script =
+    "on run argv\n" ++
+    "set outFile to POSIX file (item 1 of argv)\n" ++
+    "set pngData to the clipboard as «class PNGf»\n" ++
+    "set fileRef to open for access outFile with write permission\n" ++
+    "set eof fileRef to 0\n" ++
+    "write pngData to fileRef\n" ++
+    "close access fileRef\n" ++
+    "end run\n";
+
+const linux_clipboard_commands = [_]ClipboardReadCommand{
+    .{ .argv = &.{ "wl-paste", "--type", "image/png" } },
+    .{ .argv = &.{ "xclip", "-selection", "clipboard", "-t", "image/png", "-o" } },
+    .{ .argv = &.{ "wl-paste", "--type", "image/jpeg" } },
+    .{ .argv = &.{ "xclip", "-selection", "clipboard", "-t", "image/jpeg", "-o" } },
+};
+
+const wsl_clipboard_commands = [_]ClipboardReadCommand{
+    .{ .argv = &.{ "powershell.exe", "-NoProfile", "-STA", "-Command", powershell_clipboard_script } },
+    .{ .argv = &.{ "pwsh", "-NoProfile", "-Command", powershell_clipboard_script } },
+    .{ .argv = &.{ "powershell", "-NoProfile", "-STA", "-Command", powershell_clipboard_script } },
+    .{ .argv = &.{ "wl-paste", "--type", "image/png" } },
+    .{ .argv = &.{ "xclip", "-selection", "clipboard", "-t", "image/png", "-o" } },
+    .{ .argv = &.{ "wl-paste", "--type", "image/jpeg" } },
+    .{ .argv = &.{ "xclip", "-selection", "clipboard", "-t", "image/jpeg", "-o" } },
+};
+
+fn linuxClipboardCommands(wsl: bool) []const ClipboardReadCommand {
+    return if (wsl) &wsl_clipboard_commands else &linux_clipboard_commands;
+}
+
+fn isWslHost() bool {
+    return io_mod.getenv("WSL_INTEROP") != null or io_mod.getenv("WSL_DISTRO_NAME") != null;
+}
+
+fn processExitedSuccessfully(term: std.process.Child.Term) bool {
+    return switch (term) {
+        .exited => |code| code == 0,
+        .signal, .stopped, .unknown => false,
+    };
+}
+
+const ClipboardCommandResult = union(enum) {
+    unavailable,
+    no_image,
+    image: []u8,
+};
+
+fn clipboardCommandUnavailableError(err: anyerror) bool {
+    return err == error.FileNotFound or err == error.AccessDenied;
+}
+
+fn runClipboardReadCommand(
+    alloc: std.mem.Allocator,
+    command: ClipboardReadCommand,
+) !ClipboardCommandResult {
+    const result = std.process.run(alloc, io_mod.getIo(), .{
+        .argv = command.argv,
+        .stdout_limit = .limited(max_image_bytes),
+        .stderr_limit = .limited(4096),
+        .timeout = clipboard_command_timeout,
+    }) catch |err| {
+        if (clipboardCommandUnavailableError(err)) return .unavailable;
+        if (err == error.StreamTooLong) return error.ImageTooLarge;
+        return err;
+    };
+    defer alloc.free(result.stderr);
+
+    if (!processExitedSuccessfully(result.term) or result.stdout.len == 0) {
+        alloc.free(result.stdout);
+        return .no_image;
+    }
+    if (detectMediaTypeFromBytes(result.stdout) == null) {
+        alloc.free(result.stdout);
+        return .no_image;
+    }
+    return .{ .image = result.stdout };
+}
+
+fn readLinuxClipboardImage(alloc: std.mem.Allocator) ![]u8 {
+    var command_available = false;
+    for (linuxClipboardCommands(isWslHost())) |command| {
+        switch (try runClipboardReadCommand(alloc, command)) {
+            .unavailable => {},
+            .no_image => command_available = true,
+            .image => |bytes| return bytes,
+        }
+    }
+    return if (command_available) error.NoClipboardImage else error.Unsupported;
+}
+
+fn writePrivateFile(path: []const u8, bytes: []const u8) !void {
+    var file = try std.Io.Dir.createFileAbsolute(io_mod.getIo(), path, .{
+        .truncate = true,
+        .permissions = std.Io.File.Permissions.fromMode(0o600),
+    });
+    defer file.close(io_mod.getIo());
+    try file.writeStreamingAll(io_mod.getIo(), bytes);
+}
+
+fn captureMacClipboardImage(
+    alloc: std.mem.Allocator,
+    temp_path: []const u8,
+) !bool {
+    const argv = [_][]const u8{ "osascript", "-e", mac_clipboard_script, temp_path };
+    const result = try std.process.run(alloc, io_mod.getIo(), .{
+        .argv = &argv,
+        .stdout_limit = .limited(1024),
+        .stderr_limit = .limited(4096),
+        .timeout = clipboard_command_timeout,
+    });
+    defer alloc.free(result.stdout);
+    defer alloc.free(result.stderr);
+
+    return processExitedSuccessfully(result.term);
+}
+
 pub fn loadClipboardImageAttachment(alloc: std.mem.Allocator) !ClipboardImageAttachment {
-    if (builtin.os.tag != .macos) return error.Unsupported;
+    if (builtin.os.tag != .macos and builtin.os.tag != .linux) return error.Unsupported;
 
     const source_dir = try createTempSnapshotDir(alloc);
     errdefer {
         cleanupSnapshotDir(source_dir);
         alloc.free(source_dir);
     }
-    const temp_path = try std.fs.path.join(alloc, &.{ source_dir, "clipboard.png" });
+    const temp_path = try std.fs.path.join(alloc, &.{ source_dir, "clipboard-image" });
     defer alloc.free(temp_path);
 
-    const write_script = try std.fmt.allocPrint(
-        alloc,
-        "set outFile to POSIX file \"{s}\"\n" ++
-            "set pngData to the clipboard as «class PNGf»\n" ++
-            "set fileRef to open for access outFile with write permission\n" ++
-            "set eof fileRef to 0\n" ++
-            "write pngData to fileRef\n" ++
-            "close access fileRef\n",
-        .{temp_path},
-    );
-    defer alloc.free(write_script);
-
-    const argv = [_][]const u8{ "osascript", "-e", write_script };
-    const result = try std.process.run(alloc, io_mod.getIo(), .{
-        .argv = &argv,
-        .stdout_limit = .limited(1024),
-        .stderr_limit = .limited(4096),
-    });
-    defer alloc.free(result.stdout);
-    defer alloc.free(result.stderr);
-
-    switch (result.term) {
-        .exited => |code| if (code == 0) {
-            const attachment = try loadImageAttachment(alloc, temp_path);
-            return .{
-                .attachment = attachment,
-                .source_dir = source_dir,
-            };
+    switch (builtin.os.tag) {
+        .macos => if (!try captureMacClipboardImage(alloc, temp_path)) return error.NoClipboardImage,
+        .linux => {
+            const bytes = try readLinuxClipboardImage(alloc);
+            defer alloc.free(bytes);
+            try writePrivateFile(temp_path, bytes);
         },
-        else => {},
+        else => unreachable,
     }
 
-    return error.NoClipboardImage;
+    const attachment = try loadImageAttachment(alloc, temp_path);
+    return .{
+        .attachment = attachment,
+        .source_dir = source_dir,
+    };
+}
+
+test "WSL clipboard commands prefer the Windows image bridge" {
+    const wsl_commands = linuxClipboardCommands(true);
+    try std.testing.expectEqualStrings("powershell.exe", wsl_commands[0].argv[0]);
+    try std.testing.expectEqualStrings("-STA", wsl_commands[0].argv[2]);
+
+    const native_commands = linuxClipboardCommands(false);
+    try std.testing.expectEqualStrings("wl-paste", native_commands[0].argv[0]);
+    try std.testing.expectEqualStrings("image/png", native_commands[0].argv[2]);
+    try std.testing.expectEqualStrings("xclip", native_commands[1].argv[0]);
+}
+
+test "clipboard command reader accepts images and rejects other output" {
+    if (builtin.os.tag != .linux and builtin.os.tag != .macos) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    const image_command: ClipboardReadCommand = .{
+        .argv = &.{ "/bin/sh", "-c", "printf '\\211PNG\\r\\n\\032\\n'" },
+    };
+    switch (try runClipboardReadCommand(alloc, image_command)) {
+        .image => |bytes| {
+            defer alloc.free(bytes);
+            try std.testing.expectEqualStrings("image/png", detectMediaTypeFromBytes(bytes).?);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    const text_command: ClipboardReadCommand = .{
+        .argv = &.{ "/bin/sh", "-c", "printf 'not an image'" },
+    };
+    switch (try runClipboardReadCommand(alloc, text_command)) {
+        .no_image => {},
+        else => return error.TestUnexpectedResult,
+    }
+
+    const missing_command: ClipboardReadCommand = .{
+        .argv = &.{"/fx-test-missing-clipboard-command"},
+    };
+    switch (try runClipboardReadCommand(alloc, missing_command)) {
+        .unavailable => {},
+        else => return error.TestUnexpectedResult,
+    }
 }
 
 fn readImageHeaderBytes(path: []const u8, out: []u8) ![]const u8 {
