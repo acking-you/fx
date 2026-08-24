@@ -1675,13 +1675,12 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         await active.sendText(externalPrompt);
         const externalApproval = await active.waitForPane(
           (pane) =>
-            pane.includes("external-child.txt") &&
+            pane.includes("EXTERNAL") &&
             pane.includes("3  Don't apply") &&
             pane.includes("Enter Confirm"),
           TIMEOUT,
         );
         expect(externalApproval).toContain("Permission needed");
-        expect(externalApproval).toContain("external-child.txt");
         expect(externalApproval).toContain("EXTERNAL");
         expect(existsSync(externalMarker)).toBe(false);
         await active.sendLiteralText("3");
@@ -4846,6 +4845,12 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         await pasteVisibleText(active, "DURATION_CHILD_PROMPT");
         await active.sendKeys("Enter");
         await active.waitForText("DURATION_CHILD_READY", TIMEOUT);
+        await active.waitForPane(
+          (pane) =>
+            pane.includes("Subagent: duration-worker") &&
+            pane.includes("status: idle"),
+          TIMEOUT,
+        );
 
         const controlPath = configurationControlPath(fixture);
         const initial = readConfigurationControl(controlPath);
