@@ -5332,6 +5332,7 @@ describe("acp: model-independent", () => {
           env: {
             HOME: root.home,
             AI_GATEWAY_API_KEY: "",
+            OPENAI_API_KEY: "",
             VERCEL_OIDC_TOKEN: "",
             FX_DISABLE_KEYCHAIN: "1",
           },
@@ -5339,7 +5340,6 @@ describe("acp: model-independent", () => {
         const resp = await client.request("initialize", { protocolVersion: 1 }, 1) as any;
         expect(resp.error).toBeDefined();
         expect(resp.error.message).toContain("fx login");
-        expect(resp.error.message).toContain("fx setup");
         expect(resp.error.message).toContain("AI_GATEWAY_API_KEY");
         expect(client.stderr).toBe("");
       } finally {

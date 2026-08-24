@@ -3923,7 +3923,7 @@ test "app_input_runtime Escape closes auth picker without arming composer clear"
     try std.testing.expect(!app.input_runtime.gestures.escapeClearArmed());
 }
 
-test "app_input_runtime onboarding Escape skips setup for the session" {
+test "app_input_runtime onboarding Escape skips sign in for the session" {
     const alloc = std.testing.allocator;
     var app = try RoutingFakeApp.init(alloc);
     defer app.deinit();
@@ -3943,7 +3943,7 @@ test "app_input_runtime auth stage Escape pops before closing the picker" {
     app.auth.source_inventory = auth_runtime.SourceSet.initOne(.stored_key);
     app.auth.openPicker(alloc);
 
-    for (0..6) |_| _ = app.auth.movePicker(1);
+    for (0..5) |_| _ = app.auth.movePicker(1);
     try std.testing.expect((auth_runtime.Choice{ .action = .switch_credential }).eql(
         app.auth.pickerView().selected_choice.?,
     ));
@@ -3971,7 +3971,7 @@ test "app_input_runtime disabled change team action stays silent" {
     app.auth.source_inventory = auth_runtime.SourceSet.initOne(.stored_key);
     app.auth.openPicker(alloc);
 
-    for (0..5) |_| _ = app.auth.movePicker(1);
+    for (0..4) |_| _ = app.auth.movePicker(1);
     try std.testing.expect((auth_runtime.Choice{ .action = .change_team }).eql(
         app.auth.pickerView().selected_choice.?,
     ));
@@ -4213,30 +4213,6 @@ test "app_input_runtime Escape closes an idle skills menu before empty-composer 
     try std.testing.expect(!app.skills.menu.active);
     try std.testing.expect(app.shell.render_requests.hasReason(.footer));
     try std.testing.expect(!app.worker.cancel_requested);
-}
-
-test "api key entry bypasses composer paste and zeroes on cancellation" {
-    const alloc = std.testing.allocator;
-    var app = try RoutingFakeApp.init(alloc);
-    defer app.deinit();
-    const sentinel = "FX_API_KEY_HISTORY_SENTINEL";
-    app.auth.openApiKeyPicker(alloc);
-
-    try feedRoutingBytes(&app, "\x1b[200~");
-    try feedRoutingBytes(&app, sentinel);
-    try feedRoutingBytes(&app, "\x1b[201~");
-
-    try std.testing.expect(app.auth.apiKeyEntryActive());
-    try std.testing.expectEqual(sentinel.len, app.auth.pickerView().api_key_mask_count);
-    try std.testing.expectEqual(paste_framing.Owner.none, app.input_runtime.paste.owner);
-    try std.testing.expectEqual(@as(usize, 0), app.input_runtime.edit_state.input.items.len);
-    try std.testing.expectEqual(@as(usize, 0), app.input_runtime.paste.buffer.items.len);
-    try std.testing.expectEqual(@as(usize, 0), app.input_runtime.composer_history.count());
-
-    try Runtime(RoutingFakeApp).resolveEscape(&app, false, 1);
-    try std.testing.expect(!app.auth.apiKeyEntryActive());
-    try std.testing.expectEqual(@as(usize, 0), app.auth.pickerView().api_key_mask_count);
-    try std.testing.expectEqual(@as(usize, 0), app.input_runtime.edit_state.input.items.len);
 }
 
 test "app_input_runtime command skills menu reuses composer input as its query" {
@@ -7668,7 +7644,7 @@ fn openRoutingAuthPicker(app: *RoutingFakeApp) !void {
     app.auth.source_inventory.insert(.ai_gateway_api_key);
     app.auth.openPicker(app.alloc);
     try std.testing.expect(app.auth.movePicker(1));
-    try std.testing.expectEqual(@as(usize, 7), app.auth.pickerView().choiceCount());
+    try std.testing.expectEqual(@as(usize, 6), app.auth.pickerView().choiceCount());
     try std.testing.expectEqual(@as(usize, 1), app.auth.pickerView().selectedIndex());
 }
 

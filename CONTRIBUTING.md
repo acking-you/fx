@@ -24,7 +24,7 @@ Requirements:
 
 * interactive terminal for manual shell testing
 
-* a Vercel OAuth session via `fx login` for model-backed flows. macOS Keychain API keys (via `fx setup`), `AI_GATEWAY_API_KEY`, and `VERCEL_OIDC_TOKEN` are also supported
+* credentials for the provider being exercised, supplied through its supported environment variable or account flow. `AI_GATEWAY_API_KEY`, `OPENAI_API_KEY`, and `VERCEL_OIDC_TOKEN` remain available for their corresponding routes
 
 Common commands:
 

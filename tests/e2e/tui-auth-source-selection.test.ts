@@ -28,13 +28,10 @@ if (process.env.FX_REQUIRE_TMUX === "1" && !HAS_TMUX) {
 }
 
 const tmuxTest = test.skipIf(!HAS_TMUX);
-const profileStoredKeyTmuxTest = test.skipIf(!HAS_TMUX || process.platform === "darwin");
 const TIMEOUT = 30_000;
 const ENV_TOKEN = "env-api-key-token";
 const LOGIN_TOKEN = "fx-login-token";
-const STORED_TOKEN = "stored-api-key-token";
 const LOGIN_RESPONSE = "LOGIN_SOURCE_RESPONSE";
-const STORED_RESPONSE = "STORED_SOURCE_RESPONSE";
 const ENV_RESPONSE = "ENV_SOURCE_RESPONSE";
 const RESTART_RESPONSE = "RESTART_SOURCE_RESPONSE";
 const DIRECT_LOGIN_RESPONSE = "DIRECT_LOGIN_RESPONSE";
@@ -1189,7 +1186,7 @@ tmuxTest(
 );
 
 tmuxTest(
-  "setup provider switch reauthenticates current Codex and replaces an unavailable model",
+  "provider switch reauthenticates current Codex and replaces an unavailable model",
   async () => {
     home = mkdtempSync(join(tmpdir(), "fx-tui-chatgpt-success-"));
     stderrPath = join(home, "stderr.log");
@@ -1434,7 +1431,7 @@ tmuxTest(
 );
 
 tmuxTest(
-  "setup hub exposes each child screen and Escape returns to the hub",
+  "login hub exposes each child screen and Escape returns to the hub",
   async () => {
     home = mkdtempSync(join(tmpdir(), "fx-tui-setup-hub-"));
     stderrPath = join(home, "stderr.log");
@@ -1448,14 +1445,13 @@ tmuxTest(
     session = await startFx(home, stderrPath, gateway, oauth.issuerUrl);
     await session.waitForComposer(TIMEOUT);
     await session.resizeWindow(100, 36);
-    await session.sendText("/setup");
+    await session.sendText("/login");
     const root = await session.waitForPane(
       (pane) =>
-        pane.includes("Setup") &&
+        pane.includes("Accounts") &&
         pane.includes("Sign in with Vercel") &&
         pane.includes("Sign in with Codex") &&
         pane.includes("Sign in with Grok") &&
-        pane.includes("API key") &&
         pane.includes("Switch provider"),
       TIMEOUT,
     );
@@ -1465,22 +1461,15 @@ tmuxTest(
     await session.sendKeys("Enter");
     await session.waitForText("Enter reopens browser · Esc cancels", TIMEOUT);
     await session.sendKeys("Escape");
-    await session.waitForText("Setup", TIMEOUT);
+    await session.waitForText("Accounts", TIMEOUT);
 
     await session.sendKeys("Down");
     await session.sendKeys("Down");
-    await session.sendKeys("Down");
-    await session.sendKeys("Enter");
-    const apiKey = await session.waitForText("Paste your AI Gateway API key", TIMEOUT);
-    expect(apiKey).toContain("Saves to");
-    await session.sendKeys("Escape");
-    await session.waitForText("Setup", TIMEOUT);
-
     await session.sendKeys("Down");
     await session.sendKeys("Enter");
     await session.waitForText("Switch provider", TIMEOUT);
     await session.sendKeys("Escape");
-    await session.waitForText("Setup", TIMEOUT);
+    await session.waitForText("Accounts", TIMEOUT);
 
     await session.sendKeys("Down");
     await session.sendKeys("Enter");
@@ -1556,7 +1545,7 @@ async function waitForTrace(tracePath: string, needle: string): Promise<void> {
 }
 
 async function enterSwitchCredential(pickerSession: TmuxSession): Promise<void> {
-  for (let index = 0; index < 6; index += 1) {
+  for (let index = 0; index < 5; index += 1) {
     await pickerSession.sendKeys("Down");
   }
   await pickerSession.sendKeys("Enter");
@@ -1564,9 +1553,9 @@ async function enterSwitchCredential(pickerSession: TmuxSession): Promise<void> 
 }
 
 async function openProviderPicker(pickerSession: TmuxSession): Promise<void> {
-  await pickerSession.sendText("/setup");
-  await pickerSession.waitForText("Setup", TIMEOUT);
-  for (let index = 0; index < 4; index += 1) {
+  await pickerSession.sendText("/login");
+  await pickerSession.waitForText("Accounts", TIMEOUT);
+  for (let index = 0; index < 3; index += 1) {
     await pickerSession.sendKeys("Down");
   }
   await pickerSession.sendKeys("Enter");
@@ -1574,8 +1563,8 @@ async function openProviderPicker(pickerSession: TmuxSession): Promise<void> {
 }
 
 async function openSwitchCredential(pickerSession: TmuxSession): Promise<void> {
-  await pickerSession.sendText("/setup");
-  await pickerSession.waitForText("Setup", TIMEOUT);
+  await pickerSession.sendText("/login");
+  await pickerSession.waitForText("Accounts", TIMEOUT);
   await enterSwitchCredential(pickerSession);
 }
 
@@ -1585,57 +1574,6 @@ function savedCredentialSource(testHome: string): string | undefined {
   return (JSON.parse(readFileSync(settingsPath, "utf8")) as { credential_source?: string })
     .credential_source;
 }
-
-profileStoredKeyTmuxTest(
-  "stored-key setup persists ahead of the environment",
-  async () => {
-    home = mkdtempSync(join(tmpdir(), "fx-tui-stored-key-preference-"));
-    stderrPath = join(home, "stderr.log");
-    writeFileSync(stderrPath, "");
-    gateway = startFakeGateway([fakeGatewayFinalText(STORED_RESPONSE)]);
-
-    session = await startFx(home, stderrPath, gateway, undefined, undefined, {
-      FX_DISABLE_KEYCHAIN: undefined,
-    });
-    await session.waitForComposer(TIMEOUT);
-    await session.sendText("/status");
-    await session.waitForText("auth=AI_GATEWAY_API_KEY", TIMEOUT);
-
-    await session.sendText("/setup");
-    await session.waitForText("API key", TIMEOUT);
-    await session.sendKeys("Down");
-    await session.sendKeys("Down");
-    await session.sendKeys("Down");
-    await session.sendKeys("Enter");
-    await session.waitForText("Paste your AI Gateway API key", TIMEOUT);
-    await session.sendLiteralText(STORED_TOKEN);
-    await session.sendKeys("Enter");
-    await session.waitForText("Saved the API key to profile file and made it active", TIMEOUT);
-    await session.sendText("/status");
-    await session.waitForText("auth=stored API key (profile file)", TIMEOUT);
-    expect(savedCredentialSource(home)).toBe("stored_key");
-
-    const keyPath = join(home, ".fx", "api-key");
-    expect(readFileSync(keyPath, "utf8")).toBe(STORED_TOKEN);
-    expect(statSync(keyPath).mode & 0o777).toBe(0o600);
-
-    await session.kill();
-    session = await startFx(home, stderrPath, gateway, undefined, undefined, {
-      FX_DISABLE_KEYCHAIN: undefined,
-    });
-    await session.waitForComposer(TIMEOUT);
-    await session.sendText("/status");
-    await session.waitForText("auth=stored API key (profile file)", TIMEOUT);
-    await session.sendText("use the stored key after restart");
-    await session.waitForText(STORED_RESPONSE, TIMEOUT);
-    expect(gateway.requests[0].headers.get("authorization")).toBe(`Bearer ${STORED_TOKEN}`);
-
-    const output = await session.captureFullScrollback();
-    expect(output).not.toContain(STORED_TOKEN);
-    expect(readFileSync(stderrPath, "utf8")).toBe("");
-  },
-  60_000,
-);
 
 tmuxTest(
   "direct login persists ahead of the environment until Automatic is selected",
@@ -1724,9 +1662,8 @@ tmuxTest(
     await session.sendText("/status");
     await session.waitForText("auth=AI_GATEWAY_API_KEY", TIMEOUT);
 
-    await session.sendText("/setup");
-    await session.waitForText("Setup", TIMEOUT);
-    await session.sendKeys("Down");
+    await session.sendText("/login");
+    await session.waitForText("Accounts", TIMEOUT);
     await session.sendKeys("Down");
     await session.sendKeys("Down");
     await session.sendKeys("Down");
@@ -1829,7 +1766,7 @@ tmuxTest(
     await session.waitForText("Sign in with Codex", TIMEOUT);
     await session.sendKeys("Enter");
     const loginCompleted = await session.waitForText("Signed in to Vercel", TIMEOUT);
-    expect(loginCompleted).not.toContain("Setup");
+    expect(loginCompleted).not.toContain("Accounts");
     expect(oauth.requests.map((request) => `${request.method} ${request.path}`)).toEqual([
       "GET /.well-known/openid-configuration",
       "POST /oauth/device",
@@ -2636,7 +2573,7 @@ test("Grok CLI sends verified images directly without advertising the vision fal
 });
 
 tmuxTest(
-  "interactive Grok login activates Grok and setup round-trips without reauthentication",
+  "interactive Grok login activates Grok and provider switching avoids reauthentication",
   async () => {
     home = mkdtempSync(join(tmpdir(), "fx-grok-tui-switch-"));
     stderrPath = join(home, "stderr.log");
@@ -3547,20 +3484,19 @@ tmuxTest(
     await session.sendText("/status");
     await session.waitForText("auth=missing", TIMEOUT);
 
-    await session.sendText("/setup");
+    await session.sendText("/login");
     const inventory = await session.waitForPane(
       (pane) =>
-        pane.includes("Setup") &&
+        pane.includes("Accounts") &&
         pane.includes("Sign in with Vercel") &&
         pane.includes("Sign in with Grok") &&
-        pane.includes("API key") &&
         pane.includes("Switch provider"),
       TIMEOUT,
     );
     expect(inventory).not.toMatch(/^\s+fx login\s+/m);
     await session.sendKeys("Escape");
     await session.waitForPane(
-      (pane) => !pane.includes("   Setup"),
+      (pane) => !pane.includes("   Accounts"),
       TIMEOUT,
     );
 
@@ -3571,8 +3507,7 @@ tmuxTest(
         pane.includes(prompt) &&
         pane.includes("Welcome to fx") &&
         pane.includes("Sign in with Vercel") &&
-        pane.includes("Add an API key") &&
-        pane.includes("Esc to set up later"),
+        pane.includes("Esc to sign in later"),
       TIMEOUT,
     );
     expect(picker).not.toMatch(/^\s+fx login\s+/m);
@@ -3605,7 +3540,7 @@ tmuxTest(
     const failed = await session.waitForPane(
       (pane) =>
         pane.includes("AI_GATEWAY_API_KEY authentication failed · HTTP 401") &&
-        pane.includes("Run /setup to choose another source."),
+        pane.includes("Run /login to choose another source."),
       TIMEOUT,
     );
 
@@ -3651,7 +3586,7 @@ tmuxTest(
       (pane) =>
         pane.includes("fx login credential refresh failed.") &&
         pane.includes("Choose another source below") &&
-        pane.includes("Setup") &&
+        pane.includes("Accounts") &&
         pane.includes("Switch provider"),
       TIMEOUT,
     );
@@ -3893,7 +3828,7 @@ tmuxTest(
 
     await session.sendKeys("Escape");
     await session.waitForPane(
-      (pane) => pane.includes(blockedPrompt) && !pane.includes("   Setup"),
+      (pane) => pane.includes(blockedPrompt) && !pane.includes("   Accounts"),
       TIMEOUT,
     );
     await session.sendKeys("C-u");
@@ -3971,7 +3906,7 @@ tmuxTest(
 
     await session.sendKeys("Escape");
     await session.waitForPane(
-      (pane) => pane.includes(firstPrompt) && !pane.includes("   Setup"),
+      (pane) => pane.includes(firstPrompt) && !pane.includes("   Accounts"),
       TIMEOUT,
     );
     await session.sendKeys("C-u");

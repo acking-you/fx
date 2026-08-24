@@ -3,7 +3,6 @@ const builtin = @import("builtin");
 
 pub const permission_reviewer = @import("gateway/permission_reviewer.zig");
 
-const api_key_validator_contract = @import("../core/auth/api_key_validator.zig");
 const agent_stream_provider_contract = @import("../core/agent/stream_provider.zig");
 const credentials = @import("../core/auth/credentials.zig");
 const oauth_transport = @import("../core/auth/oauth_transport.zig");
@@ -120,10 +119,6 @@ pub const cli_model_catalog_provider = gateway_provider.CliModelCatalogProvider{
 
 pub const credits_provider = gateway_provider.CreditsProvider{
     .fetch_fn = fetchCredits,
-};
-
-pub const api_key_validator = api_key_validator_contract.Provider{
-    .validate_fn = validateApiKey,
 };
 
 pub const oauth_transport_provider = oauth_transport.Provider{
@@ -810,34 +805,6 @@ test "oauth transport user agent uses the product version" {
     try std.testing.expect(gateway_client.user_agent.len > "fx/".len);
     try std.testing.expect(std.mem.find(u8, gateway_client.user_agent, "zig") == null);
     try std.testing.expect(std.mem.find(u8, gateway_client.user_agent, "std.http") == null);
-}
-
-fn validateApiKey(
-    _: ?*anyopaque,
-    alloc: Allocator,
-    api_key: []const u8,
-) api_key_validator_contract.Result {
-    var result = gateway_client.fetchGatewayGetResult(alloc, api_key, models_path) catch |err| {
-        debug_trace.logf("auth", "api key validation failed err={s}", .{@errorName(err)});
-        return .unavailable;
-    };
-    defer result.deinit(alloc);
-    return apiKeyValidationForStatus(result.status);
-}
-
-fn apiKeyValidationForStatus(status: std.http.Status) api_key_validator_contract.Result {
-    return switch (status) {
-        .ok => .accepted,
-        .unauthorized, .forbidden => .refused,
-        else => .unavailable,
-    };
-}
-
-test "API key validator preserves Gateway status mapping" {
-    try std.testing.expectEqual(api_key_validator_contract.Result.accepted, apiKeyValidationForStatus(.ok));
-    try std.testing.expectEqual(api_key_validator_contract.Result.refused, apiKeyValidationForStatus(.unauthorized));
-    try std.testing.expectEqual(api_key_validator_contract.Result.refused, apiKeyValidationForStatus(.forbidden));
-    try std.testing.expectEqual(api_key_validator_contract.Result.unavailable, apiKeyValidationForStatus(.internal_server_error));
 }
 
 pub fn preferredWebSearchBackendsOverride(raw: ?[]const u8) !?[]const web_search_contract.SearchBackendId {
