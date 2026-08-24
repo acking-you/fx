@@ -40,7 +40,7 @@ const NO_GATEWAY_AUTH = {
   FX_CODEX_AUTH_FILE: undefined,
 };
 const MISSING_AUTH_MESSAGE =
-  "Fx needs a model credential. Use fx login for Vercel, fx login codex for ChatGPT Codex, fx login grok for Grok, set OPENAI_API_KEY for a Responses API, or use fx setup or AI_GATEWAY_API_KEY for Vercel AI Gateway.";
+  "Fx needs a model credential. Use fx login for Vercel, fx login codex for ChatGPT Codex, fx login grok for Grok, set OPENAI_API_KEY for a Responses API, or set AI_GATEWAY_API_KEY for Vercel AI Gateway.";
 
 const KEYCHAIN_SERVICE = "FX_AI_GATEWAY_API_KEY";
 
@@ -419,7 +419,6 @@ With --prompt-permissions, JSON and quiet requests may prompt on stderr only whe
         expect(r.stderr).toBe("");
         expect(r.stdout).toContain("Commands:");
         expect(r.stdout).toContain("ask");
-        expect(r.stdout).toContain("setup");
         expect(r.stdout).toContain("status");
         expect(r.stdout).toContain("doctor");
         expect(maxLineWidth(r.stdout)).toBeLessThanOrEqual(60);
@@ -1859,59 +1858,6 @@ describe("cli: logout", () => {
           { encoding: "utf8" },
         );
         rmSync(root, { recursive: true, force: true });
-      }
-    },
-    TIMEOUT,
-  );
-});
-
-describe("cli: setup", () => {
-  test(
-    "fx setup is a top-level command and fails cleanly when Keychain is disabled",
-    async () => {
-      const r = await runFx(["setup"], {
-        env: { ...NO_GATEWAY_AUTH, FX_DISABLE_KEYCHAIN: "1" },
-      });
-      expect(r.code).toBe(1);
-      expect(r.stdout).toBe("");
-      expect(r.stderr).toContain("stored API keys are disabled");
-    },
-    TIMEOUT,
-  );
-
-  test(
-    "fx setup never invokes the configured Vercel CLI",
-    async () => {
-      const runId = `${process.pid}-${Date.now()}`;
-      const fakeDir = mkdtempSync(join(tmpdir(), "fx-e2e-vercel-cli-"));
-      const fakeCli = join(fakeDir, "vc");
-      const invocationLog = join(fakeDir, "invoked");
-
-      writeFileSync(
-        fakeCli,
-        `#!/bin/sh
-set -eu
-printf '%s\\n' invoked > '${invocationLog}'
-exit 99
-`,
-        { mode: 0o700 },
-      );
-
-      try {
-        const r = await runFx(["setup"], {
-          env: {
-            ...NO_GATEWAY_AUTH,
-            USER: `fx-e2e-setup-${runId}`,
-            FX_VERCEL_CLI_PATH: fakeCli,
-          },
-          timeoutMs: TIMEOUT,
-        });
-        expect(r.code).toBe(1);
-        expect(r.stdout).toBe("");
-        expect(r.stderr).toContain("interactive terminal is required");
-        expect(existsSync(invocationLog)).toBe(false);
-      } finally {
-        rmSync(fakeDir, { recursive: true, force: true });
       }
     },
     TIMEOUT,

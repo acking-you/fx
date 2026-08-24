@@ -40,7 +40,7 @@ describe.skipIf(SKIP)("tui: startup and exit", () => {
       session = await TmuxSession.create();
       await session.waitForComposer(10_000);
       await session.sendText("/help");
-      const pane = await session.waitForText("Commands 38", 5_000);
+      const pane = await session.waitForText("Commands 37", 5_000);
       expect(pane).toContain("General");
       expect(pane).toContain("Enter Open");
       expect(pane).not.toContain("Run /help for commands");
@@ -367,39 +367,6 @@ describe.skipIf(SKIP_TMUX)("tui: MCP startup", () => {
 
 describe.skipIf(SKIP_TMUX)("tui: credential onboarding", () => {
   test(
-    "/setup opens account and provider actions without source rows",
-    async () => {
-      const home = realpathSync(mkdtempSync(join(tmpdir(), "fx-e2e-direct-setup-")));
-      session = await TmuxSession.create({
-        env: {
-          AI_GATEWAY_API_KEY: undefined,
-          VERCEL_OIDC_TOKEN: undefined,
-          HOME: home,
-          FX_AUTO_UPGRADE: "0",
-          FX_DISABLE_KEYCHAIN: "1",
-          FX_SKIP_ONBOARDING: "0",
-        },
-      });
-
-      await session.waitForComposer(TIMEOUT);
-      await session.sendText("/setup");
-      const setup = await session.waitForPane(
-        (pane) =>
-          pane.includes("Setup") &&
-          pane.includes("Sign in with Vercel") &&
-          pane.includes("Sign in with Codex") &&
-          pane.includes("Sign in with Grok") &&
-          pane.includes("API key") &&
-          pane.includes("Switch provider"),
-        TIMEOUT,
-      );
-      expect(setup).not.toContain("AI_GATEWAY_API_KEY");
-      expect(setup).not.toContain("fx login");
-    },
-    TIMEOUT,
-  );
-
-  test(
     "startup shows credential onboarding on the first frame and Escape remains session-only",
     async () => {
       const home = realpathSync(mkdtempSync(join(tmpdir(), "fx-e2e-login-onboarding-")));
@@ -418,8 +385,8 @@ describe.skipIf(SKIP_TMUX)("tui: credential onboarding", () => {
 
       const initial = await session.waitForText("Welcome to fx", TIMEOUT);
       expect(initial).toContain("Sign in with Vercel");
-      expect(initial).toContain("Add an API key");
-      expect(initial).toContain("Esc to set up later");
+      expect(initial).toContain("Sign in with Grok");
+      expect(initial).toContain("Esc to sign in later");
       expect(initial).not.toContain("Change team");
       expect(initial).not.toContain("Switch credential");
       expect(initial).not.toContain("Skip for now");
@@ -429,13 +396,13 @@ describe.skipIf(SKIP_TMUX)("tui: credential onboarding", () => {
         (pane) => !pane.includes("Welcome to fx") && !pane.includes("Sign in with Vercel"),
         TIMEOUT,
       );
-      expect(skipped).not.toContain("Add an API key");
+      expect(skipped).not.toContain("Sign in with Grok");
 
       await session.kill();
       session = await TmuxSession.create({ env });
       const restarted = await session.waitForText("Welcome to fx", TIMEOUT);
       expect(restarted).toContain("Sign in with Vercel");
-      expect(restarted).toContain("Add an API key");
+      expect(restarted).toContain("Sign in with Grok");
     },
     60_000,
   );

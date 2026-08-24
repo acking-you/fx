@@ -28,7 +28,6 @@ const host = @import("../hosts/host.zig");
 const login_flow = @import("../auth/login_flow.zig");
 const oauth_transport = @import("../auth/oauth_transport.zig");
 const provider_catalog = @import("../auth/provider_catalog.zig");
-const secret = @import("../auth/secret.zig");
 const output_contracts = @import("../output/output_contracts.zig");
 const prompt_policy = @import("../config/prompt_policy.zig");
 const session_store = @import("../session/session_store.zig");
@@ -62,7 +61,6 @@ pub const Command = union(enum) {
     issue: []const [:0]const u8,
     login: []const [:0]const u8,
     logout: []const [:0]const u8,
-    setup: []const [:0]const u8,
     status: []const [:0]const u8,
     permissions: []const [:0]const u8,
     models: []const [:0]const u8,
@@ -323,14 +321,11 @@ const LoadStartupStatusFn = *const fn (Allocator, host.SecretStore, []const u8, 
 const GetenvFn = *const fn (?*anyopaque, []const u8) ?[]const u8;
 const EnvironMapFn = *const fn (?*anyopaque) ?*const std.process.Environ.Map;
 const SelfExePathFn = *const fn (?*anyopaque, Allocator) anyerror![]u8;
-const ReadMaskedKeyFn = *const fn (?*anyopaque, Allocator, WriteFn, ?*anyopaque) anyerror![]u8;
-const SetupTerminalAvailableFn = *const fn (?*anyopaque) bool;
 const RunDeps = struct {
     stdout_ctx: ?*anyopaque = null,
     stderr_ctx: ?*anyopaque = null,
     env_ctx: ?*anyopaque = null,
     self_exe_ctx: ?*anyopaque = null,
-    setup_ctx: ?*anyopaque = null,
     write_stdout: WriteFn = writeRealStdout,
     write_stderr: WriteFn = writeRealStderr,
     load_startup_state: LoadStartupStateFn = app_lifecycle.loadStartupState,
@@ -340,8 +335,6 @@ const RunDeps = struct {
     getenv: GetenvFn = getenvDefault,
     environ_map: EnvironMapFn = environMapDefault,
     self_exe_path: SelfExePathFn = selfExePathDefault,
-    read_masked_key: ReadMaskedKeyFn = readMaskedKeyDefault,
-    setup_terminal_available: SetupTerminalAvailableFn = setupTerminalAvailableDefault,
 };
 
 const GlobalLaunchArgs = struct {
@@ -485,7 +478,6 @@ pub fn parse(command_catalog: CommandCatalog, args: []const [:0]const u8) Comman
             if (command_specs.matchesTopLevel(command_catalog, command, .replay)) return .{ .replay = args[1..] };
         },
         's' => {
-            if (command_specs.matchesTopLevel(command_catalog, command, .setup)) return .{ .setup = args[1..] };
             if (command_specs.matchesTopLevel(command_catalog, command, .status)) return .{ .status = args[1..] };
             if (command_specs.matchesTopLevel(command_catalog, command, .sessions)) return .{ .sessions = args[1..] };
             if (command_specs.matchesTopLevel(command_catalog, command, .session)) {
@@ -1070,13 +1062,6 @@ fn runNonInteractiveWithDeps(
                 .handled_success
             else
                 .handled_failure;
-        },
-        .setup => |rest| {
-            if (rest.len != 0) {
-                try writeTopLevelUsage(cfg.command_catalog, deps, .setup);
-                return .handled_failure;
-            }
-            return if (try runPasteSetup(alloc, cfg.secret_store, deps)) .handled_success else .handled_failure;
         },
         .status => |rest| {
             const opts = parseLocalSurfaceArgs(rest) catch |err| {
@@ -1807,150 +1792,6 @@ fn writeStdout(deps: RunDeps, text: []const u8) !void {
 fn writeStderr(deps: RunDeps, text: []const u8) !void {
     try deps.write_stderr(deps.stderr_ctx, text);
 }
-
-fn runPasteSetup(
-    alloc: Allocator,
-    secret_store: host.SecretStore,
-    deps: RunDeps,
-) !bool {
-    if (secret_store.isDisabled()) {
-        try writeStderr(deps, "fx setup: stored API keys are disabled by FX_DISABLE_KEYCHAIN\n");
-        return false;
-    }
-    if (!deps.setup_terminal_available(deps.setup_ctx)) {
-        try writeStderr(deps, "fx setup: an interactive terminal is required to paste an API key\n");
-        return false;
-    }
-
-    try writeStderr(deps, "Paste AI Gateway API key (input hidden): ");
-    const stored_interactively = secret_store.storeInteractive() catch {
-        try writeStderr(deps, "\nfx setup: API key was not saved\n");
-        return false;
-    };
-    if (!stored_interactively) {
-        const key = deps.read_masked_key(
-            deps.setup_ctx,
-            alloc,
-            deps.write_stderr,
-            deps.stderr_ctx,
-        ) catch {
-            try writeStderr(deps, "\nfx setup: API key was not saved\n");
-            return false;
-        };
-        defer secret.zeroAndFree(alloc, key);
-        try writeStderr(deps, "\n");
-        secret_store.store(alloc, key) catch {
-            try writeStderr(deps, "fx setup: API key was not saved\n");
-            return false;
-        };
-    }
-
-    const message = try std.fmt.allocPrint(
-        alloc,
-        "Saved API key to {s}.\n",
-        .{secret_store.backend_label},
-    );
-    defer alloc.free(message);
-    try writeStdout(deps, message);
-    return true;
-}
-
-fn setupTerminalAvailableDefault(_: ?*anyopaque) bool {
-    return std.c.isatty(std.posix.STDIN_FILENO) != 0 and
-        std.c.isatty(std.posix.STDERR_FILENO) != 0;
-}
-
-fn readMaskedKeyDefault(
-    _: ?*anyopaque,
-    alloc: Allocator,
-    write_mask: WriteFn,
-    write_ctx: ?*anyopaque,
-) ![]u8 {
-    var raw = try MaskedKeyRawMode.enable();
-    defer raw.disable();
-
-    var input: std.ArrayList(u8) = .empty;
-    errdefer {
-        if (input.capacity > 0) secret.zeroAndFree(alloc, input.allocatedSlice());
-    }
-
-    while (input.items.len < 8 * 1024) {
-        var byte: [1]u8 = undefined;
-        if (try std.posix.read(std.posix.STDIN_FILENO, &byte) == 0) return error.SetupCancelled;
-        switch (byte[0]) {
-            '\r', '\n' => {
-                if (input.items.len == 0) continue;
-                // toOwnedSlice shrinks through realloc, which may move the buffer
-                // and free the original without zeroing it. Copy out and wipe the
-                // source so no unzeroed key is left behind in freed memory.
-                const owned = try alloc.dupe(u8, input.items);
-                secret.zeroAndFree(alloc, input.allocatedSlice());
-                input = .empty;
-                return owned;
-            },
-            3, 4, 0x1b => return error.SetupCancelled,
-            8, 127 => if (input.items.len > 0) {
-                _ = input.pop();
-                try write_mask(write_ctx, "\x08 \x08");
-            },
-            0x20...0x7e => {
-                try input.append(alloc, byte[0]);
-                try write_mask(write_ctx, "•");
-            },
-            else => {},
-        }
-    }
-    return error.SetupKeyTooLong;
-}
-
-const MaskedKeyRawMode = struct {
-    original: std.posix.termios = undefined,
-    active: bool = false,
-
-    fn enable() !MaskedKeyRawMode {
-        if (std.c.isatty(std.posix.STDIN_FILENO) == 0 or
-            std.c.isatty(std.posix.STDERR_FILENO) == 0)
-        {
-            return error.NotATerminal;
-        }
-
-        var self: MaskedKeyRawMode = .{};
-        self.original = try std.posix.tcgetattr(std.posix.STDIN_FILENO);
-        var raw = self.original;
-        raw.iflag.BRKINT = false;
-        raw.iflag.ICRNL = false;
-        raw.iflag.INPCK = false;
-        raw.iflag.ISTRIP = false;
-        raw.iflag.IXON = false;
-        raw.iflag.IXOFF = false;
-        raw.cflag.CSIZE = .CS8;
-        raw.lflag.ECHO = false;
-        raw.lflag.ICANON = false;
-        raw.lflag.IEXTEN = false;
-        raw.lflag.ISIG = false;
-        const vmin_idx = switch (builtin.os.tag) {
-            .linux => 6,
-            else => 16,
-        };
-        const vtime_idx = switch (builtin.os.tag) {
-            .linux => 5,
-            else => 17,
-        };
-        if (vmin_idx < raw.cc.len and vtime_idx < raw.cc.len) {
-            raw.cc[vmin_idx] = 1;
-            raw.cc[vtime_idx] = 0;
-        }
-        try std.posix.tcsetattr(std.posix.STDIN_FILENO, .FLUSH, raw);
-        self.active = true;
-        return self;
-    }
-
-    fn disable(self: *MaskedKeyRawMode) void {
-        if (!self.active) return;
-        std.posix.tcsetattr(std.posix.STDIN_FILENO, .FLUSH, self.original) catch {};
-        self.active = false;
-    }
-};
 
 fn writeConfigDiagnostics(
     alloc: Allocator,
@@ -3508,10 +3349,6 @@ test "parse recognizes every top-level command and preserves unknown commands" {
         .issue => |rest| try std.testing.expectEqual(@as(usize, 1), rest.len),
         else => return error.TestExpectedEqual,
     }
-    switch (parse(command_catalog, &.{@constCast("setup")})) {
-        .setup => |rest| try std.testing.expectEqual(@as(usize, 0), rest.len),
-        else => return error.TestExpectedEqual,
-    }
     switch (parse(command_catalog, &.{ @constCast("status"), @constCast("--json") })) {
         .status => |rest| try std.testing.expectEqual(@as(usize, 1), rest.len),
         else => return error.TestExpectedEqual,
@@ -4288,71 +4125,6 @@ test "runIfRequested version flags reject extra args" {
     }
 }
 
-test "setup is a paste-only stored-key adapter" {
-    var capture = CaptureOutput.init(std.testing.allocator);
-    defer capture.deinit();
-    var cfg = testConfig();
-    cfg.secret_store = capture.secretStore();
-
-    const result = try runIfRequestedWithDeps(
-        std.testing.allocator,
-        &.{@constCast("setup")},
-        cfg,
-        capture.deps(),
-    );
-
-    try std.testing.expectEqual(RunResult.handled_success, result);
-    try std.testing.expectEqual(@as(usize, 1), capture.setup_store_calls);
-    try std.testing.expectEqual(@as(usize, 1), capture.setup_read_calls);
-    try std.testing.expect(capture.setup_value_matched);
-    try std.testing.expect(std.mem.find(u8, capture.stderr.written(), "Paste AI Gateway API key") != null);
-    try std.testing.expect(std.mem.find(u8, capture.stderr.written(), "Vercel CLI") == null);
-    try std.testing.expect(std.mem.find(u8, capture.stdout.written(), cfg.secret_store.backend_label) != null);
-}
-
-test "setup delegates secure input to an interactive host store" {
-    var capture = CaptureOutput.init(std.testing.allocator);
-    defer capture.deinit();
-    capture.setup_interactive_store = true;
-    var cfg = testConfig();
-    cfg.secret_store = capture.secretStore();
-
-    const result = try runIfRequestedWithDeps(
-        std.testing.allocator,
-        &.{@constCast("setup")},
-        cfg,
-        capture.deps(),
-    );
-
-    try std.testing.expectEqual(RunResult.handled_success, result);
-    try std.testing.expectEqual(@as(usize, 1), capture.setup_store_calls);
-    try std.testing.expectEqual(@as(usize, 0), capture.setup_read_calls);
-    try std.testing.expect(!capture.setup_value_matched);
-}
-
-test "setup preserves the disabled secret-store failure" {
-    var capture = CaptureOutput.init(std.testing.allocator);
-    defer capture.deinit();
-    capture.setup_store_disabled = true;
-    var cfg = testConfig();
-    cfg.secret_store = capture.secretStore();
-
-    const result = try runIfRequestedWithDeps(
-        std.testing.allocator,
-        &.{@constCast("setup")},
-        cfg,
-        capture.deps(),
-    );
-
-    try std.testing.expectEqual(RunResult.handled_failure, result);
-    try std.testing.expectEqual(@as(usize, 0), capture.setup_store_calls);
-    try std.testing.expectEqual(@as(usize, 0), capture.setup_read_calls);
-    try std.testing.expectEqualStrings(
-        "fx setup: stored API keys are disabled by FX_DISABLE_KEYCHAIN\n",
-        capture.stderr.written(),
-    );
-}
-
 test "workspace indeterminate errors report the reconciled durable state" {
     const cases = [_]struct {
         reconciliation: workspace_commands.Reconciliation,
@@ -4543,15 +4315,15 @@ test "CLI surface uses the supplied command catalog for parsing usage and help" 
             .summary = "Show injected help",
         },
         .{
-            .kind = .setup,
+            .kind = .status,
             .token = "start",
             .usage = "start",
-            .summary = "Run injected setup",
+            .summary = "Show injected status",
         },
     };
     const help_groups = [_]command_specs.TopLevelHelpGroup{
         .{ .entries = &.{
-            .{ .kind = .setup, .usage = "start" },
+            .{ .kind = .status, .usage = "start" },
             .{ .kind = .help, .usage = "guide" },
         } },
     };
@@ -4564,7 +4336,7 @@ test "CLI surface uses the supplied command catalog for parsing usage and help" 
 
     try std.testing.expectEqual(Command.help, parse(command_catalog, &.{@constCast("-?")}));
     switch (parse(command_catalog, &.{@constCast("start")})) {
-        .setup => {},
+        .status => {},
         else => return error.TestExpectedEqual,
     }
 
@@ -4983,7 +4755,7 @@ test "runIfRequested local json success appends exactly one newline" {
     const result = try runIfRequestedWithDeps(std.testing.allocator, &.{ @constCast("status"), @constCast("--json") }, testConfig(), deps);
     try std.testing.expectEqual(RunResult.handled_success, result);
     try std.testing.expectEqualStrings(
-        "{\"kind\":\"status\",\"model\":\"test-model\",\"update_channel\":\"stable\",\"build_channel\":\"stable\",\"build_revision\":\"\",\"auth\":\"missing\",\"auth_refreshable\":false,\"auth_help\":\"Fx needs a model credential. Use fx login for Vercel, fx login codex for ChatGPT Codex, fx login grok for Grok, set OPENAI_API_KEY for a Responses API, or use fx setup or AI_GATEWAY_API_KEY for Vercel AI Gateway.\",\"permission_mode\":\"auto\",\"workspace\":\"/tmp/fx\",\"history_turns\":0,\"session_permission_grants\":0,\"agent_step_limit\":42}\n",
+        "{\"kind\":\"status\",\"model\":\"test-model\",\"update_channel\":\"stable\",\"build_channel\":\"stable\",\"build_revision\":\"\",\"auth\":\"missing\",\"auth_refreshable\":false,\"auth_help\":\"Fx needs a model credential. Use fx login for Vercel, fx login codex for ChatGPT Codex, fx login grok for Grok, set OPENAI_API_KEY for a Responses API, or set AI_GATEWAY_API_KEY for Vercel AI Gateway.\",\"permission_mode\":\"auto\",\"workspace\":\"/tmp/fx\",\"history_turns\":0,\"session_permission_grants\":0,\"agent_step_limit\":42}\n",
         capture.stdout.written(),
     );
     try std.testing.expect(!std.mem.endsWith(u8, capture.stdout.written(), "\n\n"));
@@ -5076,7 +4848,7 @@ test "writeRenderedJsonLine falls back to heap and appends exactly one newline" 
     );
 
     try std.testing.expectEqualStrings(
-        "{\"kind\":\"status\",\"model\":\"test-model\",\"update_channel\":\"stable\",\"build_channel\":\"stable\",\"build_revision\":\"\",\"auth\":\"missing\",\"auth_refreshable\":false,\"auth_help\":\"Fx needs a model credential. Use fx login for Vercel, fx login codex for ChatGPT Codex, fx login grok for Grok, set OPENAI_API_KEY for a Responses API, or use fx setup or AI_GATEWAY_API_KEY for Vercel AI Gateway.\",\"permission_mode\":\"ask\",\"workspace\":\"/tmp/fx\",\"history_turns\":0,\"session_permission_grants\":0,\"agent_step_limit\":42}\n",
+        "{\"kind\":\"status\",\"model\":\"test-model\",\"update_channel\":\"stable\",\"build_channel\":\"stable\",\"build_revision\":\"\",\"auth\":\"missing\",\"auth_refreshable\":false,\"auth_help\":\"Fx needs a model credential. Use fx login for Vercel, fx login codex for ChatGPT Codex, fx login grok for Grok, set OPENAI_API_KEY for a Responses API, or set AI_GATEWAY_API_KEY for Vercel AI Gateway.\",\"permission_mode\":\"ask\",\"workspace\":\"/tmp/fx\",\"history_turns\":0,\"session_permission_grants\":0,\"agent_step_limit\":42}\n",
         capture.stdout.written(),
     );
 }
@@ -5115,11 +4887,6 @@ test "writeRenderedJsonLine renders doctor json through output contract" {
 const CaptureOutput = struct {
     stdout: std.Io.Writer.Allocating,
     stderr: std.Io.Writer.Allocating,
-    setup_store_calls: usize = 0,
-    setup_read_calls: usize = 0,
-    setup_value_matched: bool = false,
-    setup_interactive_store: bool = false,
-    setup_store_disabled: bool = false,
 
     fn init(alloc: Allocator) CaptureOutput {
         return .{
@@ -5137,22 +4904,8 @@ const CaptureOutput = struct {
         return .{
             .stdout_ctx = self,
             .stderr_ctx = self,
-            .setup_ctx = self,
             .write_stdout = captureStdout,
             .write_stderr = captureStderr,
-            .read_masked_key = captureReadMaskedKey,
-            .setup_terminal_available = captureSetupTerminalAvailable,
-        };
-    }
-
-    fn secretStore(self: *@This()) host.SecretStore {
-        return .{
-            .context = self,
-            .backend_label = "test credential store",
-            .is_disabled_fn = captureSecretStoreIsDisabled,
-            .load_fn = captureSecretStoreLoad,
-            .store_fn = captureSecretStoreWrite,
-            .store_interactive_fn = captureSecretStoreInteractiveWrite,
         };
     }
 };
@@ -5165,52 +4918,6 @@ fn captureStdout(ctx: ?*anyopaque, text: []const u8) !void {
 fn captureStderr(ctx: ?*anyopaque, text: []const u8) !void {
     const capture: *CaptureOutput = @ptrCast(@alignCast(ctx.?));
     try capture.stderr.writer.writeAll(text);
-}
-
-fn captureSetupTerminalAvailable(_: ?*anyopaque) bool {
-    return true;
-}
-
-fn captureReadMaskedKey(
-    ctx: ?*anyopaque,
-    alloc: Allocator,
-    _: WriteFn,
-    _: ?*anyopaque,
-) ![]u8 {
-    const capture: *CaptureOutput = @ptrCast(@alignCast(ctx.?));
-    capture.setup_read_calls += 1;
-    return alloc.dupe(u8, "paste-only-test-key");
-}
-
-fn captureSecretStoreIsDisabled(ctx: ?*anyopaque) bool {
-    const capture: *CaptureOutput = @ptrCast(@alignCast(ctx.?));
-    return capture.setup_store_disabled;
-}
-
-fn captureSecretStoreLoad(
-    _: ?*anyopaque,
-    _: Allocator,
-) host.SecretStoreLoadError!?[]u8 {
-    return null;
-}
-
-fn captureSecretStoreWrite(
-    ctx: ?*anyopaque,
-    _: Allocator,
-    value: []const u8,
-) host.SecretStoreWriteError!void {
-    const capture: *CaptureOutput = @ptrCast(@alignCast(ctx.?));
-    capture.setup_store_calls += 1;
-    capture.setup_value_matched = std.mem.eql(u8, value, "paste-only-test-key");
-}
-
-fn captureSecretStoreInteractiveWrite(
-    ctx: ?*anyopaque,
-) host.SecretStoreWriteError!bool {
-    const capture: *CaptureOutput = @ptrCast(@alignCast(ctx.?));
-    if (!capture.setup_interactive_store) return false;
-    capture.setup_store_calls += 1;
-    return true;
 }
 
 fn gatherNoopContextForTest(_: Allocator, _: context_contract.InitialContextInput) context_contract.ProviderError!context_contract.ProviderContext {

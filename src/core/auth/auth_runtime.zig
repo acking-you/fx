@@ -1,5 +1,4 @@
 const std = @import("std");
-const api_key_validator = @import("api_key_validator.zig");
 const credentials = @import("credentials.zig");
 const chatgpt_oauth = @import("chatgpt_oauth.zig");
 const grok_oauth = @import("grok_oauth.zig");
@@ -35,10 +34,6 @@ const credential_source_order = [_]credentials.Source{
 
 const SourceProbeFn = *const fn (?*anyopaque, Allocator, credentials.Source) anyerror!bool;
 const CredentialLoaderFn = *const fn (?*anyopaque, Allocator, credentials.Source) anyerror!?credentials.Credential;
-const StoredKeyStoreFn = *const fn (?*anyopaque, Allocator, []const u8) anyerror!void;
-
-const max_api_key_entry_bytes: usize = 8 * 1024;
-const max_api_key_mask_glyphs: usize = 32;
 const max_team_query_bytes: usize = 256;
 
 fn sourceLabelOrMissing(source: ?credentials.Source) []const u8 {
@@ -153,7 +148,6 @@ pub const AcquisitionAction = enum {
     login,
     chatgpt_login,
     grok_login,
-    setup,
     change_team,
     switch_credential,
     switch_provider,
@@ -166,176 +160,8 @@ pub const PickerStage = enum {
     root,
     provider,
     sign_in,
-    api_key,
     change_team,
     switch_credential,
-};
-
-pub const ApiKeySaveStart = enum {
-    started,
-    /// Nothing typed, so Enter is a no-op the user already understands.
-    empty,
-    /// A previous save is still in flight. The entered key is discarded rather
-    /// than queued, so the caller must say so instead of failing silently.
-    busy,
-};
-
-pub const ApiKeySaveResult = union(enum) {
-    empty,
-    saved: bool,
-    gateway_refused,
-    gateway_unavailable,
-    store_failed,
-    reload_failed,
-};
-
-/// The save does a gateway round trip and a key-store write, either of which can
-/// take seconds. It runs on a worker so the event loop keeps drawing; the worker
-/// performs I/O only and hands the loaded credential back for the main thread to
-/// adopt, keeping `selected_credential` single-threaded.
-pub const ApiKeySaveOutcome = union(enum) {
-    gateway_refused,
-    gateway_unavailable,
-    store_failed,
-    reload_failed,
-    loaded: credentials.Credential,
-
-    pub fn deinit(self: *ApiKeySaveOutcome, alloc: Allocator) void {
-        switch (self.*) {
-            .loaded => |*credential| credential.deinit(alloc),
-            else => {},
-        }
-        self.* = .reload_failed;
-    }
-};
-
-const ApiKeySaveDeps = struct {
-    ctx: ?*anyopaque = null,
-    validator: api_key_validator.Provider = api_key_validator.unavailable_provider,
-    store: StoredKeyStoreFn = storeUnavailableSecret,
-    loader: CredentialLoaderFn = loadCredentialSource,
-};
-
-/// The whole save sequence with no runtime state, so outcome behaviour can be
-/// tested synchronously while the worker owns only threading.
-fn performApiKeySave(alloc: Allocator, key: []const u8, deps: ApiKeySaveDeps) ApiKeySaveOutcome {
-    switch (deps.validator.validate(alloc, key)) {
-        .accepted => {},
-        .refused => return .gateway_refused,
-        .unavailable => return .gateway_unavailable,
-    }
-    deps.store(deps.ctx, alloc, key) catch |err| {
-        debug_trace.logf("auth", "api key save failed step=store err={s}", .{@errorName(err)});
-        return .store_failed;
-    };
-    const loaded = deps.loader(deps.ctx, alloc, .stored_key) catch |err| {
-        debug_trace.logf("auth", "api key save failed step=reload err={s}", .{@errorName(err)});
-        return .reload_failed;
-    };
-    const credential = loaded orelse return .reload_failed;
-    if (credential.source != .stored_key) {
-        var wrong = credential;
-        wrong.deinit(alloc);
-        return .reload_failed;
-    }
-    return .{ .loaded = credential };
-}
-
-const ApiKeySaveRuntime = struct {
-    const Self = @This();
-
-    mutex: std.Io.Mutex = .init,
-    thread: ?std.Thread = null,
-    running: bool = false,
-    /// Owned for the worker's lifetime and zeroed by it, so the entry stage can
-    /// drop its own buffer the moment the save starts.
-    key: std.ArrayList(u8) = .empty,
-    outcome: ?ApiKeySaveOutcome = null,
-    deps: ApiKeySaveDeps = .{},
-
-    fn start(self: *Self, alloc: Allocator, key: std.ArrayList(u8), deps: ApiKeySaveDeps) bool {
-        self.mutex.lockUncancelable(io_mod.getIo());
-        if (self.running or self.thread != null) {
-            self.mutex.unlock(io_mod.getIo());
-            var rejected = key;
-            secret.zeroAndFree(alloc, rejected.allocatedSlice());
-            return false;
-        }
-        self.running = true;
-        self.key = key;
-        self.deps = deps;
-        self.mutex.unlock(io_mod.getIo());
-
-        self.thread = std.Thread.spawn(.{}, workerMain, .{ self, alloc }) catch {
-            self.mutex.lockUncancelable(io_mod.getIo());
-            self.running = false;
-            var abandoned = self.key;
-            self.key = .empty;
-            self.mutex.unlock(io_mod.getIo());
-            secret.zeroAndFree(alloc, abandoned.allocatedSlice());
-            debug_trace.logf("auth", "api key save worker failed to spawn", .{});
-            return false;
-        };
-        return true;
-    }
-
-    fn workerMain(self: *Self, alloc: Allocator) void {
-        const result = performApiKeySave(alloc, self.key.items, self.deps);
-
-        self.mutex.lockUncancelable(io_mod.getIo());
-        defer self.mutex.unlock(io_mod.getIo());
-        var spent = self.key;
-        self.key = .empty;
-        secret.zeroAndFree(alloc, spent.allocatedSlice());
-        self.outcome = result;
-        self.running = false;
-    }
-
-    /// Returns the finished outcome once, joining the worker first. Ownership of a
-    /// loaded credential passes to the caller.
-    fn take(self: *Self, alloc: Allocator) ?ApiKeySaveOutcome {
-        self.mutex.lockUncancelable(io_mod.getIo());
-        if (self.running) {
-            self.mutex.unlock(io_mod.getIo());
-            return null;
-        }
-        const thread = self.thread;
-        self.thread = null;
-        const outcome = self.outcome;
-        self.outcome = null;
-        self.mutex.unlock(io_mod.getIo());
-
-        if (thread) |handle| handle.join();
-        _ = alloc;
-        return outcome;
-    }
-
-    fn isSaving(self: *const Self) bool {
-        const mutable = @constCast(self);
-        mutable.mutex.lockUncancelable(io_mod.getIo());
-        defer mutable.mutex.unlock(io_mod.getIo());
-        return self.running;
-    }
-
-    fn deinit(self: *Self, alloc: Allocator) void {
-        const thread = self.thread;
-        self.thread = null;
-        if (thread) |handle| handle.join();
-        if (self.outcome) |*outcome| outcome.deinit(alloc);
-        self.outcome = null;
-        var spent = self.key;
-        self.key = .empty;
-        secret.zeroAndFree(alloc, spent.allocatedSlice());
-        self.running = false;
-    }
-};
-
-const ApiKeyExitReason = enum {
-    cancel,
-    saved,
-    save_failed,
-    screen_replacement,
-    runtime_deinit,
 };
 
 pub const Choice = union(enum) {
@@ -380,7 +206,6 @@ pub const PickerView = struct {
     team_query: []const u8 = &.{},
     sign_in: login_flow.SignInSnapshot = .{},
     sign_in_source: credentials.Source = .fx_login,
-    api_key_mask_count: usize = 0,
 
     pub fn activeSourceLabel(self: PickerView) []const u8 {
         return sourceLabelOrMissing(self.active_source);
@@ -389,13 +214,13 @@ pub const PickerView = struct {
     pub fn choiceCount(self: PickerView) usize {
         return switch (self.stage) {
             .root => if (self.include_skip)
-                if (comptime host_target.is_wasm) 2 else 4
+                if (comptime host_target.is_wasm) 1 else 3
             else if (comptime host_target.is_wasm)
-                4
+                3
             else
-                7,
+                6,
             .provider => if (comptime host_target.is_wasm) 2 else 3,
-            .sign_in, .api_key => 0,
+            .sign_in => 0,
             .change_team => blk: {
                 var count: usize = 0;
                 for (self.teams) |team| {
@@ -413,32 +238,28 @@ pub const PickerView = struct {
                 if (comptime host_target.is_wasm)
                     switch (index) {
                         0 => .{ .action = .login },
-                        1 => .{ .action = .setup },
                         else => null,
                     }
                 else switch (index) {
                     0 => .{ .action = .login },
                     1 => .{ .action = .chatgpt_login },
                     2 => .{ .action = .grok_login },
-                    3 => .{ .action = .setup },
                     else => null,
                 }
             else if (comptime host_target.is_wasm)
                 switch (index) {
                     0 => .{ .action = .login },
-                    1 => .{ .action = .setup },
-                    2 => .{ .action = .change_team },
-                    3 => .{ .action = .switch_credential },
+                    1 => .{ .action = .change_team },
+                    2 => .{ .action = .switch_credential },
                     else => null,
                 }
             else switch (index) {
                 0 => .{ .action = .login },
                 1 => .{ .action = .chatgpt_login },
                 2 => .{ .action = .grok_login },
-                3 => .{ .action = .setup },
-                4 => .{ .action = .switch_provider },
-                5 => .{ .action = .change_team },
-                6 => .{ .action = .switch_credential },
+                3 => .{ .action = .switch_provider },
+                4 => .{ .action = .change_team },
+                5 => .{ .action = .switch_credential },
                 else => null,
             },
             .provider => switch (index) {
@@ -447,7 +268,7 @@ pub const PickerView = struct {
                 2 => if (comptime host_target.is_wasm) null else .{ .provider = .grok },
                 else => null,
             },
-            .sign_in, .api_key => null,
+            .sign_in => null,
             .change_team => blk: {
                 var visible_index: usize = 0;
                 for (self.teams, 0..) |team, team_index| {
@@ -488,7 +309,6 @@ pub const PickerView = struct {
                 .login => "Sign in with Vercel",
                 .chatgpt_login => "Sign in with Codex",
                 .grok_login => "Sign in with Grok",
-                .setup => if (self.include_skip) "Add an API key" else "API key",
                 .change_team => "Change team",
                 .switch_credential => "Switch credential",
                 .switch_provider => "Switch provider",
@@ -506,7 +326,7 @@ pub const PickerView = struct {
                 .login => if (self.fx_login_session_available) "connected" else "",
                 .chatgpt_login => if (self.available_sources.contains(.chatgpt_subscription)) "connected" else "",
                 .grok_login => if (self.available_sources.contains(.grok_subscription)) "connected" else "",
-                .setup, .switch_credential, .switch_provider => "",
+                .switch_credential, .switch_provider => "",
                 .automatic => "use normal precedence",
                 .change_team => if (self.fx_login_session_available) "choose a team" else "sign in first",
             },
@@ -747,7 +567,6 @@ pub const GatewayCredential = struct {
 pub const Runtime = struct {
     const Self = @This();
 
-    api_key_validator: api_key_validator.Provider = api_key_validator.unavailable_provider,
     oauth_transport: oauth_transport.Provider = oauth_transport.unavailable_provider,
     secret_store: host.SecretStore = host.unavailable_secret_store,
     selected_credential: ?credentials.Credential = null,
@@ -766,26 +585,19 @@ pub const Runtime = struct {
     sign_in_flow: login_flow.SignInRuntime = .{},
     sign_in_source: credentials.Source = .fx_login,
     sign_in_returns_to_root: bool = false,
-    api_key_input: std.ArrayList(u8) = .empty,
-    api_key_returns_to_root: bool = false,
-    api_key_save: ApiKeySaveRuntime = .{},
 
     pub fn init(
-        validator: api_key_validator.Provider,
         transport: oauth_transport.Provider,
         secret_store: host.SecretStore,
     ) Self {
         return .{
-            .api_key_validator = validator,
             .oauth_transport = transport,
             .secret_store = secret_store,
         };
     }
 
     pub fn deinit(self: *Self, alloc: Allocator) void {
-        self.api_key_save.deinit(alloc);
         self.sign_in_flow.deinit(alloc);
-        self.exitApiKeyStage(alloc, .runtime_deinit);
         self.clearTeamSelection(alloc);
         self.team_query.deinit(alloc);
         if (self.selected_credential) |*credential| credential.deinit(alloc);
@@ -955,7 +767,6 @@ pub const Runtime = struct {
 
     fn openPickerWithSkip(self: *Self, alloc: Allocator, include_skip: bool) void {
         self.exitSignInStage(alloc);
-        self.exitApiKeyStage(alloc, .screen_replacement);
         self.clearTeamSelection(alloc);
         self.picker_active = true;
         self.picker_include_skip = include_skip;
@@ -978,7 +789,6 @@ pub const Runtime = struct {
             .team_query = self.team_query.items,
             .sign_in = self.sign_in_flow.snapshot(),
             .sign_in_source = self.sign_in_source,
-            .api_key_mask_count = @min(self.api_key_input.items.len, max_api_key_mask_glyphs),
         };
     }
 
@@ -1000,7 +810,6 @@ pub const Runtime = struct {
 
     pub fn openTeamPicker(self: *Self, alloc: Allocator, selection: *login_flow.TeamSelection) void {
         self.exitSignInStage(alloc);
-        self.exitApiKeyStage(alloc, .screen_replacement);
         self.clearTeamSelection(alloc);
         self.team_selection = selection.take();
         self.picker_stage = .change_team;
@@ -1013,7 +822,6 @@ pub const Runtime = struct {
         active_provider: model_provider.ProviderId,
     ) void {
         self.exitSignInStage(alloc);
-        self.exitApiKeyStage(alloc, .screen_replacement);
         self.clearTeamSelection(alloc);
         self.picker_active = true;
         self.picker_include_skip = false;
@@ -1051,7 +859,6 @@ pub const Runtime = struct {
 
     pub fn openSwitchCredentialPicker(self: *Self, alloc: Allocator) void {
         self.exitSignInStage(alloc);
-        self.exitApiKeyStage(alloc, .screen_replacement);
         self.picker_stage = .switch_credential;
         const active_source = self.credentialSource();
         self.picker_selection = if (active_source) |source|
@@ -1061,24 +868,6 @@ pub const Runtime = struct {
                 self.pickerView().choiceAt(0)
         else
             self.pickerView().choiceAt(0);
-    }
-
-    pub fn openApiKeyPicker(self: *Self, alloc: Allocator) void {
-        self.openApiKeyPickerWithParent(alloc, false);
-    }
-
-    pub fn openApiKeyPickerFromRoot(self: *Self, alloc: Allocator) void {
-        self.openApiKeyPickerWithParent(alloc, true);
-    }
-
-    fn openApiKeyPickerWithParent(self: *Self, alloc: Allocator, returns_to_root: bool) void {
-        self.exitSignInStage(alloc);
-        self.exitApiKeyStage(alloc, .screen_replacement);
-        self.clearTeamSelection(alloc);
-        self.picker_active = true;
-        self.picker_stage = .api_key;
-        self.picker_selection = null;
-        self.api_key_returns_to_root = returns_to_root;
     }
 
     pub fn openSignInPicker(self: *Self, alloc: Allocator) !bool {
@@ -1123,7 +912,6 @@ pub const Runtime = struct {
             else => return error.InvalidSignInSource,
         };
         if (!started) return false;
-        self.exitApiKeyStage(alloc, .screen_replacement);
         self.clearTeamSelection(alloc);
         self.picker_active = true;
         self.picker_stage = .sign_in;
@@ -1154,77 +942,6 @@ pub const Runtime = struct {
         self.sign_in_flow.pulse(alloc);
     }
 
-    pub fn apiKeyEntryActive(self: *const Self) bool {
-        return self.picker_active and self.picker_stage == .api_key;
-    }
-
-    pub fn appendApiKeyByte(self: *Self, alloc: Allocator, byte: u8) !bool {
-        if (!self.apiKeyEntryActive()) return false;
-        if (self.api_key_input.items.len >= max_api_key_entry_bytes) return true;
-        if (byte < 0x20 or byte == 0x7f) return true;
-        // Reserve the entry ceiling up front so growth never abandons an
-        // unzeroed buffer holding part of the key.
-        try self.api_key_input.ensureTotalCapacityPrecise(alloc, max_api_key_entry_bytes);
-        self.api_key_input.appendAssumeCapacity(byte);
-        return true;
-    }
-
-    pub fn deleteApiKeyByte(self: *Self) bool {
-        if (!self.apiKeyEntryActive()) return false;
-        if (self.api_key_input.items.len > 0) _ = self.api_key_input.pop();
-        return true;
-    }
-
-    /// Hands the entered key to a worker and pops the stage immediately. The key
-    /// store write can block for seconds on a locked keychain, and the gateway
-    /// check is a network round trip; neither may run on the event loop.
-    pub fn beginApiKeySave(self: *Self, alloc: Allocator) ApiKeySaveStart {
-        return self.beginApiKeySaveWithDeps(alloc, .{
-            .ctx = self,
-            .validator = self.api_key_validator,
-            .store = storeRuntimeSecret,
-            .loader = loadRuntimeCredentialSource,
-        });
-    }
-
-    fn beginApiKeySaveWithDeps(self: *Self, alloc: Allocator, deps: ApiKeySaveDeps) ApiKeySaveStart {
-        if (!self.apiKeyEntryActive() or self.api_key_input.items.len == 0) return .empty;
-
-        // Ownership moves to the worker, so the stage exit below has nothing to zero.
-        const key = self.api_key_input;
-        self.api_key_input = .empty;
-
-        const returns_to_root = self.api_key_returns_to_root;
-        self.exitApiKeyStage(alloc, .saved);
-        self.picker_active = returns_to_root;
-        self.picker_stage = .root;
-        self.picker_selection = if (returns_to_root) .{ .action = .setup } else null;
-
-        return if (self.api_key_save.start(alloc, key, deps)) .started else .busy;
-    }
-
-    pub fn apiKeySaveInFlight(self: *const Self) bool {
-        return self.api_key_save.isSaving();
-    }
-
-    /// Applies a finished save on the main thread. Adopting the credential here
-    /// keeps `selected_credential` off the worker.
-    pub fn takeApiKeySaveResult(self: *Self, alloc: Allocator) ?ApiKeySaveResult {
-        var outcome = self.api_key_save.take(alloc) orelse return null;
-        return switch (outcome) {
-            .gateway_refused => .gateway_refused,
-            .gateway_unavailable => .gateway_unavailable,
-            .store_failed => .store_failed,
-            .reload_failed => .reload_failed,
-            .loaded => |*credential| blk: {
-                var owned = credential.*;
-                outcome = .reload_failed;
-                defer owned.deinit(alloc);
-                break :blk .{ .saved = self.adoptCredential(alloc, &owned) };
-            },
-        };
-    }
-
     pub fn popPickerStage(self: *Self, alloc: Allocator) bool {
         if (!self.picker_active) return false;
         const stage = self.picker_stage;
@@ -1250,17 +967,6 @@ pub const Runtime = struct {
             }
         }
 
-        if (stage == .api_key) {
-            const returns_to_root = self.api_key_returns_to_root;
-            self.exitApiKeyStage(alloc, .cancel);
-            if (!returns_to_root) {
-                self.picker_active = false;
-                self.picker_stage = .root;
-                self.picker_selection = null;
-                return true;
-            }
-        }
-
         self.clearTeamSelection(alloc);
         self.picker_stage = .root;
         self.picker_selection = .{ .action = switch (stage) {
@@ -1272,7 +978,6 @@ pub const Runtime = struct {
                 .grok_login
             else
                 .login,
-            .api_key => .setup,
             .change_team => .change_team,
             .switch_credential => .switch_credential,
         } };
@@ -1281,7 +986,6 @@ pub const Runtime = struct {
 
     pub fn closePicker(self: *Self, alloc: Allocator) void {
         self.exitSignInStage(alloc);
-        self.exitApiKeyStage(alloc, .screen_replacement);
         self.clearTeamSelection(alloc);
         self.picker_active = false;
         self.picker_stage = .root;
@@ -1289,13 +993,13 @@ pub const Runtime = struct {
 
     pub fn takePickerChoice(self: *Self, alloc: Allocator) ?Choice {
         if (!self.picker_active) return null;
-        if (self.picker_stage == .sign_in or self.picker_stage == .api_key) return null;
+        if (self.picker_stage == .sign_in) return null;
         const choice = self.picker_selection;
         const selected = choice orelse return null;
         if (!self.pickerView().choiceEnabled(selected)) return null;
 
         switch (self.picker_stage) {
-            .sign_in, .api_key => unreachable,
+            .sign_in => unreachable,
             .provider => switch (selected) {
                 .provider => self.closePicker(alloc),
                 .source, .action, .team => unreachable,
@@ -1310,7 +1014,6 @@ pub const Runtime = struct {
                         self.openSwitchCredentialPicker(alloc);
                         return null;
                     },
-                    .setup => {},
                     // Only reachable from the switch screen, never the root.
                     .automatic => unreachable,
                     .login, .chatgpt_login, .grok_login => self.closePicker(alloc),
@@ -1561,23 +1264,6 @@ pub const Runtime = struct {
         else
             self.pickerView().choiceAt(0);
     }
-
-    fn exitApiKeyStage(self: *Self, alloc: Allocator, reason: ApiKeyExitReason) void {
-        const byte_count = self.api_key_input.items.len;
-        if (self.api_key_input.capacity > 0) {
-            const allocated = self.api_key_input.allocatedSlice();
-            secret.zeroAndFree(alloc, allocated);
-            self.api_key_input = .empty;
-        }
-        self.api_key_returns_to_root = false;
-        if (byte_count > 0) {
-            debug_trace.logf(
-                "auth",
-                "api key entry cleared reason={s} bytes={d}",
-                .{ @tagName(reason), byte_count },
-            );
-        }
-    }
 };
 
 fn probeCredentialSource(raw_context: ?*anyopaque, alloc: Allocator, source: credentials.Source) !bool {
@@ -1597,15 +1283,6 @@ fn loadCredentialSource(_: ?*anyopaque, alloc: Allocator, source: credentials.So
 fn loadRuntimeCredentialSource(raw: ?*anyopaque, alloc: Allocator, source: credentials.Source) !?credentials.Credential {
     const self: *Runtime = @ptrCast(@alignCast(raw.?));
     return credentials.loadSource(alloc, self.oauth_transport, self.secret_store, source);
-}
-
-fn storeRuntimeSecret(raw: ?*anyopaque, alloc: Allocator, value: []const u8) !void {
-    const self: *Runtime = @ptrCast(@alignCast(raw.?));
-    return self.secret_store.store(alloc, value);
-}
-
-fn storeUnavailableSecret(_: ?*anyopaque, _: Allocator, _: []const u8) !void {
-    return error.StoredKeyWriteFailed;
 }
 
 fn displayTeam(credential: credentials.Credential) ?[]const u8 {
@@ -1670,96 +1347,6 @@ fn makeTestCredential(
     };
 }
 
-const ApiKeySaveFixture = struct {
-    validation: api_key_validator.Result = .accepted,
-    fail_store: bool = false,
-    fail_load: bool = false,
-    /// Holds the worker inside `store` so a test can observe the in-flight
-    /// window without racing it.
-    gate: ?*std.atomic.Value(bool) = null,
-    validate_calls: usize = 0,
-    store_calls: usize = 0,
-    load_calls: usize = 0,
-
-    fn validate(raw_ctx: ?*anyopaque, _: Allocator, _: []const u8) api_key_validator.Result {
-        const self: *@This() = @ptrCast(@alignCast(raw_ctx.?));
-        self.validate_calls += 1;
-        return self.validation;
-    }
-
-    fn validator(self: *@This()) api_key_validator.Provider {
-        return .{
-            .context = self,
-            .validate_fn = validate,
-        };
-    }
-
-    fn secretStore(self: *@This()) host.SecretStore {
-        return .{
-            .context = self,
-            .backend_label = "test credential store",
-            .is_disabled_fn = secretStoreIsDisabled,
-            .load_fn = secretStoreLoad,
-            .store_fn = secretStoreWrite,
-            .store_interactive_fn = secretStoreInteractiveWrite,
-        };
-    }
-
-    fn secretStoreIsDisabled(_: ?*anyopaque) bool {
-        return false;
-    }
-
-    fn secretStoreLoad(
-        raw_ctx: ?*anyopaque,
-        alloc: Allocator,
-    ) host.SecretStoreLoadError!?[]u8 {
-        const self: *@This() = @ptrCast(@alignCast(raw_ctx.?));
-        self.load_calls += 1;
-        if (self.fail_load) return error.StoredKeyUnreadable;
-        return try alloc.dupe(u8, "loaded-key");
-    }
-
-    fn secretStoreWrite(
-        raw_ctx: ?*anyopaque,
-        _: Allocator,
-        _: []const u8,
-    ) host.SecretStoreWriteError!void {
-        const self: *@This() = @ptrCast(@alignCast(raw_ctx.?));
-        if (self.gate) |gate| while (!gate.load(.seq_cst)) {};
-        self.store_calls += 1;
-        if (self.fail_store) return error.StoredKeyWriteFailed;
-    }
-
-    fn secretStoreInteractiveWrite(
-        _: ?*anyopaque,
-    ) host.SecretStoreWriteError!bool {
-        return false;
-    }
-
-    fn store(raw_ctx: ?*anyopaque, _: Allocator, _: []const u8) !void {
-        const self: *@This() = @ptrCast(@alignCast(raw_ctx.?));
-        if (self.gate) |gate| while (!gate.load(.seq_cst)) {};
-        self.store_calls += 1;
-        if (self.fail_store) return error.TestStoreFailed;
-    }
-
-    fn load(
-        raw_ctx: ?*anyopaque,
-        alloc: Allocator,
-        source: credentials.Source,
-    ) !?credentials.Credential {
-        const self: *@This() = @ptrCast(@alignCast(raw_ctx.?));
-        self.load_calls += 1;
-        if (self.fail_load) return error.TestLoadFailed;
-        return try makeTestCredential(alloc, "loaded-key", source, null, null);
-    }
-};
-
-fn enterTestApiKey(runtime: *Runtime, alloc: Allocator, value: []const u8) !void {
-    runtime.openApiKeyPicker(alloc);
-    for (value) |byte| try std.testing.expect(try runtime.appendApiKeyByte(alloc, byte));
-}
-
 fn appendTestTeam(
     selection: *login_flow.TeamSelection,
     alloc: Allocator,
@@ -1774,16 +1361,6 @@ fn appendTestTeam(
     const name = try alloc.dupe(u8, name_value);
     errdefer alloc.free(name);
     try selection.teams.append(alloc, .{ .id = id, .slug = slug, .name = name });
-}
-
-fn expectApiKeyAllocationCleared(
-    runtime: *const Runtime,
-    backing: []const u8,
-    sentinel: []const u8,
-) !void {
-    try std.testing.expectEqual(@as(usize, 0), runtime.api_key_input.items.len);
-    try std.testing.expectEqual(@as(usize, 0), runtime.api_key_input.capacity);
-    try std.testing.expect(std.mem.indexOf(u8, backing, sentinel) == null);
 }
 
 test "auth runtime token refresher ignores non-refreshable credential sources" {
@@ -2296,9 +1873,9 @@ test "auth picker root starts on sign in and keeps sources in the switch stage" 
     const picker = runtime.pickerView();
     try std.testing.expect(picker.active);
     try std.testing.expect((Choice{ .action = .login }).eql(picker.selected_choice.?));
-    try std.testing.expectEqual(@as(usize, 7), picker.choiceCount());
-    try std.testing.expectEqualStrings("Switch provider", picker.choiceLabel(picker.choiceAt(4).?));
-    try std.testing.expect(picker.choiceAt(7) == null);
+    try std.testing.expectEqual(@as(usize, 6), picker.choiceCount());
+    try std.testing.expectEqualStrings("Switch provider", picker.choiceLabel(picker.choiceAt(3).?));
+    try std.testing.expect(picker.choiceAt(6) == null);
 }
 
 test "credential switcher excludes provider-routed subscription sessions" {
@@ -2315,7 +1892,7 @@ test "credential switcher excludes provider-routed subscription sessions" {
     try std.testing.expect((Choice{ .action = .automatic }).eql(picker.choiceAt(1).?));
 }
 
-test "auth picker navigation wraps across the seven hub actions" {
+test "auth picker navigation wraps across the six hub actions" {
     const alloc = std.testing.allocator;
     var runtime: Runtime = .{};
     runtime.source_inventory = SourceSet.initMany(&.{ .ai_gateway_api_key, .fx_login });
@@ -2325,8 +1902,6 @@ test "auth picker navigation wraps across the seven hub actions" {
     try std.testing.expect((Choice{ .action = .chatgpt_login }).eql(runtime.pickerView().selected_choice.?));
     try std.testing.expect(runtime.movePicker(1));
     try std.testing.expect((Choice{ .action = .grok_login }).eql(runtime.pickerView().selected_choice.?));
-    try std.testing.expect(runtime.movePicker(1));
-    try std.testing.expect((Choice{ .action = .setup }).eql(runtime.pickerView().selected_choice.?));
     try std.testing.expect(runtime.movePicker(1));
     try std.testing.expectEqualStrings("Switch provider", runtime.pickerView().choiceLabel(runtime.pickerView().selected_choice.?));
     try std.testing.expect(runtime.movePicker(1));
@@ -2360,25 +1935,23 @@ test "auth picker without credentials exposes acquisition actions" {
     try std.testing.expect(picker.active_source == null);
     try std.testing.expect((Choice{ .action = .login }).eql(picker.selected_choice.?));
     try std.testing.expectEqual(@as(usize, 0), picker.available_sources.count());
-    try std.testing.expectEqual(@as(usize, 7), picker.choiceCount());
+    try std.testing.expectEqual(@as(usize, 6), picker.choiceCount());
     try std.testing.expect(!picker.choiceEnabled(.{ .action = .change_team }));
     try std.testing.expectEqualStrings("missing", picker.activeSourceLabel());
 }
 
-test "auth onboarding picker exposes the setup paths" {
+test "auth onboarding picker exposes provider login paths" {
     const alloc = std.testing.allocator;
     var runtime: Runtime = .{};
     runtime.openOnboardingPicker(alloc);
 
     const picker = runtime.pickerView();
     try std.testing.expect(picker.include_skip);
-    try std.testing.expectEqual(@as(usize, 4), picker.choiceCount());
+    try std.testing.expectEqual(@as(usize, 3), picker.choiceCount());
     try std.testing.expect((Choice{ .action = .login }).eql(picker.choiceAt(0).?));
     try std.testing.expect((Choice{ .action = .chatgpt_login }).eql(picker.choiceAt(1).?));
     try std.testing.expect((Choice{ .action = .grok_login }).eql(picker.choiceAt(2).?));
-    try std.testing.expect((Choice{ .action = .setup }).eql(picker.choiceAt(3).?));
-    try std.testing.expectEqualStrings("Add an API key", picker.choiceLabel(picker.choiceAt(3).?));
-    try std.testing.expect(picker.choiceAt(4) == null);
+    try std.testing.expect(picker.choiceAt(3) == null);
 }
 
 test "clearing a remembered choice re-resolves even when no login was active" {
@@ -2435,7 +2008,7 @@ test "switch credential stage includes the active source and pops to its root ac
     try std.testing.expect((Choice{ .action = .switch_credential }).eql(root_view.selected_choice.?));
 }
 
-test "provider stage pops to its setup root action" {
+test "provider stage pops to its hub root action" {
     const alloc = std.testing.allocator;
     var runtime: Runtime = .{};
     defer runtime.deinit(alloc);
@@ -2545,320 +2118,4 @@ test "auth picker cancellation preserves the active credential source" {
 
     try std.testing.expectEqual(credentials.Source.ai_gateway_api_key, runtime.credentialSource().?);
     try std.testing.expectEqualStrings("active-token", runtime.apiKey().?);
-}
-
-test "an api key save runs off the event loop and is reaped" {
-    const alloc = std.testing.allocator;
-    var runtime: Runtime = .{};
-    defer runtime.deinit(alloc);
-    var fixture: ApiKeySaveFixture = .{};
-
-    runtime.openApiKeyPicker(alloc);
-    for ("vck_worker_probe") |byte| _ = try runtime.appendApiKeyByte(alloc, byte);
-
-    try std.testing.expectEqual(ApiKeySaveStart.started, runtime.beginApiKeySaveWithDeps(alloc, .{
-        .ctx = @ptrCast(&fixture),
-        .validator = fixture.validator(),
-        .store = ApiKeySaveFixture.store,
-        .loader = ApiKeySaveFixture.load,
-    }));
-    // The stage releases its buffer immediately; the worker owns the key now.
-    try std.testing.expectEqual(@as(usize, 0), runtime.api_key_input.capacity);
-    try std.testing.expect(!runtime.apiKeyEntryActive());
-
-    const result = while (true) {
-        if (runtime.takeApiKeySaveResult(alloc)) |value| break value;
-    };
-    try std.testing.expect(result == .saved);
-    try std.testing.expectEqual(@as(usize, 1), fixture.validate_calls);
-    try std.testing.expectEqual(@as(usize, 1), fixture.store_calls);
-    try std.testing.expect(!runtime.apiKeySaveInFlight());
-    try std.testing.expect(runtime.api_key_save.thread == null);
-}
-
-test "auth runtime saves and reloads through its injected secret store" {
-    const alloc = std.testing.allocator;
-    var fixture: ApiKeySaveFixture = .{};
-    var runtime = Runtime.init(
-        fixture.validator(),
-        oauth_transport.unavailable_provider,
-        fixture.secretStore(),
-    );
-    defer runtime.deinit(alloc);
-
-    try enterTestApiKey(&runtime, alloc, "host-port-test-value");
-    try std.testing.expectEqual(ApiKeySaveStart.started, runtime.beginApiKeySave(alloc));
-
-    const result = while (true) {
-        if (runtime.takeApiKeySaveResult(alloc)) |value| break value;
-    };
-
-    try std.testing.expect(result == .saved);
-    try std.testing.expectEqual(@as(usize, 1), fixture.validate_calls);
-    try std.testing.expectEqual(@as(usize, 1), fixture.store_calls);
-    try std.testing.expectEqual(@as(usize, 1), fixture.load_calls);
-    try std.testing.expectEqual(credentials.Source.stored_key, runtime.credentialSource().?);
-    try std.testing.expectEqualStrings("loaded-key", runtime.apiKey().?);
-}
-
-test "an empty api key entry starts no save worker" {
-    const alloc = std.testing.allocator;
-    var runtime: Runtime = .{};
-    defer runtime.deinit(alloc);
-
-    runtime.openApiKeyPicker(alloc);
-    try std.testing.expectEqual(ApiKeySaveStart.empty, runtime.beginApiKeySave(alloc));
-    try std.testing.expect(!runtime.apiKeySaveInFlight());
-}
-
-test "a second key submitted mid-save is refused, not silently dropped" {
-    const alloc = std.testing.allocator;
-    var runtime: Runtime = .{};
-    defer runtime.deinit(alloc);
-    var gate = std.atomic.Value(bool).init(false);
-    var fixture: ApiKeySaveFixture = .{ .gate = &gate };
-    const deps: ApiKeySaveDeps = .{
-        .ctx = @ptrCast(&fixture),
-        .validator = fixture.validator(),
-        .store = ApiKeySaveFixture.store,
-        .loader = ApiKeySaveFixture.load,
-    };
-
-    runtime.openApiKeyPicker(alloc);
-    for ("vck_first") |byte| _ = try runtime.appendApiKeyByte(alloc, byte);
-    try std.testing.expectEqual(ApiKeySaveStart.started, runtime.beginApiKeySaveWithDeps(alloc, deps));
-    while (!runtime.apiKeySaveInFlight()) {}
-
-    runtime.openApiKeyPicker(alloc);
-    for ("vck_second") |byte| _ = try runtime.appendApiKeyByte(alloc, byte);
-    try std.testing.expectEqual(ApiKeySaveStart.busy, runtime.beginApiKeySaveWithDeps(alloc, deps));
-    // The refused key is wiped rather than leaked or left in the entry buffer.
-    try std.testing.expectEqual(@as(usize, 0), runtime.api_key_input.capacity);
-    try std.testing.expect(runtime.takeApiKeySaveResult(alloc) == null);
-
-    gate.store(true, .seq_cst);
-    const result = while (true) {
-        if (runtime.takeApiKeySaveResult(alloc)) |value| break value;
-    };
-    try std.testing.expect(result == .saved);
-    // Exactly one save ran: the second key never reached the store.
-    try std.testing.expectEqual(@as(usize, 1), fixture.store_calls);
-}
-
-test "deinit joins a save worker that is still running" {
-    const alloc = std.testing.allocator;
-    var runtime: Runtime = .{};
-    var fixture: ApiKeySaveFixture = .{};
-
-    runtime.openApiKeyPicker(alloc);
-    for ("vck_deinit_probe") |byte| _ = try runtime.appendApiKeyByte(alloc, byte);
-    try std.testing.expectEqual(ApiKeySaveStart.started, runtime.beginApiKeySaveWithDeps(alloc, .{
-        .ctx = @ptrCast(&fixture),
-        .validator = fixture.validator(),
-        .store = ApiKeySaveFixture.store,
-        .loader = ApiKeySaveFixture.load,
-    }));
-
-    // Must not hang, must not leak the loaded credential the worker produced.
-    runtime.deinit(alloc);
-    try std.testing.expect(runtime.api_key_save.thread == null);
-}
-
-test "api key entry never reallocates while the key is in memory" {
-    const alloc = std.testing.allocator;
-    var runtime: Runtime = .{};
-    defer runtime.deinit(alloc);
-
-    runtime.openApiKeyPicker(alloc);
-    try std.testing.expect(try runtime.appendApiKeyByte(alloc, 'a'));
-    const base = runtime.api_key_input.items.ptr;
-    try std.testing.expectEqual(max_api_key_entry_bytes, runtime.api_key_input.capacity);
-
-    for (0..1200) |_| try std.testing.expect(try runtime.appendApiKeyByte(alloc, 'b'));
-
-    try std.testing.expectEqual(base, runtime.api_key_input.items.ptr);
-    try std.testing.expectEqual(max_api_key_entry_bytes, runtime.api_key_input.capacity);
-}
-
-test "api key stage zeroes its allocation on every exit path" {
-    const sentinel = "FX_API_KEY_ZERO_SENTINEL";
-
-    {
-        var backing: [16384]u8 = [_]u8{0xa5} ** 16384;
-        var fixed = std.heap.FixedBufferAllocator.init(&backing);
-        const alloc = fixed.allocator();
-        var runtime: Runtime = .{};
-        defer runtime.deinit(alloc);
-        try enterTestApiKey(&runtime, alloc, sentinel);
-
-        try std.testing.expect(runtime.popPickerStage(alloc));
-        try expectApiKeyAllocationCleared(&runtime, &backing, sentinel);
-    }
-
-    {
-        var backing: [16384]u8 = [_]u8{0xa5} ** 16384;
-        var fixed = std.heap.FixedBufferAllocator.init(&backing);
-        const alloc = fixed.allocator();
-        var runtime: Runtime = .{};
-        defer runtime.deinit(alloc);
-        var fixture: ApiKeySaveFixture = .{ .validation = .unavailable };
-        try enterTestApiKey(&runtime, alloc, sentinel);
-
-        var outcome = performApiKeySave(alloc, runtime.api_key_input.items, .{
-            .ctx = @ptrCast(&fixture),
-            .validator = fixture.validator(),
-            .store = ApiKeySaveFixture.store,
-            .loader = ApiKeySaveFixture.load,
-        });
-        defer outcome.deinit(alloc);
-        runtime.exitApiKeyStage(alloc, .saved);
-        const result: ApiKeySaveResult = switch (outcome) {
-            .loaded => .{ .saved = true },
-            .gateway_refused => .gateway_refused,
-            .gateway_unavailable => .gateway_unavailable,
-            .store_failed => .store_failed,
-            .reload_failed => .reload_failed,
-        };
-        try std.testing.expect(result == .gateway_unavailable);
-        try std.testing.expectEqual(@as(usize, 0), fixture.store_calls);
-        try expectApiKeyAllocationCleared(&runtime, &backing, sentinel);
-    }
-
-    {
-        var backing: [16384]u8 = [_]u8{0xa5} ** 16384;
-        var fixed = std.heap.FixedBufferAllocator.init(&backing);
-        const alloc = fixed.allocator();
-        var runtime: Runtime = .{};
-        defer runtime.deinit(alloc);
-        var fixture: ApiKeySaveFixture = .{};
-        try enterTestApiKey(&runtime, alloc, sentinel);
-
-        var outcome = performApiKeySave(alloc, runtime.api_key_input.items, .{
-            .ctx = @ptrCast(&fixture),
-            .validator = fixture.validator(),
-            .store = ApiKeySaveFixture.store,
-            .loader = ApiKeySaveFixture.load,
-        });
-        defer outcome.deinit(alloc);
-        runtime.exitApiKeyStage(alloc, .saved);
-        const result: ApiKeySaveResult = switch (outcome) {
-            .loaded => .{ .saved = true },
-            .gateway_refused => .gateway_refused,
-            .gateway_unavailable => .gateway_unavailable,
-            .store_failed => .store_failed,
-            .reload_failed => .reload_failed,
-        };
-        try std.testing.expect(result == .saved);
-        try std.testing.expectEqual(@as(usize, 1), fixture.store_calls);
-        try expectApiKeyAllocationCleared(&runtime, &backing, sentinel);
-    }
-
-    {
-        var backing: [16384]u8 = [_]u8{0xa5} ** 16384;
-        var fixed = std.heap.FixedBufferAllocator.init(&backing);
-        const alloc = fixed.allocator();
-        var runtime: Runtime = .{};
-        defer runtime.deinit(alloc);
-        var fixture: ApiKeySaveFixture = .{ .validation = .refused };
-        try enterTestApiKey(&runtime, alloc, sentinel);
-
-        var outcome = performApiKeySave(alloc, runtime.api_key_input.items, .{
-            .ctx = @ptrCast(&fixture),
-            .validator = fixture.validator(),
-            .store = ApiKeySaveFixture.store,
-            .loader = ApiKeySaveFixture.load,
-        });
-        defer outcome.deinit(alloc);
-        runtime.exitApiKeyStage(alloc, .saved);
-        const result: ApiKeySaveResult = switch (outcome) {
-            .loaded => .{ .saved = true },
-            .gateway_refused => .gateway_refused,
-            .gateway_unavailable => .gateway_unavailable,
-            .store_failed => .store_failed,
-            .reload_failed => .reload_failed,
-        };
-        try std.testing.expect(result == .gateway_refused);
-        try std.testing.expectEqual(@as(usize, 0), fixture.store_calls);
-        try expectApiKeyAllocationCleared(&runtime, &backing, sentinel);
-    }
-
-    {
-        var backing: [16384]u8 = [_]u8{0xa5} ** 16384;
-        var fixed = std.heap.FixedBufferAllocator.init(&backing);
-        const alloc = fixed.allocator();
-        var runtime: Runtime = .{};
-        defer runtime.deinit(alloc);
-        var fixture: ApiKeySaveFixture = .{ .fail_store = true };
-        try enterTestApiKey(&runtime, alloc, sentinel);
-
-        var outcome = performApiKeySave(alloc, runtime.api_key_input.items, .{
-            .ctx = @ptrCast(&fixture),
-            .validator = fixture.validator(),
-            .store = ApiKeySaveFixture.store,
-            .loader = ApiKeySaveFixture.load,
-        });
-        defer outcome.deinit(alloc);
-        runtime.exitApiKeyStage(alloc, .saved);
-        const result: ApiKeySaveResult = switch (outcome) {
-            .loaded => .{ .saved = true },
-            .gateway_refused => .gateway_refused,
-            .gateway_unavailable => .gateway_unavailable,
-            .store_failed => .store_failed,
-            .reload_failed => .reload_failed,
-        };
-        try std.testing.expect(result == .store_failed);
-        try std.testing.expectEqual(@as(usize, 1), fixture.store_calls);
-        try expectApiKeyAllocationCleared(&runtime, &backing, sentinel);
-    }
-
-    {
-        var backing: [16384]u8 = [_]u8{0xa5} ** 16384;
-        var fixed = std.heap.FixedBufferAllocator.init(&backing);
-        const alloc = fixed.allocator();
-        var runtime: Runtime = .{};
-        defer runtime.deinit(alloc);
-        var fixture: ApiKeySaveFixture = .{ .fail_load = true };
-        try enterTestApiKey(&runtime, alloc, sentinel);
-
-        var outcome = performApiKeySave(alloc, runtime.api_key_input.items, .{
-            .ctx = @ptrCast(&fixture),
-            .validator = fixture.validator(),
-            .store = ApiKeySaveFixture.store,
-            .loader = ApiKeySaveFixture.load,
-        });
-        defer outcome.deinit(alloc);
-        runtime.exitApiKeyStage(alloc, .saved);
-        const result: ApiKeySaveResult = switch (outcome) {
-            .loaded => .{ .saved = true },
-            .gateway_refused => .gateway_refused,
-            .gateway_unavailable => .gateway_unavailable,
-            .store_failed => .store_failed,
-            .reload_failed => .reload_failed,
-        };
-        try std.testing.expect(result == .reload_failed);
-        try expectApiKeyAllocationCleared(&runtime, &backing, sentinel);
-    }
-
-    {
-        var backing: [16384]u8 = [_]u8{0xa5} ** 16384;
-        var fixed = std.heap.FixedBufferAllocator.init(&backing);
-        const alloc = fixed.allocator();
-        var runtime: Runtime = .{};
-        defer runtime.deinit(alloc);
-        try enterTestApiKey(&runtime, alloc, sentinel);
-
-        runtime.openSwitchCredentialPicker(alloc);
-        try expectApiKeyAllocationCleared(&runtime, &backing, sentinel);
-    }
-
-    {
-        var backing: [16384]u8 = [_]u8{0xa5} ** 16384;
-        var fixed = std.heap.FixedBufferAllocator.init(&backing);
-        const alloc = fixed.allocator();
-        var runtime: Runtime = .{};
-        try enterTestApiKey(&runtime, alloc, sentinel);
-
-        runtime.deinit(alloc);
-        try expectApiKeyAllocationCleared(&runtime, &backing, sentinel);
-    }
 }
