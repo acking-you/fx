@@ -6835,6 +6835,7 @@ describe("acp: model-independent", () => {
         await waitForCondition(
           "ACP one-off child retirement",
           () => !existsSync(control.path),
+          TIMEOUT,
         );
         client = await AcpClient.create({
           cwd: root.workspace,
