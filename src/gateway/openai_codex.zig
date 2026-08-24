@@ -4,6 +4,7 @@ const stream_provider = @import("../core/agent/stream_provider.zig");
 const responses_compaction_binding = @import("../core/gateway/responses_compaction_binding.zig");
 const responses_compaction_provider = @import("../core/gateway/responses_compaction_provider.zig");
 const responses_request_protocol = @import("../core/gateway/responses_protocol.zig");
+const responses_search = @import("../core/gateway/responses_search.zig");
 const io_mod = @import("../core/shared/io.zig");
 const types = @import("../core/shared/types.zig");
 const gateway_client = @import("client.zig");
@@ -43,6 +44,12 @@ fn buildRequestBound(
 
     var tools = try responses_request_protocol.prepareTools(alloc, request.tools);
     defer tools.deinit(alloc);
+    const projected_tools = try responses_search.projectNamespaceToolAlloc(
+        alloc,
+        tools.base_json,
+        .{ .include_web_search = containsAdvertisedTool(request.tools, "web_search") },
+    );
+    defer alloc.free(projected_tools);
 
     var schema_json: ?[]u8 = null;
     defer if (schema_json) |schema| alloc.free(schema);
@@ -72,7 +79,7 @@ fn buildRequestBound(
         .session_id = session_id,
         .model = wire_model,
         .tool_registry = request.tools.registry,
-        .serialized_tools = tools.base_json,
+        .serialized_tools = projected_tools,
         .selected_dynamic_tool_schemas = tools.dynamic_json,
         .messages = request.messages,
         .tool_choice = request.tool_choice,
@@ -92,6 +99,13 @@ fn buildRequestBound(
         .reasoning_summary = "auto",
         .function_tools_strict = false,
     });
+}
+
+fn containsAdvertisedTool(tools: stream_provider.ToolSelection, name: []const u8) bool {
+    for (tools.advertised_names) |advertised| {
+        if (std.mem.eql(u8, advertised, name)) return true;
+    }
+    return false;
 }
 
 fn buildBoundProviderIdentity(
@@ -302,6 +316,41 @@ test "OpenAI Codex standard requests omit the priority service tier" {
     defer std.testing.allocator.free(body);
 
     try std.testing.expect(std.mem.find(u8, body, "\"service_tier\"") == null);
+}
+
+test "OpenAI Codex projects local web search to the reserved namespace" {
+    const web_search_schema = model_tool_schema.FunctionSchema{
+        .name = "web_search",
+        .description = "Search",
+        .input_schema = .{},
+    };
+    const messages = [_]types.ChatMessage{.{ .role = .user, .content = "Search for Zig." }};
+    const body = try buildRequest(std.testing.allocator, .{
+        .model = "gpt-5.6-sol",
+        .messages = &messages,
+        .tools = .{ .additional_functions = &.{web_search_schema} },
+        .tool_choice = .auto,
+        .provider_options = .{},
+    });
+    defer std.testing.allocator.free(body);
+
+    try std.testing.expect(std.mem.find(u8, body, "\"type\":\"namespace\",\"name\":\"web\"") != null);
+    try std.testing.expect(std.mem.find(u8, body, "\"name\":\"web_search\"") == null);
+}
+
+test "OpenAI Codex appends the reserved namespace for provider-executed search projection" {
+    const messages = [_]types.ChatMessage{.{ .role = .user, .content = "Search for Zig." }};
+    const body = try buildRequest(std.testing.allocator, .{
+        .model = "gpt-5.6-sol",
+        .messages = &messages,
+        .tools = .{ .advertised_names = &.{"web_search"} },
+        .tool_choice = .auto,
+        .provider_options = .{},
+    });
+    defer std.testing.allocator.free(body);
+
+    try std.testing.expect(std.mem.find(u8, body, "\"type\":\"namespace\",\"name\":\"web\"") != null);
+    try std.testing.expect(std.mem.find(u8, body, "\"name\":\"web_search\"") == null);
 }
 
 test "OpenAI Codex serializes each verified image directly once" {
