@@ -1,28 +1,21 @@
 const std = @import("std");
 const gateway_client = @import("../../gateway/client.zig");
-const gateway_json = @import("../../core/gateway/gateway_json.zig");
-const provider_route = @import("../../core/gateway/provider_route.zig");
-const responses_compaction_binding = @import("../../core/gateway/responses_compaction_binding.zig");
-const responses_protocol = @import("../../core/gateway/responses_protocol.zig");
-const stream_provider = @import("../../core/agent/stream_provider.zig");
 const permission_auto_classifier = @import("../../core/permissions/auto_classifier.zig");
 const session_usage = @import("../../core/session/session_usage.zig");
 const debug_trace = @import("../../core/shared/debug_trace.zig");
 const types = @import("../../core/shared/types.zig");
-const openai_codex_models = @import("../../gateway/openai_codex_models.zig");
+const stream_provider = @import("../../core/agent/stream_provider.zig");
+const credential_authority = @import("../../core/auth/credential_authority.zig");
+const vercel_protocol = @import("../../gateway/vercel_protocol.zig");
 
 const Allocator = std.mem.Allocator;
 
 const single_transport_attempt: usize = 1;
-const guardian_prompt_cache_key_prefix = "guardian:";
 
 const StreamFn = *const fn (
     *anyopaque,
     Allocator,
     []const u8,
-    ?[]const u8,
-    ?types.CredentialSource,
-    ?[]const u8,
     ?[]const u8,
     []const u8,
     usize,
@@ -37,10 +30,8 @@ var default_stream_ctx: u8 = 0;
 
 const GatewayConfig = struct {
     api_key: []const u8,
-    team: ?[]const u8 = null,
     credential_source: ?types.CredentialSource = null,
-    account_id: ?[]const u8 = null,
-    session_id: ?[]const u8 = null,
+    team: ?[]const u8 = null,
     chat_url: []const u8,
     cancel_flag: ?*std.atomic.Value(bool) = null,
     usage: ?*session_usage.Usage = null,
@@ -59,10 +50,8 @@ fn reviewGateway(
 ) anyerror!permission_auto_classifier.ParseOutcome {
     return reviewGatewayConfig(.{
         .api_key = input.credential,
-        .team = input.tenant,
         .credential_source = input.credential_source,
-        .account_id = input.account_id,
-        .session_id = input.session_id,
+        .team = input.tenant,
         .chat_url = input.endpoint,
         .cancel_flag = input.cancel_flag,
         .usage = input.usage,
@@ -76,94 +65,37 @@ fn reviewGatewayConfig(
     request: permission_auto_classifier.ReviewRequest,
 ) !permission_auto_classifier.ParseOutcome {
     var local = config;
-    const reviewer_model = if (routeForSource(local.credential_source) == .codex_responses_oauth)
-        openai_codex_models.reviewer_model
-    else
-        permission_auto_classifier.gateway_reviewer_model;
-    return permission_auto_classifier.Reviewer.withTransportModel(
+    return permission_auto_classifier.Reviewer.withTransport(
         .{
             .context = @ptrCast(&local),
-            .build_fn = buildProviderReviewPayload,
             .send_fn = sendGatewayReview,
+            .build_fn = buildGatewayReview,
         },
         local.cancel_flag,
         permission_auto_classifier.Reviewer.default_timeout_ms,
-        reviewer_model,
     ).review(alloc, request);
 }
 
-fn buildProviderReviewPayload(
-    raw_ctx: *anyopaque,
+fn buildGatewayReview(
+    _: *anyopaque,
     alloc: Allocator,
-    model: []const u8,
+    _: []const u8,
     tools_json: []const u8,
     messages: []const types.ChatMessage,
     target_call_id: []const u8,
     deadline: std.Io.Clock.Timestamp,
     cancel_flag: *std.atomic.Value(bool),
 ) ![]u8 {
-    const config: *GatewayConfig = @ptrCast(@alignCast(raw_ctx));
-    const route = routeForSource(config.credential_source);
-    if (route == .vercel_gateway) {
-        return gateway_json.buildGatewayPendingToolReviewRequestBodyWithMaxOutputTokens(
-            alloc,
-            tools_json,
-            messages,
-            target_call_id,
-            .{},
-            2048,
-            deadline,
-            cancel_flag,
-        );
-    }
-
-    const expanded = try gateway_json.expandPendingToolReviewMessages(
+    return vercel_protocol.buildGatewayPendingToolReviewRequestBodyWithMaxOutputTokens(
         alloc,
+        tools_json,
         messages,
         target_call_id,
+        .{},
+        2048,
         deadline,
         cancel_flag,
     );
-    defer alloc.free(expanded);
-
-    const prompt_cache_key = if (config.session_id) |session_id|
-        try std.fmt.allocPrint(
-            alloc,
-            guardian_prompt_cache_key_prefix ++ "{s}",
-            .{session_id},
-        )
-    else
-        null;
-    defer if (prompt_cache_key) |key| alloc.free(key);
-
-    return responses_protocol.buildRequest(alloc, .{
-        .credential_source = config.credential_source,
-        .model = provider_route.wireModel(route, model),
-        .serialized_tools = tools_json,
-        .messages = expanded,
-        .tool_choice = .auto,
-        .provider_options = .{ .parallel_tool_calls = false },
-        .max_output_tokens = if (route.contract().supports_max_output_tokens) 2048 else null,
-        .budget = stream_provider.BuildBudget{
-            .deadline = deadline,
-            .cancel_flag = cancel_flag,
-        },
-    }, .{
-        .capabilities = .{
-            .supports_max_output_tokens = route.contract().supports_max_output_tokens,
-        },
-        .prompt_cache_key = prompt_cache_key,
-        .tool_choice_json = "\"required\"",
-        .reasoning_summary = if (route == .codex_responses_oauth) "auto" else null,
-        .function_tools_strict = false,
-    });
-}
-
-fn routeForSource(source: ?types.CredentialSource) provider_route.ProviderRoute {
-    return if (source) |value|
-        provider_route.fromCredentialSource(value) orelse .vercel_gateway
-    else
-        .vercel_gateway;
 }
 
 const OwnedStream = struct {
@@ -185,8 +117,6 @@ fn sendGatewayReview(
     cancel_flag: *std.atomic.Value(bool),
 ) error{OutOfMemory}!permission_auto_classifier.TransportOutcome {
     const config: *GatewayConfig = @ptrCast(@alignCast(raw_ctx));
-    const route = routeForSource(config.credential_source);
-    const wire_model = provider_route.wireModel(route, model);
     debug_trace.logf(
         "permission",
         "event=auto_review_transport_start model={s} retry_count={d}",
@@ -198,7 +128,7 @@ fn sendGatewayReview(
         return .permanent_failure;
     }
 
-    const usage_observation = session_usage.GatewayObservation.begin(config.usage) catch |err| {
+    const usage_observation = session_usage.InvocationObservation.begin(config.usage) catch |err| {
         debug_trace.logf(
             "permission",
             "event=auto_review_usage result=permanent_failure phase=begin reason={s}",
@@ -212,10 +142,7 @@ fn sendGatewayReview(
         alloc,
         config.api_key,
         config.team,
-        config.credential_source,
-        config.account_id,
-        config.session_id,
-        wire_model,
+        model,
         single_transport_attempt,
         config.chat_url,
         payload,
@@ -238,24 +165,15 @@ fn sendGatewayReview(
     };
     var stream_owned = true;
     defer if (stream_owned) stream.deinit(alloc);
-    (if (route == .vercel_gateway)
+    const usage_outcome = usageOutcome(config, stream.completion);
+    (if (stream.status == .ok)
         usage_observation.complete(
             config.usage_allocator,
-            stream.status,
             stream.completion,
-            gateway_client.generationBaseUrl(),
-            config.team,
+            usage_outcome,
         )
     else
-        usage_observation.completeDirect(
-            config.usage_allocator,
-            wire_model,
-            stream.completion.usage,
-            .{
-                .http_ok = stream.status == .ok,
-                .terminal_finish_reason = stream.completion.finish_reason,
-            },
-        )) catch |err| {
+        usage_observation.fail(.unbilled)) catch |err| {
         debug_trace.logf(
             "permission",
             "event=auto_review_usage result=permanent_failure phase=completion reason={s}",
@@ -263,11 +181,13 @@ fn sendGatewayReview(
         );
         return .permanent_failure;
     };
-    if (route == .vercel_gateway) {
-        if (config.usage) |ledger| {
-            ledger.startReconciliation(config.usage_allocator, config.api_key);
-        }
-    }
+    if (stream.status == .ok and std.meta.activeTag(usage_outcome) == .deferred) if (config.usage) |ledger| {
+        ledger.startDeferredReconciliation(
+            config.usage_allocator,
+            usage_outcome.deferred,
+            config.api_key,
+        );
+    };
 
     if (cancel_flag.load(.seq_cst)) {
         return .cancelled;
@@ -301,6 +221,30 @@ fn sendGatewayReview(
     } };
 }
 
+fn usageOutcome(
+    config: *const GatewayConfig,
+    completion: types.ModelCompletion,
+) stream_provider.UsageOutcome {
+    const generation_id = completion.generation_id orelse
+        return .{ .unavailable = .possibly_billed };
+    const source = config.credential_source orelse .ai_gateway_api_key;
+    const reference = stream_provider.DeferredUsageReference{
+        .provider = .gateway,
+        .generation_id = generation_id,
+        .scope = gateway_client.generationBaseUrl(),
+        .tenant = config.team,
+        .credential_source = source,
+        .credential_identity = credential_authority.derive(
+            source,
+            null,
+        ),
+    };
+    return if (completion.billing != null)
+        .{ .immediate = reference }
+    else
+        .{ .deferred = reference };
+}
+
 fn mapTransportError(
     err: anyerror,
     cancel_flag: *std.atomic.Value(bool),
@@ -330,9 +274,6 @@ fn streamGatewayReviewer(
     alloc: Allocator,
     api_key: []const u8,
     team: ?[]const u8,
-    credential_source: ?types.CredentialSource,
-    account_id: ?[]const u8,
-    session_id: ?[]const u8,
     model: []const u8,
     retry_count: usize,
     chat_url: []const u8,
@@ -341,30 +282,11 @@ fn streamGatewayReviewer(
     delivery: *gateway_client.DeliveryCertainty,
     cancel_flag: *std.atomic.Value(bool),
 ) !gateway_client.StreamResult {
-    const binding: ?types.ResponsesCompactionProviderBinding = if (credential_source) |source|
-        if (provider_route.fromCredentialSource(source)) |route|
-            if (route.contract().wire_api == .openai_responses)
-                try responses_compaction_binding.buildFromEnvironmentAlloc(
-                    alloc,
-                    source,
-                    api_key,
-                    account_id,
-                )
-            else
-                null
-        else
-            null
-    else
-        null;
-    defer if (binding) |owned| types.freeResponsesCompactionProviderBinding(alloc, owned);
     return gateway_client.streamGatewayRequiredToolCompletionBounded(
         alloc,
         .{
             .api_key = api_key,
             .team = team,
-            .credential_source = credential_source,
-            .responses_compaction_binding = if (binding) |owned| owned.view() else null,
-            .session_id = session_id,
             .model = model,
             .retry_count = retry_count,
             .chat_url = chat_url,
@@ -394,22 +316,12 @@ const FakeStream = struct {
     saw_single_attempt_only: bool = true,
     saw_expected_model_only: bool = true,
     saw_required_tool_payload: bool = true,
-    saw_expected_source_only: bool = true,
-    saw_responses_payload: bool = true,
-    saw_expected_prompt_cache_key: bool = true,
-    expected_model: []const u8 = "zai/glm-5.2",
-    expected_source: ?types.CredentialSource = null,
-    expected_prompt_cache_key: ?[]const u8 = null,
-    expect_responses_payload: bool = false,
     deadlines: [2]?std.Io.Clock.Timestamp = .{ null, null },
 
     fn execute(
         raw_ctx: *anyopaque,
         alloc: Allocator,
         _: []const u8,
-        _: ?[]const u8,
-        source: ?types.CredentialSource,
-        _: ?[]const u8,
         _: ?[]const u8,
         model: []const u8,
         retry_count: usize,
@@ -422,28 +334,7 @@ const FakeStream = struct {
         const self: *FakeStream = @ptrCast(@alignCast(raw_ctx));
         if (self.calls < self.deadlines.len) self.deadlines[self.calls] = deadline;
         self.saw_single_attempt_only = self.saw_single_attempt_only and retry_count == 1;
-        self.saw_expected_model_only = self.saw_expected_model_only and std.mem.eql(u8, model, self.expected_model);
-        self.saw_expected_source_only = self.saw_expected_source_only and source == self.expected_source;
-        if (self.expect_responses_payload) {
-            const expected_model = try std.fmt.allocPrint(alloc, "\"model\":\"{s}\"", .{self.expected_model});
-            defer alloc.free(expected_model);
-            self.saw_responses_payload = self.saw_responses_payload and
-                std.mem.find(u8, payload, "\"input\":[") != null and
-                std.mem.find(u8, payload, expected_model) != null and
-                std.mem.find(u8, payload, "\"tool_choice\":\"required\"") != null;
-        }
-        if (self.expected_prompt_cache_key) |expected| {
-            var parsed = try std.json.parseFromSlice(std.json.Value, alloc, payload, .{});
-            defer parsed.deinit();
-            const actual = if (parsed.value == .object)
-                parsed.value.object.get("prompt_cache_key")
-            else
-                null;
-            self.saw_expected_prompt_cache_key = self.saw_expected_prompt_cache_key and
-                actual != null and
-                actual.? == .string and
-                std.mem.eql(u8, actual.?.string, expected);
-        }
+        self.saw_expected_model_only = self.saw_expected_model_only and std.mem.eql(u8, model, "moonshotai/kimi-k3");
         self.saw_required_tool_payload = self.saw_required_tool_payload and
             std.mem.find(u8, payload, "permission_decision") != null;
         const outcome = self.outcomes[@min(self.calls, self.outcomes.len - 1)];
@@ -474,7 +365,7 @@ fn validStream(alloc: Allocator) !gateway_client.StreamResult {
     errdefer alloc.free(name);
     const arguments = try alloc.dupe(
         u8,
-        "{\"risk\":\"low\",\"authorization\":\"medium\",\"decision\":\"allow\",\"rationale\":\"Narrow authorized action.\"}",
+        "{\"risk\":\"low\",\"decision\":\"clear\",\"rationale\":\"Narrow authorized action.\"}",
     );
     errdefer alloc.free(arguments);
     const tool_calls = try alloc.alloc(types.ToolCall, 1);
@@ -514,7 +405,6 @@ fn testRequest() permission_auto_classifier.ReviewRequest {
         }},
     };
     return .{
-        .workspace_root = "/tmp/workspace",
         .review_turn = .{
             .model = "openai/gpt-5",
             .pending_assistant = pending,
@@ -527,7 +417,6 @@ fn testRequest() permission_auto_classifier.ReviewRequest {
             .tool_name = "list_files",
             .arguments_json = "{\"path\":\".\"}",
         } },
-        .escalation_reason = "No deterministic rule settled the call.",
     };
 }
 
@@ -548,77 +437,13 @@ test "gateway automatic reviewer transport is single-attempt" {
     defer outcome.deinit(std.testing.allocator);
 
     switch (outcome) {
-        .valid => |result| try std.testing.expectEqual(permission_auto_classifier.Decision.allow, result.decision),
+        .valid => |result| try std.testing.expectEqual(permission_auto_classifier.Decision.clear, result.decision),
         .invalid => return error.TestExpectedEqual,
     }
     try std.testing.expectEqual(@as(usize, 1), fake.calls);
     try std.testing.expect(fake.saw_single_attempt_only);
     try std.testing.expect(fake.saw_expected_model_only);
     try std.testing.expect(fake.saw_required_tool_payload);
-}
-
-test "direct automatic reviewer uses Responses route without Gateway reconciliation" {
-    const alloc = std.testing.allocator;
-    var usage = session_usage.Usage.initFresh();
-    defer usage.deinit(alloc);
-    var fake = FakeStream{
-        .outcomes = &.{.valid},
-        .expected_model = "gpt-5.4",
-        .expected_source = .openai_api_key,
-        .expected_prompt_cache_key = "guardian:parent-session-1",
-        .expect_responses_payload = true,
-    };
-    const config = GatewayConfig{
-        .api_key = "openai-test-key",
-        .credential_source = .openai_api_key,
-        .session_id = "parent-session-1",
-        .chat_url = "https://ai-gateway.vercel.sh/v3/ai/language-model",
-        .usage = &usage,
-        .usage_allocator = alloc,
-        .stream_ctx = @ptrCast(&fake),
-        .stream_fn = FakeStream.execute,
-    };
-
-    var outcome = try reviewGatewayConfig(config, alloc, testRequest());
-    defer outcome.deinit(alloc);
-    try std.testing.expect(fake.saw_expected_source_only);
-    try std.testing.expect(fake.saw_expected_model_only);
-    try std.testing.expect(fake.saw_responses_payload);
-    try std.testing.expect(fake.saw_expected_prompt_cache_key);
-
-    var snapshot = try usage.snapshot(alloc);
-    defer snapshot.deinit(alloc);
-    try std.testing.expectEqual(@as(usize, 0), snapshot.pending.len);
-    try std.testing.expectEqual(session_usage.Availability.incomplete, snapshot.billing);
-    try std.testing.expectEqual(@as(usize, 1), snapshot.incidents.len);
-    try std.testing.expectEqual(@as(usize, 0), snapshot.models.len);
-}
-
-test "Codex automatic reviewer uses the shared Responses route and reviewer model" {
-    const alloc = std.testing.allocator;
-    var fake = FakeStream{
-        .outcomes = &.{.valid},
-        .expected_model = openai_codex_models.reviewer_model,
-        .expected_source = .chatgpt_subscription,
-        .expected_prompt_cache_key = "guardian:codex-parent-session",
-        .expect_responses_payload = true,
-    };
-    const config = GatewayConfig{
-        .api_key = "codex-test-token",
-        .credential_source = .chatgpt_subscription,
-        .account_id = "codex-account",
-        .session_id = "codex-parent-session",
-        .chat_url = "https://ai-gateway.vercel.sh/v3/ai/language-model",
-        .stream_ctx = @ptrCast(&fake),
-        .stream_fn = FakeStream.execute,
-    };
-
-    var outcome = try reviewGatewayConfig(config, alloc, testRequest());
-    defer outcome.deinit(alloc);
-    try std.testing.expect(fake.saw_expected_source_only);
-    try std.testing.expect(fake.saw_expected_model_only);
-    try std.testing.expect(fake.saw_responses_payload);
-    try std.testing.expect(fake.saw_expected_prompt_cache_key);
 }
 
 test "gateway automatic reviewer records its generation in session usage" {

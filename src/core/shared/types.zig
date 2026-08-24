@@ -1114,7 +1114,7 @@ pub const Usage = struct {
 
 /// Exact usage metadata returned by a completed Gateway stream. `model` is
 /// owned by the completion carrying this value.
-pub const GatewayBilling = struct {
+pub const ProviderBilling = struct {
     created_at_ms: i64,
     model: []const u8,
     total_cost: f64,
@@ -1183,7 +1183,7 @@ pub const ProviderFinishReason = enum {
     }
 };
 
-pub const GatewayCompletion = struct {
+pub const ModelCompletion = struct {
     content: ?[]const u8 = null,
     responses_message_output_index: ?u32 = null,
     /// Full streamed reasoning body, retained untruncated so the next step of
@@ -1204,7 +1204,7 @@ pub const GatewayCompletion = struct {
     url_citations: []const ResponsesUrlCitation = &.{},
     tool_calls: []const ToolCall = &.{},
     generation_id: ?[]const u8 = null,
-    billing: ?GatewayBilling = null,
+    billing: ?ProviderBilling = null,
     /// Gateway generation or resolved-model metadata was malformed or conflicting.
     generation_metadata_invalid: bool = false,
     /// An earlier delivery may have billed outside this generation identity.
@@ -1391,7 +1391,7 @@ pub fn allToolCallsProviderExecuted(tool_calls: []const ToolCall) bool {
     return true;
 }
 
-pub fn classifyProviderCompletion(completion: GatewayCompletion) ProviderCompletionDisposition {
+pub fn classifyProviderCompletion(completion: ModelCompletion) ProviderCompletionDisposition {
     const finish_reason = completion.finish_reason orelse return .interrupted;
     return switch (finish_reason) {
         .provider_error, .content_filter => .provider_failure,
@@ -1516,7 +1516,7 @@ pub const AuthoritativeToolAdmission = union(enum) {
     reject_duplicate_identity,
 };
 
-pub fn authoritativeToolAdmission(completion: GatewayCompletion) AuthoritativeToolAdmission {
+pub fn authoritativeToolAdmission(completion: ModelCompletion) AuthoritativeToolAdmission {
     if (completion.provider_result_identity_failure) |failure| {
         return .{ .reject_malformed_provider_result = failure };
     }
@@ -1907,6 +1907,8 @@ pub const ReasoningEffort = union(enum) {
 pub const ToolPermissionDenialReason = enum {
     user_denied,
     auto_denied,
+    review_caution,
+    review_unavailable,
     policy_denied,
     permission_required,
 };
@@ -3275,7 +3277,7 @@ test "public types remain constructible" {
     try std.testing.expectEqual(ChatRole.assistant, chat.role);
     try std.testing.expectEqualStrings("ok", chat.tool_calls[0].provider_result.?);
 
-    const completion = GatewayCompletion{
+    const completion = ModelCompletion{
         .content = "done",
         .tool_calls = &.{tool_call},
         .finish_reason = .stop,

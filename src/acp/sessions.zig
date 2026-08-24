@@ -13,11 +13,12 @@ const js_host_session_store = @import("../core/session/js_host_session_store.zig
 const session_runtime = @import("../core/session/session.zig");
 const mcp_runtime = @import("../core/mcp/mcp_runtime.zig");
 const model_catalog = @import("../core/gateway/model_catalog.zig");
-const model_capabilities = @import("../core/config/model_capabilities.zig");
+const provider_set = @import("../core/gateway/provider_set.zig");
 const host = @import("../core/hosts/host.zig");
 const host_target = @import("../core/hosts/target.zig");
 const credentials = @import("../core/auth/credentials.zig");
 const model_provider = @import("../core/config/model_provider.zig");
+const model_capabilities = @import("../core/config/model_capabilities.zig");
 const mode_registry = @import("../core/modes/mode_registry.zig");
 const subagent_resume_admission = @import("../core/subagent/resume_admission.zig");
 const types = @import("../core/shared/types.zig");
@@ -44,9 +45,9 @@ pub fn handleNewWasmSession(state: *server.ServerState, alloc: Allocator, msg: *
     const model = try alloc.dupe(u8, durable.preferences.model);
     var model_owned = true;
     defer if (model_owned) alloc.free(model);
-    var session_rt = session_runtime.SessionRuntime.init(
+    var session_rt = session_runtime.SessionRuntime.initWithProviders(
         state.cfg.max_history_turns,
-        state.cfg.gateway_provider.generation_usage,
+        state.cfg.provider_set.deferredUsageProviders(),
     );
     var session_rt_owned = true;
     defer if (session_rt_owned) session_rt.deinit(alloc);
@@ -194,9 +195,9 @@ pub fn handleNewSession(state: *server.ServerState, alloc: Allocator, msg: *json
     defer if (model_owned) alloc.free(model_copy);
     const session_dir = try session_store.sessionDirPath(alloc, store.sessions_dir, writable.active_id);
     defer alloc.free(session_dir);
-    var session_rt = session_runtime.SessionRuntime.init(
+    var session_rt = session_runtime.SessionRuntime.initWithProviders(
         state.cfg.max_history_turns,
-        state.cfg.gateway_provider.generation_usage,
+        state.cfg.provider_set.deferredUsageProviders(),
     );
     var session_rt_owned = true;
     defer if (session_rt_owned) session_rt.deinit(alloc);
@@ -263,10 +264,14 @@ fn writeNewSessionResponse(
         state.capability_resolver.catalogEntries(),
     );
     try out.writer.writeAll(",");
-    const active_capabilities = state.capability_resolver.available(state.active_session.?.model);
-    try writeEffortConfigOption(&out.writer, state.active_session.?.effort, active_capabilities);
+    const active = &state.active_session.?;
+    const active_capabilities = state.capability_resolver.available(
+        active.model,
+        state.cfg.provider_set.select(active.provider).fallbackModelCapabilities(active.model),
+    );
+    try writeEffortConfigOption(&out.writer, active.effort, active_capabilities);
     try out.writer.writeAll(",");
-    try writeFastModeConfigOption(&out.writer, state.active_session.?.fast_mode, active_capabilities.supports_fast_mode);
+    try writeFastModeConfigOption(&out.writer, active.fast_mode, active_capabilities.supports_fast_mode);
     try out.writer.writeAll(",");
     try writeModeConfigOption(
         &out.writer,
@@ -326,7 +331,7 @@ pub fn handleLoadWasmSession(state: *server.ServerState, alloc: Allocator, msg: 
     const model_copy = try alloc.dupe(u8, loaded.state.preferences.model);
     var model_owned = true;
     defer if (model_owned) alloc.free(model_copy);
-    var session_rt = session_runtime.SessionRuntime.init(state.cfg.max_history_turns, state.cfg.gateway_provider.generation_usage);
+    var session_rt = session_runtime.SessionRuntime.initWithProviders(state.cfg.max_history_turns, state.cfg.provider_set.deferredUsageProviders());
     var session_rt_owned = true;
     defer if (session_rt_owned) session_rt.deinit(alloc);
     try session_rt.restoreWithPermissionState(
@@ -557,7 +562,7 @@ fn handleRestoreSession(
     const sid_copy = try alloc.dupe(u8, writable.state.id);
     var sid_owned = true;
     defer if (sid_owned) alloc.free(sid_copy);
-    const effective_provider = if (state.process_provider_override)
+    const effective_provider = if (state.process_model_override)
         state.provider
     else
         writable.state.preferences.provider;
@@ -580,9 +585,9 @@ fn handleRestoreSession(
     var model_owned = true;
     defer if (model_owned) alloc.free(model_copy);
 
-    var session_rt = session_runtime.SessionRuntime.init(
+    var session_rt = session_runtime.SessionRuntime.initWithProviders(
         state.cfg.max_history_turns,
-        state.cfg.gateway_provider.generation_usage,
+        state.cfg.provider_set.deferredUsageProviders(),
     );
     var session_rt_owned = true;
     defer if (session_rt_owned) session_rt.deinit(alloc);
@@ -712,7 +717,10 @@ fn writeLoadSessionResponse(
     );
     try out.writer.writeAll(",");
     const active = &state.active_session.?;
-    const active_capabilities = state.capability_resolver.available(model);
+    const active_capabilities = state.capability_resolver.available(
+        model,
+        state.cfg.provider_set.select(active.provider).fallbackModelCapabilities(model),
+    );
     try writeEffortConfigOption(&out.writer, active.effort, active_capabilities);
     try out.writer.writeAll(",");
     try writeFastModeConfigOption(&out.writer, active.fast_mode, active_capabilities.supports_fast_mode);
@@ -807,13 +815,18 @@ fn activateSession(
     };
     server.enableSubagentHost(state);
     state.active_session.?.session_rt.attachProfileUsagePublisher(state.alloc);
-    if (state.credential_source == .chatgpt_subscription or state.credential_source == .grok_subscription) {
+    if (state.cfg.provider_set.select(activation.provider).deferred_usage == null) {
         state.active_session.?.session_rt.usage.clearReconciliationCredential();
-    } else {
-        state.active_session.?.session_rt.usage.startReconciliation(
+    } else if (state.credential_source) |source| {
+        state.active_session.?.session_rt.usage.replaceProviderReconciliationCredential(
             state.alloc,
+            activation.provider,
+            source,
+            state.account_id,
             state.api_key,
         );
+    } else {
+        state.active_session.?.session_rt.usage.clearReconciliationCredential();
     }
     activateManagedBackground(state, store);
 }
@@ -1038,9 +1051,7 @@ fn buildSlashCommandsJson(alloc: Allocator) ![]u8 {
         .{ .name = "reset", .description = "Reset session", .hint = null },
         .{ .name = "help", .description = "Show available commands", .hint = null },
         .{ .name = "status", .description = "Show current status", .hint = null },
-        .{ .name = "ps", .description = "Show the active turn and background processes", .hint = null },
         .{ .name = "model", .description = "Switch model", .hint = "model name" },
-        .{ .name = "effort", .description = "Show or set reasoning effort", .hint = "auto or supported level" },
         .{ .name = "permissions", .description = "Show permission settings", .hint = null },
         .{ .name = "allowlist", .description = "Manage persistent allow rules", .hint = "add command \"git *\"" },
         .{ .name = "rules", .description = "Show active rules", .hint = null },
@@ -1118,40 +1129,6 @@ pub fn writeModelConfigOption(
     try w.writeAll("]}");
 }
 
-pub fn writeEffortConfigOption(
-    w: *std.Io.Writer,
-    current: types.ReasoningEffort,
-    capabilities: model_capabilities.Capabilities,
-) !void {
-    const effective_current = if (model_capabilities.reasoningEffortSupported(capabilities, current)) current else types.ReasoningEffort.auto;
-    try w.writeAll("{\"id\":\"effort\",\"name\":\"Reasoning Effort\",\"description\":\"Controls how deeply the selected model reasons\",\"category\":\"model\",\"type\":\"select\",\"currentValue\":");
-    try writeJsonStr(effective_current.label(), w);
-    try w.writeAll(",\"options\":[{\"value\":\"auto\",\"name\":\"Default\"}");
-    for (capabilities.reasoning_efforts.slice()) |effort| {
-        if (effort.isDefault()) continue;
-        try w.writeAll(",{\"value\":");
-        try writeJsonStr(effort.label(), w);
-        try w.writeAll(",\"name\":");
-        try writeJsonStr(effort.displayLabel(), w);
-        try w.writeAll("}");
-    }
-    try w.writeAll("]}");
-}
-
-pub fn writeFastModeConfigOption(
-    w: *std.Io.Writer,
-    current: bool,
-    supports_fast_mode: bool,
-) !void {
-    try w.writeAll("{\"id\":\"fast_mode\",\"name\":\"Fast Mode\",\"description\":\"Uses the provider's lower-latency service tier when supported\",\"category\":\"model\",\"type\":\"select\",\"currentValue\":");
-    try writeJsonStr(if (current and supports_fast_mode) "fast" else "normal", w);
-    try w.writeAll(",\"options\":[{\"value\":\"normal\",\"name\":\"Normal\"}");
-    if (supports_fast_mode) {
-        try w.writeAll(",{\"value\":\"fast\",\"name\":\"Fast\"}");
-    }
-    try w.writeAll("]}");
-}
-
 pub fn writeProviderConfigOption(
     w: *std.Io.Writer,
     current: model_provider.ProviderId,
@@ -1163,6 +1140,43 @@ pub fn writeProviderConfigOption(
         try w.writeAll(",{\"value\":\"grok\",\"name\":\"Grok subscription\"}");
     }
     try w.writeAll("]}");
+}
+
+pub fn writeEffortConfigOption(
+    writer: *std.Io.Writer,
+    current: types.ReasoningEffort,
+    capabilities: model_capabilities.Capabilities,
+) !void {
+    const effective_current = if (model_capabilities.reasoningEffortSupported(capabilities, current))
+        current
+    else
+        types.ReasoningEffort.auto;
+    try writer.writeAll("{\"id\":\"effort\",\"name\":\"Reasoning Effort\",\"description\":\"Controls how deeply the selected model reasons\",\"category\":\"model\",\"type\":\"select\",\"currentValue\":");
+    try writeJsonStr(effective_current.label(), writer);
+    try writer.writeAll(",\"options\":[{\"value\":\"auto\",\"name\":\"Default\"}");
+    for (capabilities.reasoning_efforts.slice()) |effort| {
+        if (effort.isDefault()) continue;
+        try writer.writeAll(",{\"value\":");
+        try writeJsonStr(effort.label(), writer);
+        try writer.writeAll(",\"name\":");
+        try writeJsonStr(effort.displayLabel(), writer);
+        try writer.writeByte('}');
+    }
+    try writer.writeAll("]}");
+}
+
+pub fn writeFastModeConfigOption(
+    writer: *std.Io.Writer,
+    current: bool,
+    supports_fast_mode: bool,
+) !void {
+    try writer.writeAll("{\"id\":\"fast_mode\",\"name\":\"Fast Mode\",\"description\":\"Uses the provider's lower-latency service tier when supported\",\"category\":\"model\",\"type\":\"select\",\"currentValue\":");
+    try writeJsonStr(if (current and supports_fast_mode) "fast" else "normal", writer);
+    try writer.writeAll(",\"options\":[{\"value\":\"normal\",\"name\":\"Normal\"}");
+    if (supports_fast_mode) {
+        try writer.writeAll(",{\"value\":\"fast\",\"name\":\"Fast\"}");
+    }
+    try writer.writeAll("]}");
 }
 
 pub fn writeModeConfigOption(
@@ -1228,10 +1242,10 @@ test "buildSlashCommandsJson includes all expected commands" {
     defer alloc.free(json);
 
     const expected_commands = [_][]const u8{
-        "compact", "undo",        "changes",   "review", "clear",
-        "reset",   "help",        "status",    "ps",     "model",
-        "effort",  "permissions", "allowlist", "rules",  "settings",
-        "credits", "mcp",         "skills",    "fast",
+        "compact",   "undo",  "changes",  "review",  "clear",
+        "reset",     "help",  "status",   "model",   "permissions",
+        "allowlist", "rules", "settings", "credits", "mcp",
+        "skills",    "fast",
     };
     for (expected_commands) |cmd| {
         try std.testing.expect(std.mem.find(u8, json, cmd) != null);
@@ -1244,7 +1258,6 @@ test "buildSlashCommandsJson includes input hint for model" {
     const json = try buildSlashCommandsJson(alloc);
     defer alloc.free(json);
     try std.testing.expect(std.mem.find(u8, json, "\"input\":{\"hint\":\"model name\"}") != null);
-    try std.testing.expect(std.mem.find(u8, json, "\"input\":{\"hint\":\"auto or supported level\"}") != null);
 }
 
 test "formatIso8601 produces known timestamp" {
@@ -1296,33 +1309,6 @@ test "writeModelConfigOption appends current model when not in cached list" {
     try std.testing.expect(std.mem.find(u8, items, "\"currentValue\":\"custom/my-model\"") != null);
     try std.testing.expect(std.mem.find(u8, items, "anthropic/claude-opus-4.6") != null);
     try std.testing.expect(std.mem.find(u8, items, "custom/my-model") != null);
-}
-
-test "writeEffortConfigOption advertises default and provider-supported values" {
-    const efforts = [_]types.ReasoningEffort{
-        types.ReasoningEffort.literal("low"),
-        types.ReasoningEffort.literal("high"),
-    };
-    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
-    defer out.deinit();
-    try writeEffortConfigOption(
-        &out.writer,
-        types.ReasoningEffort.literal("high"),
-        .{ .reasoning_efforts = .fromSlice(&efforts) },
-    );
-    const json = out.writer.buffered();
-    try std.testing.expect(std.mem.find(u8, json, "\"currentValue\":\"high\"") != null);
-    try std.testing.expect(std.mem.find(u8, json, "\"value\":\"auto\"") != null);
-    try std.testing.expect(std.mem.find(u8, json, "\"value\":\"low\"") != null);
-}
-
-test "writeFastModeConfigOption hides unsupported Fast selection" {
-    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
-    defer out.deinit();
-    try writeFastModeConfigOption(&out.writer, true, false);
-    const json = out.writer.buffered();
-    try std.testing.expect(std.mem.find(u8, json, "\"currentValue\":\"normal\"") != null);
-    try std.testing.expect(std.mem.find(u8, json, "\"value\":\"fast\"") == null);
 }
 
 test "writeModeConfigOption produces valid json with all modes" {
@@ -1527,6 +1513,7 @@ fn acpSessionTestConfig() server.Config {
         .gateway_chat_url = "http://127.0.0.1/unused",
         .gateway_models_path = "/v1/models",
         .gateway_provider = test_builtin_gateway.provider,
+        .provider_set = provider_set.gateway_only(test_builtin_gateway.provider_bundle),
         .secret_store = host.unavailable_secret_store,
         .prompt_policy = .{ .system_prompt = "test" },
         .ignored_list_entries = &.{},
@@ -1622,8 +1609,8 @@ test "ACP new and loaded sessions provide a writable subagent host" {
         try std.testing.expectEqualStrings("review", new_active.mode);
         try std.testing.expect(new_writable.state.usage != null);
         try std.testing.expect(
-            new_active.session_rt.usage.generation_usage_provider.lookup_fn ==
-                state.cfg.gateway_provider.generation_usage.lookup_fn,
+            new_active.session_rt.usage.generation_usage_providers.select(.gateway).?.lookup_fn ==
+                state.cfg.provider_set.deferredUsageProviders().select(.gateway).?.lookup_fn,
         );
         io_mod.sleep(10 * std.time.ns_per_ms);
         var live_usage = try new_active.session_rt.usage.snapshot(alloc);
@@ -1661,8 +1648,8 @@ test "ACP new and loaded sessions provide a writable subagent host" {
         try std.testing.expect(state.subagent_store != null);
         try std.testing.expect(state.subagent_host != null);
         try std.testing.expect(
-            loaded_active.session_rt.usage.generation_usage_provider.lookup_fn ==
-                state.cfg.gateway_provider.generation_usage.lookup_fn,
+            loaded_active.session_rt.usage.generation_usage_providers.select(.gateway).?.lookup_fn ==
+                state.cfg.provider_set.deferredUsageProviders().select(.gateway).?.lookup_fn,
         );
 
         try capture.sync(io_mod.getIo());

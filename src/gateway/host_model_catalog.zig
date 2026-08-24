@@ -7,6 +7,7 @@ const provider_route = @import("../core/gateway/provider_route.zig");
 const io_mod = @import("../core/shared/io.zig");
 const builtin_gateway = @import("../builtins/gateway.zig");
 const host_stream_provider = @import("host_stream_provider.zig");
+const openai_models = @import("openai_models.zig");
 
 const Allocator = std.mem.Allocator;
 const max_response_bytes: usize = 4 * 1024 * 1024;
@@ -146,12 +147,11 @@ fn fetch(
         try body.appendSlice(alloc, chunk[0..len]);
     }
 
-    const catalog = builtin_gateway.parseModelCatalogForProvider(
-        alloc,
-        body.items,
-        input.view,
-        plan.route.contract().catalog,
-    ) catch |err| return .{ .failure = .{
+    const catalog = (switch (plan.route) {
+        .vercel_gateway => builtin_gateway.parseModelCatalogForView(alloc, body.items, input.view),
+        .openai_responses_byok => openai_models.parse(alloc, body.items, input.view),
+        .codex_responses_oauth => unreachable,
+    }) catch |err| return .{ .failure = .{
         .category = if (err == error.OutOfMemory) .resource_exhausted else .malformed_response,
         .http_status = .ok,
     } };

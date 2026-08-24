@@ -1,12 +1,10 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const build_options = @import("build_options");
 
 pub const permission_reviewer = @import("gateway/permission_reviewer.zig");
 
 const api_key_validator_contract = @import("../core/auth/api_key_validator.zig");
 const agent_stream_provider_contract = @import("../core/agent/stream_provider.zig");
-const chatgpt_oauth = @import("../core/auth/chatgpt_oauth.zig");
 const credentials = @import("../core/auth/credentials.zig");
 const oauth_transport = @import("../core/auth/oauth_transport.zig");
 const secret = @import("../core/auth/secret.zig");
@@ -14,29 +12,26 @@ const collections = @import("../core/shared/collections.zig");
 const debug_trace = @import("../core/shared/debug_trace.zig");
 const gateway_error_format = @import("../core/shared/gateway_error_format.zig");
 const gateway_client = @import("../gateway/client.zig");
-const gateway_failure_diagnostics = @import("../core/gateway/gateway_failure_diagnostics.zig");
-const gateway_json = @import("../core/gateway/gateway_json.zig");
-const codex_usage = @import("../core/gateway/codex_usage.zig");
+const vercel_failure_diagnostics = @import("../gateway/vercel_failure_diagnostics.zig");
+const vercel_protocol = @import("../gateway/vercel_protocol.zig");
 const io_mod = @import("../core/shared/io.zig");
 const gateway_generation_usage = @import("../gateway/generation_usage.zig");
 const gateway_provider = @import("../core/gateway/gateway_provider.zig");
 const provider_route = @import("../core/gateway/provider_route.zig");
-const responses_compaction_binding = @import("../core/gateway/responses_compaction_binding.zig");
-const responses_compaction = @import("../core/gateway/responses_compaction.zig");
-const responses_compaction_provider = @import("../core/gateway/responses_compaction_provider.zig");
-const responses_protocol = @import("../core/gateway/responses_protocol.zig");
-const responses_search = @import("../core/gateway/responses_search.zig");
+const provider_set = @import("../core/gateway/provider_set.zig");
+const provider_catalog = @import("../core/auth/provider_catalog.zig");
+const credential_authority = @import("../core/auth/credential_authority.zig");
 const model_capabilities = @import("../core/config/model_capabilities.zig");
+const vercel_model_policy = @import("../gateway/vercel_model_policy.zig");
 const model_catalog = @import("../core/gateway/model_catalog.zig");
+const openai_models = @import("../gateway/openai_models.zig");
 const output_contracts = @import("../core/output/output_contracts.zig");
 const shared_types = @import("../core/shared/types.zig");
-const text_utils = @import("../core/shared/text_utils.zig");
 const session_usage = @import("../core/session/session_usage.zig");
 const web_search_contract = @import("../core/tooling/web_search_contract.zig");
 const web_search_policy = @import("../core/tooling/web_search_policy.zig");
 const web_search_provider = @import("../core/tooling/web_search_provider.zig");
-const gateway_schema = @import("../core/tooling/gateway_schema.zig");
-const tool_advertisement = @import("../core/tooling/tool_advertisement.zig");
+const model_tool_schema = @import("../core/tooling/model_tool_schema.zig");
 const tool_dispatch = @import("../core/tooling/tool_dispatch.zig");
 const sort_utils = @import("../core/shared/sort_utils.zig");
 
@@ -47,7 +42,7 @@ const Request = web_search_contract.ProviderRequest;
 const Response = web_search_contract.ProviderResponse;
 const ProgressFn = web_search_contract.ProgressFn;
 
-pub const default_model = "zai/glm-5.2";
+pub const default_model = "moonshotai/kimi-k3";
 pub const default_chat_url = "https://ai-gateway.vercel.sh/v3/ai/language-model";
 pub const models_path = "/coding-agent/v1/models";
 const credits_path = "/coding-agent/v1/credits";
@@ -58,25 +53,16 @@ const base_url_env = "FX_GATEWAY_BASE_URL";
 const e2e_gateway_models_url_env = "FX_E2E_GATEWAY_MODELS_URL";
 const oauth_request_timeout_ms: i64 = 15_000;
 const oauth_response_max_bytes: usize = 64 * 1024;
-const compact_response_max_bytes: usize = 32 * 1024 * 1024;
 
 const web_search_system_prompt = "Research the user's query with the web_search tool and preserve sources for citation.";
 const perplexity_search_backend_id = web_search_contract.SearchBackendId{ .value = "ai_gateway_perplexity_search" };
 const parallel_search_backend_id = web_search_contract.SearchBackendId{ .value = "ai_gateway_parallel_search" };
-const codex_search_backend_id = web_search_contract.SearchBackendId{ .value = "codex_standalone_search" };
-const responses_default_include = [_][]const u8{"reasoning.encrypted_content"};
-const responses_hosted_search_include = [_][]const u8{
-    "reasoning.encrypted_content",
-    "web_search_call.action.sources",
-    "web_search_call.results",
-};
 const default_web_search_backend_order = [_]web_search_contract.SearchBackendId{
     perplexity_search_backend_id,
     parallel_search_backend_id,
 };
 const perplexity_search_backend = [_]web_search_contract.SearchBackendId{perplexity_search_backend_id};
 const parallel_search_backend = [_]web_search_contract.SearchBackendId{parallel_search_backend_id};
-const codex_search_backend = [_]web_search_contract.SearchBackendId{codex_search_backend_id};
 const default_web_search_backend_policies = [_]web_search_policy.BackendPolicy{
     .{
         .id = perplexity_search_backend_id,
@@ -94,20 +80,6 @@ const default_web_search_backend_policies = [_]web_search_policy.BackendPolicy{
     },
     .{
         .id = parallel_search_backend_id,
-        .features = .{
-            .max_uses = .best_effort,
-            .allowed_domains = .pass_through,
-            .blocked_domains = .pass_through,
-            .ordered_sources = true,
-            .usage = true,
-            .terminal_incomplete = true,
-            .timeout = true,
-            .cancellation = true,
-            .result_bounds = .pass_through,
-        },
-    },
-    .{
-        .id = codex_search_backend_id,
         .features = .{
             .max_uses = .best_effort,
             .allowed_domains = .pass_through,
@@ -138,16 +110,16 @@ pub const chat_url_provider = gateway_provider.ChatUrlProvider{
     .resolve_fn = resolveChatUrlForProvider,
 };
 
+pub fn agentChatUrl() []const u8 {
+    return resolveChatUrl(default_chat_url, io_mod.getenv(chat_url_env));
+}
+
 pub const cli_model_catalog_provider = gateway_provider.CliModelCatalogProvider{
     .fetch_fn = fetchCliModelCatalog,
 };
 
 pub const credits_provider = gateway_provider.CreditsProvider{
     .fetch_fn = fetchCredits,
-};
-
-pub const account_usage_provider = gateway_provider.AccountUsageProvider{
-    .fetch_fn = fetchAccountUsage,
 };
 
 pub const api_key_validator = api_key_validator_contract.Provider{
@@ -161,267 +133,47 @@ pub const oauth_transport_provider = oauth_transport.Provider{
 pub const generation_usage_provider = gateway_generation_usage.provider;
 
 pub const agent_stream_provider = agent_stream_provider_contract.Provider{
-    .build_fn = buildAgentRequest,
     .stream_fn = streamAgentCompletion,
 };
 
-pub const responses_compaction_provider_impl = responses_compaction_provider.Provider{
-    .fetch_fn = fetchResponsesCompaction,
+pub const provider_bundle = provider_set.Bundle{
+    .capabilities = .{ .fx_search = true, .vision_fallback = true, .deferred_usage = true },
+    .presentation = provider_catalog.find(.gateway),
+    .auth_strategy = .vercel,
+    .fallback_model_capabilities_fn = vercel_model_policy.capabilitiesForModel,
+    .agent_stream = agent_stream_provider,
+    .cli_model_catalog = cli_model_catalog_provider,
+    .model_catalog = model_catalog_provider,
+    .permission_reviewer = permission_reviewer.provider,
+    .deferred_usage = generation_usage_provider,
+    .credits = credits_provider,
+    .fx_search = default_web_search_provider,
 };
 
 pub const provider = gateway_provider.Provider{
-    .agent_stream = agent_stream_provider,
     .oauth_transport = oauth_transport_provider,
     .chat_url = chat_url_provider,
-    .cli_model_catalog = cli_model_catalog_provider,
-    .credits = credits_provider,
-    .account_usage = account_usage_provider,
-    .responses_compaction = responses_compaction_provider_impl,
-    .generation_usage = generation_usage_provider,
-    .web_search = default_web_search_provider,
-    .model_catalog = model_catalog_provider,
 };
 
-fn fetchResponsesCompaction(
-    _: ?*anyopaque,
-    alloc: Allocator,
-    input: responses_compaction_provider.Request,
-) anyerror!responses_compaction_provider.Outcome {
-    const source = input.build_request.credential_source orelse
-        return error.UnsupportedCredentialSource;
-    const route = provider_route.fromCredentialSource(source) orelse
-        return error.UnsupportedCredentialSource;
-    if (route.contract().remote_compaction == .unsupported) return .unsupported;
-    try responses_compaction_binding.validate(source, input.provider_binding);
-    if (!responses_compaction_binding.credentialMatches(
-        source,
-        input.credential,
-        input.account_id,
-        input.provider_binding,
-    )) {
-        return error.ResponsesCompactionIdentityMismatch;
-    }
-
-    const wire_model = provider_route.wireModel(route, input.build_request.model);
-    const direct_tools = try projectDirectResponseTools(
-        alloc,
-        input.build_request.serialized_tools,
-        route,
-        wire_model,
-    );
-    defer alloc.free(direct_tools);
-    try rejectSelectedDirectProviderTools(
-        alloc,
-        input.build_request.selected_dynamic_tool_schemas,
-    );
-
-    var request = input.build_request;
-    request.model = wire_model;
-    request.serialized_tools = direct_tools;
-    request.responses_compaction_binding = input.provider_binding;
-    const use_v2_trigger = route.contract().remote_compaction == .v2;
-    request.responses_compaction_trigger = use_v2_trigger;
-    request.tool_choice = .auto;
-    request.responses_tool_choice_json = null;
-    request.max_output_tokens = null;
-    request.response_format = null;
-    request.vision_mode = .unavailable;
-    if (request.provider_options.parallel_tool_calls == null) {
-        request.provider_options.parallel_tool_calls = true;
-    }
-    // Latest Codex deliberately omits service tier for API-key compaction;
-    // OAuth retains Fast through the Responses priority tier.
-    if (route == .openai_responses_byok) request.provider_options.fast = false;
-
-    const request_options: responses_protocol.RequestOptions = .{
-        .capabilities = .{
-            .supports_max_output_tokens = route.contract().supports_max_output_tokens,
-        },
-        .store = false,
-        .stream = use_v2_trigger,
-        .include = if (use_v2_trigger) &responses_default_include else &.{},
-        .prompt_cache_key = input.build_request.session_id,
-        .reasoning_summary = if (route == .codex_responses_oauth or
-            request.provider_options.reasoning != null)
-            "auto"
-        else
-            null,
-        .function_tools_strict = false,
-    };
-    const payload = if (use_v2_trigger)
-        try responses_protocol.buildRequest(alloc, request, request_options)
-    else
-        try responses_protocol.buildCompactRequest(alloc, request, request_options);
-    defer alloc.free(payload);
-
-    const endpoint = if (use_v2_trigger)
-        try alloc.dupe(u8, input.provider_binding.normalized_origin)
-    else
-        try provider_route.appendResponsesCompactEndpointAlloc(
-            alloc,
-            input.provider_binding.normalized_origin,
-        );
-    defer alloc.free(endpoint);
-    if (route == .codex_responses_oauth) {
-        var local_cancel = std.atomic.Value(bool).init(false);
-        const cancel_flag = if (input.build_request.budget) |budget|
-            budget.cancel_flag orelse &local_cancel
-        else
-            &local_cancel;
-        var response = try gateway_client.streamResponsesCompactionBounded(
-            alloc,
-            .{
-                .api_key = input.credential,
-                .credential_source = source,
-                .responses_compaction_binding = input.provider_binding,
-                .model = wire_model,
-                .retry_count = 1,
-                .chat_url = endpoint,
-                .payload = payload,
-                .session_id = input.build_request.session_id,
-                .codex_beta_features = responses_compaction.v2_beta_feature,
-            },
-            if (input.build_request.budget) |budget| budget.deadline else null,
-            cancel_flag,
-        );
-        defer response.deinit(alloc);
-        if (response.status.class() != .success) return .{ .rejected = response.status };
-
-        const input_json = try responses_compaction.replayInputJsonFromOutputItemsAlloc(
-            alloc,
-            response.completion.responses_provider_output_items,
-        );
-        errdefer alloc.free(input_json);
-        const model_copy = try alloc.dupe(u8, wire_model);
-        return .{ .compacted = .{
-            .credential_source = source,
-            .wire_model = model_copy,
-            .input_json = input_json,
-            .usage = response.completion.usage,
-        } };
-    }
-
-    var response = try gateway_client.fetchOpenAIJsonBounded(alloc, .{
-        .url = endpoint,
-        .api_key = input.credential,
-        .payload = payload,
-        .organization = input.provider_binding.organization,
-        .project = input.provider_binding.project,
-        .cancel_flag = if (input.build_request.budget) |budget| budget.cancel_flag else null,
-        .deadline = if (input.build_request.budget) |budget| budget.deadline else null,
-        .max_response_bytes = compact_response_max_bytes,
-    });
-    defer response.deinit(alloc);
-    if (response.status.class() != .success) return .{ .rejected = response.status };
-
-    var decoded = try responses_protocol.compaction.decodeResponse(alloc, response.body);
-    defer decoded.deinit();
-    const input_json = try decoded.replayInputJsonAlloc(alloc);
-    errdefer alloc.free(input_json);
-    const model_copy = try alloc.dupe(u8, wire_model);
-    return .{ .compacted = .{
-        .credential_source = source,
-        .wire_model = model_copy,
-        .input_json = input_json,
-        .usage = .{
-            .input_tokens = decoded.usage.input_tokens,
-            .output_tokens = decoded.usage.output_tokens,
-            .cached_input_tokens = decoded.usage.cached_input_tokens,
-            .cache_write_input_tokens = decoded.usage.cache_write_input_tokens,
-            .reasoning_output_tokens = decoded.usage.reasoning_output_tokens,
-            .total_tokens = decoded.usage.total_tokens,
-            .codex_rollout_budget_units = decoded.usage.codex_rollout_budget_units,
-        },
-    } };
-}
-
 pub fn buildAgentRequest(
-    _: ?*anyopaque,
     alloc: Allocator,
-    request: agent_stream_provider_contract.BuildRequest,
+    request: agent_stream_provider_contract.RequestData,
 ) anyerror![]u8 {
-    const route = if (request.credential_source) |source|
-        provider_route.fromCredentialSource(source) orelse return error.UnsupportedCredentialSource
-    else
-        provider_route.ProviderRoute.vercel_gateway;
-    if (route.contract().wire_api == .openai_responses) {
-        const wire_model = provider_route.wireModel(route, request.model);
-        const direct_tools = try projectDirectResponseTools(
-            alloc,
-            request.serialized_tools,
-            route,
-            wire_model,
-        );
-        defer alloc.free(direct_tools);
-        try rejectSelectedDirectProviderTools(alloc, request.selected_dynamic_tool_schemas);
-
-        var routed_request = request;
-        routed_request.model = wire_model;
-        routed_request.serialized_tools = direct_tools;
-        var owned_provider_binding: ?shared_types.ResponsesCompactionProviderBinding = null;
-        defer if (owned_provider_binding) |binding| {
-            shared_types.freeResponsesCompactionProviderBinding(alloc, binding);
-        };
-        if (request.responses_compaction_binding) |binding| {
-            const source = request.credential_source orelse
-                return error.InvalidResponsesCompactionProviderBinding;
-            try responses_compaction_binding.validate(source, binding);
-            if (request.provider_credential) |credential| {
-                if (!responses_compaction_binding.credentialMatches(
-                    source,
-                    credential,
-                    request.account_id,
-                    binding,
-                )) return error.ResponsesCompactionProviderBindingMismatch;
-            }
-            routed_request.responses_compaction_binding = binding;
-        } else if (request.provider_credential) |credential| {
-            owned_provider_binding = try responses_compaction_binding.buildFromEnvironmentAlloc(
-                alloc,
-                request.credential_source.?,
-                credential,
-                request.account_id,
-            );
-            routed_request.responses_compaction_binding = owned_provider_binding.?.view();
-        } else {
-            routed_request.responses_compaction_binding = null;
-        }
-        if (routed_request.provider_options.parallel_tool_calls == null) {
-            routed_request.provider_options.parallel_tool_calls = true;
-        }
-        const summary: ?[]const u8 = if (route == .codex_responses_oauth or
-            routed_request.provider_options.reasoning != null)
-            "auto"
-        else
-            null;
-        return responses_protocol.buildRequest(alloc, routed_request, .{
-            .capabilities = .{
-                .supports_max_output_tokens = route.contract().supports_max_output_tokens,
-            },
-            .prompt_cache_key = request.session_id,
-            .reasoning_summary = summary,
-            .include = try directResponsesInclude(alloc, route, direct_tools),
-            .function_tools_strict = false,
-            .responses_input_json = request.responses_input_json,
-            .responses_text_options_json = request.responses_text_options_json,
-            .responses_reasoning_options_json = request.responses_reasoning_options_json,
-            .tool_choice_json = request.responses_tool_choice_json,
-            .extra_fields_json = request.responses_extra_fields_json,
-        });
-    }
-
-    const budget: ?gateway_json.BuildBudget = if (request.budget) |value|
+    const budget: ?vercel_protocol.BuildBudget = if (request.budget) |value|
         .{ .deadline = value.deadline, .cancel_flag = value.cancel_flag }
     else
         null;
     if (budget) |active| try active.check();
 
+    const tools_json = try buildAgentToolsJson(alloc, request);
+    defer alloc.free(tools_json);
+
     if (request.verified_images) |images| {
         const response_format = request.response_format orelse
             return error.MissingStructuredResponseFormat;
-        const body = try gateway_json.buildGatewayRequestBodyWithVerifiedImagesAndBudget(
+        const body = try vercel_protocol.buildGatewayRequestBodyWithVerifiedImagesAndBudget(
             alloc,
-            request.serialized_tools,
+            tools_json,
             request.messages,
             images,
             request.provider_options,
@@ -429,7 +181,7 @@ pub fn buildAgentRequest(
             .{
                 .name = response_format.name,
                 .description = response_format.description,
-                .schema_json = response_format.schema_json,
+                .schema = response_format.schema,
             },
             budget orelse .{},
         );
@@ -437,11 +189,11 @@ pub fn buildAgentRequest(
     }
     if (request.response_format != null) return error.StructuredResponseRequiresVerifiedImages;
 
-    if (request.vision_mode == .unavailable and request.selected_dynamic_tool_schemas.len == 0) {
+    if (request.vision_mode != .required) {
         const body = if (budget) |active|
-            gateway_json.buildGatewayRequestBodyWithOptionsAndBudget(
+            vercel_protocol.buildGatewayRequestBodyWithOptionsAndBudget(
                 alloc,
-                request.serialized_tools,
+                tools_json,
                 request.messages,
                 request.provider_options,
                 request.tool_choice,
@@ -449,9 +201,9 @@ pub fn buildAgentRequest(
                 active,
             )
         else
-            gateway_json.buildGatewayRequestBodyWithOptionsAndOutputLimit(
+            vercel_protocol.buildGatewayRequestBodyWithOptionsAndOutputLimit(
                 alloc,
-                request.serialized_tools,
+                tools_json,
                 request.messages,
                 request.provider_options,
                 request.tool_choice,
@@ -459,18 +211,10 @@ pub fn buildAgentRequest(
             );
         return finalizeAgentRequestBody(alloc, request.model, try body);
     }
-
-    const vision_schema = if (request.vision_mode != .unavailable)
-        try writeVisionGatewaySchema(alloc, request.tool_registry)
-    else
-        null;
-    defer if (vision_schema) |schema| alloc.free(schema);
 
     if (request.vision_mode == .required) {
-        const tools_json = try std.fmt.allocPrint(alloc, "[{s}]", .{vision_schema.?});
-        defer alloc.free(tools_json);
         const body = if (budget) |active|
-            gateway_json.buildGatewayRequiredToolRequestBodyWithOptionsAndBudget(
+            vercel_protocol.buildGatewayRequiredToolRequestBodyWithOptionsAndBudget(
                 alloc,
                 tools_json,
                 request.messages,
@@ -479,7 +223,7 @@ pub fn buildAgentRequest(
                 active,
             )
         else
-            gateway_json.buildGatewayRequiredToolRequestBodyWithOptionsAndOutputLimit(
+            vercel_protocol.buildGatewayRequiredToolRequestBodyWithOptionsAndOutputLimit(
                 alloc,
                 tools_json,
                 request.messages,
@@ -489,36 +233,90 @@ pub fn buildAgentRequest(
         return finalizeAgentRequestBody(alloc, request.model, try body);
     }
 
-    var schemas: std.ArrayList([]const u8) = .empty;
-    defer schemas.deinit(alloc);
-    try schemas.appendSlice(alloc, request.selected_dynamic_tool_schemas);
-    if (vision_schema) |schema| try schemas.append(alloc, schema);
-    const tools_json = try tool_advertisement.buildGatewayToolsJsonWithSelectedDynamicSchemas(
-        alloc,
-        request.serialized_tools,
-        schemas.items,
+    unreachable;
+}
+
+fn resolveGatewayProviderOptions(
+    model: []const u8,
+    effort: shared_types.ReasoningEffort,
+    fast_mode: bool,
+) model_capabilities.ResolvedProviderOptions {
+    return model_capabilities.resolveProviderOptionsForCapabilities(
+        vercel_model_policy.capabilitiesForModel(model),
+        effort,
+        fast_mode,
     );
-    defer alloc.free(tools_json);
-    const body = if (budget) |active|
-        gateway_json.buildGatewayRequestBodyWithOptionsAndBudget(
-            alloc,
-            tools_json,
-            request.messages,
-            request.provider_options,
-            request.tool_choice,
-            request.max_output_tokens,
-            active,
-        )
-    else
-        gateway_json.buildGatewayRequestBodyWithOptionsAndOutputLimit(
-            alloc,
-            tools_json,
-            request.messages,
-            request.provider_options,
-            request.tool_choice,
-            request.max_output_tokens,
-        );
-    return finalizeAgentRequestBody(alloc, request.model, try body);
+}
+
+fn buildAgentToolsJson(
+    alloc: Allocator,
+    request: agent_stream_provider_contract.RequestData,
+) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    errdefer out.deinit();
+    try out.writer.writeByte('[');
+    var first = true;
+
+    if (request.vision_mode == .required) {
+        const vision = request.tools.registry.lookup("vision") orelse
+            return error.VisionToolNotRegistered;
+        try model_tool_schema.writeBuiltinFunctionSchema(alloc, &out.writer, vision.model_schema);
+        try out.writer.writeByte(']');
+        return out.toOwnedSlice();
+    }
+
+    for (request.tools.advertised_names) |name| {
+        if (!first) try out.writer.writeByte(',');
+        first = false;
+        if (request.tools.advertisedFunction(name)) |function| {
+            try model_tool_schema.writeBuiltinFunctionSchema(alloc, &out.writer, function);
+        } else {
+            const tool = request.tools.registry.lookup(name) orelse return error.AdvertisedToolNotRegistered;
+            const write_advertisement = tool.write_provider_advertisement_fn orelse
+                return error.AdvertisedToolSchemaMissing;
+            try write_advertisement(alloc, &out.writer);
+        }
+    }
+    for (request.tools.additional_functions) |tool| {
+        if (toolNameSelected(request.tools.advertised_names, tool.name)) continue;
+        if (!first) try out.writer.writeByte(',');
+        first = false;
+        try model_tool_schema.writeBuiltinFunctionSchema(alloc, &out.writer, tool);
+    }
+    for (request.tools.selected_dynamic) |tool| {
+        if (toolNameSelected(request.tools.advertised_names, tool.name)) continue;
+        if (!first) try out.writer.writeByte(',');
+        first = false;
+        try writeDynamicFunctionTool(&out.writer, tool);
+    }
+    if (request.vision_mode == .optional and
+        !toolNameSelected(request.tools.advertised_names, "vision"))
+    {
+        const vision = request.tools.registry.lookup("vision") orelse
+            return error.VisionToolNotRegistered;
+        if (!first) try out.writer.writeByte(',');
+        try model_tool_schema.writeBuiltinFunctionSchema(alloc, &out.writer, vision.model_schema);
+    }
+    try out.writer.writeByte(']');
+    return out.toOwnedSlice();
+}
+
+fn toolNameSelected(names: []const []const u8, expected: []const u8) bool {
+    for (names) |name| if (std.mem.eql(u8, name, expected)) return true;
+    return false;
+}
+
+fn writeDynamicFunctionTool(
+    writer: *std.Io.Writer,
+    tool: agent_stream_provider_contract.DynamicFunctionTool,
+) !void {
+    try writer.writeAll("{\"type\":\"function\",\"name\":");
+    try std.json.Stringify.value(tool.name, .{}, writer);
+    try writer.writeAll(",\"description\":");
+    try std.json.Stringify.value(tool.description, .{}, writer);
+    try writer.writeAll(",\"inputSchema\":");
+    try std.json.Stringify.value(tool.input_schema, .{}, writer);
+    try writer.writeByte('}');
 }
 
 fn finalizeAgentRequestBody(
@@ -529,7 +327,7 @@ fn finalizeAgentRequestBody(
     if (!std.mem.eql(u8, model, "zai/glm-5.2")) return body;
 
     errdefer alloc.free(body);
-    const identified = try gateway_json.withRequestUserAgent(
+    const identified = try vercel_protocol.withRequestUserAgent(
         alloc,
         body,
         gateway_client.user_agent,
@@ -538,139 +336,13 @@ fn finalizeAgentRequestBody(
     return identified;
 }
 
-/// Vercel's `type:provider` tools are not part of the Responses wire contract.
-/// The two built-in Gateway search backends have a direct Responses equivalent;
-/// all other provider-owned tools are omitted so a direct credential can never
-/// activate an Fx worker that sends it back to Vercel.
-fn projectDirectResponseTools(
-    alloc: Allocator,
-    serialized_tools: []const u8,
-    route: provider_route.ProviderRoute,
-    wire_model: []const u8,
-) ![]u8 {
-    var parsed = std.json.parseFromSlice(std.json.Value, alloc, serialized_tools, .{}) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return error.InvalidResponsesTools,
-    };
-    defer parsed.deinit();
-    if (parsed.value != .array) return error.InvalidResponsesTools;
-
-    var out: std.Io.Writer.Allocating = .init(alloc);
-    errdefer out.deinit();
-    const codex_namespace = if (route == .codex_responses_oauth)
-        try responses_search.buildNamespaceToolAlloc(alloc)
-    else
-        null;
-    defer if (codex_namespace) |tool| alloc.free(tool);
-    const supports_hosted_web_search = route == .openai_responses_byok and
-        isOpenAiTextModel(wire_model);
-    try out.writer.writeByte('[');
-    var wrote = false;
-    var wrote_native_web_search = false;
-    for (parsed.value.array.items) |tool| {
-        if (isProviderTool(tool)) {
-            if ((codex_namespace != null or supports_hosted_web_search) and
-                isGatewaySearchProviderTool(tool) and
-                !wrote_native_web_search)
-            {
-                if (wrote) try out.writer.writeByte(',');
-                if (codex_namespace) |namespace_tool| {
-                    try out.writer.writeAll(namespace_tool);
-                } else {
-                    try out.writer.writeAll("{\"type\":\"web_search\"}");
-                }
-                wrote = true;
-                wrote_native_web_search = true;
-            } else if (!isGatewaySearchProviderTool(tool) or
-                (codex_namespace == null and !supports_hosted_web_search))
-            {
-                debug_trace.logf("gateway", "omitting unsupported provider-owned tool from direct Responses request", .{});
-            }
-            continue;
-        }
-        if (wrote) try out.writer.writeByte(',');
-        try std.json.Stringify.value(tool, .{}, &out.writer);
-        wrote = true;
-    }
-    try out.writer.writeByte(']');
-    return out.toOwnedSlice();
-}
-
-fn rejectSelectedDirectProviderTools(
-    alloc: Allocator,
-    selected_schemas: []const []const u8,
-) !void {
-    for (selected_schemas) |schema_json| {
-        var parsed = std.json.parseFromSlice(std.json.Value, alloc, schema_json, .{}) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return error.InvalidResponsesTools,
-        };
-        defer parsed.deinit();
-        switch (parsed.value) {
-            .object => if (isProviderTool(parsed.value)) return error.DirectProviderToolUnsupported,
-            .array => |tools| for (tools.items) |tool| {
-                if (isProviderTool(tool)) return error.DirectProviderToolUnsupported;
-            },
-            else => return error.InvalidResponsesTools,
-        }
-    }
-}
-
-fn isProviderTool(tool: std.json.Value) bool {
-    if (tool != .object) return false;
-    const tool_type = tool.object.get("type") orelse return false;
-    return tool_type == .string and std.mem.eql(u8, tool_type.string, "provider");
-}
-
-fn isGatewaySearchProviderTool(tool: std.json.Value) bool {
-    if (!isProviderTool(tool)) return false;
-    const id = tool.object.get("id") orelse return false;
-    if (id != .string) return false;
-    return std.mem.eql(u8, id.string, "gateway.perplexity_search") or
-        std.mem.eql(u8, id.string, "gateway.parallel_search");
-}
-
-fn directResponsesInclude(
-    alloc: Allocator,
-    route: provider_route.ProviderRoute,
-    serialized_tools: []const u8,
-) ![]const []const u8 {
-    if (route != .openai_responses_byok) return &responses_default_include;
-    var parsed = std.json.parseFromSlice(std.json.Value, alloc, serialized_tools, .{}) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return error.InvalidResponsesTools,
-    };
-    defer parsed.deinit();
-    if (parsed.value != .array) return error.InvalidResponsesTools;
-    for (parsed.value.array.items) |tool| {
-        if (tool != .object) continue;
-        const tool_type = tool.object.get("type") orelse continue;
-        if (tool_type == .string and std.mem.eql(u8, tool_type.string, "web_search")) {
-            return &responses_hosted_search_include;
-        }
-    }
-    return &responses_default_include;
-}
-
-fn writeVisionGatewaySchema(
-    alloc: Allocator,
-    registry: tool_dispatch.Registry,
-) ![]u8 {
-    const vision_tool = registry.lookup("vision") orelse return error.VisionToolNotRegistered;
-    var out: std.Io.Writer.Allocating = .init(alloc);
-    errdefer out.deinit();
-    try gateway_schema.writeBuiltinFunctionSchema(alloc, &out.writer, vision_tool.gateway_schema);
-    return out.toOwnedSlice();
-}
-
 test "agent request builder keeps default reasoning silent and emits output limit" {
     const messages = [_]shared_types.ChatMessage{.{ .role = .user, .content = "question" }};
-    const body = try agent_stream_provider.build(std.testing.allocator, .{
+    const body = try buildAgentRequest(std.testing.allocator, .{
         .model = "anthropic/claude-opus-4.8",
-        .serialized_tools = "[]",
         .messages = &messages,
         .tool_choice = .auto,
-        .provider_options = model_capabilities.resolveProviderOptions(
+        .provider_options = resolveGatewayProviderOptions(
             "anthropic/claude-opus-4.8",
             .auto,
             false,
@@ -696,12 +368,11 @@ test "agent request builder scopes the product user agent to GLM 5.2" {
     };
 
     for (cases) |case| {
-        const body = try agent_stream_provider.build(alloc, .{
+        const body = try buildAgentRequest(alloc, .{
             .model = case.model,
-            .serialized_tools = "[]",
             .messages = &messages,
             .tool_choice = .auto,
-            .provider_options = model_capabilities.resolveProviderOptions(case.model, .auto, false),
+            .provider_options = resolveGatewayProviderOptions(case.model, .auto, false),
         });
         defer alloc.free(body);
 
@@ -722,14 +393,23 @@ test "agent request builder scopes the product user agent to GLM 5.2" {
 
 test "agent request builder overlays selected dynamic schemas" {
     const messages = [_]shared_types.ChatMessage{.{ .role = .user, .content = "question" }};
-    const selected_schema = "{\"type\":\"function\",\"name\":\"mcp_fs_read\",\"description\":\"Read\",\"inputSchema\":{\"type\":\"object\",\"properties\":{}}}";
-    const body = try agent_stream_provider.build(std.testing.allocator, .{
+    var selected_schema = try std.json.parseFromSlice(
+        std.json.Value,
+        std.testing.allocator,
+        "{\"type\":\"object\",\"properties\":{}}",
+        .{},
+    );
+    defer selected_schema.deinit();
+    const body = try buildAgentRequest(std.testing.allocator, .{
         .model = "anthropic/claude",
-        .serialized_tools = "[]",
         .messages = &messages,
         .tool_choice = .auto,
-        .selected_dynamic_tool_schemas = &.{selected_schema},
-        .provider_options = model_capabilities.resolveProviderOptions(
+        .tools = .{ .selected_dynamic = &.{.{
+            .name = "mcp_fs_read",
+            .description = "Read",
+            .input_schema = selected_schema.value,
+        }} },
+        .provider_options = resolveGatewayProviderOptions(
             "anthropic/claude",
             .auto,
             false,
@@ -740,103 +420,6 @@ test "agent request builder overlays selected dynamic schemas" {
 
     try std.testing.expect(std.mem.find(u8, body, "\"name\":\"mcp_fs_read\"") != null);
     try std.testing.expect(std.mem.find(u8, body, "\"maxOutputTokens\":64000") != null);
-}
-
-test "direct Responses request maps Gateway search and omits unknown provider tools" {
-    const messages = [_]shared_types.ChatMessage{.{ .role = .system, .content = "instruction" }};
-    const body = try agent_stream_provider.build(std.testing.allocator, .{
-        .credential_source = .openai_api_key,
-        .model = "openai/gpt-5.4",
-        .serialized_tools = "[{\"type\":\"provider\",\"id\":\"gateway.perplexity_search\",\"name\":\"perplexity_search\",\"args\":{}},{\"type\":\"provider\",\"id\":\"gateway.future_tool\",\"name\":\"future_tool\",\"args\":{}},{\"type\":\"function\",\"name\":\"read_file\",\"description\":\"Read\",\"inputSchema\":{\"type\":\"object\",\"properties\":{}}}]",
-        .messages = &messages,
-        .tool_choice = .auto,
-        .provider_options = .{},
-        .responses_input_json = "[{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_file\",\"file_id\":\"file_123\"}]}]",
-        .responses_text_options_json = "{\"verbosity\":\"low\"}",
-        .responses_reasoning_options_json = "{\"future_mode\":\"compact\"}",
-        .responses_tool_choice_json = "{\"type\":\"function\",\"name\":\"read_file\"}",
-        .responses_extra_fields_json = "{\"metadata\":{\"source\":\"fx-test\"},\"temperature\":0.2}",
-    });
-    defer std.testing.allocator.free(body);
-
-    try std.testing.expect(std.mem.find(u8, body, "\"model\":\"gpt-5.4\"") != null);
-    try std.testing.expect(std.mem.find(u8, body, "\"type\":\"web_search\"") != null);
-    try std.testing.expect(std.mem.find(u8, body, "\"name\":\"read_file\"") != null);
-    try std.testing.expect(std.mem.find(u8, body, "gateway.perplexity_search") == null);
-    try std.testing.expect(std.mem.find(u8, body, "gateway.future_tool") == null);
-    try std.testing.expect(std.mem.find(u8, body, "\"tool_choice\":{\"type\":\"function\",\"name\":\"read_file\"}") != null);
-    try std.testing.expect(std.mem.find(u8, body, "\"file_id\":\"file_123\"") != null);
-    try std.testing.expect(std.mem.find(u8, body, "\"verbosity\":\"low\"") != null);
-    try std.testing.expect(std.mem.find(u8, body, "\"future_mode\":\"compact\"") != null);
-    try std.testing.expect(std.mem.find(u8, body, "\"metadata\":{\"source\":\"fx-test\"}") != null);
-    try std.testing.expect(std.mem.find(u8, body, "\"temperature\":2e-1") != null or
-        std.mem.find(u8, body, "\"temperature\":0.2") != null);
-
-    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
-    defer parsed.deinit();
-    const include = parsed.value.object.get("include").?.array.items;
-    try std.testing.expectEqual(@as(usize, 3), include.len);
-    try std.testing.expectEqualStrings("reasoning.encrypted_content", include[0].string);
-    try std.testing.expectEqualStrings("web_search_call.action.sources", include[1].string);
-    try std.testing.expectEqualStrings("web_search_call.results", include[2].string);
-}
-
-test "Codex Responses request advertises latest web namespace instead of hosted search" {
-    const messages = [_]shared_types.ChatMessage{.{ .role = .user, .content = "research Zig" }};
-    const body = try agent_stream_provider.build(std.testing.allocator, .{
-        .credential_source = .chatgpt_subscription,
-        .model = "gpt-5.6-sol",
-        .serialized_tools = "[{\"type\":\"provider\",\"id\":\"gateway.perplexity_search\",\"name\":\"perplexity_search\",\"args\":{}}]",
-        .messages = &messages,
-        .tool_choice = .auto,
-        .provider_options = .{},
-    });
-    defer std.testing.allocator.free(body);
-
-    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
-    defer parsed.deinit();
-    const tools = parsed.value.object.get("tools").?.array.items;
-    try std.testing.expectEqual(@as(usize, 1), tools.len);
-    try std.testing.expectEqualStrings("namespace", tools[0].object.get("type").?.string);
-    try std.testing.expectEqualStrings("web", tools[0].object.get("name").?.string);
-    try std.testing.expectEqualStrings(
-        "run",
-        tools[0].object.get("tools").?.array.items[0].object.get("name").?.string,
-    );
-    const include = parsed.value.object.get("include").?.array.items;
-    try std.testing.expectEqual(@as(usize, 1), include.len);
-    try std.testing.expectEqualStrings("reasoning.encrypted_content", include[0].string);
-    try std.testing.expect(parsed.value.object.get("parallel_tool_calls").?.bool);
-}
-
-test "direct Responses request rejects selected provider-owned schemas" {
-    const messages = [_]shared_types.ChatMessage{.{ .role = .user, .content = "question" }};
-    try std.testing.expectError(error.DirectProviderToolUnsupported, agent_stream_provider.build(std.testing.allocator, .{
-        .credential_source = .chatgpt_subscription,
-        .model = "gpt-5.6-sol",
-        .serialized_tools = "[]",
-        .selected_dynamic_tool_schemas = &.{"{\"type\":\"provider\",\"id\":\"gateway.future\"}"},
-        .messages = &messages,
-        .tool_choice = .auto,
-        .provider_options = .{},
-    }));
-}
-
-test "direct compatible model without native search capability drops Gateway search" {
-    const messages = [_]shared_types.ChatMessage{.{ .role = .user, .content = "question" }};
-    const body = try agent_stream_provider.build(std.testing.allocator, .{
-        .credential_source = .openai_api_key,
-        .model = "acme/llama-agent",
-        .serialized_tools = "[{\"type\":\"provider\",\"id\":\"gateway.parallel_search\",\"name\":\"parallel_search\",\"args\":{}}]",
-        .messages = &messages,
-        .tool_choice = .auto,
-        .provider_options = .{},
-    });
-    defer std.testing.allocator.free(body);
-
-    try std.testing.expect(std.mem.find(u8, body, "gateway.parallel_search") == null);
-    try std.testing.expect(std.mem.find(u8, body, "\"type\":\"web_search\"") == null);
-    try std.testing.expect(std.mem.find(u8, body, "\"tools\":[]") != null);
 }
 
 test "required vision request contains only the registered vision schema" {
@@ -861,7 +444,7 @@ test "required vision request contains only the registered vision schema" {
     const vision_tool = tool_dispatch.Tool{
         .name = "vision",
         .description = "registry-owned vision schema sentinel",
-        .gateway_schema = .{
+        .model_schema = .{
             .name = "vision",
             .description = "registry-owned vision schema sentinel",
         },
@@ -872,15 +455,33 @@ test "required vision request contains only the registered vision schema" {
         .irreversible_fn = Callbacks.isIrreversible,
     };
     const registered_tools = [_]tool_dispatch.Tool{vision_tool};
-    const body = try agent_stream_provider.build(std.testing.allocator, .{
+    const read_file_schema = model_tool_schema.FunctionSchema{
+        .name = "read_file",
+        .description = "Read",
+        .input_schema = .{},
+    };
+    var dynamic_schema = try std.json.parseFromSlice(
+        std.json.Value,
+        std.testing.allocator,
+        "{\"type\":\"object\",\"properties\":{}}",
+        .{},
+    );
+    defer dynamic_schema.deinit();
+    const body = try buildAgentRequest(std.testing.allocator, .{
         .model = "zai/glm-5.2",
-        .tool_registry = .{ .tools = registered_tools[0..] },
-        .serialized_tools = "[{\"type\":\"function\",\"name\":\"read_file\",\"description\":\"Read\",\"inputSchema\":{\"type\":\"object\",\"properties\":{}}}]",
+        .tools = .{
+            .registry = .{ .tools = registered_tools[0..] },
+            .additional_functions = &.{read_file_schema},
+            .selected_dynamic = &.{.{
+                .name = "mcp_fs_read",
+                .description = "Read",
+                .input_schema = dynamic_schema.value,
+            }},
+        },
         .messages = &messages,
         .tool_choice = .none,
-        .selected_dynamic_tool_schemas = &.{"{\"type\":\"function\",\"name\":\"mcp_fs_read\",\"description\":\"Read\",\"inputSchema\":{\"type\":\"object\",\"properties\":{}}}"},
         .vision_mode = .required,
-        .provider_options = model_capabilities.resolveProviderOptions(
+        .provider_options = resolveGatewayProviderOptions(
             "zai/glm-5.2",
             .auto,
             false,
@@ -900,37 +501,38 @@ test "required vision request contains only the registered vision schema" {
 fn streamAgentCompletion(
     _: ?*anyopaque,
     alloc: Allocator,
-    request: agent_stream_provider_contract.Request,
+    request: agent_stream_provider_contract.ModelRequest,
 ) anyerror!agent_stream_provider_contract.Result {
-    if (request.credential_source == .grok_subscription) {
+    if (request.credential.source == .chatgpt_subscription or request.credential.source == .grok_subscription) {
         return error.SubscriptionCredentialCannotAuthorizeGateway;
     }
+    const payload = try buildAgentRequest(alloc, request.data());
+    defer alloc.free(payload);
+    var events = request.events;
     const result = gateway_client.streamGatewayCompletion(
         alloc,
         .{
-            .api_key = request.api_key,
-            .credential_source = request.credential_source,
-            .responses_compaction_binding = request.responses_compaction_binding,
-            .team = request.team,
+            .api_key = request.credential.secret,
+            .team = request.credential.tenant,
             .session_id = request.session_id,
             .model = request.model,
             .retry_count = request.retry_count,
-            .chat_url = request.chat_url,
-            .payload = request.payload,
+            .chat_url = agentChatUrl(),
+            .payload = payload,
             .trace_ctx = request.trace_ctx,
             .content_capture_limit = request.content_capture_limit,
             .delivery = request.delivery,
-            .on_reasoning_chunk = request.on_reasoning_chunk,
-            .on_tool_input_chunk = request.on_tool_input_chunk,
-            .on_responses_unhandled_event = request.on_unhandled_provider_event,
+            .admission = request.admission,
+            .on_reasoning_chunk = EventBridge.reasoning,
+            .on_tool_input_chunk = EventBridge.toolInput,
             .provider_attempt_owner = switch (request.provider_attempt_owner) {
                 .transport => .transport,
                 .agent => .agent,
             },
         },
-        request.callback_ctx,
-        request.on_content_chunk,
-        request.on_tool_start,
+        &events,
+        EventBridge.content,
+        EventBridge.toolStart,
         request.cancel_flag,
     ) catch |err| {
         request.attempt_evidence.network_failure = gateway_client.networkFailureEvidence(
@@ -940,25 +542,92 @@ fn streamAgentCompletion(
         return err;
     };
     const diagnostics = if (result.status == .ok)
-        gateway_failure_diagnostics.FailureDiagnostics{}
+        vercel_failure_diagnostics.FailureDiagnostics{}
     else
-        gateway_failure_diagnostics.collect(alloc, request.payload, result.err_body);
-    const route = if (request.credential_source) |source|
-        provider_route.fromCredentialSource(source) orelse return error.UnsupportedCredentialSource
-    else
-        provider_route.ProviderRoute.vercel_gateway;
-    const direct_responses = route.contract().wire_api == .openai_responses;
-    return .{
-        .status = result.status,
-        .completion = result.completion,
-        .err_body = result.err_body,
-        .generation_origin = if (direct_responses) "" else gateway_client.generationBaseUrl(),
-        .reconcile_generation_usage = !direct_responses,
-        .accounting = if (direct_responses) .direct_usage else .gateway_generation,
-        .failure_schema = diagnostics.schema,
-        .failure_request_shape = diagnostics.request_shape,
+        vercel_failure_diagnostics.collect(alloc, payload, result.err_body);
+    if (result.status != .ok) return .{ .failed = .{
+        .kind = failureKind(result.status),
+        .detail = result.err_body,
+        .diagnostics = .{
+            .schema = diagnostics.schema,
+            .request_shape = diagnostics.request_shape,
+        },
         .retry_after_seconds = result.retry_after_seconds,
         .ownership = .owned,
+    } };
+    return .{ .completed = .{
+        .completion = result.completion,
+        .usage = gatewayUsageOutcome(request, result.completion),
+        .ownership = .owned,
+    } };
+}
+
+fn gatewayUsageOutcome(
+    request: agent_stream_provider_contract.ModelRequest,
+    completion: shared_types.ModelCompletion,
+) agent_stream_provider_contract.UsageOutcome {
+    const reference = gatewayUsageReference(request, completion) orelse
+        return .{ .unavailable = .possibly_billed };
+    return if (completion.billing != null)
+        .{ .immediate = reference }
+    else
+        .{ .deferred = reference };
+}
+
+fn gatewayUsageReference(
+    request: agent_stream_provider_contract.ModelRequest,
+    completion: shared_types.ModelCompletion,
+) ?agent_stream_provider_contract.DeferredUsageReference {
+    const generation_id = completion.generation_id orelse return null;
+    const source = request.credential.source orelse return null;
+    return .{
+        .provider = .gateway,
+        .generation_id = generation_id,
+        .scope = gateway_client.generationBaseUrl(),
+        .tenant = request.credential.tenant,
+        .account_id = request.credential.account_id,
+        .credential_source = source,
+        .credential_identity = credential_authority.derive(
+            source,
+            request.credential.account_id,
+        ),
+    };
+}
+
+const EventBridge = struct {
+    fn sink(raw: *anyopaque) *agent_stream_provider_contract.EventSink {
+        return @ptrCast(@alignCast(raw));
+    }
+
+    fn content(raw: *anyopaque, chunk: []const u8) void {
+        sink(raw).emit(.{ .content_delta = chunk });
+    }
+
+    fn reasoning(raw: *anyopaque, chunk: []const u8) void {
+        sink(raw).emit(.{ .reasoning_delta = chunk });
+    }
+
+    fn toolInput(raw: *anyopaque, chunk: []const u8) void {
+        sink(raw).emit(.{ .tool_input_delta = chunk });
+    }
+
+    fn toolStart(raw: *anyopaque, id: []const u8, name: []const u8, label: ?[]const u8) void {
+        sink(raw).emit(.{ .tool_started = .{ .id = id, .name = name, .label = label } });
+    }
+};
+
+fn failureKind(status: std.http.Status) agent_stream_provider_contract.FailureKind {
+    return switch (status) {
+        .bad_request => .invalid_request,
+        .unauthorized => .unauthorized,
+        .forbidden => .forbidden,
+        .payload_too_large => .request_too_large,
+        .too_many_requests => .rate_limited,
+        .internal_server_error => .server_error,
+        .bad_gateway => .bad_gateway,
+        .service_unavailable => .unavailable,
+        .gateway_timeout => .gateway_timeout,
+        else => .provider_error,
     };
 }
 
@@ -967,13 +636,11 @@ fn fetchCredits(
     alloc: Allocator,
     input: gateway_provider.CreditsLookupInput,
 ) output_contracts.CreditsSnapshot {
-    if (input.credential_source) |source| {
-        const route = provider_route.fromCredentialSource(source) orelse {
-            return creditsErrorSnapshot(alloc, "credits are unavailable for this credential source");
-        };
-        if (!route.contract().supports_credits) {
-            return creditsErrorSnapshot(alloc, "credits are available only for Vercel AI Gateway credentials");
-        }
+    if (input.credential_source == .chatgpt_subscription) {
+        return creditsErrorSnapshot(alloc, "AI Gateway credits are unavailable for a ChatGPT subscription.");
+    }
+    if (input.credential_source == .grok_subscription) {
+        return creditsErrorSnapshot(alloc, "AI Gateway credits are unavailable for a Grok subscription.");
     }
     return fetchCreditsWithFetch(
         alloc,
@@ -981,464 +648,6 @@ fn fetchCredits(
         input.tenant,
         gateway_client.fetchGatewayGetResult,
     );
-}
-
-fn fetchAccountUsage(
-    _: ?*anyopaque,
-    alloc: Allocator,
-    input: gateway_provider.AccountUsageLookupInput,
-) output_contracts.CodexAccountUsageSnapshot {
-    if (input.credential_source != .chatgpt_subscription) {
-        return codexAccountUsageFailure(.unsupported_credential_source, null);
-    }
-    const access_token = input.credential orelse
-        return codexAccountUsageFailure(.missing_credential, null);
-    if (access_token.len == 0) return codexAccountUsageFailure(.missing_credential, null);
-    const account_id = input.account_id orelse
-        return codexAccountUsageFailure(.missing_account_id, null);
-    if (account_id.len == 0) return codexAccountUsageFailure(.missing_account_id, null);
-
-    var endpoints = codex_usage.resolveEndpointsAlloc(
-        alloc,
-        codex_usage.EndpointOverrides.fromEnvironment(),
-    ) catch |err| {
-        debug_trace.logf("codex_usage", "endpoint resolution failed err={s}", .{@errorName(err)});
-        return codexAccountUsageFailure(codexUsageFailureKindForError(err), null);
-    };
-    defer endpoints.deinit(alloc);
-
-    return fetchAccountUsageWithRetry(
-        alloc,
-        endpoints,
-        access_token,
-        account_id,
-        input.cancel_flag,
-        .{},
-    );
-}
-
-const AccountUsageRetryDependencies = struct {
-    context: ?*anyopaque = null,
-    fetch_pair_fn: *const fn (
-        ?*anyopaque,
-        Allocator,
-        codex_usage.Endpoints,
-        []const u8,
-        []const u8,
-        ?*std.atomic.Value(bool),
-    ) output_contracts.CodexAccountUsageSnapshot = fetchAccountUsagePairProvider,
-    load_credential_fn: *const fn (
-        ?*anyopaque,
-        Allocator,
-        AccountUsageCredentialRetryMode,
-    ) anyerror!?chatgpt_oauth.Access = loadCodexAuthForUsageRetry,
-};
-
-const AccountUsageCredentialRetryMode = enum {
-    reload,
-    force_refresh,
-};
-
-fn fetchAccountUsageWithRetry(
-    alloc: Allocator,
-    endpoints: codex_usage.Endpoints,
-    access_token: []const u8,
-    account_id: []const u8,
-    cancel_flag: ?*std.atomic.Value(bool),
-    dependencies: AccountUsageRetryDependencies,
-) output_contracts.CodexAccountUsageSnapshot {
-    var first = dependencies.fetch_pair_fn(
-        dependencies.context,
-        alloc,
-        endpoints,
-        access_token,
-        account_id,
-        cancel_flag,
-    );
-    const retry_mode: AccountUsageCredentialRetryMode = if (first.failure) |failure|
-        switch (failure.kind) {
-            .unauthorized => .force_refresh,
-            .credential_changed => .reload,
-            else => return first,
-        }
-    else
-        return first;
-    first.deinit(alloc);
-
-    var refreshed = (dependencies.load_credential_fn(dependencies.context, alloc, retry_mode) catch |err| {
-        debug_trace.logf("codex_usage", "credential retry failed mode={s} err={s}", .{ @tagName(retry_mode), @errorName(err) });
-        return codexAccountUsageFailure(codexUsageFailureKindForError(err), null);
-    }) orelse return codexAccountUsageFailure(.credential_unavailable, null);
-    defer refreshed.deinit(alloc);
-    if (!std.mem.eql(u8, refreshed.account_id, account_id)) {
-        return codexAccountUsageFailure(.credential_changed, null);
-    }
-    return dependencies.fetch_pair_fn(
-        dependencies.context,
-        alloc,
-        endpoints,
-        refreshed.access_token,
-        refreshed.account_id,
-        cancel_flag,
-    );
-}
-
-fn loadCodexAuthForUsageRetry(
-    _: ?*anyopaque,
-    alloc: Allocator,
-    mode: AccountUsageCredentialRetryMode,
-) !?chatgpt_oauth.Access {
-    return switch (mode) {
-        .reload => chatgpt_oauth.loadAccess(alloc, oauth_transport_provider, .stored),
-        .force_refresh => chatgpt_oauth.loadAccess(alloc, oauth_transport_provider, .force),
-    };
-}
-
-fn fetchAccountUsagePairProvider(
-    _: ?*anyopaque,
-    alloc: Allocator,
-    endpoints: codex_usage.Endpoints,
-    access_token: []const u8,
-    account_id: []const u8,
-    cancel_flag: ?*std.atomic.Value(bool),
-) output_contracts.CodexAccountUsageSnapshot {
-    return fetchAccountUsagePair(
-        alloc,
-        endpoints,
-        access_token,
-        account_id,
-        cancel_flag,
-    );
-}
-
-fn fetchAccountUsagePair(
-    alloc: Allocator,
-    endpoints: codex_usage.Endpoints,
-    access_token: []const u8,
-    account_id: []const u8,
-    cancel_flag: ?*std.atomic.Value(bool),
-) output_contracts.CodexAccountUsageSnapshot {
-    var usage_response = gateway_client.fetchCodexJsonBounded(alloc, .{
-        .method = .get,
-        .url = endpoints.usage,
-        .access_token = access_token,
-        .account_id = account_id,
-        .cancel_flag = cancel_flag,
-        .max_response_bytes = codex_usage.max_response_bytes,
-    }) catch |err| {
-        debug_trace.logf("codex_usage", "usage request failed err={s}", .{@errorName(err)});
-        return codexAccountUsageFailure(codexUsageFailureKindForError(err), null);
-    };
-    defer usage_response.deinit(alloc);
-    if (usage_response.status != .ok) {
-        return codexAccountUsageFailureForStatus(usage_response.status);
-    }
-
-    // The second request is independently checked against the same access
-    // token and account id. If the auth file changes between calls, the client
-    // returns CodexCredentialChanged and this partial pair is discarded.
-    var profile_response = gateway_client.fetchCodexJsonBounded(alloc, .{
-        .method = .get,
-        .url = endpoints.profile,
-        .access_token = access_token,
-        .account_id = account_id,
-        .cancel_flag = cancel_flag,
-        .max_response_bytes = codex_usage.max_response_bytes,
-    }) catch |err| {
-        debug_trace.logf("codex_usage", "profile request failed err={s}", .{@errorName(err)});
-        return codexAccountUsageFailure(codexUsageFailureKindForError(err), null);
-    };
-    defer profile_response.deinit(alloc);
-    if (profile_response.status != .ok) {
-        return codexAccountUsageFailureForStatus(profile_response.status);
-    }
-
-    const data = codex_usage.parseSnapshot(
-        alloc,
-        usage_response.body,
-        profile_response.body,
-        io_mod.milliTimestamp(),
-    ) catch |err| {
-        debug_trace.logf("codex_usage", "response parse failed err={s}", .{@errorName(err)});
-        return codexAccountUsageFailure(codexUsageFailureKindForError(err), null);
-    };
-    return .{ .data = data };
-}
-
-fn codexAccountUsageFailure(
-    kind: codex_usage.FailureKind,
-    status: ?std.http.Status,
-) output_contracts.CodexAccountUsageSnapshot {
-    return .{ .failure = .{ .kind = kind, .http_status = status } };
-}
-
-fn codexAccountUsageFailureForStatus(status: std.http.Status) output_contracts.CodexAccountUsageSnapshot {
-    const kind: codex_usage.FailureKind = switch (status) {
-        .unauthorized => .unauthorized,
-        .forbidden => .forbidden,
-        .too_many_requests => .rate_limited,
-        else => .http_error,
-    };
-    return codexAccountUsageFailure(kind, status);
-}
-
-fn codexUsageFailureKindForError(err: anyerror) codex_usage.FailureKind {
-    return switch (err) {
-        error.OutOfMemory => .resource_exhausted,
-        error.Cancelled => .cancelled,
-        error.Timeout => .timeout,
-        error.CodexAuthUnavailable,
-        error.CodexCredentialUnavailable,
-        => .credential_unavailable,
-        error.CodexAccountChanged,
-        error.CodexCredentialChanged,
-        => .credential_changed,
-        error.CodexJsonResponseTooLarge,
-        error.CodexUsageResponseTooLarge,
-        => .response_too_large,
-        error.InvalidCodexUsageResponse,
-        error.InvalidCodexTokenProfileResponse,
-        error.TooManyCodexRateLimits,
-        error.TooManyCodexDailyUsageBuckets,
-        => .invalid_response,
-        error.InvalidBaseUrl,
-        error.BaseUrlContainsUserInfo,
-        error.BaseUrlContainsQueryOrFragment,
-        error.InsecureBaseUrl,
-        error.InvalidUri,
-        => .invalid_endpoint,
-        else => .transport,
-    };
-}
-
-test "account usage provider rejects unbound and non-Codex credentials before transport" {
-    var wrong_source = fetchAccountUsage(null, std.testing.allocator, .{
-        .credential = "key",
-        .account_id = "account",
-        .credential_source = .openai_api_key,
-    });
-    defer wrong_source.deinit(std.testing.allocator);
-    try std.testing.expectEqual(
-        codex_usage.FailureKind.unsupported_credential_source,
-        wrong_source.failure.?.kind,
-    );
-
-    var missing_account = fetchAccountUsage(null, std.testing.allocator, .{
-        .credential = "access",
-        .account_id = null,
-        .credential_source = .chatgpt_subscription,
-    });
-    defer missing_account.deinit(std.testing.allocator);
-    try std.testing.expectEqual(
-        codex_usage.FailureKind.missing_account_id,
-        missing_account.failure.?.kind,
-    );
-}
-
-test "account usage provider classifies provider HTTP failures without response detail" {
-    var unauthorized = codexAccountUsageFailureForStatus(.unauthorized);
-    defer unauthorized.deinit(std.testing.allocator);
-    try std.testing.expectEqual(codex_usage.FailureKind.unauthorized, unauthorized.failure.?.kind);
-    try std.testing.expectEqual(std.http.Status.unauthorized, unauthorized.failure.?.http_status.?);
-
-    var throttled = codexAccountUsageFailureForStatus(.too_many_requests);
-    defer throttled.deinit(std.testing.allocator);
-    try std.testing.expectEqual(codex_usage.FailureKind.rate_limited, throttled.failure.?.kind);
-}
-
-test "account usage provider refreshes once and retries the complete pair for the same account" {
-    const Fake = struct {
-        pair_calls: usize = 0,
-        refresh_calls: usize = 0,
-        saw_initial_access: bool = false,
-        saw_refreshed_access: bool = false,
-        saw_force_refresh: bool = false,
-        refresh_account: []const u8 = "account",
-
-        fn fetchPair(
-            raw: ?*anyopaque,
-            _: Allocator,
-            _: codex_usage.Endpoints,
-            access_token: []const u8,
-            account_id: []const u8,
-            _: ?*std.atomic.Value(bool),
-        ) output_contracts.CodexAccountUsageSnapshot {
-            const self: *@This() = @ptrCast(@alignCast(raw.?));
-            self.pair_calls += 1;
-            self.saw_initial_access = self.saw_initial_access or
-                (std.mem.eql(u8, access_token, "expired") and
-                    std.mem.eql(u8, account_id, "account"));
-            self.saw_refreshed_access = self.saw_refreshed_access or
-                (std.mem.eql(u8, access_token, "fresh") and
-                    std.mem.eql(u8, account_id, "account"));
-            return if (self.pair_calls == 1)
-                codexAccountUsageFailure(.unauthorized, .unauthorized)
-            else
-                codexAccountUsageFailure(.forbidden, .forbidden);
-        }
-
-        fn loadCredential(
-            raw: ?*anyopaque,
-            alloc: Allocator,
-            mode: AccountUsageCredentialRetryMode,
-        ) !?chatgpt_oauth.Access {
-            const self: *@This() = @ptrCast(@alignCast(raw.?));
-            self.refresh_calls += 1;
-            self.saw_force_refresh = mode == .force_refresh;
-            const access_token = try alloc.dupe(u8, "fresh");
-            errdefer alloc.free(access_token);
-            return .{
-                .access_token = access_token,
-                .account_id = try alloc.dupe(u8, self.refresh_account),
-                .refresh_after_ms = 0,
-            };
-        }
-    };
-
-    const endpoints = codex_usage.Endpoints{
-        .usage = @constCast("usage"),
-        .profile = @constCast("profile"),
-    };
-    var fake: Fake = .{};
-    var result = fetchAccountUsageWithRetry(
-        std.testing.allocator,
-        endpoints,
-        "expired",
-        "account",
-        null,
-        .{
-            .context = &fake,
-            .fetch_pair_fn = Fake.fetchPair,
-            .load_credential_fn = Fake.loadCredential,
-        },
-    );
-    defer result.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(usize, 2), fake.pair_calls);
-    try std.testing.expectEqual(@as(usize, 1), fake.refresh_calls);
-    try std.testing.expect(fake.saw_initial_access);
-    try std.testing.expect(fake.saw_refreshed_access);
-    try std.testing.expect(fake.saw_force_refresh);
-    try std.testing.expectEqual(codex_usage.FailureKind.forbidden, result.failure.?.kind);
-}
-
-test "account usage provider rejects a cross-account refresh without retrying" {
-    const Fake = struct {
-        pair_calls: usize = 0,
-        refresh_calls: usize = 0,
-
-        fn fetchPair(
-            raw: ?*anyopaque,
-            _: Allocator,
-            _: codex_usage.Endpoints,
-            _: []const u8,
-            _: []const u8,
-            _: ?*std.atomic.Value(bool),
-        ) output_contracts.CodexAccountUsageSnapshot {
-            const self: *@This() = @ptrCast(@alignCast(raw.?));
-            self.pair_calls += 1;
-            return codexAccountUsageFailure(.unauthorized, .unauthorized);
-        }
-
-        fn loadCredential(
-            raw: ?*anyopaque,
-            alloc: Allocator,
-            mode: AccountUsageCredentialRetryMode,
-        ) !?chatgpt_oauth.Access {
-            const self: *@This() = @ptrCast(@alignCast(raw.?));
-            self.refresh_calls += 1;
-            try std.testing.expectEqual(AccountUsageCredentialRetryMode.force_refresh, mode);
-            const access_token = try alloc.dupe(u8, "other-access");
-            errdefer alloc.free(access_token);
-            return .{
-                .access_token = access_token,
-                .account_id = try alloc.dupe(u8, "other-account"),
-                .refresh_after_ms = 0,
-            };
-        }
-    };
-
-    var fake: Fake = .{};
-    var result = fetchAccountUsageWithRetry(
-        std.testing.allocator,
-        .{ .usage = @constCast("usage"), .profile = @constCast("profile") },
-        "expired",
-        "account",
-        null,
-        .{
-            .context = &fake,
-            .fetch_pair_fn = Fake.fetchPair,
-            .load_credential_fn = Fake.loadCredential,
-        },
-    );
-    defer result.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(usize, 1), fake.pair_calls);
-    try std.testing.expectEqual(@as(usize, 1), fake.refresh_calls);
-    try std.testing.expectEqual(codex_usage.FailureKind.credential_changed, result.failure.?.kind);
-}
-
-test "account usage provider reloads a concurrently replaced same-account credential" {
-    const Fake = struct {
-        pair_calls: usize = 0,
-        load_calls: usize = 0,
-        saw_reload: bool = false,
-        saw_reloaded_access: bool = false,
-
-        fn fetchPair(
-            raw: ?*anyopaque,
-            _: Allocator,
-            _: codex_usage.Endpoints,
-            access_token: []const u8,
-            account_id: []const u8,
-            _: ?*std.atomic.Value(bool),
-        ) output_contracts.CodexAccountUsageSnapshot {
-            const self: *@This() = @ptrCast(@alignCast(raw.?));
-            self.pair_calls += 1;
-            self.saw_reloaded_access = self.saw_reloaded_access or
-                (std.mem.eql(u8, access_token, "replacement") and
-                    std.mem.eql(u8, account_id, "account"));
-            return if (self.pair_calls == 1)
-                codexAccountUsageFailure(.credential_changed, null)
-            else
-                codexAccountUsageFailure(.forbidden, .forbidden);
-        }
-
-        fn loadCredential(
-            raw: ?*anyopaque,
-            alloc: Allocator,
-            mode: AccountUsageCredentialRetryMode,
-        ) !?chatgpt_oauth.Access {
-            const self: *@This() = @ptrCast(@alignCast(raw.?));
-            self.load_calls += 1;
-            self.saw_reload = mode == .reload;
-            const access_token = try alloc.dupe(u8, "replacement");
-            errdefer alloc.free(access_token);
-            return .{
-                .access_token = access_token,
-                .account_id = try alloc.dupe(u8, "account"),
-                .refresh_after_ms = 0,
-            };
-        }
-    };
-
-    var fake: Fake = .{};
-    var result = fetchAccountUsageWithRetry(
-        std.testing.allocator,
-        .{ .usage = @constCast("usage"), .profile = @constCast("profile") },
-        "replaced",
-        "account",
-        null,
-        .{
-            .context = &fake,
-            .fetch_pair_fn = Fake.fetchPair,
-            .load_credential_fn = Fake.loadCredential,
-        },
-    );
-    defer result.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(usize, 2), fake.pair_calls);
-    try std.testing.expectEqual(@as(usize, 1), fake.load_calls);
-    try std.testing.expect(fake.saw_reload);
-    try std.testing.expect(fake.saw_reloaded_access);
-    try std.testing.expectEqual(codex_usage.FailureKind.forbidden, result.failure.?.kind);
 }
 
 /// An fx login can reach several teams, so `/v1/credits` rejects it outright
@@ -1590,8 +799,7 @@ const OAuthHttpOperation = struct {
         if (body.len > oauth_response_max_bytes) return error.OAuthResponseTooLarge;
 
         return .{
-            .disposition = if (result.status.class() == .success) .accepted else .rejected,
-            .status = result.status,
+            .disposition = if (result.status == .ok) .accepted else .rejected,
             .body = try self.alloc.dupe(u8, body),
         };
     }
@@ -1647,11 +855,7 @@ pub fn selectedWebSearchBackend() !web_search_contract.SearchBackendId {
     return default_web_search_backend_order[0];
 }
 
-fn resolvePreferredWebSearchBackends(
-    _: ?*anyopaque,
-    inputs: web_search_provider.Inputs,
-) !?[]const web_search_contract.SearchBackendId {
-    if (inputs.credential_source == .chatgpt_subscription) return &codex_search_backend;
+fn resolvePreferredWebSearchBackends(_: ?*anyopaque) !?[]const web_search_contract.SearchBackendId {
     return preferredWebSearchBackendsOverride(io_mod.getenv("FX_WEB_SEARCH_BACKEND"));
 }
 
@@ -1663,20 +867,9 @@ fn executeWebSearchProvider(
     on_progress: ?ProgressFn,
     progress_ctx: ?*anyopaque,
 ) !Response {
-    if (request.backend.eql(codex_search_backend_id)) {
-        return executeCodexStandaloneSearch(
-            alloc,
-            inputs,
-            request,
-            on_progress,
-            progress_ctx,
-        );
-    }
-    if (inputs.credential_source == .chatgpt_subscription) {
-        return error.InvalidWebSearchBackend;
-    }
     return executeGatewayWorker(alloc, .{
         .api_key = inputs.api_key,
+        .credential_source = inputs.credential_source,
         .team = inputs.gateway_team,
         .model = inputs.worker_model,
         .retry_count = inputs.gateway_retry_count,
@@ -1684,212 +877,6 @@ fn executeWebSearchProvider(
         .usage = inputs.usage,
         .usage_allocator = inputs.usage_allocator,
     }, request, on_progress, progress_ctx);
-}
-
-fn executeCodexStandaloneSearch(
-    alloc: Allocator,
-    inputs: web_search_provider.Inputs,
-    request: Request,
-    on_progress: ?ProgressFn,
-    progress_ctx: ?*anyopaque,
-) !Response {
-    if (inputs.credential_source != .chatgpt_subscription) return error.InvalidWebSearchBackend;
-    if (inputs.api_key.len == 0) return error.MissingGatewaySearchConfiguration;
-    const account_id = inputs.account_id orelse
-        return error.CodexCredentialChanged;
-    if (request.cancel_flag.load(.seq_cst)) return error.Cancelled;
-    if (on_progress) |progress| progress(
-        progress_ctx orelse return error.MissingProgressContext,
-        .{ .query_update = request.query },
-    );
-
-    const endpoint = try provider_route.resolveSearchEndpointFromEnvironmentAlloc(
-        alloc,
-        .codex_responses_oauth,
-    );
-    defer alloc.free(endpoint);
-    const commands = if (request.commands_json) |raw|
-        try alloc.dupe(u8, raw)
-    else
-        try buildCodexSearchCommandsAlloc(alloc, request);
-    defer alloc.free(commands);
-    const settings = try buildCodexSearchSettingsAlloc(alloc, request);
-    defer alloc.free(settings);
-    const payload = try responses_search.buildRequest(alloc, .{
-        .id = request.request_id orelse "fx_web_search",
-        .model = provider_route.wireModel(.codex_responses_oauth, inputs.worker_model),
-        .input_json = request.input_json,
-        .commands_json = commands,
-        .settings_json = settings,
-        .max_output_tokens = request.max_output_tokens,
-    });
-    defer alloc.free(payload);
-
-    var result = try gateway_client.fetchCodexJsonBounded(alloc, .{
-        .method = .post_json,
-        .url = endpoint,
-        .access_token = inputs.api_key,
-        .account_id = account_id,
-        .payload = payload,
-        .cancel_flag = @constCast(request.cancel_flag),
-        .deadline = deadlineAfterMs(request.timeout_ms),
-        .max_response_bytes = 512 * 1024,
-    });
-    defer result.deinit(alloc);
-    if (result.status.class() != .success) return error.CodexSearchRequestFailed;
-
-    var decoded = try responses_search.decodeResponse(alloc, result.body);
-    defer decoded.deinit();
-    const content = try materializeCodexSearchContent(
-        alloc,
-        decoded,
-        request.request_id orelse "codex-search",
-    );
-    errdefer {
-        for (content) |item| item.deinit(alloc);
-        alloc.free(content);
-    }
-    if (on_progress) |progress| progress(
-        progress_ctx orelse return error.MissingProgressContext,
-        .{ .results_received = .{
-            .query = request.query,
-            .result_count = if (decoded.results) |items| items.len else 0,
-        } },
-    );
-    return .{
-        .content = content,
-        .stop_reason = try alloc.dupe(u8, "stop"),
-        .usage = .{ .web_search_requests = 1 },
-    };
-}
-
-const max_codex_search_sources: usize = 64;
-const max_codex_search_title_bytes: usize = 1024;
-
-fn materializeCodexSearchContent(
-    alloc: Allocator,
-    decoded: responses_search.DecodedResponse,
-    search_id: []const u8,
-) ![]const web_search_contract.ResultItem {
-    var content: std.ArrayList(web_search_contract.ResultItem) = .empty;
-    errdefer {
-        for (content.items) |item| item.deinit(alloc);
-        content.deinit(alloc);
-    }
-    const commentary = try alloc.dupe(u8, decoded.output);
-    content.append(alloc, .{ .commentary = commentary }) catch |err| {
-        alloc.free(commentary);
-        return err;
-    };
-
-    var source_count: usize = 0;
-    for (decoded.results orelse &.{}) |result| {
-        if (source_count >= max_codex_search_sources) break;
-        const projected = responses_search.resultSource(result) orelse continue;
-        var item = try materializeCodexSearchSourceItem(alloc, projected, search_id);
-        content.append(alloc, item) catch |err| {
-            item.deinit(alloc);
-            return err;
-        };
-        source_count += 1;
-    }
-    return content.toOwnedSlice(alloc);
-}
-
-fn materializeCodexSearchSourceItem(
-    alloc: Allocator,
-    projected: responses_search.ResultSource,
-    search_id: []const u8,
-) !web_search_contract.ResultItem {
-    const raw_title = projected.title orelse projected.url;
-    const title = text_utils.utf8PrefixByBytes(raw_title, max_codex_search_title_bytes);
-    const owned_url = try alloc.dupe(u8, projected.url);
-    errdefer alloc.free(owned_url);
-    const owned_title = try alloc.dupe(u8, if (title.len > 0) title else projected.url);
-    errdefer alloc.free(owned_title);
-    const sources = try alloc.alloc(web_search_contract.Source, 1);
-    errdefer alloc.free(sources);
-    sources[0] = .{ .title = owned_title, .url = owned_url };
-    const tool_use_id = try alloc.dupe(u8, projected.ref_id orelse search_id);
-    return .{ .search = .{
-        .tool_use_id = tool_use_id,
-        .content = sources,
-    } };
-}
-
-test "Codex standalone search materializes structured result citations" {
-    const alloc = std.testing.allocator;
-    var decoded = try responses_search.decodeResponse(
-        alloc,
-        "{\"output\":\"Search answer\",\"results\":[{\"type\":\"text_result\",\"ref_id\":\"turn0search0\",\"title\":\"Primary source\",\"url\":\"https://example.com/source\"},{\"type\":\"text_result\",\"title\":\"Unsafe\",\"url\":\"javascript:alert(1)\"}]}",
-    );
-    defer decoded.deinit();
-    const content = try materializeCodexSearchContent(alloc, decoded, "session-search");
-    defer {
-        for (content) |item| item.deinit(alloc);
-        alloc.free(content);
-    }
-
-    try std.testing.expectEqual(@as(usize, 2), content.len);
-    try std.testing.expectEqualStrings("Search answer", content[0].commentary);
-    const search = content[1].search;
-    try std.testing.expectEqualStrings("turn0search0", search.tool_use_id);
-    try std.testing.expectEqual(@as(usize, 1), search.content.len);
-    try std.testing.expectEqualStrings("Primary source", search.content[0].title);
-    try std.testing.expectEqualStrings("https://example.com/source", search.content[0].url);
-}
-
-fn checkCodexSearchMaterializationAllocationFailures(alloc: Allocator) !void {
-    var decoded = try responses_search.decodeResponse(
-        alloc,
-        "{\"output\":\"Search answer\",\"results\":[{\"ref_id\":\"turn0search0\",\"title\":\"Primary\",\"url\":\"https://example.com/one\"},{\"ref_id\":\"turn0search1\",\"url\":\"https://example.com/two\"}]}",
-    );
-    defer decoded.deinit();
-    const content = try materializeCodexSearchContent(alloc, decoded, "session-search");
-    defer {
-        for (content) |item| item.deinit(alloc);
-        alloc.free(content);
-    }
-}
-
-test "Codex standalone search citation materialization cleans allocation failures" {
-    try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
-        checkCodexSearchMaterializationAllocationFailures,
-        .{},
-    );
-}
-
-fn buildCodexSearchCommandsAlloc(alloc: Allocator, request: Request) ![]u8 {
-    var out: std.Io.Writer.Allocating = .init(alloc);
-    errdefer out.deinit();
-    try out.writer.writeAll("{\"search_query\":[{\"q\":");
-    try std.json.Stringify.value(request.query, .{}, &out.writer);
-    if (hasValues(request.allowed_domains)) {
-        try out.writer.writeAll(",\"domains\":");
-        try std.json.Stringify.value(request.allowed_domains.?, .{}, &out.writer);
-    }
-    try out.writer.writeAll("}]}");
-    return out.toOwnedSlice();
-}
-
-fn buildCodexSearchSettingsAlloc(alloc: Allocator, request: Request) ![]u8 {
-    var out: std.Io.Writer.Allocating = .init(alloc);
-    errdefer out.deinit();
-    try out.writer.writeAll("{\"allowed_callers\":[\"direct\"],\"external_web_access\":true");
-    if (hasValues(request.allowed_domains) or hasValues(request.blocked_domains)) {
-        try out.writer.writeAll(",\"filters\":{");
-        if (hasValues(request.allowed_domains)) {
-            try out.writer.writeAll("\"allowed_domains\":");
-            try std.json.Stringify.value(request.allowed_domains.?, .{}, &out.writer);
-        } else {
-            try out.writer.writeAll("\"blocked_domains\":");
-            try std.json.Stringify.value(request.blocked_domains.?, .{}, &out.writer);
-        }
-        try out.writer.writeByte('}');
-    }
-    try out.writer.writeByte('}');
-    return out.toOwnedSlice();
 }
 
 pub fn chatUrl(fallback: []const u8) []const u8 {
@@ -1960,6 +947,7 @@ var default_stream_ctx: u8 = 0;
 
 pub const GatewayWorkerConfig = struct {
     api_key: []const u8,
+    credential_source: ?shared_types.CredentialSource = null,
     team: ?[]const u8 = null,
     model: []const u8,
     retry_count: usize,
@@ -2007,10 +995,10 @@ pub fn executeGatewayWorker(
         .{ .role = .system, .content = web_search_system_prompt },
         .{ .role = .user, .content = request.query },
     };
-    const payload = try gateway_json.buildGatewayRequiredToolRequestBodyWithMaxOutputTokens(alloc, tools_json, &messages, request.max_output_tokens);
+    const payload = try vercel_protocol.buildGatewayRequiredToolRequestBodyWithMaxOutputTokens(alloc, tools_json, &messages, request.max_output_tokens);
     defer alloc.free(payload);
 
-    const usage_observation = try session_usage.GatewayObservation.begin(config.usage);
+    const usage_observation = try session_usage.InvocationObservation.begin(config.usage);
     var delivery = gateway_client.DeliveryCertainty.init();
     const provider_tool_name = try selectedToolName(request.backend);
     var stream = config.stream_fn(
@@ -2034,20 +1022,51 @@ pub fn executeGatewayWorker(
         return err;
     };
     defer stream.deinit(alloc);
-    try usage_observation.complete(
-        config.usage_allocator,
-        stream.status,
-        stream.completion,
-        gateway_client.generationBaseUrl(),
-        config.team,
-    );
-    if (!builtin.is_test) {
+    const usage_outcome = gatewayWorkerUsageOutcome(config, stream.completion);
+    if (stream.status == .ok) {
+        try usage_observation.complete(
+            config.usage_allocator,
+            stream.completion,
+            usage_outcome,
+        );
+    } else {
+        try usage_observation.fail(.unbilled);
+    }
+    if (!builtin.is_test and stream.status == .ok and std.meta.activeTag(usage_outcome) == .deferred) {
         if (config.usage) |ledger| {
-            ledger.startReconciliation(config.usage_allocator, config.api_key);
+            ledger.startDeferredReconciliation(
+                config.usage_allocator,
+                usage_outcome.deferred,
+                config.api_key,
+            );
         }
     }
     if (stream.status != .ok) return error.GatewayRequestFailed;
     return normalizeGatewayCompletion(alloc, request, stream.completion, on_progress, progress_ctx);
+}
+
+fn gatewayWorkerUsageOutcome(
+    config: GatewayWorkerConfig,
+    completion: shared_types.ModelCompletion,
+) agent_stream_provider_contract.UsageOutcome {
+    const generation_id = completion.generation_id orelse
+        return .{ .unavailable = .possibly_billed };
+    const source = config.credential_source orelse .ai_gateway_api_key;
+    const reference = agent_stream_provider_contract.DeferredUsageReference{
+        .provider = .gateway,
+        .generation_id = generation_id,
+        .scope = gateway_client.generationBaseUrl(),
+        .tenant = config.team,
+        .credential_source = source,
+        .credential_identity = credential_authority.derive(
+            source,
+            null,
+        ),
+    };
+    return if (completion.billing != null)
+        .{ .immediate = reference }
+    else
+        .{ .deferred = reference };
 }
 
 fn deadlineAfterMs(timeout_ms: u32) std.Io.Clock.Timestamp {
@@ -2126,7 +1145,7 @@ fn streamGatewayWorker(
 fn normalizeGatewayCompletion(
     alloc: Allocator,
     request: Request,
-    completion: shared_types.GatewayCompletion,
+    completion: shared_types.ModelCompletion,
     on_progress: ?ProgressFn,
     progress_ctx: ?*anyopaque,
 ) !Response {
@@ -2827,7 +1846,7 @@ test "possibly sent web search failure marks billing incomplete" {
 }
 
 test "built-in gateway defaults preserve active provider policy" {
-    try std.testing.expectEqualStrings("zai/glm-5.2", default_model);
+    try std.testing.expectEqualStrings("moonshotai/kimi-k3", default_model);
     try std.testing.expectEqualStrings("https://ai-gateway.vercel.sh/v3/ai/language-model", default_chat_url);
     try std.testing.expectEqualStrings("/coding-agent/v1/models", models_path);
     try std.testing.expectEqual(@as(usize, 3), retry_count);
@@ -2894,6 +1913,19 @@ fn stubFetchForbiddenCredits(
     };
 }
 
+test "built-in credits provider rejects ChatGPT credentials before Gateway I/O" {
+    var snapshot = fetchCredits(null, std.testing.allocator, .{
+        .credential = "chatgpt-secret",
+        .credential_source = .chatgpt_subscription,
+        .tenant = null,
+    });
+    defer snapshot.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings(
+        "AI Gateway credits are unavailable for a ChatGPT subscription.",
+        snapshot.err_message.?,
+    );
+}
+
 test "built-in credits provider names the team query only when valid" {
     const cases = [_]struct { team: ?[]const u8, want: []const u8 }{
         .{ .team = null, .want = "/coding-agent/v1/credits" },
@@ -2914,22 +1946,6 @@ test "built-in credits provider names the team query only when valid" {
         try std.testing.expectEqualStrings(
             case.want,
             captured_credits_path[0..captured_credits_path_len],
-        );
-    }
-}
-
-test "direct provider credentials are never sent to the Vercel credits endpoint" {
-    for ([_]shared_types.CredentialSource{ .openai_api_key, .chatgpt_subscription }) |source| {
-        var snapshot = fetchCredits(null, std.testing.allocator, .{
-            .credential = "must-not-leave-process",
-            .tenant = "must-not-cross-provider-boundary",
-            .credential_source = source,
-        });
-        defer snapshot.deinit(std.testing.allocator);
-        try std.testing.expect(snapshot.balance == null);
-        try std.testing.expectEqualStrings(
-            "credits are available only for Vercel AI Gateway credentials",
-            snapshot.err_message.?,
         );
     }
 }
@@ -3055,57 +2071,11 @@ test "built-in model catalog owns default and loopback target resolution" {
     try std.testing.expectEqualStrings("https://ai-gateway.vercel.sh/coding-agent/v1/models", rejected_url);
 }
 
-test "model catalog request plan keeps direct credentials off the Vercel route" {
-    const alloc = std.testing.allocator;
-    var openai = try prepareModelCatalogRequest(
-        alloc,
-        credentials.catalogAccessForCredential(.openai_api_key, "openai-secret", "team_must_not_cross"),
-        models_path,
-        "http://127.0.0.1:43123",
-        .{ .responses_base_url = "https://openai-proxy.example/v1/responses" },
-    );
-    defer openai.deinit(alloc);
-    try std.testing.expectEqual(provider_route.ProviderRoute.openai_responses_byok, openai.route);
-    try std.testing.expectEqualStrings("https://openai-proxy.example/v1/models", openai.url);
-    try std.testing.expectEqualStrings("openai-secret", openai.api_key.?);
-    try std.testing.expect(openai.gateway_team == null);
-
-    var codex = try prepareModelCatalogRequest(
-        alloc,
-        credentials.catalogAccessForCredential(.chatgpt_subscription, "codex-secret", "team_must_not_cross"),
-        models_path,
-        "http://127.0.0.1:43123",
-        .{ .codex_base_url = "https://codex-proxy.example/backend-api/codex" },
-    );
-    defer codex.deinit(alloc);
-    try std.testing.expectEqual(provider_route.ProviderRoute.codex_responses_oauth, codex.route);
-    try std.testing.expectEqualStrings(
-        "https://codex-proxy.example/backend-api/codex/models?client_version=0.144.5",
-        codex.url,
-    );
-    try std.testing.expectEqualStrings("codex-secret", codex.api_key.?);
-    try std.testing.expect(codex.gateway_team == null);
-
-    var vercel = try prepareModelCatalogRequest(
-        alloc,
-        credentials.catalogAccessForCredential(.ai_gateway_api_key, "gateway-secret", "team_123"),
-        models_path,
-        "http://127.0.0.1:43123",
-        .{ .responses_base_url = "https://must-not-be-used.example/v1" },
-    );
-    defer vercel.deinit(alloc);
-    try std.testing.expectEqual(provider_route.ProviderRoute.vercel_gateway, vercel.route);
-    try std.testing.expectEqualStrings("http://127.0.0.1:43123/coding-agent/v1/models", vercel.url);
-    try std.testing.expectEqualStrings("gateway-secret", vercel.api_key.?);
-    try std.testing.expectEqualStrings("team_123", vercel.gateway_team.?);
-}
-
 test "built-in gateway owns the admitted web search provider policy" {
     try std.testing.expect(web_search_policy.hasAdmittedBackendPolicy(default_web_search_policy.backend_policies));
-    try std.testing.expectEqual(@as(usize, 3), default_web_search_policy.backend_policies.len);
+    try std.testing.expectEqual(@as(usize, 2), default_web_search_policy.backend_policies.len);
     try std.testing.expect(perplexity_search_backend_id.eql(default_web_search_policy.preferred_backends[0]));
     try std.testing.expect(parallel_search_backend_id.eql(default_web_search_policy.preferred_backends[1]));
-    try std.testing.expect(codex_search_backend_id.eql(default_web_search_policy.backend_policies[2].id));
 
     for (default_web_search_policy.backend_policies) |backend| {
         try std.testing.expectEqual(web_search_contract.BackendFeatureMode.best_effort, backend.features.max_uses);
@@ -3146,44 +2116,6 @@ test "built-in gateway web search override selects one backend and rejects unkno
     try std.testing.expect(perplexity_search_backend_id.eql((try preferredWebSearchBackendsOverride("ai_gateway_perplexity_search")).?[0]));
     try std.testing.expect(parallel_search_backend_id.eql((try preferredWebSearchBackendsOverride("ai_gateway_parallel_search")).?[0]));
     try std.testing.expectError(error.InvalidWebSearchBackend, preferredWebSearchBackendsOverride("parallel_search"));
-}
-
-test "Codex web search selects standalone backend and projects legacy filters" {
-    const selected = (try resolvePreferredWebSearchBackends(null, .{
-        .api_key = "access",
-        .credential_source = .chatgpt_subscription,
-        .account_id = "acct",
-        .worker_model = "gpt-5.6-sol",
-        .gateway_retry_count = 1,
-        .gateway_chat_url = default_chat_url,
-    })).?;
-    try std.testing.expectEqual(@as(usize, 1), selected.len);
-    try std.testing.expect(codex_search_backend_id.eql(selected[0]));
-
-    var cancel = std.atomic.Value(bool).init(false);
-    const allowed = [_][]const u8{"openai.com"};
-    const request: Request = .{
-        .backend = codex_search_backend_id,
-        .query = "latest Codex API",
-        .allowed_domains = &allowed,
-        .cancel_flag = &cancel,
-    };
-    const commands = try buildCodexSearchCommandsAlloc(std.testing.allocator, request);
-    defer std.testing.allocator.free(commands);
-    const settings = try buildCodexSearchSettingsAlloc(std.testing.allocator, request);
-    defer std.testing.allocator.free(settings);
-    var parsed_commands = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, commands, .{});
-    defer parsed_commands.deinit();
-    var parsed_settings = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, settings, .{});
-    defer parsed_settings.deinit();
-    try std.testing.expectEqualStrings(
-        "openai.com",
-        parsed_commands.value.object.get("search_query").?.array.items[0].object.get("domains").?.array.items[0].string,
-    );
-    try std.testing.expectEqualStrings(
-        "openai.com",
-        parsed_settings.value.object.get("filters").?.object.get("allowed_domains").?.array.items[0].string,
-    );
 }
 
 test "built-in gateway chat url honors loopback override before fallback" {
@@ -3314,16 +2246,9 @@ fn fetchCatalogForProvider(
     };
     defer alloc.free(json_text);
 
-    const catalog = parseProviderModelCatalogForView(
-        alloc,
-        json_text,
-        input.view,
-        route.contract().catalog,
-    ) catch |err| return .{
-        .failure = .{
-            .category = if (err == error.OutOfMemory) .resource_exhausted else .malformed_response,
-            .http_status = .ok,
-        },
+    const catalog = parseModelCatalogForRoute(alloc, json_text, input.view, route) catch |err| {
+        if (err == error.OutOfMemory) return error.OutOfMemory;
+        return .{ .failure = .{ .category = .malformed_response, .http_status = .ok } };
     };
     return .{ .catalog = catalog };
 }
@@ -3356,12 +2281,14 @@ fn fetchModelCatalogForView(
     };
     defer alloc.free(json_text);
 
-    return parseProviderModelCatalogForView(alloc, json_text, view, route.contract().catalog);
+    return parseModelCatalogForRoute(alloc, json_text, view, route);
 }
 
 fn modelCatalogRoute(access: credentials.CatalogAccess) provider_route.ProviderRoute {
-    const source = access.credentialSource() orelse return .vercel_gateway;
-    return provider_route.fromCredentialSource(source) orelse unreachable;
+    return if (access.credentialSource() == .openai_api_key)
+        .openai_responses_byok
+    else
+        .vercel_gateway;
 }
 
 const ModelCatalogRequestPlan = struct {
@@ -3395,14 +2322,30 @@ fn prepareModelCatalogRequest(
         };
     }
 
+    const base_url = try provider_route.resolveBaseUrlAlloc(alloc, route, endpoint_overrides);
+    defer alloc.free(base_url);
     return .{
         .route = route,
-        .url = try directModelCatalogUrl(alloc, route, endpoint_overrides),
+        .url = try provider_route.appendModelsEndpointAlloc(alloc, base_url),
         .api_key = access.authorizationCredential(),
-        // Team identifiers are a Vercel-only request capability. Codex account
-        // identity is loaded and paired with the token in gateway/client.zig.
         .gateway_team = null,
     };
+}
+
+test "OpenAI catalog request stays on the configured Responses origin" {
+    var plan = try prepareModelCatalogRequest(
+        std.testing.allocator,
+        credentials.catalogAccessForCredential(.openai_api_key, "openai-secret", "vercel-team"),
+        models_path,
+        "http://127.0.0.1:49999",
+        .{ .responses_base_url = "http://127.0.0.1:43123/v1/responses" },
+    );
+    defer plan.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(provider_route.ProviderRoute.openai_responses_byok, plan.route);
+    try std.testing.expectEqualStrings("http://127.0.0.1:43123/v1/models", plan.url);
+    try std.testing.expectEqualStrings("openai-secret", plan.api_key.?);
+    try std.testing.expect(plan.gateway_team == null);
 }
 
 fn fetchModelCatalogResponse(
@@ -3429,13 +2372,14 @@ fn fetchModelCatalogResponse(
             gateway_client.fetchGatewayJsonCancellable(alloc, plan.api_key, plan.gateway_team, plan.url, flag)
         else
             gateway_client.fetchGatewayJson(alloc, plan.api_key, plan.gateway_team, plan.url),
-        .openai_responses_byok, .codex_responses_oauth => direct: {
+        .openai_responses_byok => direct: {
             const api_key = plan.api_key orelse break :direct .{ .http_status = .unauthorized };
             break :direct if (cancel_flag) |flag|
-                gateway_client.fetchProviderJsonCancellable(alloc, access.credentialSource().?, api_key, plan.url, flag)
+                gateway_client.fetchProviderJsonCancellable(alloc, .openai_api_key, api_key, plan.url, flag)
             else
-                gateway_client.fetchProviderJson(alloc, access.credentialSource().?, api_key, plan.url);
+                gateway_client.fetchProviderJson(alloc, .openai_api_key, api_key, plan.url);
         },
+        .codex_responses_oauth => unreachable,
     };
 }
 
@@ -3504,29 +2448,6 @@ fn modelCatalogUrl(alloc: Allocator, path: []const u8, base_url_override: ?[]con
     } else default_model_catalog_base_url;
 
     return std.fmt.allocPrint(alloc, "{s}{s}", .{ base_url, path });
-}
-
-// This is the Codex model-catalog schema compatibility level implemented by
-// parseCodexModelCatalog, not fx's independently versioned application release.
-const codex_catalog_client_version = "0.144.5";
-
-fn directModelCatalogUrl(
-    alloc: Allocator,
-    route: provider_route.ProviderRoute,
-    overrides: provider_route.EndpointOverrides,
-) ![]u8 {
-    std.debug.assert(route != .vercel_gateway);
-    const resolved_base = try provider_route.resolveBaseUrlAlloc(alloc, route, overrides);
-    defer alloc.free(resolved_base);
-
-    const models_url = try provider_route.appendModelsEndpointAlloc(alloc, resolved_base);
-    if (route != .codex_responses_oauth) return models_url;
-    defer alloc.free(models_url);
-    return std.fmt.allocPrint(
-        alloc,
-        "{s}?client_version={s}",
-        .{ models_url, codex_catalog_client_version },
-    );
 }
 
 var stable_models_test_environ: ?*std.process.Environ.Map = null;
@@ -3676,20 +2597,7 @@ pub fn parseModelCatalogForView(
     json_text: []const u8,
     view: ModelCatalogView,
 ) !std.ArrayList(ModelCatalogEntry) {
-    return parseProviderModelCatalogForView(alloc, json_text, view, .vercel_gateway);
-}
-
-fn parseProviderModelCatalogForView(
-    alloc: std.mem.Allocator,
-    json_text: []const u8,
-    view: ModelCatalogView,
-    catalog_kind: provider_route.CatalogKind,
-) !std.ArrayList(ModelCatalogEntry) {
-    var catalog = switch (catalog_kind) {
-        .vercel_gateway => try parseSortedModelCatalog(alloc, json_text),
-        .openai_models => try parseOpenAiModelCatalog(alloc, json_text),
-        .codex_builtin => try parseCodexModelCatalog(alloc, json_text),
-    };
+    var catalog = try parseSortedModelCatalog(alloc, json_text);
     switch (view) {
         .full => return catalog,
         .picker => {
@@ -3699,225 +2607,17 @@ fn parseProviderModelCatalogForView(
     }
 }
 
-/// Shared provider-aware catalog parser for transports that fetch outside the
-/// native HTTP client (for example the JavaScript host bridge).
-pub fn parseModelCatalogForProvider(
+fn parseModelCatalogForRoute(
     alloc: Allocator,
     json_text: []const u8,
-    view: model_catalog.View,
-    catalog_kind: provider_route.CatalogKind,
+    view: ModelCatalogView,
+    route: provider_route.ProviderRoute,
 ) !std.ArrayList(ModelCatalogEntry) {
-    return parseProviderModelCatalogForView(alloc, json_text, view, catalog_kind);
-}
-
-fn parseOpenAiModelCatalog(
-    alloc: Allocator,
-    json_text: []const u8,
-) !std.ArrayList(ModelCatalogEntry) {
-    var candidates: std.ArrayList(ModelCatalogEntry) = .empty;
-    errdefer freeModelCatalog(alloc, &candidates);
-
-    var parsed = try std.json.parseFromSlice(std.json.Value, alloc, json_text, .{});
-    defer parsed.deinit();
-    if (parsed.value != .object) return error.MalformedResponse;
-    const data = parsed.value.object.get("data") orelse return error.MalformedResponse;
-    if (data != .array) return error.MalformedResponse;
-
-    for (data.array.items) |raw| {
-        if (raw != .object) continue;
-        const id_value = raw.object.get("id") orelse continue;
-        if (id_value != .string or id_value.string.len == 0) continue;
-        // Keep `/models` IDs in the same raw namespace used by direct request
-        // capability lookup. `wireModel` still accepts `openai/` for existing
-        // saved configuration, but the direct picker never introduces it.
-        const id = try alloc.dupe(u8, id_value.string);
-        errdefer alloc.free(id);
-        const model_type = try alloc.dupe(u8, "language");
-        errdefer alloc.free(model_type);
-        const responses_model = provider_route.wireModel(.openai_responses_byok, id);
-        const reasoning_model = isOpenAiReasoningModel(responses_model);
-        const text_model = isOpenAiTextModel(responses_model);
-        var reasoning_efforts: std.ArrayList(shared_types.ReasoningEffort) = .empty;
-        errdefer reasoning_efforts.deinit(alloc);
-        if (openAiModelHasKnownGpt56Controls(responses_model)) {
-            try reasoning_efforts.appendSlice(alloc, &openai_gpt56_reasoning_efforts);
-        }
-        const released = optionalInteger(raw.object.get("created"));
-        try candidates.append(alloc, .{
-            .id = id,
-            .model_type = model_type,
-            .released = released,
-            // `/models` does not advertise capability metadata. These flags
-            // describe the recognized Responses families only; arbitrary
-            // OpenAI-compatible IDs remain selectable without invented traits.
-            .has_tool_use = text_model,
-            .has_reasoning = reasoning_model,
-            .reasoning_efforts = reasoning_efforts,
-            .supports_fast_mode = openAiModelHasKnownGpt56Controls(responses_model),
-            .has_vision = text_model,
-            .has_file_input = text_model,
-            .has_web_search = text_model,
-        });
-    }
-    sort_utils.sort(ModelCatalogEntry, candidates.items, {}, model_catalog.compareModelCatalogEntries);
-    return candidates;
-}
-
-const openai_gpt56_reasoning_efforts = [_]shared_types.ReasoningEffort{
-    shared_types.ReasoningEffort.literal("none"),
-    shared_types.ReasoningEffort.literal("low"),
-    shared_types.ReasoningEffort.literal("medium"),
-    shared_types.ReasoningEffort.literal("high"),
-    shared_types.ReasoningEffort.literal("xhigh"),
-    shared_types.ReasoningEffort.literal("max"),
-};
-
-fn openAiModelHasKnownGpt56Controls(model: []const u8) bool {
-    const exact_models = [_][]const u8{
-        "gpt-5.6",
-        "gpt-5.6-sol",
-        "gpt-5.6-terra",
-        "gpt-5.6-luna",
+    return switch (route) {
+        .vercel_gateway => parseModelCatalogForView(alloc, json_text, view),
+        .openai_responses_byok => openai_models.parse(alloc, json_text, view),
+        .codex_responses_oauth => unreachable,
     };
-    for (exact_models) |candidate| {
-        if (std.mem.eql(u8, model, candidate)) return true;
-    }
-    return false;
-}
-
-fn parseCodexModelCatalog(
-    alloc: Allocator,
-    json_text: []const u8,
-) !std.ArrayList(ModelCatalogEntry) {
-    var candidates: std.ArrayList(ModelCatalogEntry) = .empty;
-    errdefer freeModelCatalog(alloc, &candidates);
-
-    var parsed = try std.json.parseFromSlice(std.json.Value, alloc, json_text, .{});
-    defer parsed.deinit();
-    if (parsed.value != .object) return error.MalformedResponse;
-    const models = parsed.value.object.get("models") orelse return error.MalformedResponse;
-    if (models != .array) return error.MalformedResponse;
-
-    for (models.array.items) |raw| {
-        if (raw != .object) continue;
-        const slug = raw.object.get("slug") orelse continue;
-        if (slug != .string or slug.string.len == 0) continue;
-        if (raw.object.get("visibility")) |visibility| {
-            if (visibility != .string or !std.mem.eql(u8, visibility.string, "list")) continue;
-        }
-
-        var reasoning_efforts = try parseCodexReasoningEfforts(
-            alloc,
-            raw.object.get("supported_reasoning_levels"),
-        );
-        errdefer reasoning_efforts.deinit(alloc);
-        const id = try alloc.dupe(u8, slug.string);
-        errdefer alloc.free(id);
-        const model_type = try alloc.dupe(u8, "language");
-        errdefer alloc.free(model_type);
-        const priority = optionalInteger(raw.object.get("priority"));
-        const released = if (priority == std.math.minInt(i64))
-            std.math.maxInt(i64)
-        else
-            -priority;
-        const declared_context_window = optionalUnsignedU32(raw.object.get("context_window"));
-        const context_window = if (declared_context_window > 0)
-            declared_context_window
-        else
-            optionalUnsignedU32(raw.object.get("max_context_window"));
-        const configured_auto_compact_limit = optionalUnsignedU32(raw.object.get("auto_compact_token_limit"));
-        const derived_auto_compact_limit: u32 = @intCast((@as(u64, context_window) * 9) / 10);
-        const auto_compact_token_limit = if (configured_auto_compact_limit == 0)
-            derived_auto_compact_limit
-        else if (derived_auto_compact_limit == 0)
-            configured_auto_compact_limit
-        else
-            @min(configured_auto_compact_limit, derived_auto_compact_limit);
-        const effective_context_window_percent: u8 = blk: {
-            const raw_percent = optionalInteger(raw.object.get("effective_context_window_percent"));
-            if (raw_percent <= 0) break :blk 95;
-            break :blk @intCast(@min(raw_percent, 100));
-        };
-        try candidates.append(alloc, .{
-            .id = id,
-            .model_type = model_type,
-            .released = released,
-            .has_tool_use = true,
-            .has_reasoning = reasoning_efforts.items.len > 0,
-            .reasoning_efforts = reasoning_efforts,
-            .supports_fast_mode = codexSupportsFastMode(raw.object),
-            .has_vision = codexSupportsImageInput(raw.object),
-            .has_web_search = optionalBool(raw.object.get("supports_search_tool")),
-            .context_window = context_window,
-            .auto_compact_token_limit = auto_compact_token_limit,
-            .effective_context_window_percent = effective_context_window_percent,
-        });
-    }
-    sort_utils.sort(ModelCatalogEntry, candidates.items, {}, model_catalog.compareModelCatalogEntries);
-    return candidates;
-}
-
-fn parseCodexReasoningEfforts(
-    alloc: Allocator,
-    levels: ?std.json.Value,
-) !std.ArrayList(shared_types.ReasoningEffort) {
-    var efforts: std.ArrayList(shared_types.ReasoningEffort) = .empty;
-    errdefer efforts.deinit(alloc);
-    const value = levels orelse return efforts;
-    if (value != .array) return efforts;
-    for (value.array.items) |level| {
-        if (efforts.items.len >= shared_types.ReasoningEffort.max_options) break;
-        if (level != .object) continue;
-        const raw_effort = level.object.get("effort") orelse continue;
-        if (raw_effort != .string) continue;
-        const effort = shared_types.ReasoningEffort.parse(raw_effort.string) orelse continue;
-        if (effort.isDefault()) continue;
-        try efforts.append(alloc, effort);
-    }
-    return efforts;
-}
-
-fn isOpenAiReasoningModel(model: []const u8) bool {
-    if (std.mem.startsWith(u8, model, "gpt-5")) return true;
-    return model.len >= 2 and model[0] == 'o' and std.ascii.isDigit(model[1]);
-}
-
-fn isOpenAiTextModel(model: []const u8) bool {
-    return std.mem.startsWith(u8, model, "gpt-") or
-        isOpenAiReasoningModel(model) or
-        std.mem.startsWith(u8, model, "codex-") or
-        std.mem.startsWith(u8, model, "chatgpt-");
-}
-
-fn codexSupportsFastMode(entry: std.json.ObjectMap) bool {
-    if (entry.get("additional_speed_tiers")) |additional| {
-        if (tagListContains(additional, "fast")) return true;
-    }
-    const tiers = entry.get("service_tiers") orelse return false;
-    if (tiers != .array) return false;
-    for (tiers.array.items) |tier| {
-        if (tier != .object) continue;
-        const id = tier.object.get("id") orelse continue;
-        if (id == .string and
-            (std.mem.eql(u8, id.string, "priority") or
-                std.mem.eql(u8, id.string, "fast"))) return true;
-    }
-    return false;
-}
-
-fn codexSupportsImageInput(entry: std.json.ObjectMap) bool {
-    const modalities = entry.get("input_modalities") orelse return true;
-    return tagListContains(modalities, "image");
-}
-
-fn optionalInteger(value: ?std.json.Value) i64 {
-    const actual = value orelse return 0;
-    return if (actual == .integer) actual.integer else 0;
-}
-
-fn optionalBool(value: ?std.json.Value) bool {
-    const actual = value orelse return false;
-    return actual == .bool and actual.bool;
 }
 
 fn parseSortedModelCatalog(alloc: std.mem.Allocator, json_text: []const u8) !std.ArrayList(ModelCatalogEntry) {
@@ -4271,149 +2971,6 @@ test "gateway catalog accepts an explicit empty data array" {
     defer freeModelCatalog(std.testing.allocator, &catalog);
 
     try std.testing.expectEqual(@as(usize, 0), catalog.items.len);
-}
-
-test "OpenAI catalog data IDs stay in the direct wire capability namespace" {
-    const json_text =
-        \\{"object":"list","data":[
-        \\  {"id":"gpt-5.6-sol","object":"model","created":42},
-        \\  {"id":"text-embedding-3-large","object":"model","created":41}
-        \\]}
-    ;
-    var catalog = try parseProviderModelCatalogForView(
-        std.testing.allocator,
-        json_text,
-        .full,
-        .openai_models,
-    );
-    defer freeModelCatalog(std.testing.allocator, &catalog);
-
-    try std.testing.expectEqual(@as(usize, 2), catalog.items.len);
-    try std.testing.expectEqualStrings("gpt-5.6-sol", catalog.items[0].id);
-    try std.testing.expectEqualStrings(
-        "gpt-5.6-sol",
-        provider_route.wireModel(.openai_responses_byok, catalog.items[0].id),
-    );
-    try std.testing.expect(catalog.items[0].has_tool_use);
-    try std.testing.expect(catalog.items[0].has_reasoning);
-    try std.testing.expect(catalog.items[0].has_vision);
-    const capability_lookup = for (catalog.items) |*entry| {
-        if (std.mem.eql(u8, entry.id, "gpt-5.6-sol")) break entry;
-    } else return error.TestExpectedEqual;
-    try std.testing.expect(capability_lookup.has_tool_use);
-    try std.testing.expect(capability_lookup.has_reasoning);
-    try std.testing.expectEqual(@as(usize, 6), capability_lookup.reasoning_efforts.items.len);
-    try std.testing.expectEqualStrings("none", capability_lookup.reasoning_efforts.items[0].label());
-    try std.testing.expectEqualStrings("max", capability_lookup.reasoning_efforts.items[5].label());
-    try std.testing.expect(capability_lookup.supports_fast_mode);
-    try std.testing.expectEqualStrings("text-embedding-3-large", catalog.items[1].id);
-    try std.testing.expect(!catalog.items[1].has_tool_use);
-}
-
-test "OpenAI catalog does not infer controls for compatible custom IDs" {
-    const json_text =
-        \\{"data":[
-        \\  {"id":"gpt-5.6-company-custom","object":"model"},
-        \\  {"id":"company/gpt-5.6-sol","object":"model"}
-        \\]}
-    ;
-    var catalog = try parseProviderModelCatalogForView(
-        std.testing.allocator,
-        json_text,
-        .full,
-        .openai_models,
-    );
-    defer freeModelCatalog(std.testing.allocator, &catalog);
-
-    try std.testing.expectEqual(@as(usize, 2), catalog.items.len);
-    for (catalog.items) |entry| {
-        try std.testing.expectEqual(@as(usize, 0), entry.reasoning_efforts.items.len);
-        try std.testing.expect(!entry.supports_fast_mode);
-    }
-}
-
-fn checkOpenAiCatalogControlAllocationFailures(alloc: Allocator) !void {
-    var catalog = try parseProviderModelCatalogForView(
-        alloc,
-        "{\"data\":[{\"id\":\"gpt-5.6-sol\",\"object\":\"model\"}]}",
-        .full,
-        .openai_models,
-    );
-    defer freeModelCatalog(alloc, &catalog);
-}
-
-test "OpenAI catalog controls clean all partial allocations" {
-    try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
-        checkOpenAiCatalogControlAllocationFailures,
-        .{},
-    );
-}
-
-test "Codex catalog accepts models slug metadata and hides non-picker entries" {
-    const json_text =
-        \\{"models":[
-        \\  {"slug":"gpt-5.6-sol","visibility":"list","priority":1,"supported_reasoning_levels":[{"effort":"low"},{"effort":"xhigh"}],"additional_speed_tiers":["fast"],"input_modalities":["text","image"],"supports_search_tool":true,"context_window":272000,"max_context_window":872000,"auto_compact_token_limit":null},
-        \\  {"slug":"gpt-hidden","visibility":"hide","priority":0,"supported_reasoning_levels":[]},
-        \\  {"slug":"o3","visibility":"list","priority":2,"supported_reasoning_levels":[],"service_tiers":[{"id":"priority"}],"input_modalities":["text"],"supports_search_tool":false,"max_context_window":200000}
-        \\]}
-    ;
-    var catalog = try parseProviderModelCatalogForView(
-        std.testing.allocator,
-        json_text,
-        .full,
-        .codex_builtin,
-    );
-    defer freeModelCatalog(std.testing.allocator, &catalog);
-
-    try std.testing.expectEqual(@as(usize, 2), catalog.items.len);
-    try std.testing.expectEqualStrings("gpt-5.6-sol", catalog.items[0].id);
-    try std.testing.expectEqual(@as(usize, 2), catalog.items[0].reasoning_efforts.items.len);
-    try std.testing.expectEqualStrings("low", catalog.items[0].reasoning_efforts.items[0].label());
-    try std.testing.expectEqualStrings("xhigh", catalog.items[0].reasoning_efforts.items[1].label());
-    try std.testing.expect(catalog.items[0].supports_fast_mode);
-    try std.testing.expect(catalog.items[0].has_vision);
-    try std.testing.expect(catalog.items[0].has_web_search);
-    try std.testing.expectEqual(@as(u32, 272_000), catalog.items[0].context_window);
-    try std.testing.expectEqual(@as(u32, 244_800), catalog.items[0].auto_compact_token_limit);
-    try std.testing.expectEqual(@as(u8, 95), catalog.items[0].effective_context_window_percent);
-    try std.testing.expectEqualStrings("o3", catalog.items[1].id);
-    try std.testing.expect(catalog.items[1].supports_fast_mode);
-    try std.testing.expect(!catalog.items[1].has_vision);
-    try std.testing.expect(!catalog.items[1].has_web_search);
-}
-
-fn checkCodexCatalogAllocationFailures(alloc: Allocator) !void {
-    const json_text =
-        \\{"models":[{"slug":"gpt-5.6-sol","visibility":"list","priority":1,"supported_reasoning_levels":[{"effort":"low"},{"effort":"high"}],"input_modalities":["text","image"],"supports_search_tool":true}]}
-    ;
-    var catalog = try parseProviderModelCatalogForView(
-        alloc,
-        json_text,
-        .full,
-        .codex_builtin,
-    );
-    defer freeModelCatalog(alloc, &catalog);
-}
-
-test "Codex catalog parser cleans all partial allocations" {
-    try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
-        checkCodexCatalogAllocationFailures,
-        .{},
-    );
-}
-
-test "Codex catalog malformed envelopes leave the allocator clean" {
-    try std.testing.expectError(
-        error.MalformedResponse,
-        parseProviderModelCatalogForView(
-            std.testing.allocator,
-            "{\"models\":{}}",
-            .full,
-            .codex_builtin,
-        ),
-    );
 }
 
 test "gateway catalog retains broad capability metadata" {

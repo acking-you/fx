@@ -229,7 +229,7 @@ describe.skipIf(!tmuxAvailable())("config persistence", () => {
         session = null;
 
         const stored = JSON.parse(readFileSync(join(home, ".fx", "settings.json"), "utf8"));
-        expect(stored.model).toBe("anthropic/claude-opus-4.7");
+        expect(stored.models.gateway).toBe("anthropic/claude-opus-4.7");
         expect(stored.permission_mode).toBe("auto");
         expect(stored.effort).toBe("auto");
         expect(stored.fast_mode).toBe(true);
@@ -324,7 +324,7 @@ describe.skipIf(!tmuxAvailable())("config persistence", () => {
         const afterOverride = JSON.parse(
           readFileSync(join(home, ".fx", "settings.json"), "utf8"),
         );
-        expect(afterOverride.model).toBe("anthropic/claude-opus-4.7");
+        expect(afterOverride.models.gateway).toBe("anthropic/claude-opus-4.7");
         expect(readFileSync(stderrAPath, "utf8")).toBe("");
         expect(readFileSync(stderrBPath, "utf8")).toBe("");
       } finally {
@@ -926,7 +926,7 @@ describe.skipIf(!tmuxAvailable())("config persistence", () => {
 
         const stored = JSON.parse(readFileSync(settingsPath, "utf8"));
         expect(stored).toMatchObject({
-          model: "anthropic/claude-opus-4.8",
+          models: { gateway: "anthropic/claude-opus-4.8" },
           effort: "xhigh",
           fast_mode: true,
         });
@@ -1056,7 +1056,7 @@ describe.skipIf(!tmuxAvailable())("config persistence", () => {
           readFileSync(settingsPath, "utf8"),
         );
         expect(stored).toMatchObject({
-          model: "openai/gpt-5.6-sol",
+          models: { gateway: "openai/gpt-5.6-sol" },
           effort: "max",
           fast_mode: true,
         });
@@ -1064,7 +1064,7 @@ describe.skipIf(!tmuxAvailable())("config persistence", () => {
         await session.sendText("/effort future-tier");
         await session.waitForText("● Effort: future-tier", TIMEOUT);
         expect(JSON.parse(readFileSync(settingsPath, "utf8"))).toMatchObject({
-          model: "openai/gpt-5.6-sol",
+          models: { gateway: "openai/gpt-5.6-sol" },
           effort: "future-tier",
           fast_mode: true,
         });
@@ -1145,10 +1145,10 @@ describe.skipIf(!tmuxAvailable())("config persistence", () => {
 
         const stored = JSON.parse(readFileSync(join(home, ".fx", "settings.json"), "utf8"));
         expect(stored).toMatchObject({
-          model: "anthropic/claude-fable-5",
+          models: { gateway: "anthropic/claude-fable-5" },
           effort: "xhigh",
         });
-        expect(stored).not.toHaveProperty("fast_mode");
+        expect(stored.fast_mode).toBe(false);
         expect(readFileSync(stderrPath, "utf8")).toBe("");
       } finally {
         gateway.stop();
@@ -1208,9 +1208,9 @@ describe.skipIf(!tmuxAvailable())("config persistence", () => {
         expect(await session.capturePane()).not.toContain("saved to user settings");
 
         const stored = JSON.parse(readFileSync(join(home, ".fx", "settings.json"), "utf8"));
-        expect(stored.model).toBe("xai/grok-build-1");
+        expect(stored.models.gateway).toBe("xai/grok-build-1");
         expect(stored).not.toHaveProperty("effort");
-        expect(stored).not.toHaveProperty("fast_mode");
+        expect(stored.fast_mode).toBe(false);
 
         const scrollback = await session.captureFullScrollbackEscapes();
         expect(scrollback).toContain("grok-build-1");
@@ -1288,8 +1288,8 @@ describe.skipIf(!tmuxAvailable())("config persistence", () => {
         await session.waitForText("● Switched to provider/new-reasoning-model", TIMEOUT);
 
         let stored = JSON.parse(readFileSync(join(home, ".fx", "settings.json"), "utf8"));
-        expect(stored.model).toBe("provider/new-reasoning-model");
-        expect(stored).not.toHaveProperty("fast_mode");
+        expect(stored.models.gateway).toBe("provider/new-reasoning-model");
+        expect(stored.fast_mode).toBe(false);
 
         await session.sendText("Use portable auto.");
         await session.waitForText("portable auto complete", TIMEOUT);
@@ -1322,7 +1322,7 @@ describe.skipIf(!tmuxAvailable())("config persistence", () => {
           stored = JSON.parse(readFileSync(join(home, ".fx", "settings.json"), "utf8"));
         }
         expect(stored).toMatchObject({
-          model: "provider/new-reasoning-model",
+          models: { gateway: "provider/new-reasoning-model" },
           effort: "future-tier",
         });
 
@@ -1347,10 +1347,10 @@ describe.skipIf(!tmuxAvailable())("config persistence", () => {
 
         stored = JSON.parse(readFileSync(join(home, ".fx", "settings.json"), "utf8"));
         expect(stored).toMatchObject({
-          model: "provider/new-reasoning-model",
+          models: { gateway: "provider/new-reasoning-model" },
           effort: "future-tier",
         });
-        expect(stored).not.toHaveProperty("fast_mode");
+        expect(stored.fast_mode).toBe(false);
         expect(readFileSync(stderrPath, "utf8")).toBe("");
       } finally {
         gateway.stop();

@@ -1,15 +1,11 @@
 const std = @import("std");
-const agent_stream_provider = @import("../agent/stream_provider.zig");
 const credentials = @import("../auth/credentials.zig");
 const oauth_transport = @import("../auth/oauth_transport.zig");
 const model_capabilities = @import("../config/model_capabilities.zig");
 const debug_trace = @import("../shared/debug_trace.zig");
-const generation_usage_provider = @import("../session/generation_usage_provider.zig");
 const output_contracts = @import("../output/output_contracts.zig");
-const web_search_provider = @import("../tooling/web_search_provider.zig");
 const model_catalog = @import("model_catalog.zig");
 const model_catalog_metadata = @import("model_catalog_metadata.zig");
-const responses_compaction_provider = @import("responses_compaction_provider.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -88,46 +84,23 @@ pub const CreditsProvider = struct {
     }
 };
 
-pub const AccountUsageLookupInput = struct {
-    credential: ?[]const u8,
-    account_id: ?[]const u8,
-    credential_source: ?credentials.Source = null,
-    cancel_flag: ?*std.atomic.Value(bool) = null,
-};
+fn fetchCreditsUnavailable(
+    _: ?*anyopaque,
+    alloc: Allocator,
+    _: CreditsLookupInput,
+) output_contracts.CreditsSnapshot {
+    return .{
+        .err_message = alloc.dupe(u8, "Credits are unavailable for the selected provider.") catch null,
+    };
+}
 
-pub const FetchAccountUsageFn = *const fn (
-    ?*anyopaque,
-    Allocator,
-    AccountUsageLookupInput,
-) output_contracts.CodexAccountUsageSnapshot;
-
-pub const AccountUsageProvider = struct {
-    /// When set, context must remain valid until every in-flight `fetch` returns.
-    context: ?*anyopaque = null,
-    fetch_fn: FetchAccountUsageFn,
-
-    /// The returned snapshot owns all parsed provider fields. The caller must
-    /// call `CodexAccountUsageSnapshot.deinit`.
-    pub fn fetch(
-        self: AccountUsageProvider,
-        alloc: Allocator,
-        input: AccountUsageLookupInput,
-    ) output_contracts.CodexAccountUsageSnapshot {
-        return self.fetch_fn(self.context, alloc, input);
-    }
+pub const unavailable_credits_provider = CreditsProvider{
+    .fetch_fn = fetchCreditsUnavailable,
 };
 
 pub const Provider = struct {
-    agent_stream: agent_stream_provider.Provider,
     oauth_transport: oauth_transport.Provider,
     chat_url: ChatUrlProvider,
-    cli_model_catalog: CliModelCatalogProvider,
-    credits: CreditsProvider,
-    account_usage: ?AccountUsageProvider = null,
-    responses_compaction: ?responses_compaction_provider.Provider = null,
-    generation_usage: generation_usage_provider.Provider,
-    web_search: web_search_provider.Provider,
-    model_catalog: model_catalog.Provider,
 };
 
 test "credits lookup dispatches through the injected provider" {
@@ -167,41 +140,6 @@ test "credits lookup dispatches through the injected provider" {
     try std.testing.expectEqualStrings("10", snapshot.balance.?);
 }
 
-test "account usage lookup dispatches the bound Codex identity" {
-    const Fake = struct {
-        calls: usize = 0,
-        saw_identity: bool = false,
-
-        fn fetch(
-            raw: ?*anyopaque,
-            _: Allocator,
-            input: AccountUsageLookupInput,
-        ) output_contracts.CodexAccountUsageSnapshot {
-            const self: *@This() = @ptrCast(@alignCast(raw.?));
-            self.calls += 1;
-            self.saw_identity = input.credential_source == .chatgpt_subscription and
-                std.mem.eql(u8, input.credential orelse "", "access") and
-                std.mem.eql(u8, input.account_id orelse "", "account");
-            return .{};
-        }
-    };
-
-    var fake: Fake = .{};
-    const provider = AccountUsageProvider{
-        .context = &fake,
-        .fetch_fn = Fake.fetch,
-    };
-    var snapshot = provider.fetch(std.testing.allocator, .{
-        .credential = "access",
-        .account_id = "account",
-        .credential_source = .chatgpt_subscription,
-    });
-    defer snapshot.deinit(std.testing.allocator);
-
-    try std.testing.expectEqual(@as(usize, 1), fake.calls);
-    try std.testing.expect(fake.saw_identity);
-}
-
 const CapabilityResolverState = enum {
     idle,
     ready,
@@ -222,6 +160,7 @@ pub const CapabilityResolver = struct {
         provider: model_catalog.Provider,
         input: model_catalog.FetchInput,
         model: []const u8,
+        fallback: model_capabilities.Capabilities,
     ) model_capabilities.ResolveError!model_capabilities.Capabilities {
         if (self.state == .idle) {
             const result = model_catalog.fetchWithPublicFallback(provider, alloc, input);
@@ -243,7 +182,7 @@ pub const CapabilityResolver = struct {
                         "model catalog lookup outcome=fetch_failed model={s} category={t}",
                         .{ model, failure.category },
                     );
-                    return model_capabilities.capabilitiesForModel(model);
+                    return fallback;
                 },
             };
             self.catalog = loaded.catalog;
@@ -256,7 +195,7 @@ pub const CapabilityResolver = struct {
                 "model catalog lookup outcome=cache_failed model={s}",
                 .{model},
             );
-            return model_capabilities.capabilitiesForModel(model);
+            return fallback;
         }
         for (self.catalog.items) |entry| {
             if (std.mem.eql(u8, entry.id, model)) {
@@ -265,8 +204,8 @@ pub const CapabilityResolver = struct {
                     "model catalog lookup outcome=ready_hit model={s}",
                     .{model},
                 );
-                return model_capabilities.resolveCapabilities(
-                    model,
+                return model_capabilities.mergeCapabilities(
+                    fallback,
                     model_catalog_metadata.fromCatalogEntry(entry),
                 );
             }
@@ -276,21 +215,25 @@ pub const CapabilityResolver = struct {
             "model catalog lookup outcome=missing_entry model={s}",
             .{model},
         );
-        return model_capabilities.capabilitiesForModel(model);
+        return fallback;
     }
 
-    pub fn available(self: *const CapabilityResolver, model: []const u8) model_capabilities.Capabilities {
+    pub fn available(
+        self: *const CapabilityResolver,
+        model: []const u8,
+        fallback: model_capabilities.Capabilities,
+    ) model_capabilities.Capabilities {
         if (self.state == .ready) {
             for (self.catalog.items) |entry| {
                 if (std.mem.eql(u8, entry.id, model)) {
-                    return model_capabilities.resolveCapabilities(
-                        model,
+                    return model_capabilities.mergeCapabilities(
+                        fallback,
                         model_catalog_metadata.fromCatalogEntry(entry),
                     );
                 }
             }
         }
-        return model_capabilities.capabilitiesForModel(model);
+        return fallback;
     }
 
     pub fn catalogEntries(self: *const CapabilityResolver) ?[]const model_catalog.ModelCatalogEntry {
@@ -381,7 +324,7 @@ test "available capabilities never fetch and use a completed catalog snapshot" {
     var resolver: CapabilityResolver = .{};
     defer resolver.deinit(alloc);
 
-    const cold = resolver.available("provider/model");
+    const cold = resolver.available("provider/model", .{});
     try std.testing.expectEqual(@as(usize, 0), fake.calls);
     try std.testing.expectEqual(@as(?u32, null), cold.context_window);
     try std.testing.expectEqual(@as(?u32, null), cold.max_output_tokens);
@@ -391,8 +334,9 @@ test "available capabilities never fetch and use a completed catalog snapshot" {
         provider,
         .{ .endpoint = "https://example.invalid" },
         "provider/model",
+        .{},
     );
-    const warm = resolver.available("provider/model");
+    const warm = resolver.available("provider/model", .{});
     try std.testing.expectEqual(@as(usize, 1), fake.calls);
     try std.testing.expectEqual(@as(?u32, 256_000), warm.context_window);
     try std.testing.expectEqual(@as(?u32, 32_000), warm.max_output_tokens);
@@ -437,6 +381,7 @@ test "capability resolver leaves a cancelled catalog fetch retryable" {
                 .cancel_flag = &cancel_flag,
             },
             "provider/model",
+            .{},
         ),
     );
     try std.testing.expectEqual(CapabilityResolverState.idle, resolver.state);
@@ -451,6 +396,7 @@ test "capability resolver leaves a cancelled catalog fetch retryable" {
             .cancel_flag = &cancel_flag,
         },
         "provider/model",
+        .{},
     );
     try std.testing.expect(capabilities.supports_vision);
 }
@@ -470,6 +416,7 @@ test "capability resolver uses provider catalog metadata" {
             .cancel_flag = &cancel_flag,
         },
         "provider/model",
+        .{},
     );
 
     try std.testing.expect(capabilities.supports_vision);
@@ -485,6 +432,7 @@ test "capability resolver uses provider catalog metadata" {
             .cancel_flag = &cancel_flag,
         },
         "zai/glm-4.6",
+        .{},
     );
     try std.testing.expect(!missing.supports_fast_mode);
     try std.testing.expect(!missing.supports_vision);
@@ -503,6 +451,7 @@ test "capability resolver retries rejected authenticated catalog access anonymou
             .endpoint = "/v1/models",
         },
         "provider/model",
+        .{},
     );
 
     try std.testing.expectEqual(@as(usize, 2), fake.calls);
@@ -525,6 +474,7 @@ test "capability resolver degrades terminal catalog failures to local capabiliti
             .cancel_flag = &cancel_flag,
         },
         "zai/glm-4.6",
+        .{},
     );
     try std.testing.expect(!capabilities.supports_fast_mode);
 
@@ -537,6 +487,7 @@ test "capability resolver degrades terminal catalog failures to local capabiliti
             .cancel_flag = &cancel_flag,
         },
         "provider/model",
+        .{},
     );
     try std.testing.expect(!cached_failure.supports_vision);
     try std.testing.expectEqual(@as(usize, 1), fake.calls);

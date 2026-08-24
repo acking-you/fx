@@ -16,11 +16,7 @@ extern "fx" fn fx_http_stream_status(handle: i32, status_out: *u16) i32;
 extern "fx" fn fx_http_stream_next(handle: i32, out_ptr: [*]u8, out_cap: usize) i32;
 extern "fx" fn fx_http_stream_close(handle: i32) void;
 
-const provider_context = host_stream_provider.initContext(builtin_gateway.buildAgentRequest, transport());
-
-pub fn provider() stream_provider.Provider {
-    return host_stream_provider.provider(@constCast(&provider_context));
-}
+const provider_context = host_stream_provider.initContext(builtin_gateway.buildAgentRequest, .{ .resolve = builtin_gateway.agentChatUrl }, transport());
 
 pub fn transport() host_stream_provider.Transport {
     return .{
@@ -30,6 +26,10 @@ pub fn transport() host_stream_provider.Transport {
         .next_fn = next,
         .close_fn = close,
     };
+}
+
+pub fn provider() stream_provider.Provider {
+    return host_stream_provider.provider(@constCast(&provider_context));
 }
 
 fn open(_: ?*anyopaque, method: []const u8, url: []const u8, headers: []const u8, body: []const u8) !i32 {

@@ -6,6 +6,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -115,6 +116,28 @@ function writeSeededGrokLogin(testHome: string, accessToken: string, accountId =
     account_id: accountId,
   }) + "\n", { mode: 0o600 });
   chmodSync(authPath, 0o600);
+}
+
+function readSingleUsageSnapshot(testHome: string): {
+  billing: string;
+  next_sequence: number;
+  settled_through_sequence: number;
+  pending: unknown[];
+} {
+  const sessionsDir = join(testHome, ".fx", "sessions");
+  const usagePaths = readdirSync(sessionsDir, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => join(sessionsDir, entry.name, "usage-v2.json"))
+    .filter((path) => existsSync(path));
+  expect(usagePaths).toHaveLength(1);
+  return (JSON.parse(readFileSync(usagePaths[0]!, "utf8")) as {
+    snapshot: {
+      billing: string;
+      next_sequence: number;
+      settled_through_sequence: number;
+      pending: unknown[];
+    };
+  }).snapshot;
 }
 
 function writeSeededFxLogin(
@@ -498,6 +521,44 @@ function startFakeChatGptOAuth(
   };
 }
 
+function startFakeOpenAIResponses() {
+  const requests: Array<{
+    path: string;
+    authorization: string | null;
+    body: string | null;
+  }> = [];
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request) {
+      const url = new URL(request.url);
+      const body = request.method === "POST" ? await request.text() : null;
+      requests.push({
+        path: url.pathname,
+        authorization: request.headers.get("authorization"),
+        body,
+      });
+      if (url.pathname === "/v1/models") {
+        return Response.json({ data: [{ id: "gpt-5.4", object: "model" }] });
+      }
+      if (url.pathname === "/v1/responses") {
+        return new Response(
+          'data: {"type":"response.output_text.delta","delta":"OPENAI_BYOK_RESPONSE"}\n\n' +
+            'data: {"type":"response.completed","response":{"id":"resp_openai_byok","status":"completed","usage":{"input_tokens":5,"output_tokens":2,"total_tokens":7}}}\n\n',
+          { headers: { "content-type": "text/event-stream" } },
+        );
+      }
+      return new Response("not found", { status: 404 });
+    },
+  });
+  const baseUrl = `http://127.0.0.1:${server.port}/v1`;
+  return {
+    requests,
+    baseUrl,
+    stop() { server.stop(true); },
+  };
+}
+
 function startFakeGrokOAuth(options: {
   unauthorizedResponses?: number;
   revokeStatus?: number;
@@ -793,6 +854,45 @@ function startFakeCodexToolLoop(options: {
   };
 }
 
+function startFakeCodexCapacityLoop() {
+  const bodies: string[] = [];
+  const accessToken = chatgptAccessToken("acct_capacity_loop");
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request) {
+      if (new URL(request.url).pathname === "/models") {
+        return Response.json({ models: [
+          { slug: "gpt-5.6-sol", visibility: "list", supported_in_api: true, supported_reasoning_levels: [{ effort: "high" }], additional_speed_tiers: [], input_modalities: ["text"], context_window: 272000 },
+        ] });
+      }
+      bodies.push(await request.text());
+      const call = bodies.length;
+      if (call <= 64) {
+        return new Response(
+          `data: ${JSON.stringify({ type: "response.output_item.added", output_index: 0, item: { type: "function_call", call_id: `call_capacity_${call}`, name: "read_file" } })}\n\n` +
+            `data: ${JSON.stringify({ type: "response.function_call_arguments.done", output_index: 0, arguments: JSON.stringify({ path: "README.md", start_line: call, line_count: 1 }) })}\n\n` +
+            `data: ${JSON.stringify({ type: "response.completed", response: { id: `resp_capacity_${call}`, status: "completed", usage: { input_tokens: 5, output_tokens: 2 } } })}\n\n`,
+          { headers: { "content-type": "text/event-stream" } },
+        );
+      }
+      const text = call === 65 ? "CODEX_CAPACITY_65_OK" : "CODEX_CAPACITY_NEXT_OK";
+      return new Response(
+        `data: ${JSON.stringify({ type: "response.output_text.delta", delta: text })}\n\n` +
+          `data: ${JSON.stringify({ type: "response.completed", response: { id: `resp_capacity_${call}`, status: "completed", usage: { input_tokens: 7, output_tokens: 3 } } })}\n\n`,
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    },
+  });
+  return {
+    accessToken,
+    bodies,
+    responsesUrl: `http://127.0.0.1:${server.port}/responses`,
+    modelsUrl: `http://127.0.0.1:${server.port}/models`,
+    stop() { server.stop(true); },
+  };
+}
+
 function startFakeGrokToolLoop(options: {
   toolName?: string;
   toolArguments?: object;
@@ -863,7 +963,7 @@ function startFakeCodexAutoReview() {
       if (model === "gpt-5.4-mini") {
         return new Response(
           'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","call_id":"call_permission","name":"permission_decision"}}\n\n' +
-            'data: {"type":"response.function_call_arguments.done","output_index":0,"arguments":"{\\"risk\\":\\"low\\",\\"authorization\\":\\"high\\",\\"decision\\":\\"allow\\",\\"rationale\\":\\"The user requested this harmless command.\\"}"}\n\n' +
+            'data: {"type":"response.function_call_arguments.done","output_index":0,"arguments":"{\\"risk\\":\\"low\\",\\"decision\\":\\"clear\\",\\"rationale\\":\\"The user requested this harmless command.\\"}"}\n\n' +
             'data: {"type":"response.completed","response":{"id":"gen_review","status":"completed","usage":{"input_tokens":8,"output_tokens":3}}}\n\n',
           { headers: { "content-type": "text/event-stream" } },
         );
@@ -929,7 +1029,7 @@ function startFakeGrokAutoReview() {
       if (body.includes('"name":"permission_decision"')) {
         return new Response(
           'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","call_id":"call_permission","name":"permission_decision"}}\n\n' +
-            'data: {"type":"response.function_call_arguments.done","output_index":0,"arguments":"{\\"risk\\":\\"low\\",\\"authorization\\":\\"high\\",\\"decision\\":\\"allow\\",\\"rationale\\":\\"The user requested this harmless command.\\"}"}\n\n' +
+            'data: {"type":"response.function_call_arguments.done","output_index":0,"arguments":"{\\"risk\\":\\"low\\",\\"decision\\":\\"clear\\",\\"rationale\\":\\"The user requested this harmless command.\\"}"}\n\n' +
             'data: {"type":"response.completed","response":{"id":"gen_review","status":"completed","usage":{"input_tokens":8,"output_tokens":3}}}\n\n',
           { headers: { "content-type": "text/event-stream" } },
         );
@@ -1191,11 +1291,11 @@ tmuxTest(
       (request) => request.path === "/oauth/authorize",
     ).length;
     const settingsPath = join(home, ".fx", "settings.json");
-    const gatewayModelBefore = JSON.parse(readFileSync(settingsPath, "utf8")).model;
+    const gatewayModelBefore = JSON.parse(readFileSync(settingsPath, "utf8")).models.gateway;
     expect(typeof gatewayModelBefore).toBe("string");
     const savedCodex = JSON.parse(readFileSync(settingsPath, "utf8"));
-    expect(savedCodex.model).toBe(gatewayModelBefore);
-    expect(savedCodex.codex_model).toBe("gpt-5.6-sol");
+    expect(savedCodex.models.gateway).toBe(gatewayModelBefore);
+    expect(savedCodex.models.codex).toBe("gpt-5.6-sol");
     await session.sendText("/quit");
     await session.waitForSessionEnd(TIMEOUT);
     session = null;
@@ -1220,16 +1320,16 @@ tmuxTest(
     await session.waitForText("Switched to Vercel AI Gateway", TIMEOUT);
     const savedGateway = JSON.parse(readFileSync(settingsPath, "utf8"));
     expect(savedGateway.provider).toBe("gateway");
-    expect(savedGateway.model).toBe(gatewayModelBefore);
-    expect(savedGateway.codex_model).toBe("gpt-5.6-sol");
+    expect(savedGateway.models.gateway).toBe(gatewayModelBefore);
+    expect(savedGateway.models.codex).toBe("gpt-5.6-sol");
     await openProviderPicker(session);
     await session.sendKeys("Down");
     await session.sendKeys("Enter");
     await session.waitForText("Switched to Codex subscription", TIMEOUT);
     const restoredCodex = JSON.parse(readFileSync(settingsPath, "utf8"));
     expect(restoredCodex.provider).toBe("codex");
-    expect(restoredCodex.model).toBe(gatewayModelBefore);
-    expect(restoredCodex.codex_model).toBe("gpt-5.6-sol");
+    expect(restoredCodex.models.gateway).toBe(gatewayModelBefore);
+    expect(restoredCodex.models.codex).toBe("gpt-5.6-sol");
     expect(chatgptOauth.requests.filter((request) => request.path === "/oauth/authorize"))
       .toHaveLength(authorizeRequestsBeforeRoundTrip);
     await session.sendText("/logout codex");
@@ -1247,7 +1347,7 @@ tmuxTest(
     await session.waitForText("Switched to Codex subscription with gpt-5.4-mini.", TIMEOUT);
     const reauthenticated = JSON.parse(readFileSync(settingsPath, "utf8"));
     expect(reauthenticated.provider).toBe("codex");
-    expect(reauthenticated.codex_model).toBe("gpt-5.4-mini");
+    expect(reauthenticated.models.codex).toBe("gpt-5.4-mini");
     expect(chatgptOauth.requests.filter((request) => request.path === "/oauth/authorize"))
       .toHaveLength(authorizeRequestsBeforeRoundTrip + 1);
     await session.sendKeys("C-c");
@@ -1285,7 +1385,7 @@ tmuxTest(
 
     const selected = JSON.parse(readFileSync(join(home, ".fx", "settings.json"), "utf8"));
     expect(selected.provider).toBe("codex");
-    expect(selected.codex_model).toBe("gpt-5.6-sol");
+    expect(selected.models.codex).toBe("gpt-5.6-sol");
     await session.sendText("/status");
     await session.waitForText("model_source=Codex subscription", TIMEOUT);
     expect(readFileSync(stderrPath, "utf8")).toBe("");
@@ -2018,6 +2118,44 @@ test(
 );
 
 test(
+  "OpenAI API key uses the Responses wire protocol without Vercel leakage",
+  async () => {
+    home = mkdtempSync(join(tmpdir(), "fx-openai-byok-"));
+    const openai = startFakeOpenAIResponses();
+    try {
+      const result = await runFx(["ask", "--json", "--auto", "--no-save", "Answer directly."], {
+        env: {
+          HOME: home,
+          OPENAI_API_KEY: "sk-openai-byok",
+          AI_GATEWAY_API_KEY: undefined,
+          VERCEL_OIDC_TOKEN: undefined,
+          FX_DISABLE_KEYCHAIN: "1",
+          FX_SKIP_ONBOARDING: "1",
+          FX_AUTO_UPGRADE: "0",
+          FX_MODEL: "openai/gpt-5.4",
+          FX_RESPONSES_BASE_URL: openai.baseUrl,
+        },
+        timeoutMs: TIMEOUT,
+      });
+
+      expect(result.code, `stdout: ${result.stdout}\nstderr: ${result.stderr}`).toBe(0);
+      expect(result.stdout).toContain("OPENAI_BYOK_RESPONSE");
+      expect(result.stderr).toBe("");
+      const responses = openai.requests.filter((request) => request.path === "/v1/responses");
+      expect(responses).toHaveLength(1);
+      expect(responses[0]!.authorization).toBe("Bearer sk-openai-byok");
+      const body = JSON.parse(responses[0]!.body ?? "{}") as Record<string, unknown>;
+      expect(body.model).toBe("gpt-5.4");
+      expect(Array.isArray(body.input)).toBe(true);
+      expect(body.prompt).toBeUndefined();
+    } finally {
+      openai.stop();
+    }
+  },
+  60_000,
+);
+
+test(
   "Codex CLI browser login fetches raw models and replays one 401 without Gateway leakage",
   async () => {
     home = mkdtempSync(join(tmpdir(), "fx-codex-cli-login-"));
@@ -2048,7 +2186,7 @@ test(
     const settingsPath = join(home, ".fx", "settings.json");
     const selected = JSON.parse(readFileSync(settingsPath, "utf8"));
     expect(selected.provider).toBe("codex");
-    expect(selected.codex_model).toBe("gpt-5.6-sol");
+    expect(selected.models.codex).toBe("gpt-5.6-sol");
 
     const models = await runFx(["models", "--json"], { env, timeoutMs: TIMEOUT });
     const modelIds = (JSON.parse(models.stdout) as { models: Array<{ id: string }> }).models
@@ -2310,7 +2448,7 @@ test(
       expect(statSync(authPath).mode & 0o077).toBe(0);
       const settings = JSON.parse(readFileSync(join(home, ".fx", "settings.json"), "utf8"));
       expect(settings.provider).toBe("grok");
-      expect(settings.grok_model).toBe("grok-4.20");
+      expect(settings.models.grok).toBe("grok-4.20");
 
       const models = await runFx(["models", "--json"], { env, timeoutMs: TIMEOUT });
       const modelIds = (JSON.parse(models.stdout) as { models: Array<{ id: string }> }).models
@@ -2534,11 +2672,11 @@ tmuxTest(
       await session.waitForText("Switched to Grok subscription with grok-4.20.", TIMEOUT);
       const settingsPath = join(home, ".fx", "settings.json");
       const persistenceDeadline = Date.now() + TIMEOUT;
-      let saved: { provider: string; grok_model: string } | undefined;
+      let saved: { provider: string; models: { grok: string } } | undefined;
       while (Date.now() < persistenceDeadline) {
         saved = JSON.parse(readFileSync(settingsPath, "utf8")) as {
           provider: string;
-          grok_model: string;
+          models: { grok: string };
         };
         if (saved.provider === "grok") break;
         await Bun.sleep(25);
@@ -2546,7 +2684,7 @@ tmuxTest(
       expect(saved).toBeDefined();
       expect(grok.tokenCalls()).toBe(tokenCallsAfterLogin);
       expect(saved!.provider).toBe("grok");
-      expect(saved!.grok_model).toBe("grok-4.20");
+      expect(saved!.models.grok).toBe("grok-4.20");
       const responses = grok.requests.filter((request) => request.path === "/v1/responses");
       expect(responses).toHaveLength(1);
       expect(responses[0]!.conversationId).toBeTruthy();
@@ -2689,6 +2827,44 @@ test(
     }
   },
   60_000,
+);
+
+tmuxTest(
+  "Codex remains usable beyond Gateway observation capacity in one process",
+  async () => {
+    home = mkdtempSync(join(tmpdir(), "fx-codex-capacity-loop-"));
+    stderrPath = join(home, "stderr.log");
+    writeFileSync(stderrPath, "");
+    gateway = startFakeGateway([]);
+    const codex = startFakeCodexCapacityLoop();
+    try {
+      writeSeededChatGptLogin(home, codex.accessToken);
+      writeFileSync(
+        join(home, ".fx", "settings.json"),
+        JSON.stringify({ provider: "codex", codex_model: "gpt-5.6-sol" }) + "\n",
+        { mode: 0o600 },
+      );
+      session = await startFx(home, stderrPath, gateway, undefined, undefined, {
+        FX_MODEL: undefined,
+        FX_E2E_OPENAI_CODEX_RESPONSES_URL: codex.responsesUrl,
+        FX_E2E_OPENAI_CODEX_MODELS_URL: codex.modelsUrl,
+      });
+      await session.waitForComposer(TIMEOUT);
+      await session.sendText("Read enough lines to complete the capacity loop.");
+      await session.waitForText("CODEX_CAPACITY_65_OK", 120_000);
+      expect(codex.bodies).toHaveLength(65);
+
+      await session.sendText("Confirm the same process remains usable.");
+      await session.waitForText("CODEX_CAPACITY_NEXT_OK", TIMEOUT);
+      expect(codex.bodies).toHaveLength(66);
+      expect(await session.captureFullScrollback()).not.toContain("UsageCapacityExceeded");
+      expect(gateway.requests).toHaveLength(0);
+      expect(readFileSync(stderrPath, "utf8")).toBe("");
+    } finally {
+      codex.stop();
+    }
+  },
+  150_000,
 );
 
 test(
@@ -2924,7 +3100,7 @@ test(
         { mode: 0o600 },
       );
       const result = await runFx(
-        ["ask", "--json", "--auto", "--no-save", "Run pwd, then finish."],
+        ["ask", "--json", "--auto", "Run pwd, then finish."],
         {
           env: {
             HOME: home,
@@ -2945,9 +3121,18 @@ test(
       expect(codex.bodies.map((body) => (JSON.parse(body) as { model: string }).model))
         .toEqual(["gpt-5.6-sol", "gpt-5.4-mini", "gpt-5.6-sol"]);
       expect(codex.bodies[1]).toContain('"name":"permission_decision"');
+      expect(codex.bodies[2]).toContain('"type":"function_call_output"');
+      expect(codex.bodies[2]).toContain("exit_code=0");
       for (const request of gateway.requests) {
         expect(request.body).not.toContain("permission_decision");
       }
+      expect(readSingleUsageSnapshot(home)).toMatchObject({
+        billing: "complete",
+        api_duration_complete: true,
+        next_sequence: 1,
+        settled_through_sequence: 0,
+        pending: [],
+      });
     } finally {
       codex.stop();
     }
@@ -2969,7 +3154,7 @@ test(
         { mode: 0o600 },
       );
       const result = await runFx(
-        ["ask", "--json", "--auto", "--no-save", "Run pwd, then finish."],
+        ["ask", "--json", "--auto", "Run pwd, then finish."],
         {
           env: {
             HOME: home,
@@ -2991,6 +3176,8 @@ test(
       expect(grok.bodies.map((body) => (JSON.parse(body) as { model: string }).model))
         .toEqual(["grok-4.20", "grok-4.20", "grok-4.20"]);
       expect(grok.bodies[1]).toContain('"name":"permission_decision"');
+      expect(grok.bodies[2]).toContain('"type":"function_call_output"');
+      expect(grok.bodies[2]).toContain("exit_code=0");
       expect(grok.headers).toHaveLength(3);
       for (const headers of grok.headers) {
         expect(headers.tokenAuth).toBe("xai-grok-cli");
@@ -3003,6 +3190,13 @@ test(
       for (const request of gateway.requests) {
         expect(request.body).not.toContain("permission_decision");
       }
+      expect(readSingleUsageSnapshot(home)).toMatchObject({
+        billing: "complete",
+        api_duration_complete: true,
+        next_sequence: 1,
+        settled_through_sequence: 0,
+        pending: [],
+      });
     } finally {
       grok.stop();
     }

@@ -323,7 +323,6 @@ pub const ServerState = struct {
     selected_model: []u8 = &.{},
     provider: model_provider.ProviderId = .gateway,
     configured_model: []u8 = &.{},
-    process_provider_override: bool = false,
     process_model_override: bool = false,
     permission_mode: types.PermissionMode = .ask,
     permission_rules: types.PermissionRuleSet = .{},
@@ -467,24 +466,14 @@ pub fn streamProviderFor(
     state: *const ServerState,
     provider: model_provider.ProviderId,
 ) @import("../core/agent/stream_provider.zig").Provider {
-    return switch (provider) {
-        .gateway => state.cfg.gateway_provider.agent_stream,
-        .codex => state.cfg.codex_agent_stream orelse
-            @import("../core/agent/stream_provider.zig").unavailable_provider,
-        .grok => state.cfg.grok_agent_stream orelse
-            @import("../core/agent/stream_provider.zig").unavailable_provider,
-    };
+    return state.cfg.provider_set.select(provider).agent_stream_or_unavailable();
 }
 
 pub fn catalogProviderFor(
     state: *const ServerState,
     provider: model_provider.ProviderId,
 ) ?@import("../core/gateway/model_catalog.zig").Provider {
-    return switch (provider) {
-        .gateway => state.cfg.gateway_provider.model_catalog,
-        .codex => state.cfg.codex_model_catalog,
-        .grok => state.cfg.grok_model_catalog,
-    };
+    return state.cfg.provider_set.select(provider).model_catalog;
 }
 
 pub fn refreshModelCredential(
@@ -542,13 +531,18 @@ pub fn releaseActiveSession(state: *ServerState) !void {
         active.session_rt.usage.cancelReconciliation();
         active.session_rt.usage.finishProfilePublicationsBeforeShutdown();
         flushActiveSessionUsage(state) catch |err| {
-            if (state.credential_source == .chatgpt_subscription or state.credential_source == .grok_subscription) {
+            if (state.cfg.provider_set.select(active.provider).deferred_usage == null) {
                 active.session_rt.usage.clearReconciliationCredential();
-            } else {
-                active.session_rt.usage.startReconciliation(
+            } else if (active.credential_source) |source| {
+                active.session_rt.usage.replaceProviderReconciliationCredential(
                     state.alloc,
+                    active.provider,
+                    source,
+                    active.account_id,
                     state.api_key,
                 );
+            } else {
+                active.session_rt.usage.clearReconciliationCredential();
             }
             return err;
         };
@@ -763,7 +757,7 @@ pub fn runWithTransport(
         .cfg = cfg,
         .writer = writer_value,
         .web_search_runtime = web_search_runtime.Runtime.init(.{
-            .provider = cfg.gateway_provider.web_search,
+            .provider = cfg.provider_set.gateway.fx_search.?,
         }),
         .background = background_runtime.BackgroundRuntime.init(
             cfg.background_process_provider,
@@ -1465,7 +1459,6 @@ fn handleInitialize(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message
         state.process_model_override = startup.model_source == .process_override;
     }
     state.provider = state.cfg.provider_override orelse startup.provider;
-    state.process_provider_override = state.cfg.provider_override != null;
     state.configured_model = try alloc.dupe(u8, startup.configured_model);
 
     var startup_credential = startup.takeCredential();
@@ -1527,7 +1520,8 @@ fn handleInitialize(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message
     state.max_tool_result_bytes = startup.max_tool_result_bytes;
     state.context_limits = startup.context_limits;
     state.context_limits.applyCommandLine(state.cfg.context_limit_overrides);
-    state.fast_mode = startup.fast_mode;
+    state.fast_mode = startup.fast_mode and
+        (state.cfg.model_override == null or startup.fast_mode_source != .compiled_default);
     state.effort = startup.effort;
     state.first_call_tool_choice = startup.first_call_tool_choice;
     state.context_enabled = startup.context_enabled;
@@ -1558,6 +1552,7 @@ fn handleInitialize(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message
             .cancel_flag = &catalog_cancel_flag,
         },
         state.selected_model,
+        state.cfg.provider_set.select(state.provider).fallbackModelCapabilities(state.selected_model),
     );
 
     state.client_fs_read = request.client_fs_read;
@@ -1704,7 +1699,10 @@ fn handleSetConfigOption(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Me
         const controls = normalizeModelControls(
             session.effort,
             session.fast_mode,
-            state.capability_resolver.available(value),
+            state.capability_resolver.available(
+                value,
+                state.cfg.provider_set.select(session.provider).fallbackModelCapabilities(value),
+            ),
         );
         if (host_target.is_wasm and session.writable == null) {
             commitWasmSessionPreferences(alloc, session, .{
@@ -1803,11 +1801,7 @@ fn handleSetConfigOption(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Me
             else
                 try config_runtime.loadMergedSettings(alloc, state.workspace_root);
             defer settings.deinit(alloc);
-            const saved_model = switch (target) {
-                .gateway => settings.model,
-                .codex => settings.codex_model,
-                .grok => settings.grok_model,
-            };
+            const saved_model = settings.models.get(target);
             var selected_model = catalog.items[0].id;
             if (saved_model) |saved| {
                 for (catalog.items) |entry| {
@@ -1842,7 +1836,10 @@ fn handleSetConfigOption(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Me
                 .message = "Invalid reasoning effort",
             });
         if (!model_capabilities.reasoningEffortSupported(
-            state.capability_resolver.available(session.model),
+            state.capability_resolver.available(
+                session.model,
+                state.cfg.provider_set.select(session.provider).fallbackModelCapabilities(session.model),
+            ),
             effort,
         )) return state.writer.writeError(alloc, msg.id, .{
             .code = ErrorCode.invalid_params,
@@ -1863,7 +1860,10 @@ fn handleSetConfigOption(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Me
                 .code = ErrorCode.invalid_params,
                 .message = "Invalid Fast mode",
             });
-        if (fast_mode and !state.capability_resolver.available(session.model).supports_fast_mode) {
+        if (fast_mode and !state.capability_resolver.available(
+            session.model,
+            state.cfg.provider_set.select(session.provider).fallbackModelCapabilities(session.model),
+        ).supports_fast_mode) {
             return state.writer.writeError(alloc, msg.id, .{
                 .code = ErrorCode.invalid_params,
                 .message = "Fast mode is not supported by the selected model",
@@ -1895,7 +1895,10 @@ fn handleSetConfigOption(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Me
 
     const current_model = session.model;
     const current_mode = session.mode;
-    const current_capabilities = state.capability_resolver.available(current_model);
+    const current_capabilities = state.capability_resolver.available(
+        current_model,
+        state.cfg.provider_set.select(session.provider).fallbackModelCapabilities(current_model),
+    );
 
     var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();
