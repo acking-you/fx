@@ -1677,23 +1677,33 @@ pub const CreditsSnapshot = struct {
         defer out.deinit();
 
         if (self.err_message) |msg| {
-            try out.writer.print("[credits] error: {s}\n", .{msg});
+            try out.writer.writeAll("[credits] error: ");
+            try writeTerminalSafe(&out.writer, alloc, msg);
+            try out.writer.writeByte('\n');
             return try out.toOwnedSlice();
         }
 
         if (self.balance) |b| {
-            try out.writer.print("[credits] balance={s}\n", .{b});
+            try out.writer.writeAll("[credits] balance=");
+            try writeTerminalSafe(&out.writer, alloc, b);
+            try out.writer.writeByte('\n');
         }
         if (self.used) |u| {
-            try out.writer.print("[credits] used={s}\n", .{u});
+            try out.writer.writeAll("[credits] used=");
+            try writeTerminalSafe(&out.writer, alloc, u);
+            try out.writer.writeByte('\n');
         }
         if (self.plan) |p| {
-            try out.writer.print("[credits] plan={s}\n", .{p});
+            try out.writer.writeAll("[credits] plan=");
+            try writeTerminalSafe(&out.writer, alloc, p);
+            try out.writer.writeByte('\n');
         }
 
         if (self.balance == null and self.used == null and self.plan == null) {
             if (self.raw_json) |raw| {
-                try out.writer.print("[credits] {s}\n", .{raw});
+                try out.writer.writeAll("[credits] ");
+                try writeTerminalSafe(&out.writer, alloc, raw);
+                try out.writer.writeByte('\n');
             } else {
                 try out.writer.writeAll("[credits] no data returned by gateway\n");
             }
@@ -1706,25 +1716,31 @@ pub const CreditsSnapshot = struct {
         var out: std.Io.Writer.Allocating = .init(alloc);
         defer out.deinit();
 
-        if (self.err_message) |msg| return alloc.dupe(u8, msg);
+        if (self.err_message) |msg| {
+            try writeTerminalSafe(&out.writer, alloc, msg);
+            return out.toOwnedSlice();
+        }
         var wrote_field = false;
         if (self.balance) |balance| {
-            try out.writer.print("balance={s}", .{balance});
+            try out.writer.writeAll("balance=");
+            try writeTerminalSafe(&out.writer, alloc, balance);
             wrote_field = true;
         }
         if (self.used) |used| {
             if (wrote_field) try out.writer.writeByte('\n');
-            try out.writer.print("used={s}", .{used});
+            try out.writer.writeAll("used=");
+            try writeTerminalSafe(&out.writer, alloc, used);
             wrote_field = true;
         }
         if (self.plan) |plan| {
             if (wrote_field) try out.writer.writeByte('\n');
-            try out.writer.print("plan={s}", .{plan});
+            try out.writer.writeAll("plan=");
+            try writeTerminalSafe(&out.writer, alloc, plan);
             wrote_field = true;
         }
         if (self.balance == null and self.used == null and self.plan == null) {
             if (self.raw_json) |raw| {
-                try out.writer.writeAll(raw);
+                try writeTerminalSafe(&out.writer, alloc, raw);
             } else {
                 try out.writer.writeAll("no data returned by gateway");
             }
@@ -3065,6 +3081,32 @@ test "core credits snapshot renders parsed, raw, and empty fallbacks" {
     const empty_text = try (CreditsSnapshot{}).renderText(std.testing.allocator);
     defer std.testing.allocator.free(empty_text);
     try std.testing.expectEqualStrings("[credits] no data returned by gateway\n", empty_text);
+
+    const hostile = CreditsSnapshot{
+        .balance = "1\x1b",
+        .used = "2\n",
+        .plan = "pro\r",
+    };
+    const hostile_text = try hostile.renderText(std.testing.allocator);
+    defer std.testing.allocator.free(hostile_text);
+    try std.testing.expectEqualStrings(
+        "[credits] balance=1\\x1b\n[credits] used=2\\x0a\n[credits] plan=pro\\x0d\n",
+        hostile_text,
+    );
+    const hostile_interactive = try hostile.renderInteractiveBody(std.testing.allocator);
+    defer std.testing.allocator.free(hostile_interactive);
+    try std.testing.expectEqualStrings(
+        "balance=1\\x1b\nused=2\\x0a\nplan=pro\\x0d",
+        hostile_interactive,
+    );
+
+    const hostile_raw = CreditsSnapshot{ .raw_json = "{\"raw\":\"\x1b\n\"}" };
+    const hostile_raw_text = try hostile_raw.renderText(std.testing.allocator);
+    defer std.testing.allocator.free(hostile_raw_text);
+    try std.testing.expectEqualStrings(
+        "[credits] {\"raw\":\"\\x1b\\x0a\"}\n",
+        hostile_raw_text,
+    );
 }
 
 test "core upgrade snapshot renders errors and statuses" {
