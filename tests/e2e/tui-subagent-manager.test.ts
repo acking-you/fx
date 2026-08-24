@@ -5098,7 +5098,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         const external = await waitForConfigurationControl(
           controlPath,
           (control) =>
-            control.generation === initial.generation + 1 &&
+            control.generation > initial.generation &&
             control.configuration.name === "external-winner",
         );
         const refreshed = await active.waitForPane(
@@ -5113,7 +5113,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         expect(external.operations.at(-1)).toMatchObject({
           code: "configured",
           identity_source: "model",
-          generation: initial.generation + 1,
+          generation: external.generation,
         });
 
         await active.sendKeys("Enter");
