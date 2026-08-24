@@ -17,6 +17,7 @@ const runtime_profile = @import("../hosts/runtime_profile.zig");
 const host_capability = @import("../hosts/host.zig");
 const host_target = @import("../hosts/target.zig");
 const diff = @import("../output/diff.zig");
+const thought_presentation = @import("../output/thought_presentation.zig");
 const diagnostics = @import("../workspace/diagnostics.zig");
 const app_lifecycle = @import("app_lifecycle.zig");
 const provider_runtime = @import("provider_runtime.zig");
@@ -4674,6 +4675,20 @@ pub fn Runtime(comptime App: type) type {
             return replayHistoryToSinkIncremental(app, sink, history, &has_prior_turns);
         }
 
+        fn writeReasoningHistoryToSink(sink: anytype, reasoning: ?[]const u8) !void {
+            const source = reasoning orelse return;
+            const visible = thought_presentation.finalizedBody(
+                source,
+                thought_presentation.default_visible_lines,
+            );
+            if (visible.text.len == 0) return;
+            try sink.appendNotice(.{
+                .topic = "thinking",
+                .tone = .neutral,
+                .body = visible.text,
+            });
+        }
+
         fn replayHistoryToSinkIncremental(
             app: *App,
             sink: anytype,
@@ -4695,6 +4710,7 @@ pub fn Runtime(comptime App: type) type {
                         try sink.appendUserTurn(entry.user, has_prior_turns.*);
                         has_prior_turns.* = true;
                         try writeExecutionHistoryToSink(app, sink, entry.execution);
+                        try writeReasoningHistoryToSink(sink, entry.reasoning);
                         if (entry.assistant.len > 0) {
                             try writeAssistantHistoryMarkdownToSink(app, sink, entry.assistant);
                         }
@@ -4793,6 +4809,7 @@ pub fn Runtime(comptime App: type) type {
             execution: types.ExecutionMemory,
         ) !void {
             for (execution.tool_steps) |step| {
+                try writeReasoningHistoryToSink(sink, step.reasoning);
                 if (step.assistant) |assistant| {
                     if (assistant.len > 0) try writeAssistantHistoryMarkdownToSink(app, sink, assistant);
                 }
@@ -7516,6 +7533,35 @@ test "execution replay keeps an inline command preview when its stored output is
     try std.testing.expectEqualStrings("/workspace", app.command_stdout.items);
     try std.testing.expectEqualStrings("warning", app.command_stderr.items);
     try std.testing.expectEqual(@as(usize, 1), app.command_output_flush_count);
+}
+
+test "history replay restores step and terminal reasoning summaries" {
+    const alloc = std.testing.allocator;
+    var app = try TestApp.init(alloc, "/workspace");
+    defer app.deinit();
+
+    var steps = [_]types.ToolExecutionStep{.{
+        .reasoning = @constCast("**Inspecting the runtime**\n\nThe worker queues thought events."),
+    }};
+    const history = [_]types.HistoryTurn{.{ .assistant = .{
+        .user = .{ .text = @constCast("inspect reasoning") },
+        .assistant = @constCast("The path is safe."),
+        .reasoning = @constCast("**Concluding the review**\n\nThe UI drains them on its own thread."),
+        .execution = .{ .tool_steps = steps[0..] },
+    } }};
+
+    try Runtime(TestApp).replayHistory(&app, &history);
+
+    try std.testing.expectEqual(@as(usize, 2), app.notices.items.len);
+    try std.testing.expectEqualStrings(
+        "● Thinking: The worker queues thought events.",
+        app.notices.items[0],
+    );
+    try std.testing.expectEqualStrings(
+        "● Thinking: The UI drains them on its own thread.",
+        app.notices.items[1],
+    );
+    try std.testing.expectEqualStrings("The path is safe.\n", app.assistant_text.items);
 }
 
 test "execution replay renders persisted permission feedback after its tool result" {

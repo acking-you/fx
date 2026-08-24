@@ -25,13 +25,15 @@ function reasoningStream(reasoning: string, answer: string) {
         controller.enqueue(encoder.encode(send({ type: "reasoning-start", id: "r1" })));
         // Stream one line per chunk, as a provider does, so each chunk drains
         // through the worker-event queue separately.
-        for (const line of reasoning.split("\n")) {
+        for (const [index, line] of reasoning.split("\n").entries()) {
           controller.enqueue(
             encoder.encode(
               send({ type: "reasoning-delta", id: "r1", delta: `${line}\n` }),
             ),
           );
-          await Bun.sleep(10);
+          // Keep the completed heading on screen long enough to prove the
+          // live activity state before the finalized summary replaces it.
+          await Bun.sleep(index === 0 ? 250 : 10);
         }
         controller.enqueue(encoder.encode(send({ type: "reasoning-end", id: "r1" })));
         controller.enqueue(encoder.encode(send({ type: "text-start", id: "a1" })));
@@ -72,7 +74,7 @@ afterEach(async () => {
 
 describe.skipIf(!tmuxAvailable())("TUI thinking display", () => {
   test(
-    "streams reasoning by default and truncates it to a trailing window",
+    "shows a live reasoning heading and retains the recent summary",
     async () => {
       root = realpathSync(mkdtempSync(join(tmpdir(), "fx-tui-thinking-")));
       const home = join(root, "home");
@@ -86,6 +88,8 @@ describe.skipIf(!tmuxAvailable())("TUI thinking display", () => {
 
       // Far more lines than the display window keeps, so truncation is visible.
       const reasoning = [
+        "**Inspecting the request**",
+        "",
         EARLY_THOUGHT,
         ...Array.from({ length: 30 }, (_, i) => `middle thought ${i + 1}`),
         LATE_THOUGHT,
@@ -117,15 +121,18 @@ describe.skipIf(!tmuxAvailable())("TUI thinking display", () => {
       await session.waitForComposer(TIMEOUT);
 
       await session.sendText("think it through");
+      await session.waitForText("Inspecting the request", TIMEOUT);
       await session.waitForText(ANSWER, TIMEOUT);
       await session.waitForComposer(TIMEOUT);
 
       const scrollback = await session.captureFullScrollback();
 
-      // Reasoning reached the transcript with no flag, setting, or env var.
+      // The finalized block keeps the recent reasoning summary without the
+      // live activity heading or the generic semantic-notice label.
       expect(scrollback).toContain(LATE_THOUGHT);
-      // The window keeps the tail, so the oldest line is dropped from view.
       expect(scrollback).not.toContain(EARLY_THOUGHT);
+      expect(scrollback).toContain("•");
+      expect(scrollback).not.toContain("Thinking:");
       expect(scrollback).toContain(ANSWER);
 
       // This path aborted twice before on cross-thread transcript mutation, so
