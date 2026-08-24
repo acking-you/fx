@@ -45,7 +45,7 @@ Goals 1 and 2 remain in progress. The branch currently supports these model-acce
 - ChatGPT Codex through OAuth with `fx login codex`.
 - Grok through xAI OAuth with `fx login grok`.
 - Direct Responses API access with `OPENAI_API_KEY`, using OpenAI by default or a configurable Responses-compatible base URL.
-- The inherited Vercel Gateway route remains present, but its dedicated setup and login onboarding are not a required target for this fork and may be removed as a coherent feature slice.
+- The inherited Vercel Gateway route remains present while its dedicated onboarding is removed in coherent slices. `fx setup` and the duplicate `/setup` hub are no longer part of this fork; Vercel login remains pending separate removal.
 
 The direct API-key, Codex, and Grok paths use the Responses protocol, with provider-specific authentication and transport boundaries. This does not mean every OpenAI-compatible or provider-specific protocol is supported. Chat Completions endpoints, broader provider-specific authentication, and additional catalogs and credential stores are still in progress.
 
@@ -83,7 +83,7 @@ fx login grok
 fx
 ```
 
-`fx login codex` and `fx login grok` select that provider and a model from its authenticated catalog. Inside fx, open `/setup` and choose **Switch provider** to move between Gateway, Codex, and Grok. `/model` lists the active provider's fetched models. Subscription model IDs are the raw IDs returned by each authenticated catalog. Use `/logout codex` or `/logout grok` to remove that subscription session without affecting other providers; choosing it again from **Switch provider** starts sign-in.
+`fx login codex` and `fx login grok` select that provider and a model from its authenticated catalog. Inside fx, open `/login` and choose **Switch provider** to move between Gateway, Codex, and Grok. `/model` lists the active provider's fetched models. Subscription model IDs are the raw IDs returned by each authenticated catalog. Use `/logout codex` or `/logout grok` to remove that subscription session without affecting other providers; choosing it again from **Switch provider** starts sign-in.
 
 The OpenAI Codex route uses ChatGPT subscription access directly and never sends its OAuth token to Vercel AI Gateway. The session is stored privately at `~/.fx/chatgpt-auth.json` and refreshed when needed. Its `web_search` tool uses the authenticated Codex search service directly. On supported Codex models, `/fast` requests OpenAI's priority service tier and consumes ChatGPT credits at the higher Fast mode rate.
 
@@ -123,12 +123,6 @@ Web search follows the selected direct provider instead of routing a direct cred
 For a saved conversation, `/compact` uses the active direct Responses provider's remote compaction transport. Codex OAuth and API-key Responses providers append a `compaction_trigger` to a non-streaming `/responses` request. A successful response is stored as the provider's complete opaque replacement output and replayed only while the same provider identity, normalized Responses endpoint, and wire model remain active. Codex checkpoints bind to the ChatGPT account; API-key checkpoints bind to a non-secret key digest plus organization and project. If any binding changes, fx falls back to the portable local summary instead of sending old opaque context to a new provider identity. If a BYOK endpoint does not implement remote compaction, or the request is rejected or unavailable, fx applies local compaction once instead.
 
 For Codex OAuth models, fx also consumes the model catalog's context-budget metadata. The effective context display reserves model-declared headroom, defaulting to 95% of the raw window, and automatic compaction starts when the latest provider-reported total usage reaches the model limit, defaulting to 90% of the raw window. The TUI reports when automatic compaction starts and settles; background remote compaction owns the activity row until the replacement checkpoint is installed or local fallback completes.
-
-To use an AI Gateway API key instead:
-
-```bash
-fx setup
-```
 
 Run fx from a project:
 
