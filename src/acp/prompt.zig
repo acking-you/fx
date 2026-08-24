@@ -1646,12 +1646,7 @@ fn prepareParentTurnContext(
     const ctx: *AcpContext = @ptrCast(@alignCast(raw_ctx));
     const subagent_host = ctx.state.subagent_host orelse return null;
     const session = if (ctx.state.active_session) |*active| active else return null;
-    return parent_delivery_projector.prepare(
-        arena,
-        subagent_host.sessions,
-        session.session_id,
-        subagent_host.manager.options.child_store,
-    );
+    return subagent_host.prepareParentTurnContext(arena, session.session_id);
 }
 
 fn acknowledgeParentTurnContext(

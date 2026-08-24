@@ -349,12 +349,7 @@ fn prepareParentTurnContext(
 ) !?agent_runtime.PreparedParentTurnContext {
     const context: *Context = @ptrCast(@alignCast(raw));
     const child_id = context.turn.child_id orelse return null;
-    return parent_delivery_projector.prepare(
-        arena,
-        context.config.host.sessions,
-        child_id,
-        context.config.host.manager.options.child_store,
-    );
+    return context.config.host.prepareParentTurnContext(arena, child_id);
 }
 
 fn acknowledgeParentTurnContext(
