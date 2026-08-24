@@ -264,6 +264,15 @@ fn writeNewSessionResponse(
         state.capability_resolver.catalogEntries(),
     );
     try out.writer.writeAll(",");
+    const active = &state.active_session.?;
+    const active_capabilities = state.capability_resolver.available(
+        active.model,
+        state.cfg.provider_set.select(active.provider).fallbackModelCapabilities(active.model),
+    );
+    try writeEffortConfigOption(&out.writer, active.effort, active_capabilities);
+    try out.writer.writeAll(",");
+    try writeFastModeConfigOption(&out.writer, active.fast_mode, active_capabilities.supports_fast_mode);
+    try out.writer.writeAll(",");
     try writeModeConfigOption(
         &out.writer,
         state.cfg.mode_registry,
@@ -706,6 +715,15 @@ fn writeLoadSessionResponse(
         model,
         state.capability_resolver.catalogEntries(),
     );
+    try out.writer.writeAll(",");
+    const active = &state.active_session.?;
+    const active_capabilities = state.capability_resolver.available(
+        model,
+        state.cfg.provider_set.select(active.provider).fallbackModelCapabilities(model),
+    );
+    try writeEffortConfigOption(&out.writer, active.effort, active_capabilities);
+    try out.writer.writeAll(",");
+    try writeFastModeConfigOption(&out.writer, active.fast_mode, active_capabilities.supports_fast_mode);
     try out.writer.writeAll(",");
     try writeModeConfigOption(
         &out.writer,

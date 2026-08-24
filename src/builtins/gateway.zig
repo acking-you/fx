@@ -17,12 +17,14 @@ const vercel_protocol = @import("../gateway/vercel_protocol.zig");
 const io_mod = @import("../core/shared/io.zig");
 const gateway_generation_usage = @import("../gateway/generation_usage.zig");
 const gateway_provider = @import("../core/gateway/gateway_provider.zig");
+const provider_route = @import("../core/gateway/provider_route.zig");
 const provider_set = @import("../core/gateway/provider_set.zig");
 const provider_catalog = @import("../core/auth/provider_catalog.zig");
 const credential_authority = @import("../core/auth/credential_authority.zig");
 const model_capabilities = @import("../core/config/model_capabilities.zig");
 const vercel_model_policy = @import("../gateway/vercel_model_policy.zig");
 const model_catalog = @import("../core/gateway/model_catalog.zig");
+const openai_models = @import("../gateway/openai_models.zig");
 const output_contracts = @import("../core/output/output_contracts.zig");
 const shared_types = @import("../core/shared/types.zig");
 const session_usage = @import("../core/session/session_usage.zig");
@@ -2226,6 +2228,7 @@ fn fetchCatalogForProvider(
     alloc: std.mem.Allocator,
     input: model_catalog.FetchInput,
 ) std.mem.Allocator.Error!model_catalog.ProviderResult {
+    const route = modelCatalogRoute(input.access);
     const response = fetchModelCatalogResponse(
         alloc,
         input.access,
@@ -2243,7 +2246,7 @@ fn fetchCatalogForProvider(
     };
     defer alloc.free(json_text);
 
-    const catalog = parseModelCatalogForView(alloc, json_text, input.view) catch |err| {
+    const catalog = parseModelCatalogForRoute(alloc, json_text, input.view, route) catch |err| {
         if (err == error.OutOfMemory) return error.OutOfMemory;
         return .{ .failure = .{ .category = .malformed_response, .http_status = .ok } };
     };
@@ -2270,6 +2273,7 @@ fn fetchModelCatalogForView(
     cancel_flag: ?*std.atomic.Value(bool),
     view: ModelCatalogView,
 ) !std.ArrayList(ModelCatalogEntry) {
+    const route = modelCatalogRoute(access);
     const response = try fetchModelCatalogResponse(alloc, access, path, cancel_flag);
     const json_text = switch (response) {
         .success => |body| body,
@@ -2277,7 +2281,71 @@ fn fetchModelCatalogForView(
     };
     defer alloc.free(json_text);
 
-    return parseModelCatalogForView(alloc, json_text, view);
+    return parseModelCatalogForRoute(alloc, json_text, view, route);
+}
+
+fn modelCatalogRoute(access: credentials.CatalogAccess) provider_route.ProviderRoute {
+    return if (access.credentialSource() == .openai_api_key)
+        .openai_responses_byok
+    else
+        .vercel_gateway;
+}
+
+const ModelCatalogRequestPlan = struct {
+    route: provider_route.ProviderRoute,
+    url: []u8,
+    api_key: ?[]const u8,
+    gateway_team: ?[]const u8,
+
+    fn deinit(self: *ModelCatalogRequestPlan, alloc: Allocator) void {
+        alloc.free(self.url);
+        self.* = undefined;
+    }
+};
+
+fn prepareModelCatalogRequest(
+    alloc: Allocator,
+    access: credentials.CatalogAccess,
+    path: []const u8,
+    gateway_base_override: ?[]const u8,
+    endpoint_overrides: provider_route.EndpointOverrides,
+) !ModelCatalogRequestPlan {
+    const route = modelCatalogRoute(access);
+    if (route == .vercel_gateway) {
+        const team_path = try modelCatalogTeamPath(alloc, path, access);
+        defer if (team_path) |owned| alloc.free(owned);
+        return .{
+            .route = route,
+            .url = try modelCatalogUrl(alloc, team_path orelse path, gateway_base_override),
+            .api_key = access.authorizationCredential(),
+            .gateway_team = modelCatalogHeaderTeam(access),
+        };
+    }
+
+    const base_url = try provider_route.resolveBaseUrlAlloc(alloc, route, endpoint_overrides);
+    defer alloc.free(base_url);
+    return .{
+        .route = route,
+        .url = try provider_route.appendModelsEndpointAlloc(alloc, base_url),
+        .api_key = access.authorizationCredential(),
+        .gateway_team = null,
+    };
+}
+
+test "OpenAI catalog request stays on the configured Responses origin" {
+    var plan = try prepareModelCatalogRequest(
+        std.testing.allocator,
+        credentials.catalogAccessForCredential(.openai_api_key, "openai-secret", "vercel-team"),
+        models_path,
+        "http://127.0.0.1:49999",
+        .{ .responses_base_url = "http://127.0.0.1:43123/v1/responses" },
+    );
+    defer plan.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(provider_route.ProviderRoute.openai_responses_byok, plan.route);
+    try std.testing.expectEqualStrings("http://127.0.0.1:43123/v1/models", plan.url);
+    try std.testing.expectEqualStrings("openai-secret", plan.api_key.?);
+    try std.testing.expect(plan.gateway_team == null);
 }
 
 fn fetchModelCatalogResponse(
@@ -2290,22 +2358,29 @@ fn fetchModelCatalogResponse(
         if (flag.load(.seq_cst)) return error.Cancelled;
     }
 
-    const team_path = try modelCatalogTeamPath(alloc, path, access);
-    defer if (team_path) |owned| alloc.free(owned);
-
-    const model_catalog_url = try modelCatalogUrl(
+    var plan = try prepareModelCatalogRequest(
         alloc,
-        team_path orelse path,
+        access,
+        path,
         io_mod.getenv(base_url_env),
+        provider_route.EndpointOverrides.fromEnvironment(),
     );
-    defer alloc.free(model_catalog_url);
+    defer plan.deinit(alloc);
 
-    const api_key = access.authorizationCredential();
-    const gateway_team = modelCatalogHeaderTeam(access);
-    return if (cancel_flag) |flag|
-        gateway_client.fetchGatewayJsonCancellable(alloc, api_key, gateway_team, model_catalog_url, flag)
-    else
-        gateway_client.fetchGatewayJson(alloc, api_key, gateway_team, model_catalog_url);
+    return switch (plan.route) {
+        .vercel_gateway => if (cancel_flag) |flag|
+            gateway_client.fetchGatewayJsonCancellable(alloc, plan.api_key, plan.gateway_team, plan.url, flag)
+        else
+            gateway_client.fetchGatewayJson(alloc, plan.api_key, plan.gateway_team, plan.url),
+        .openai_responses_byok => direct: {
+            const api_key = plan.api_key orelse break :direct .{ .http_status = .unauthorized };
+            break :direct if (cancel_flag) |flag|
+                gateway_client.fetchProviderJsonCancellable(alloc, .openai_api_key, api_key, plan.url, flag)
+            else
+                gateway_client.fetchProviderJson(alloc, .openai_api_key, api_key, plan.url);
+        },
+        .codex_responses_oauth => unreachable,
+    };
 }
 
 fn modelCatalogTeamPath(
@@ -2530,6 +2605,19 @@ pub fn parseModelCatalogForView(
             return model_catalog.projectPickerModelCatalog(alloc, catalog.items);
         },
     }
+}
+
+fn parseModelCatalogForRoute(
+    alloc: Allocator,
+    json_text: []const u8,
+    view: ModelCatalogView,
+    route: provider_route.ProviderRoute,
+) !std.ArrayList(ModelCatalogEntry) {
+    return switch (route) {
+        .vercel_gateway => parseModelCatalogForView(alloc, json_text, view),
+        .openai_responses_byok => openai_models.parse(alloc, json_text, view),
+        .codex_responses_oauth => unreachable,
+    };
 }
 
 fn parseSortedModelCatalog(alloc: std.mem.Allocator, json_text: []const u8) !std.ArrayList(ModelCatalogEntry) {

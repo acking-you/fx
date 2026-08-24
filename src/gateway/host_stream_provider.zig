@@ -1,8 +1,12 @@
 const std = @import("std");
 const stream_provider = @import("../core/agent/stream_provider.zig");
+const provider_route = @import("../core/gateway/provider_route.zig");
+const secret = @import("../core/auth/secret.zig");
 const io_mod = @import("../core/shared/io.zig");
 const gateway_client = @import("client.zig");
 const credential_authority = @import("../core/auth/credential_authority.zig");
+const openai_responses = @import("openai_responses.zig");
+const responses_stream = @import("responses_stream.zig");
 
 const Allocator = std.mem.Allocator;
 const max_error_body_bytes = 1024 * 1024;
@@ -15,19 +19,19 @@ pub const Transport = struct {
     next_fn: *const fn (?*anyopaque, i32, []u8) i32,
     close_fn: *const fn (?*anyopaque, i32) void,
 
-    fn open(self: Transport, method: []const u8, url: []const u8, headers: []const u8, body: []const u8) !i32 {
+    pub fn open(self: Transport, method: []const u8, url: []const u8, headers: []const u8, body: []const u8) !i32 {
         return self.open_fn(self.context, method, url, headers, body);
     }
 
-    fn status(self: Transport, handle: i32, status_out: *u16) i32 {
+    pub fn status(self: Transport, handle: i32, status_out: *u16) i32 {
         return self.status_fn(self.context, handle, status_out);
     }
 
-    fn next(self: Transport, handle: i32, out: []u8) i32 {
+    pub fn next(self: Transport, handle: i32, out: []u8) i32 {
         return self.next_fn(self.context, handle, out);
     }
 
-    fn close(self: Transport, handle: i32) void {
+    pub fn close(self: Transport, handle: i32) void {
         self.close_fn(self.context, handle);
     }
 };
@@ -36,6 +40,7 @@ pub const ProviderContext = struct {
     build_fn: *const fn (Allocator, stream_provider.RequestData) anyerror![]u8,
     endpoint: Endpoint,
     transport: Transport,
+    endpoint_overrides: ?provider_route.EndpointOverrides = null,
 };
 
 pub const Endpoint = union(enum) {
@@ -68,10 +73,20 @@ pub fn initContext(
 fn stream(raw: ?*anyopaque, alloc: Allocator, request: stream_provider.ModelRequest) anyerror!stream_provider.Result {
     const context: *ProviderContext = @ptrCast(@alignCast(raw.?));
     const transport = context.transport;
-    const payload = try context.build_fn(alloc, request.data());
+    const route = if (request.credential.source) |source|
+        provider_route.fromCredentialSource(source) orelse return error.UnsupportedCredentialSource
+    else
+        provider_route.ProviderRoute.vercel_gateway;
+    if (route == .codex_responses_oauth) return error.CodexCredentialUnavailable;
+
+    const payload = switch (route) {
+        .vercel_gateway => try context.build_fn(alloc, request.data()),
+        .openai_responses_byok => try openai_responses.buildRequest(alloc, request.data()),
+        .codex_responses_oauth => unreachable,
+    };
     defer alloc.free(payload);
     const auth = try std.fmt.allocPrint(alloc, "Bearer {s}", .{request.credential.secret});
-    defer alloc.free(auth);
+    defer secret.zeroAndFree(alloc, auth);
 
     const Header = struct { name: []const u8, value: []const u8 };
     var headers: std.ArrayList(Header) = .empty;
@@ -79,24 +94,53 @@ fn stream(raw: ?*anyopaque, alloc: Allocator, request: stream_provider.ModelRequ
     try headers.appendSlice(alloc, &.{
         .{ .name = "content-type", .value = "application/json" },
         .{ .name = "authorization", .value = auth },
-        .{ .name = "HTTP-Referer", .value = "https://github.com/vercel-labs/fx" },
-        .{ .name = "X-Title", .value = "fx" },
-        .{ .name = "ai-gateway-protocol-version", .value = "0.0.1" },
-        .{ .name = "ai-language-model-specification-version", .value = "4" },
-        .{ .name = "ai-language-model-id", .value = request.model },
-        .{ .name = "ai-language-model-streaming", .value = "true" },
     });
-    if (request.credential.tenant) |team| if (team.len > 0) try headers.append(alloc, .{ .name = "x-vercel-ai-gateway-team", .value = team });
-    if (request.session_id) |session_id| if (session_id.len > 0) try headers.appendSlice(alloc, &.{
-        .{ .name = "x-session-id", .value = session_id },
-        .{ .name = "x-session-affinity", .value = session_id },
-    });
+    switch (route) {
+        .vercel_gateway => {
+            try headers.appendSlice(alloc, &.{
+                .{ .name = "HTTP-Referer", .value = "https://github.com/vercel-labs/fx" },
+                .{ .name = "X-Title", .value = "fx" },
+                .{ .name = "ai-gateway-protocol-version", .value = "0.0.1" },
+                .{ .name = "ai-language-model-specification-version", .value = "4" },
+                .{ .name = "ai-language-model-id", .value = request.model },
+                .{ .name = "ai-language-model-streaming", .value = "true" },
+            });
+            if (request.credential.tenant) |team| if (team.len > 0) try headers.append(alloc, .{ .name = "x-vercel-ai-gateway-team", .value = team });
+            if (request.session_id) |session_id| if (session_id.len > 0) try headers.appendSlice(alloc, &.{
+                .{ .name = "x-session-id", .value = session_id },
+                .{ .name = "x-session-affinity", .value = session_id },
+            });
+        },
+        .openai_responses_byok => {
+            try headers.append(alloc, .{ .name = "accept", .value = "text/event-stream" });
+            if (io_mod.getenv("OPENAI_ORG_ID")) |organization| {
+                if (organization.len > 0) try headers.append(alloc, .{ .name = "OpenAI-Organization", .value = organization });
+            }
+            if (io_mod.getenv("OPENAI_PROJECT_ID")) |project| {
+                if (project.len > 0) try headers.append(alloc, .{ .name = "OpenAI-Project", .value = project });
+            }
+        },
+        .codex_responses_oauth => unreachable,
+    }
 
     var headers_json: std.Io.Writer.Allocating = .init(alloc);
     defer headers_json.deinit();
     try std.json.Stringify.value(headers.items, .{}, &headers_json.writer);
 
-    const endpoint = context.endpoint.url();
+    var owned_endpoint: ?[]u8 = null;
+    defer if (owned_endpoint) |endpoint| alloc.free(endpoint);
+    const endpoint = switch (route) {
+        .vercel_gateway => context.endpoint.url(),
+        .openai_responses_byok => direct: {
+            owned_endpoint = try provider_route.resolveEndpointAlloc(
+                alloc,
+                route,
+                context.endpoint_overrides orelse provider_route.EndpointOverrides.fromEnvironment(),
+            );
+            break :direct owned_endpoint.?;
+        },
+        .codex_responses_oauth => unreachable,
+    };
     try request.admission.admit();
     request.delivery.markPossiblySent();
     const handle = try transport.open("POST", endpoint, headers_json.writer.buffered(), payload);
@@ -114,31 +158,54 @@ fn stream(raw: ?*anyopaque, alloc: Allocator, request: stream_provider.ModelRequ
     }
 
     const status: std.http.Status = @enumFromInt(status_code);
-    if (status != .ok) return .{ .failed = .{
-        .kind = failureKind(status),
-        .detail = try readBody(alloc, transport, handle, request.cancel_flag, request.cooperative_pulse),
-        .ownership = .owned,
-    } };
+    if (status != .ok) {
+        const detail = try readBody(alloc, transport, handle, request.cancel_flag, request.cooperative_pulse);
+        errdefer alloc.free(detail);
+        return .{ .failed = .{
+            .kind = failureKind(status),
+            .detail = detail,
+            .retry_after_seconds = if (route == .openai_responses_byok)
+                try gateway_client.responsesRetryAfterFromBody(alloc, status_code, detail)
+            else
+                null,
+            .ownership = .owned,
+        } };
+    }
 
     var reader: HostStreamReader = undefined;
     reader.init(transport, handle, request.cancel_flag, request.cooperative_pulse);
     var events = request.events;
-    const completion = gateway_client.consumeGatewaySseStream(
-        alloc,
-        &reader.interface,
-        &events,
-        EventBridge.content,
-        EventBridge.toolStart,
-        EventBridge.reasoning,
-        request.cancel_flag,
-        request.content_capture_limit,
-    ) catch |err| switch (err) {
+    const completion = (switch (route) {
+        .vercel_gateway => gateway_client.consumeGatewaySseStream(
+            alloc,
+            &reader.interface,
+            &events,
+            EventBridge.content,
+            EventBridge.toolStart,
+            EventBridge.reasoning,
+            request.cancel_flag,
+            request.content_capture_limit,
+        ),
+        .openai_responses_byok => responses_stream.consume(alloc, &reader.interface, .{
+            .context = &events,
+            .on_content_chunk = EventBridge.content,
+            .on_tool_start = EventBridge.toolStart,
+            .on_reasoning_chunk = EventBridge.reasoning,
+            .on_tool_input_chunk = EventBridge.toolInput,
+            .on_unknown_event = EventBridge.unknown,
+            .content_capture_limit = request.content_capture_limit,
+        }, request.cancel_flag),
+        .codex_responses_oauth => unreachable,
+    }) catch |err| switch (err) {
         error.ReadFailed => return if (request.cancel_flag.load(.seq_cst) or reader.aborted) error.Cancelled else error.HostStreamFailed,
         else => return err,
     };
     return .{ .completed = .{
         .completion = completion,
-        .usage = gatewayUsageOutcome(request, completion),
+        .usage = if (route == .openai_responses_byok)
+            .{ .immediate = null }
+        else
+            gatewayUsageOutcome(request, completion),
         .ownership = .owned,
     } };
 }
@@ -187,6 +254,12 @@ const EventBridge = struct {
     fn reasoning(raw: *anyopaque, chunk: []const u8) void {
         sink(raw).emit(.{ .reasoning_delta = chunk });
     }
+
+    fn toolInput(raw: *anyopaque, chunk: []const u8) void {
+        sink(raw).emit(.{ .tool_input_delta = chunk });
+    }
+
+    fn unknown(_: *anyopaque, _: []const u8, _: []const u8) void {}
 
     fn toolStart(raw: *anyopaque, id: []const u8, name: []const u8, label: ?[]const u8) void {
         sink(raw).emit(.{ .tool_started = .{ .id = id, .name = name, .label = label } });

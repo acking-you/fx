@@ -5,12 +5,19 @@ const background_process_provider = @import(
 );
 const gateway_provider = @import("../gateway/gateway_provider.zig");
 const provider_set = @import("../gateway/provider_set.zig");
+const model_provider = @import("../config/model_provider.zig");
+const types = @import("../shared/types.zig");
 const host = @import("../hosts/host.zig");
 const mode_registry = @import("../modes/mode_registry.zig");
 const prompt_policy = @import("../config/prompt_policy.zig");
 const context_contract = @import("../workspace/context_contract.zig");
 
 const Allocator = std.mem.Allocator;
+
+pub const CredentialOverride = struct {
+    token: []const u8,
+    source: types.CredentialSource,
+};
 
 pub const Config = struct {
     default_model: []const u8,
@@ -34,8 +41,9 @@ pub const Config = struct {
     max_history_turns: usize,
     context_registry: context_contract.Registry,
     mode_registry: mode_registry.Registry,
+    provider_override: ?model_provider.ProviderId = null,
     model_override: ?[]const u8 = null,
-    credential_override: ?[]const u8 = null,
+    credential_override: ?CredentialOverride = null,
     home_override: ?[]const u8 = null,
     workspace_root_override: ?[]const u8 = null,
     log_file: ?[]const u8 = null,

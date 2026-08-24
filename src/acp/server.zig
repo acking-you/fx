@@ -443,8 +443,8 @@ pub fn selectCredentialForProvider(
 
     var credential = if (provider == .gateway and state.cfg.credential_override != null)
         credentials.Credential{
-            .token = try state.alloc.dupe(u8, state.cfg.credential_override.?),
-            .source = .ai_gateway_api_key,
+            .token = try state.alloc.dupe(u8, state.cfg.credential_override.?.token),
+            .source = state.cfg.credential_override.?.source,
         }
     else blk: {
         const resolution = try credentials.resolveForProvider(
@@ -1458,7 +1458,7 @@ fn handleInitialize(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message
         state.selected_model = startup.takeSelectedModel();
         state.process_model_override = startup.model_source == .process_override;
     }
-    state.provider = startup.provider;
+    state.provider = state.cfg.provider_override orelse startup.provider;
     state.configured_model = try alloc.dupe(u8, startup.configured_model);
 
     var startup_credential = startup.takeCredential();
@@ -1471,8 +1471,8 @@ fn handleInitialize(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message
         false;
     const credential: *credentials.Credential = if (state.provider == .gateway and state.cfg.credential_override != null) override: {
         routed_credential = .{
-            .token = try alloc.dupe(u8, state.cfg.credential_override.?),
-            .source = .ai_gateway_api_key,
+            .token = try alloc.dupe(u8, state.cfg.credential_override.?.token),
+            .source = state.cfg.credential_override.?.source,
         };
         break :override &routed_credential.?;
     } else if (startup_matches_model)
@@ -1735,8 +1735,8 @@ fn handleSetConfigOption(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Me
             }
             var staged_credential = if (target == .gateway and state.cfg.credential_override != null)
                 credentials.Credential{
-                    .token = try alloc.dupe(u8, state.cfg.credential_override.?),
-                    .source = .ai_gateway_api_key,
+                    .token = try alloc.dupe(u8, state.cfg.credential_override.?.token),
+                    .source = state.cfg.credential_override.?.source,
                 }
             else credential: {
                 const resolution = try credentials.resolveForProvider(
