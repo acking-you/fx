@@ -199,8 +199,8 @@ pub const LoadMode = enum { stored, refresh_if_needed };
 
 const FxLoginRefreshMode = enum { if_needed, force };
 
-pub const missing_credential_message = "Fx needs a model credential. Use fx login for Vercel, fx login codex for ChatGPT Codex, fx login grok for Grok, set OPENAI_API_KEY for a Responses API, or use fx setup or AI_GATEWAY_API_KEY for Vercel AI Gateway.";
-pub const missing_interactive_credential_message = "Fx needs a model credential. Use /login for Vercel, ChatGPT Codex, or Grok, set OPENAI_API_KEY for a Responses API, or use /setup or AI_GATEWAY_API_KEY for Vercel AI Gateway.";
+pub const missing_credential_message = "Fx needs a model credential. Use fx login for Vercel, fx login codex for ChatGPT Codex, fx login grok for Grok, set OPENAI_API_KEY for a Responses API, or set AI_GATEWAY_API_KEY for Vercel AI Gateway.";
+pub const missing_interactive_credential_message = "Fx needs a model credential. Use /login for Vercel, ChatGPT Codex, or Grok, set OPENAI_API_KEY for a Responses API, or set AI_GATEWAY_API_KEY for Vercel AI Gateway.";
 pub const missing_chatgpt_credential_message = "fx needs a Codex subscription login for this model. Run fx login codex.";
 pub const missing_chatgpt_interactive_credential_message = "Codex needs a subscription login. Run /login and choose Sign in with Codex.";
 pub const missing_grok_credential_message = "fx needs a Grok subscription login for this model. Run fx login grok.";
@@ -680,18 +680,14 @@ test "stored key label discloses the backend that answered" {
 
 test "missing credential messages use surface commands in preferred order" {
     const cli_login = std.mem.find(u8, missing_credential_message, "fx login").?;
-    const cli_setup = std.mem.find(u8, missing_credential_message, "fx setup").?;
     const cli_env = std.mem.find(u8, missing_credential_message, "AI_GATEWAY_API_KEY").?;
 
-    try std.testing.expect(cli_login < cli_setup);
-    try std.testing.expect(cli_setup < cli_env);
+    try std.testing.expect(cli_login < cli_env);
 
     const tui_login = std.mem.find(u8, missing_interactive_credential_message, "/login").?;
-    const tui_setup = std.mem.find(u8, missing_interactive_credential_message, "/setup").?;
     const tui_env = std.mem.find(u8, missing_interactive_credential_message, "AI_GATEWAY_API_KEY").?;
 
-    try std.testing.expect(tui_login < tui_setup);
-    try std.testing.expect(tui_setup < tui_env);
+    try std.testing.expect(tui_login < tui_env);
 }
 
 test "credential gateway team prefers team id" {

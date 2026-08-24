@@ -308,7 +308,7 @@ describe("tui: render record/replay", () => {
         { length: 33 },
         (_, index) => `captured input line ${index + 1}: ${"x".repeat(32)}`,
       ).join("\n");
-      const authNotice = "● Auth: Fx needs a model credential. Use /login for Vercel, ChatGPT Codex, or Grok, set OPENAI_API_KEY for a Responses API, or use /setup or AI_GATEWAY_API_KEY for Vercel AI Gateway.";
+      const authNotice = "● Auth: Fx needs a model credential. Use /login for Vercel, ChatGPT Codex, or Grok, set OPENAI_API_KEY for a Responses API, or set AI_GATEWAY_API_KEY for Vercel AI Gateway.";
       const launched = await launch({ recordInput: true });
       session = launched.session;
 

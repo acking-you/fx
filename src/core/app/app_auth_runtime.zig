@@ -214,20 +214,6 @@ pub fn Runtime(comptime App: type) type {
             try applyLogoutResult(app, result);
         }
 
-        pub fn openSetupHub(app: *App) !void {
-            if (comptime !runtime_profile.allows(App, .native_auth)) {
-                try app.writeDomainNotice(.{
-                    .topic = "auth",
-                    .tone = .warning,
-                    .body = "API key setup is unavailable in this WASM session.",
-                }, true);
-                return;
-            }
-            try app.auth.refreshSourceInventory(app.alloc);
-            app.auth.openPicker(app.alloc);
-            app.shell.render_requests.request(.footer);
-        }
-
         fn applyLogoutResult(app: *App, result: login_flow.LogoutResult) !void {
             // Logging out is an explicit rejection of that credential, so a
             // remembered pointer to it would silently reactivate on next login.
@@ -279,18 +265,6 @@ pub fn Runtime(comptime App: type) type {
                     .login => try beginSignIn(app, true),
                     .chatgpt_login => try beginChatGptSignIn(app),
                     .grok_login => try beginGrokSignIn(app),
-                    .setup => {
-                        if (comptime !runtime_profile.allows(App, .native_auth)) {
-                            try app.writeDomainNotice(.{
-                                .topic = "auth",
-                                .tone = .warning,
-                                .body = "API key setup is unavailable in this WASM session.",
-                            }, true);
-                            return;
-                        }
-                        prepareApiKeyInputBoundary(app);
-                        app.auth.openApiKeyPickerFromRoot(app.alloc);
-                    },
                     .change_team => try beginTeamPicker(app),
                     .switch_credential => app.auth.openSwitchCredentialPicker(app.alloc),
                     .switch_provider => app.auth.openProviderPicker(app.alloc, provider_runtime.provider(app)),
@@ -320,19 +294,11 @@ pub fn Runtime(comptime App: type) type {
                     return true;
                 }
             }
-            if (!app.auth.apiKeyEntryActive()) return false;
-            switch (byte) {
-                3, 4 => _ = app.auth.popPickerStage(app.alloc),
-                '\r', '\n' => try submitApiKeyEntry(app),
-                8, 127 => _ = app.auth.deleteApiKeyByte(),
-                else => _ = try app.auth.appendApiKeyByte(app.alloc, byte),
-            }
-            app.shell.render_requests.request(.footer);
-            return true;
+            return false;
         }
 
         pub fn routeAuthPickerEscapeAction(app: *App, action: anytype) bool {
-            if (!app.auth.signInEntryActive() and !app.auth.apiKeyEntryActive()) return false;
+            if (!app.auth.signInEntryActive()) return false;
             return switch (action) {
                 .escape, .remapped_byte => false,
                 else => true,
@@ -430,89 +396,6 @@ pub fn Runtime(comptime App: type) type {
                         else
                             "Signed in with Grok.",
                     });
-                },
-            }
-        }
-
-        fn prepareApiKeyInputBoundary(app: *App) void {
-            if (comptime @hasDecl(App, "prepareApiKeyInputBoundary")) {
-                app.prepareApiKeyInputBoundary();
-            }
-        }
-
-        fn submitApiKeyEntry(app: *App) !void {
-            if (app.auth.pickerView().api_key_mask_count == 0) return;
-            switch (app.auth.beginApiKeySave(app.alloc)) {
-                .started => app.shell.render_requests.request(.footer),
-                .empty => {},
-                .busy => try app.writeDomainNotice(.{
-                    .topic = "auth",
-                    .tone = .warning,
-                    .body = "Still saving the previous API key. Nothing was stored for this one; try again in a moment.",
-                }, true),
-            }
-        }
-
-        /// Polled from the event loop so a save that blocks on a locked key store
-        /// or a slow gateway never stalls rendering.
-        pub fn collectApiKeySaveFacts(app: *App) !void {
-            const result = app.auth.takeApiKeySaveResult(app.alloc) orelse return;
-            try applyApiKeySaveResult(app, result);
-        }
-
-        fn applyApiKeySaveResult(app: *App, result: auth_runtime.ApiKeySaveResult) !void {
-            switch (result) {
-                .empty => return,
-                .saved => |changed| {
-                    applyCredentialChange(app, changed);
-                    rememberCredentialSource(app, .stored_key);
-                    const body = try std.fmt.allocPrint(
-                        app.alloc,
-                        "Saved the API key to {s} and made it active.",
-                        .{credentials.stored_key_backend_label},
-                    );
-                    defer app.alloc.free(body);
-                    try app.writeDomainNotice(.{
-                        .topic = "auth",
-                        .tone = .neutral,
-                        .body = body,
-                    }, true);
-                },
-                .gateway_refused => try app.writeDomainNotice(.{
-                    .topic = "auth",
-                    .tone = .@"error",
-                    .body = "The AI Gateway refused that API key. Nothing was stored.",
-                }, true),
-                .gateway_unavailable => try app.writeDomainNotice(.{
-                    .topic = "auth",
-                    .tone = .@"error",
-                    .body = "Could not verify that API key with AI Gateway. Nothing was stored.",
-                }, true),
-                .store_failed => {
-                    const body = try std.fmt.allocPrint(
-                        app.alloc,
-                        "Could not save the API key to {s}. Nothing was stored.",
-                        .{credentials.stored_key_backend_label},
-                    );
-                    defer app.alloc.free(body);
-                    try app.writeDomainNotice(.{
-                        .topic = "auth",
-                        .tone = .@"error",
-                        .body = body,
-                    }, true);
-                },
-                .reload_failed => {
-                    const body = try std.fmt.allocPrint(
-                        app.alloc,
-                        "Saved the API key to {s}, but could not make it active.",
-                        .{credentials.stored_key_backend_label},
-                    );
-                    defer app.alloc.free(body);
-                    try app.writeDomainNotice(.{
-                        .topic = "auth",
-                        .tone = .warning,
-                        .body = body,
-                    }, true);
                 },
             }
         }
@@ -1841,39 +1724,12 @@ test "failed preference persistence keeps a successful direct login active" {
     try std.testing.expectEqual(@as(?credentials.Source, null), app.last_preference_source);
 }
 
-test "successful API key save persists even when the live credential is unchanged" {
-    var app: TestApp = .{};
-    defer app.deinit();
-    app.auth.active_source = .stored_key;
-
-    try Runtime(TestApp).applyApiKeySaveResult(&app, .{ .saved = false });
-
-    try std.testing.expectEqual(credentials.Source.stored_key, app.auth.active_source.?);
-    try std.testing.expectEqual(@as(usize, 1), app.preference_write_count);
-    try std.testing.expectEqual(credentials.Source.stored_key, app.last_preference_source.?);
-}
-
-test "successful API key save remembers the newly active stored key" {
-    var app: TestApp = .{};
-    defer app.deinit();
-    app.auth.active_source = .stored_key;
-
-    try Runtime(TestApp).applyApiKeySaveResult(&app, .{ .saved = true });
-
-    try std.testing.expectEqual(credentials.Source.stored_key, app.auth.active_source.?);
-    try std.testing.expectEqual(@as(usize, 1), app.preference_write_count);
-    try std.testing.expectEqual(credentials.Source.stored_key, app.last_preference_source.?);
-    try std.testing.expectEqual(@as(usize, 1), app.model_cache.reset_count);
-    try std.testing.expectEqual(@as(usize, 1), app.model_cache_warmup_count);
-}
-
-test "cancelled login and rejected API key do not persist a source" {
+test "cancelled login does not persist a source" {
     var app: TestApp = .{};
     defer app.deinit();
     app.auth.sign_in_transition = .cancelled;
 
     try Runtime(TestApp).collectSignInFacts(&app);
-    try Runtime(TestApp).applyApiKeySaveResult(&app, .gateway_refused);
 
     try std.testing.expectEqual(@as(usize, 0), app.preference_write_count);
     try std.testing.expectEqual(credentials.Source.ai_gateway_api_key, app.auth.active_source.?);

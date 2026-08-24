@@ -372,7 +372,6 @@ pub fn Handlers(comptime App: type) type {
                 .show_help = commandShowHelp,
                 .login = commandLogin,
                 .logout = commandLogout,
-                .setup = commandSetup,
                 .show_status = commandShowStatus,
                 .show_background = commandShowBackground,
                 .stop_background = commandStopBackground,
@@ -685,19 +684,6 @@ pub fn Handlers(comptime App: type) type {
                     .topic = "auth",
                     .tone = .@"error",
                     .body = "logout is not available in this runtime",
-                }, true);
-            }
-        }
-
-        fn commandSetup(ctx: *anyopaque) !void {
-            const app: *App = @ptrCast(@alignCast(ctx));
-            if (comptime @hasDecl(App, "openSetupHub")) {
-                try app.openSetupHub();
-            } else {
-                try app.writeDomainNotice(.{
-                    .topic = "setup",
-                    .tone = .@"error",
-                    .body = "setup is not available in this runtime",
                 }, true);
             }
         }
