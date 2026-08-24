@@ -19,6 +19,42 @@ For end users, its CLI output style and form factor aim to be closer to a Unix s
 
 It's open source (Apache-2.0), model-agnostic, and suitable for both local and cloud inference.
 
+## About this fork (`byok`)
+
+This is the `byok` branch of a fork of upstream [`vercel-labs/fx`](https://github.com/vercel-labs/fx). Upstream stays the source of truth for the shared codebase and is merged in regularly; this branch exists for work upstream would not take, aimed at three goals.
+
+> [!IMPORTANT]
+> **Long-term maintenance commitment for BYOK and third-party OAuth**
+>
+> This branch is maintained as a daily-use distribution, not a one-time experiment. The maintainer uses it for real fx work, continuously exercises BYOK, ChatGPT Codex OAuth, xAI Grok OAuth, remote compaction, tool calls, permission review, token refresh, and session resume, and fixes regressions found through that use. The commitment is to keep these supported paths working across provider changes and future upstream merges, with focused regression coverage for failures already seen.
+>
+> Upstream remains the source of truth for shared fx development, but BYOK and third-party OAuth are not its primary maintenance focus, and fixes in these paths can move slowly. For example, merging an upstream revision reintroduced a Codex Responses request that failed to provide valid input, even though this branch had already fixed that failure class. Owning and repairing independent provider behavior without waiting for upstream is a central reason this fork and the `byok` branch exist.
+>
+> This is a promise of ongoing ownership rather than a claim that external providers will never change. Regressions in supported BYOK and OAuth paths are treated as branch bugs: they are reproduced against real runtime behavior, fixed here, and kept under regression coverage.
+
+**1. Remove every hard binding to Vercel.** No default path should require a Vercel account, gateway, key, setup flow, login, catalog, or request endpoint. Generic provider contracts and useful optional transports can remain, but Vercel-specific onboarding is not a capability this fork promises to preserve.
+
+**2. Support any BYOK provider.** The target is to bring the key you already pay for and point fx at a compatible commercial, corporate, self-hosted, or local endpoint. That requires configurable base URLs, multiple credential sources, provider protocols, and model catalogs.
+
+**3. Improve the agent harness.** Better default agent behavior belongs here even where upstream keeps it optional or absent. Streamed model reasoning, for example, is shown during work and durable provider summaries are replayed as reasoning context when available.
+
+### Status
+
+Goals 1 and 2 remain in progress. The branch currently supports these model-access paths:
+
+- ChatGPT Codex through OAuth with `fx login codex`.
+- Grok through xAI OAuth with `fx login grok`.
+- Direct Responses API access with `OPENAI_API_KEY`, using OpenAI by default or a configurable Responses-compatible base URL.
+- The inherited Vercel Gateway route remains present, but its dedicated setup and login onboarding are not a required target for this fork and may be removed as a coherent feature slice.
+
+The direct API-key, Codex, and Grok paths use the Responses protocol, with provider-specific authentication and transport boundaries. This does not mean every OpenAI-compatible or provider-specific protocol is supported. Chat Completions endpoints, broader provider-specific authentication, and additional catalogs and credential stores are still in progress.
+
+For direct API-key access, `FX_RESPONSES_BASE_URL` takes precedence over `OPENAI_BASE_URL`. fx appends `/responses` unless the configured URL already ends with it. Remote bases must use HTTPS; loopback HTTP is accepted only with an explicit port. These generic variables never redirect a Codex OAuth credential away from ChatGPT. `FX_CODEX_BASE_URL` is the separate explicit Codex override.
+
+The inherited Vercel route retains one existing limitation: `FX_GATEWAY_BASE_URL` is honored only for a loopback address because the base URL carries the bearer token. A remote override is ignored rather than used.
+
+Fork changes stay deliberately small and shaped like upstream's own code: divergence costs a merge conflict every time, and a change that fits upstream's structure can still be sent back as a pull request. Bug fixes and features upstream would plausibly accept are contributed to `vercel-labs/fx` rather than kept here. See [AGENTS.md](AGENTS.md) for branch roles, removal boundaries, and the upstream merge routine.
+
 ## Install
 
 ```bash
@@ -53,6 +89,41 @@ The OpenAI Codex route uses ChatGPT subscription access directly and never sends
 
 The Grok route uses subscription access directly at xAI and never sends its OAuth token to Vercel AI Gateway or OpenAI. Its session is stored privately at `~/.fx/grok-auth.json`, refreshed when needed, and used only with the authenticated xAI catalog and Responses API.
 
+For direct BYOK access to the Responses API, set an OpenAI API key:
+
+```bash
+export OPENAI_API_KEY="your-key"
+fx
+```
+
+To use another endpoint that implements the Responses API, set its base URL before running fx:
+
+```bash
+export FX_RESPONSES_BASE_URL=https://gateway.example.com/v1
+export OPENAI_API_KEY="your-key"
+fx
+```
+
+`OPENAI_BASE_URL` is also supported when `FX_RESPONSES_BASE_URL` is unset. This path expects the Responses API, not the Chat Completions protocol.
+
+Inside the interactive app, run `/model` to browse the active provider's catalog. After choosing a model, the same picker offers only the reasoning efforts and Fast mode supported by that catalog entry. The **Model** row in `/settings` uses the same flow. `/effort` shows or sets the current reasoning effort, while `/fast` toggles Fast mode for the current model. ACP clients receive the same `model`, `effort`, and `fast_mode` configuration options; the JavaScript SDK exposes `setModel`, `setEffort`, and `setFastMode`. On the Responses wire, Fast mode uses the `priority` service tier. Selecting a model that does not support the current effort or Fast mode clears that stale setting instead of sending an invalid request.
+
+For a direct switch, pass the model, effort, and optional speed in one command:
+
+```text
+/model gpt-5.6-sol high fast
+/model gpt-5.6-sol xhigh normal
+/effort max
+/effort auto
+/fast
+```
+
+Web search follows the selected direct provider instead of routing a direct credential through Vercel. With an OpenAI API key, fx advertises the hosted Responses `web_search` tool only when the current permission policy allows it and retains returned URL citations in the answer. With Codex OAuth, fx uses the Codex `web.run` namespace and the account's `/alpha/search` endpoint, keeping one search-session identity across follow-up search, open, click, and find commands. Standalone search receives only the previous verified user and assistant turn plus the current verified user request; the assistant excerpt is capped at 1,000 estimated tokens, and the in-progress assistant that invoked the tool is excluded.
+
+For a saved conversation, `/compact` uses the active direct Responses provider's remote compaction transport. Codex OAuth and API-key Responses providers append a `compaction_trigger` to a non-streaming `/responses` request. A successful response is stored as the provider's complete opaque replacement output and replayed only while the same provider identity, normalized Responses endpoint, and wire model remain active. Codex checkpoints bind to the ChatGPT account; API-key checkpoints bind to a non-secret key digest plus organization and project. If any binding changes, fx falls back to the portable local summary instead of sending old opaque context to a new provider identity. If a BYOK endpoint does not implement remote compaction, or the request is rejected or unavailable, fx applies local compaction once instead.
+
+For Codex OAuth models, fx also consumes the model catalog's context-budget metadata. The effective context display reserves model-declared headroom, defaulting to 95% of the raw window, and automatic compaction starts when the latest provider-reported total usage reaches the model limit, defaulting to 90% of the raw window. The TUI reports when automatic compaction starts and settles; background remote compaction owns the activity row until the replacement checkpoint is installed or local fallback completes.
+
 To use an AI Gateway API key instead:
 
 ```bash
@@ -66,9 +137,7 @@ cd your_project
 fx
 ```
 
-The current directory becomes the primary workspace. Enter a prompt, or run `/help` to browse interactive commands.
-
-Reasoning-capable models show their current activity while they work, then retain a compact recent summary in the transcript. Provider summaries that carry durable replay identity are also restored when a session resumes.
+The current directory becomes the primary workspace. Enter a prompt, or run `/help` to browse interactive commands. Run `/ps` to inspect active durable terminals and background command history; open terminal output from the Ctrl+X process manager, or use `/background logs <id>` for legacy background tasks.
 
 The status line hides the workspace path and Git branch by default. Enable the `Status line workspace` option in `/settings`, run `/statusline workspace`, or set it in `~/.fx/settings.json`:
 
@@ -97,7 +166,10 @@ Use `fx ask` for a single request:
 
 ```bash
 fx ask "explain the changes in this repository"
+fx ask --show-thinking "explain the changes in this repository"
 ```
+
+During a turn, reasoning-capable models show their current activity while they work, then keep a compact recent summary in the transcript. Durable provider summaries are replayed as reasoning context when a session resumes. ACP sessions emit `agent_thought_chunk` updates. `fx ask` writes reasoning to stderr with `--show-thinking`, and `fx ask --json` includes a separate `thinking` field when reasoning is present; it is never merged into `output`.
 
 Inspect usage recorded locally by fx, or query account-wide limits for the
 signed-in Codex subscription:
@@ -123,7 +195,7 @@ fx builds as a native binary or WebAssembly. Applications embedding fx can provi
 | `createFxAgent()` | Embed the agent core in a JavaScript host with `fx-core.wasm`. |
 | `createFxTerminal()` | Embed the interactive terminal with `fx-term.wasm`. |
 
-The WebAssembly SDK is experimental. See the [WebAssembly SDK](sdk/README.md) and [ACP documentation](https://fx.sh/docs/using-fx/acp).
+The WebAssembly SDK is experimental. See the [WebAssembly SDK](sdk/README.md), the repository's [ACP usage and fx extensions guide](docs/acp.md), and the hosted [ACP documentation](https://fx.sh/docs/using-fx/acp).
 
 ## Extend fx
 

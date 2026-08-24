@@ -10,7 +10,7 @@ This checkout is `acking-you/fx`, a fork of the upstream `vercel-labs/fx`. It is
 
 `byok` ("bring your own key") is the development branch and the default place to work. It pursues three goals, stated for users in [README.md](README.md):
 
-1. **Remove every hard binding to Vercel.** Vercel stays fully supported and stops being required. No default path may assume that account, that gateway, or that key. Where upstream hardcodes one hosted provider, the fork makes it one choice among several.
+1. **Remove every hard binding to Vercel.** No default path may assume a Vercel account, gateway, key, setup flow, or login. Generic provider contracts and useful optional transports may remain, but preserving Vercel-specific onboarding such as `fx setup` is not a goal of this fork.
 
 2. **Support any BYOK provider.** Configurable base URLs, credentials from the environment or a local store rather than one vendor's login, and model catalogs that are not the upstream default, so an OpenAI-compatible endpoint, corporate proxy, or local server works.
 
@@ -37,12 +37,15 @@ Upstream is merged into `byok` periodically so the fork never accumulates a larg
 
 1. `git fetch vercel`
 2. Fast-forward the mirror: `git branch -f upstream vercel/main` (it must fast-forward; if it cannot, the mirror was committed to by mistake).
-3. `git switch byok && git merge upstream`
-4. Resolve conflicts in favor of upstream's structure, keeping the fork's behavior. Then build, run the focused tests for every conflicted path, and run the binary per **Declaring Work Ready**.
+3. `git switch byok && git merge --no-commit upstream`
+4. Resolve conflicts in favor of upstream's structure while keeping the fork's behavior. Before committing, inspect the staged first-parent result with `git diff --cached HEAD -- README.md AGENTS.md` and restore any fork-owned material.
+5. Commit the merge, then verify the recorded result with `git diff HEAD^1 HEAD -- README.md AGENTS.md`. Build, run the focused tests for every conflicted path, and run the binary per **Declaring Work Ready**.
 
 Prefer a merge over a rebase: `byok` is shared, and a rebase would rewrite published history.
 
 Upstream frequently changes counts and layout that fork tests assert (command totals, settings rows, menu geometry). Expect to update those fixtures as part of the merge rather than treating them as regressions.
+
+A clean merge is not proof that fork-owned documentation survived. Preserve and adapt the `About this fork` section, the BYOK maintenance commitment and status, provider configuration, fork-specific examples, and these repository instructions. Upstream wording may be incorporated, but it must not silently delete or replace the fork's contract.
 
 ### Contributing back to upstream
 
@@ -154,6 +157,16 @@ matches the file's product role. When removing a feature or E2E owner, remove
 its stale corpus entry. Normal PR CI loads the corpus and rejects missing,
 duplicate, stale, or unclassified files without running the expensive PGSO
 qualification.
+
+### Removing Fork-Unneeded Features and Tests
+
+`byok` does not retain upstream code merely because upstream ships it. Treat a feature as a removal candidate when it conflicts with the BYOK vision, duplicates or conflicts with a fork-owned implementation, or adds a product capability this fork does not need. Vercel-specific setup and login onboarding are examples of extra product surface that the fork is not committed to preserving.
+
+Trace live entrypoints and dependencies before deleting anything. A generic protocol, provider contract, or transport that remains useful to BYOK must not be removed only because it originated in Vercel code or still uses a Vercel name. Conversely, upstream origin is not a reason to preserve a vendor-specific product flow that has no remaining fork use.
+
+Keep tests that protect real product behavior, including stability, crashes, recovery, security boundaries, resource limits, portability, and reproduced user-visible bugs. Remove tests whose only owner is a removed feature, duplicate assertions already covered at the proper boundary, unrelated assertions attached to another scenario, brittle upstream layout or count snapshots with no product contract, and harness-only coverage that cannot fail for a meaningful runtime regression.
+
+Do not delete a test solely to make CI green. First diagnose the failure and establish that the assertion is redundant, meaningless, or belongs to an unsupported feature. When removing a feature, remove its complete vertical slice in the same change: entrypoints, dispatch, configuration, state, protocol and UI wiring, documentation, tests, fixtures, and any PGSO corpus entry. Prefer the smallest coherent deletion, then build, run focused tests, and exercise the affected real runtime path.
 
 ### Adding a Command
 
