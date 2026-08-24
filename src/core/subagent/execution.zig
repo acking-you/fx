@@ -2318,6 +2318,7 @@ pub const Owner = struct {
     ) ControlError!RestartRecovery {
         // Ordinary chats share the session namespace. Prove this session owns
         // subagent control state before a writable resume can rebind it.
+        var terminal_one_off = false;
         {
             var read_capability = self.sessions.openSubagentControlCapabilityReadOnly(
                 self.alloc,
@@ -2333,10 +2334,14 @@ pub const Owner = struct {
                 return mapControlLoadError(err);
             if (existing) |value| {
                 var record = value;
+                terminal_one_off = isTerminalOneOff(record.mode, record.state);
                 record.deinit(self.alloc);
             } else {
                 return .{};
             }
+        }
+        if (terminal_one_off) {
+            return self.reconcileTerminalOneOffReadOnly(child_id, timestamp_ms);
         }
 
         var loaded = self.sessions.resumeTargetForWrite(
@@ -2428,6 +2433,83 @@ pub const Owner = struct {
             loaded.state.history,
         ) catch return error.ControlStoreFailed;
         return changed;
+    }
+
+    /// A terminal one-off has already committed its history before publishing
+    /// the terminal control state. Repair its parent deliveries from a
+    /// read-only history snapshot so a recently exited or still-finalizing
+    /// writer cannot make the next parent turn omit the durable final result.
+    fn reconcileTerminalOneOffReadOnly(
+        self: *Owner,
+        child_id: []const u8,
+        timestamp_ms: i64,
+    ) ControlError!RestartRecovery {
+        var loaded = self.sessions.loadReadOnly(self.alloc, child_id) catch |err| {
+            return switch (err) {
+                error.OutOfMemory => error.OutOfMemory,
+                else => error.ControlStoreFailed,
+            };
+        };
+        defer loaded.deinit(self.alloc);
+        var capability = self.sessions.openSubagentControlCapabilityWritable(
+            self.alloc,
+            child_id,
+            self.child_store_options,
+        ) catch |err| return mapOpenControlError(err);
+        defer capability.deinit();
+        const store = control_store.Store{
+            .capability = &capability,
+            .expected_child_id = child_id,
+        };
+        var lock = store.acquireLock() catch |err| return mapControlLockError(err);
+        defer lock.release();
+        var record = store.load(self.alloc) catch |err| return mapControlLoadError(err);
+        defer record.deinit(self.alloc);
+        if (!isTerminalOneOff(record.mode, record.state)) {
+            return error.ControlStoreFailed;
+        }
+        var communication_capability = self.sessions.openSubagentControlCapabilityWritable(
+            self.alloc,
+            child_id,
+            self.communication_store_options,
+        ) catch |err| return mapOpenControlError(err);
+        defer communication_capability.deinit();
+        const communication_state = communication_store.Store{
+            .capability = &communication_capability,
+            .expected_session_id = child_id,
+        };
+        _ = reconcileToolActivityLocked(
+            self.alloc,
+            communication_state,
+            child_id,
+            loaded.last_subagent_work_id,
+            loaded.history,
+        ) catch |err| blk: {
+            debug_trace.logf(
+                "subagent",
+                "tool activity reconciliation deferred child_id={s} outcome={s}",
+                .{ child_id, @errorName(err) },
+            );
+            break :blk 0;
+        };
+        _ = communication_manager.reconcileApprovalsLocked(
+            self.alloc,
+            communication_state,
+            record,
+            timestamp_ms,
+        ) catch return error.ControlStoreFailed;
+        _ = communication_manager.reconcileTerminalsLocked(
+            self.alloc,
+            communication_state,
+            record,
+        ) catch return error.ControlStoreFailed;
+        _ = reconcileOneOffFinalResultLocked(
+            self.alloc,
+            communication_state,
+            record,
+            loaded.history,
+        ) catch return error.ControlStoreFailed;
+        return .{};
     }
 
     fn recoverCandidate(
@@ -6874,6 +6956,51 @@ const FailCommunicationFrom = struct {
     }
 };
 
+const PlainCompletionExecution = struct {
+    result: []const u8,
+
+    fn services(self: *PlainCompletionExecution) Services {
+        return .{ .context = self, .capture_fn = capture, .run_fn = run };
+    }
+
+    fn capture(
+        _: ?*anyopaque,
+        alloc: Allocator,
+        request: CaptureRequest,
+    ) ServiceError!domain.AdmissionSnapshot {
+        return domain.captureAdmission(alloc, .{
+            .parent_id = request.parent_id,
+            .source_id = request.source_id,
+            .model = request.preferences.model,
+            .effort = request.preferences.effort,
+        }) catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => error.AdmissionFailed,
+        };
+    }
+
+    fn run(
+        raw: ?*anyopaque,
+        turn: *TurnContext,
+        message: domain.QueuedMessage,
+        _: domain.AdmissionSnapshot,
+        _: *std.atomic.Value(bool),
+    ) ServiceError!RunOutcome {
+        const self: *PlainCompletionExecution = @ptrCast(@alignCast(raw.?));
+        const history_turn = session.makeAssistantTurn(
+            turn.alloc,
+            message.content,
+            self.result,
+        ) catch return error.OutOfMemory;
+        defer session.freeHistoryTurn(turn.alloc, history_turn);
+        turn.commit(message.id, history_turn, 1, 1, 2) catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => error.ProviderFailed,
+        };
+        return .completed;
+    }
+};
+
 const ToolEffectExecution = struct {
     dir: std.Io.Dir,
     effects: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
@@ -7050,6 +7177,121 @@ test "definite final activity save failure preserves result and repairs exactly 
 
 test "indeterminate final activity save preserves result and repairs without duplicate" {
     try runToolActivityProjectionFailure(true);
+}
+
+test "terminal one off recovery repairs parent result while child writer is busy" {
+    const alloc = std.testing.allocator;
+    const child_id = "busy-terminal-one-off";
+    var env = try TestEnvironment.init(alloc);
+    defer env.deinit(alloc);
+    try env.createSession(alloc, "parent");
+    try env.createSession(alloc, child_id);
+    try env.installControl(
+        alloc,
+        child_id,
+        .one_off,
+        "model/one-off",
+        types.ReasoningEffort.literal("high"),
+        &.{"one-off-work"},
+    );
+    _ = try relationship_index.ensureChild(
+        alloc,
+        &env.store,
+        "parent",
+        child_id,
+        .{},
+    );
+
+    var execution = PlainCompletionExecution{ .result = "durable one-off result" };
+    var manager = manager_mod.Manager{ .sessions = &env.store };
+    var communication_failure = FailCommunicationFrom{ .fail_from = 3 };
+    var owner = Owner{
+        .alloc = alloc,
+        .sessions = &env.store,
+        .manager = &manager,
+        .services = execution.services(),
+        .retirement_root_id = "parent",
+        .communication_store_options = .{ .replace_ops = .{
+            .ctx = &communication_failure,
+            .sync_file = FailCommunicationFrom.syncFile,
+        } },
+        .session_resume_options = .{ .log = .{ .session_lock_deadline_ms = 0 } },
+    };
+    defer owner.deinit();
+    try std.testing.expectEqual(StartResult.started, try owner.start(child_id, false));
+    try std.testing.expectEqual(ChildResult.control_failed, try owner.join(child_id));
+    var terminal = try env.loadControl(alloc, child_id);
+    defer terminal.deinit(alloc);
+    try std.testing.expectEqual(domain.State.completed, terminal.state);
+    try std.testing.expectEqual(domain.QueueStatus.completed, terminal.queue[0].status);
+
+    const lock_path = try std.fs.path.join(
+        alloc,
+        &.{ env.store.sessions_dir, child_id, "session.lock" },
+    );
+    defer alloc.free(lock_path);
+    const locker_script =
+        \\import fcntl, os, sys
+        \\lock_file = open(sys.argv[1], "a+b")
+        \\fcntl.flock(lock_file, fcntl.LOCK_EX)
+        \\os.write(1, b"R")
+        \\os.read(0, 1)
+    ;
+    const argv = [_][]const u8{
+        "/usr/bin/env",
+        "python3",
+        "-c",
+        locker_script,
+        lock_path,
+    };
+    var locker = try std.process.spawn(io_mod.getIo(), .{
+        .argv = &argv,
+        .stdin = .pipe,
+        .stdout = .pipe,
+        .stderr = .pipe,
+    });
+    var locker_reaped = false;
+    defer if (!locker_reaped) {
+        if (locker.stdin) |stdin_file| stdin_file.writeStreamingAll(
+            io_mod.getIo(),
+            "X",
+        ) catch {};
+        _ = locker.wait(io_mod.getIo()) catch {};
+    };
+    var ready: [1]u8 = undefined;
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        try std.posix.read(locker.stdout.?.handle, &ready),
+    );
+    try std.testing.expectEqual(@as(u8, 'R'), ready[0]);
+
+    owner.communication_store_options = .{};
+    const report = try owner.recoverTree("parent", 10);
+    try std.testing.expect(report.fullyReconciled());
+    try std.testing.expectEqual(@as(usize, 0), report.sessions_external_busy);
+    var delivery_manager = communication_manager.Manager{ .sessions = &env.store };
+    var page = try delivery_manager.page(
+        alloc,
+        child_id,
+        "parent-model",
+        "parent",
+        null,
+        16,
+    );
+    defer page.deinit(alloc);
+    var final_result_count: usize = 0;
+    for (page.deliveries) |delivery| switch (delivery.payload) {
+        .message => |message| {
+            final_result_count += 1;
+            try std.testing.expectEqualStrings("durable one-off result", message);
+        },
+        else => {},
+    };
+    try std.testing.expectEqual(@as(usize, 1), final_result_count);
+
+    try locker.stdin.?.writeStreamingAll(io_mod.getIo(), "X");
+    _ = try locker.wait(io_mod.getIo());
+    locker_reaped = true;
 }
 
 test "restart before history commit interrupts without replay" {
