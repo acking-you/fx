@@ -31,6 +31,7 @@ pub const CodeHighlightTheme = code_highlight.Theme;
 pub const Styles = struct {
     system_notice_label_style: []const u8 = "",
     system_notice_text_style: []const u8 = "",
+    reasoning_summary_style: []const u8 = "",
     reset_style: []const u8 = "",
     dim_style: []const u8 = "",
     red_style: []const u8 = "",
@@ -1453,6 +1454,37 @@ fn appendNoticeRow(
     if (active_hyperlink.* != null) try out.appendSlice(alloc, notice_osc8_close);
 }
 
+fn renderReasoningSummary(
+    alloc: Allocator,
+    body: []const u8,
+    styles: Styles,
+    cols: u16,
+) ![]u8 {
+    const trimmed = std.mem.trim(u8, body, " \t\r\n");
+    var logical: std.ArrayList(u8) = .empty;
+    defer logical.deinit(alloc);
+    try logical.appendSlice(alloc, "• ");
+    try logical.appendSlice(alloc, trimmed);
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    var cursor: usize = 0;
+    var row: usize = 0;
+    while (cursor < logical.items.len) : (row += 1) {
+        if (row > 0) try out.append(alloc, '\n');
+        const indent: usize = if (row > 0) noticeContinuationIndent(logical.items, cursor, cols) else 0;
+        const available: usize = @max(@as(usize, cols) -| indent, 1);
+        const line = scanNoticeLine(logical.items, cursor, available);
+        try out.appendNTimes(alloc, ' ', indent);
+        try out.appendSlice(alloc, styles.reasoning_summary_style);
+        try out.appendSlice(alloc, logical.items[cursor..line.end]);
+        try out.appendSlice(alloc, styles.reset_style);
+        std.debug.assert(line.next > cursor);
+        cursor = line.next;
+    }
+    return out.toOwnedSlice(alloc);
+}
+
 /// Returns an owned semantic notice block without surrounding blank rows.
 pub fn renderSemanticNotice(
     alloc: Allocator,
@@ -1460,6 +1492,10 @@ pub fn renderSemanticNotice(
     styles: Styles,
     cols: u16,
 ) ![]u8 {
+    if (std.ascii.eqlIgnoreCase(notice.topic, "thinking")) {
+        return renderReasoningSummary(alloc, notice.body, styles, cols);
+    }
+
     var logical: std.ArrayList(u8) = .empty;
     defer logical.deinit(alloc);
     try logical.appendSlice(alloc, "● ");
@@ -2740,6 +2776,25 @@ test "semantic notice renders every tone and resets before following content" {
         try std.testing.expect(following.style.fg.eql(.default));
         try std.testing.expect(following.style.bg.eql(.default));
     }
+}
+
+test "thinking notice renders a dim italic bullet summary" {
+    const alloc = std.testing.allocator;
+    const rendered = try renderSemanticNotice(alloc, .{
+        .topic = "thinking",
+        .tone = .neutral,
+        .body = "Checked the runtime path.\nThe focused test passes.",
+    }, .{
+        .reasoning_summary_style = "<reasoning>",
+        .reset_style = "</>",
+    }, 80);
+    defer alloc.free(rendered);
+
+    try std.testing.expectEqualStrings(
+        "<reasoning>• Checked the runtime path.</>\n  <reasoning>The focused test passes.</>",
+        rendered,
+    );
+    try std.testing.expect(std.mem.find(u8, rendered, "Thinking:") == null);
 }
 
 test "semantic notice keeps an OSC 8 target hidden and clickable" {

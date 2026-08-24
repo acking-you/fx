@@ -55,6 +55,55 @@ pub fn visibleBody(body: []const u8, visible_lines: usize) VisibleBody {
     return .{ .text = body[offset..], .truncated = true };
 }
 
+/// Returns the first completed Markdown bold span. Reasoning-summary providers
+/// conventionally put the current activity label in that span, matching the
+/// live status extraction used by Codex's TUI.
+pub fn firstBoldHeading(body: []const u8) ?[]const u8 {
+    const open = std.mem.find(u8, body, "**") orelse return null;
+    const content_start = open + 2;
+    const close_relative = std.mem.find(u8, body[content_start..], "**") orelse return null;
+    const heading = std.mem.trim(u8, body[content_start .. content_start + close_relative], " \t\r\n");
+    return if (heading.len == 0) null else heading;
+}
+
+const LeadingBoldSummary = struct {
+    heading: []const u8,
+    body: []const u8,
+};
+
+fn splitLeadingBoldSummary(reasoning: []const u8) ?LeadingBoldSummary {
+    const trimmed = std.mem.trimStart(u8, reasoning, " \t\r\n");
+    if (!std.mem.startsWith(u8, trimmed, "**")) return null;
+    const close_relative = std.mem.find(u8, trimmed[2..], "**") orelse return null;
+    const close = 2 + close_relative;
+    const heading = std.mem.trim(u8, trimmed[2..close], " \t\r\n");
+    if (heading.len == 0) return null;
+    return .{
+        .heading = heading,
+        .body = std.mem.trim(u8, trimmed[close + 2 ..], " \t\r\n"),
+    };
+}
+
+/// Compact body used while reasoning is streaming. Prefer the provider's first
+/// completed bold activity header; raw providers fall back to the recent tail.
+pub fn activeBody(body: []const u8, visible_lines: usize) VisibleBody {
+    if (firstBoldHeading(body)) |heading| {
+        return .{ .text = heading, .truncated = heading.len != body.len };
+    }
+    return visibleBody(body, visible_lines);
+}
+
+/// Compact body retained after reasoning settles. A leading bold activity
+/// header is presentation metadata, so show the summary beneath it. Header-only
+/// summaries remain visible instead of producing an empty block.
+pub fn finalizedBody(body: []const u8, visible_lines: usize) VisibleBody {
+    if (splitLeadingBoldSummary(body)) |summary| {
+        if (summary.body.len > 0) return visibleBody(summary.body, visible_lines);
+        return .{ .text = summary.heading, .truncated = false };
+    }
+    return visibleBody(body, visible_lines);
+}
+
 test "visibleBody keeps a short body whole" {
     const result = visibleBody("one\ntwo", 8);
     try std.testing.expect(!result.truncated);
@@ -99,4 +148,39 @@ test "visibleBody keeps blank interior lines inside the window" {
     const result = visibleBody("a\n\nb\n\nc", 3);
     try std.testing.expect(result.truncated);
     try std.testing.expectEqualStrings("b\n\nc", result.text);
+}
+
+test "activeBody prefers the first completed bold reasoning header" {
+    const result = activeBody("prefix **Inspecting clipboard input**\nmore detail", 3);
+    try std.testing.expect(result.truncated);
+    try std.testing.expectEqualStrings("Inspecting clipboard input", result.text);
+}
+
+test "activeBody falls back to the recent raw reasoning tail" {
+    const result = activeBody("one\ntwo\nthree", 2);
+    try std.testing.expect(result.truncated);
+    try std.testing.expectEqualStrings("two\nthree", result.text);
+}
+
+test "finalizedBody removes a leading bold header" {
+    const result = finalizedBody(
+        "**Inspecting clipboard input**\n\nThe TUI already routes Ctrl+V.\nLinux capture is missing.",
+        8,
+    );
+    try std.testing.expect(!result.truncated);
+    try std.testing.expectEqualStrings(
+        "The TUI already routes Ctrl+V.\nLinux capture is missing.",
+        result.text,
+    );
+}
+
+test "finalizedBody retains a header-only summary" {
+    const result = finalizedBody("  **Checking the focused tests**  ", 8);
+    try std.testing.expect(!result.truncated);
+    try std.testing.expectEqualStrings("Checking the focused tests", result.text);
+}
+
+test "firstBoldHeading ignores incomplete and empty spans" {
+    try std.testing.expect(firstBoldHeading("**still streaming") == null);
+    try std.testing.expect(firstBoldHeading("before **** after") == null);
 }
