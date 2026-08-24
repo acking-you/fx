@@ -45,7 +45,7 @@ Goals 1 and 2 remain in progress. The branch currently supports these model-acce
 - ChatGPT Codex through OAuth with `fx login codex`.
 - Grok through xAI OAuth with `fx login grok`.
 - Direct Responses API access with `OPENAI_API_KEY`, using OpenAI by default or a configurable Responses-compatible base URL.
-- The inherited Vercel Gateway route remains present while its dedicated onboarding is removed in coherent slices. `fx setup` and the duplicate `/setup` hub are no longer part of this fork; Vercel login remains pending separate removal.
+- The inherited Vercel Gateway route remains present while its dedicated onboarding is removed in coherent slices. `fx setup`, Vercel account login, team selection, and their duplicate interactive surfaces are no longer part of this fork.
 
 The direct API-key, Codex, and Grok paths use the Responses protocol, with provider-specific authentication and transport boundaries. This does not mean every OpenAI-compatible or provider-specific protocol is supported. Chat Completions endpoints, broader provider-specific authentication, and additional catalogs and credential stores are still in progress.
 
@@ -63,13 +63,7 @@ curl -fsSL https://fx.sh/setup.sh | bash
 
 ## Run fx
 
-Sign in with Vercel AI Gateway:
-
-```bash
-fx login
-```
-
-Or use an eligible ChatGPT subscription through OpenAI Codex OAuth:
+Use an eligible ChatGPT subscription through OpenAI Codex OAuth:
 
 ```bash
 fx login codex

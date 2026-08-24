@@ -1697,9 +1697,9 @@ test "surface footer measurement reserves only the compact auth picker rows" {
     var ctx = surfaceTestContext(&input);
     ctx.auth_picker = auth_runtime.PickerView{
         .active = true,
-        .available_sources = auth_runtime.SourceSet.initMany(&.{ .ai_gateway_api_key, .fx_login }),
-        .selected_choice = .{ .source = .fx_login },
-        .active_source = .fx_login,
+        .available_sources = auth_runtime.SourceSet.initMany(&.{ .ai_gateway_api_key, .stored_key }),
+        .selected_choice = .{ .source = .stored_key },
+        .active_source = .stored_key,
         .include_skip = false,
     };
 
@@ -1713,116 +1713,6 @@ test "surface footer measurement reserves only the compact auth picker rows" {
     );
 }
 
-test "surface footer places the cursor after the Vercel team query" {
-    const auth_runtime = @import("../../core/auth/auth_runtime.zig");
-    const login_flow = @import("../../core/auth/login_flow.zig");
-    const alloc = std.testing.allocator;
-    var approval = ApprovalPrompt{};
-    defer approval.deinit(alloc);
-    var input = InputRuntime{};
-    defer input.deinit(alloc);
-    var shell = surfaceTestShell(24, 80);
-    defer shell.deinit(alloc);
-    var team_id = "team_123".*;
-    var team_slug = "example-internal-team".*;
-    var team_name = "Example Internal Team".*;
-    const teams = [_]login_flow.Team{.{
-        .id = &team_id,
-        .slug = &team_slug,
-        .name = &team_name,
-    }};
-    var ctx = surfaceTestContext(&input);
-    ctx.auth_picker = auth_runtime.PickerView{
-        .active = true,
-        .available_sources = auth_runtime.SourceSet.initOne(.fx_login),
-        .selected_choice = .{ .team = 0 },
-        .active_source = .fx_login,
-        .include_skip = false,
-        .stage = .change_team,
-        .fx_login_session_available = true,
-        .teams = &teams,
-        .team_query = "play",
-    };
-
-    var metrics = Metrics{};
-    var force_redraw = false;
-    var frame = try prepareSurfaceFooterFrameWithReservation(
-        alloc,
-        &shell,
-        &metrics,
-        &force_redraw,
-        approval.projection(),
-        ctx,
-        .{},
-        FrameInvalidationSet.empty(),
-    );
-    defer frame.deinit(alloc);
-
-    try std.testing.expectEqual(frame.paint.footer.picker_start, frame.composed.cursor.row);
-    try std.testing.expectEqual(@as(u16, 39), frame.composed.cursor.col);
-    try std.testing.expect(frame.composed.cursor_visible);
-}
-
-test "surface footer keeps the Vercel team query and cursor visible at minimum height" {
-    const auth_runtime = @import("../../core/auth/auth_runtime.zig");
-    const alloc = std.testing.allocator;
-    var approval = ApprovalPrompt{};
-    defer approval.deinit(alloc);
-    var input = InputRuntime{};
-    defer input.deinit(alloc);
-    var shell = surfaceTestShell(5, 80);
-    defer shell.deinit(alloc);
-    var ctx = surfaceTestContext(&input);
-    ctx.auth_picker = auth_runtime.PickerView{
-        .active = true,
-        .available_sources = .empty,
-        .selected_choice = null,
-        .active_source = .fx_login,
-        .include_skip = false,
-        .stage = .change_team,
-        .fx_login_session_available = true,
-        .team_query = "play",
-    };
-
-    var measurement = try measureSurfaceFooter(alloc, &shell, approval.projection(), ctx);
-    defer measurement.deinit(alloc);
-    try std.testing.expectEqual(@as(u16, 1), measurement.picker_rows);
-
-    var metrics = Metrics{};
-    var force_redraw = false;
-    const reservation = try resolveSurfaceFooterReservation(
-        alloc,
-        &shell,
-        &force_redraw,
-        approval.projection(),
-        ctx,
-        currentSurfaceFooterTranscriptState(&shell),
-    );
-    var frame = try prepareSurfaceFooterFrameWithReservation(
-        alloc,
-        &shell,
-        &metrics,
-        &force_redraw,
-        approval.projection(),
-        ctx,
-        reservation,
-        FrameInvalidationSet.empty(),
-    );
-    defer frame.deinit(alloc);
-
-    var query_visible = false;
-    for (frame.composed.rows.items) |row| {
-        if (row.row == frame.paint.footer.picker_start) {
-            query_visible = std.mem.find(u8, row.text.items, "Search: play") != null;
-            break;
-        }
-    }
-    try std.testing.expect(query_visible);
-    try std.testing.expectEqual(frame.paint.footer.picker_start, frame.composed.cursor.row);
-    try std.testing.expectEqual(@as(u16, 39), frame.composed.cursor.col);
-    try std.testing.expect(frame.composed.cursor_visible);
-}
-
 test "surface footer keeps the selected auth source visible at minimum height" {
     const auth_runtime = @import("../../core/auth/auth_runtime.zig");
     const alloc = std.testing.allocator;
@@ -1833,8 +1723,8 @@ test "surface footer keeps the selected auth source visible at minimum height" {
     var ctx = surfaceTestContext(&input);
     ctx.auth_picker = auth_runtime.PickerView{
         .active = true,
-        .available_sources = auth_runtime.SourceSet.initMany(&.{ .ai_gateway_api_key, .fx_login }),
-        .selected_choice = .{ .source = .fx_login },
+        .available_sources = auth_runtime.SourceSet.initMany(&.{ .ai_gateway_api_key, .stored_key }),
+        .selected_choice = .{ .source = .stored_key },
         .active_source = .ai_gateway_api_key,
         .include_skip = false,
     };
@@ -1870,7 +1760,7 @@ test "surface footer keeps the selected auth source visible at minimum height" {
     defer frame.deinit(alloc);
 
     for (frame.composed.rows.items) |row| {
-        if (std.mem.find(u8, row.text.items, "fx login") != null) return;
+        if (std.mem.find(u8, row.text.items, "stored API key") != null) return;
     }
     return error.SelectedAuthSourceNotVisible;
 }

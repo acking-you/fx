@@ -24,7 +24,6 @@ pub fn derive(
         .vercel_oidc_token,
         .ai_gateway_api_key,
         .openai_api_key,
-        .fx_login,
         .stored_key,
         => hash.update("\x00slot\x00"),
         .chatgpt_subscription,
@@ -60,5 +59,4 @@ test "credential authority uses non-secret Gateway credential slots" {
     try std.testing.expect(api_key.eql(same_slot));
     try std.testing.expect(!api_key.eql(stored_key));
     try std.testing.expect(derive(.vercel_oidc_token, null) != null);
-    try std.testing.expect(derive(.fx_login, null) != null);
 }

@@ -19,7 +19,6 @@ pub const TopLevelKind = enum {
     provider,
     doctor,
     background,
-    teams,
     session,
     sessions,
     @"resume",

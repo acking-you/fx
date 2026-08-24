@@ -4493,7 +4493,7 @@ test "deferred usage preserves provider and credential authority" {
     var usage = Usage.initFresh();
     defer usage.deinit(alloc);
     const identity = @import("../auth/credential_authority.zig").derive(
-        .fx_login,
+        .ai_gateway_api_key,
         "acct_1",
     ).?;
     const observation = try InvocationObservation.begin(&usage);
@@ -4503,14 +4503,14 @@ test "deferred usage preserves provider and credential authority" {
         .scope = "https://ai-gateway.vercel.sh",
         .tenant = "team_1",
         .account_id = "acct_1",
-        .credential_source = .fx_login,
+        .credential_source = .ai_gateway_api_key,
         .credential_identity = identity,
     } });
 
     var snapshot = try usage.snapshot(alloc);
     defer snapshot.deinit(alloc);
     try std.testing.expectEqual(model_provider.ProviderId.gateway, snapshot.pending[0].provider);
-    try std.testing.expectEqual(types.CredentialSource.fx_login, snapshot.pending[0].credential_source.?);
+    try std.testing.expectEqual(types.CredentialSource.ai_gateway_api_key, snapshot.pending[0].credential_source.?);
     try std.testing.expect(snapshot.pending[0].credential_identity.?.eql(identity));
 }
 

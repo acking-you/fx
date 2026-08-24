@@ -6,8 +6,6 @@ const debug_trace = @import("../shared/debug_trace.zig");
 const host = @import("../hosts/host.zig");
 const io_mod = @import("../shared/io.zig");
 const model_provider = @import("../config/model_provider.zig");
-const oauth = @import("oauth.zig");
-const oauth_session = @import("oauth_session.zig");
 const oauth_transport = @import("oauth_transport.zig");
 const secret = @import("secret.zig");
 const types = @import("../shared/types.zig");
@@ -16,8 +14,6 @@ pub const Source = types.CredentialSource;
 
 pub const CatalogPublicOnly = union(enum) {
     no_credential,
-    fx_login_team_required,
-    fx_login_refresh_required,
     credential_refresh_failed: Source,
     authenticated_credential_rejected: Source,
     chatgpt_subscription,
@@ -26,7 +22,6 @@ pub const CatalogPublicOnly = union(enum) {
     fn credentialSource(self: CatalogPublicOnly) ?Source {
         return switch (self) {
             .no_credential => null,
-            .fx_login_team_required, .fx_login_refresh_required => .fx_login,
             .credential_refresh_failed => |source| source,
             .authenticated_credential_rejected => |source| source,
             .chatgpt_subscription => .chatgpt_subscription,
@@ -41,7 +36,6 @@ pub const CatalogAuthenticatedSource = enum {
     vercel_oidc_token,
     ai_gateway_api_key,
     openai_api_key,
-    fx_login,
     stored_key,
     chatgpt_subscription,
     grok_subscription,
@@ -51,7 +45,6 @@ pub const CatalogAuthenticatedSource = enum {
             .vercel_oidc_token => .vercel_oidc_token,
             .ai_gateway_api_key => .ai_gateway_api_key,
             .openai_api_key => .openai_api_key,
-            .fx_login => .fx_login,
             .stored_key => .stored_key,
             .chatgpt_subscription => .chatgpt_subscription,
             .grok_subscription => .grok_subscription,
@@ -130,9 +123,7 @@ pub const CatalogAccess = union(enum) {
 
 pub fn catalogAccessAt(credential: ?Credential, now_ms: i64) CatalogAccess {
     const selected = credential orelse return .{ .public_only = .no_credential };
-    if (selected.source == .fx_login and selected.needsRefreshAt(now_ms)) {
-        return .{ .public_only = .fx_login_refresh_required };
-    }
+    _ = now_ms;
     return catalogAccessForCredentialAndAccount(
         selected.source,
         selected.token,
@@ -171,13 +162,6 @@ pub fn catalogAccessForCredentialAndAccount(
         .stored_key => .stored_key,
         .chatgpt_subscription => .chatgpt_subscription,
         .grok_subscription => .grok_subscription,
-        .fx_login => blk: {
-            const team = team_context orelse
-                return .{ .public_only = .fx_login_team_required };
-            if (!types.validGatewayTeam(team))
-                return .{ .public_only = .fx_login_team_required };
-            break :blk .fx_login;
-        },
     };
     return .{
         .authenticated = .{
@@ -193,14 +177,12 @@ pub fn catalogAccessForCredentialAndAccount(
 /// injected host port; Core retains the stable user-facing source name.
 pub const stored_key_backend_label = if (builtin.os.tag == .macos) "macOS Keychain" else "profile file";
 
-/// Both modes resolve the same source set; the mode selects only whether an expired
-/// fx login session is refreshed first.
+/// Both modes resolve the same source set; the mode selects only whether an
+/// expired subscription credential is refreshed first.
 pub const LoadMode = enum { stored, refresh_if_needed };
 
-const FxLoginRefreshMode = enum { if_needed, force };
-
-pub const missing_credential_message = "Fx needs a model credential. Use fx login for Vercel, fx login codex for ChatGPT Codex, fx login grok for Grok, set OPENAI_API_KEY for a Responses API, or set AI_GATEWAY_API_KEY for Vercel AI Gateway.";
-pub const missing_interactive_credential_message = "Fx needs a model credential. Use /login for Vercel, ChatGPT Codex, or Grok, set OPENAI_API_KEY for a Responses API, or set AI_GATEWAY_API_KEY for Vercel AI Gateway.";
+pub const missing_credential_message = "Fx needs a model credential. Set OPENAI_API_KEY for a Responses API, use fx login codex for ChatGPT Codex, use fx login grok for Grok, or set AI_GATEWAY_API_KEY for Vercel AI Gateway.";
+pub const missing_interactive_credential_message = "Fx needs a model credential. Set OPENAI_API_KEY for a Responses API, use /login for ChatGPT Codex or Grok, or set AI_GATEWAY_API_KEY for Vercel AI Gateway.";
 pub const missing_chatgpt_credential_message = "fx needs a Codex subscription login for this model. Run fx login codex.";
 pub const missing_chatgpt_interactive_credential_message = "Codex needs a subscription login. Run /login and choose Sign in with Codex.";
 pub const missing_grok_credential_message = "fx needs a Grok subscription login for this model. Run fx login grok.";
@@ -244,20 +226,9 @@ pub const StoredKeyReadStatus = enum {
     unavailable,
 };
 
-/// Why the fx login produced no credential. Only meaningful once resolution has
-/// reached the fx-login step and it stayed silent. `unavailable` means the
-/// session could not be loaded or its refresh failed, which is different from
-/// having no session at all: the login exists and may still be repairable.
-pub const FxLoginReadStatus = enum {
-    not_attempted,
-    absent,
-    unavailable,
-};
-
 pub const Resolution = struct {
     credential: ?Credential = null,
     stored_key_status: StoredKeyReadStatus = .not_attempted,
-    fx_login_status: FxLoginReadStatus = .not_attempted,
 };
 
 /// The single credential resolution method. Walks source precedence, then falls back to
@@ -332,20 +303,7 @@ pub fn resolvePreferring(
     if (try loadSource(alloc, transport, secret_store, .ai_gateway_api_key)) |credential| return .{ .credential = credential };
     if (try loadSource(alloc, transport, secret_store, .openai_api_key)) |credential| return .{ .credential = credential };
 
-    // A login that cannot be loaded or refreshed is one silent source, not a
-    // reason to abandon resolution: the sources on either side of it already
-    // fall through on failure, and a rejected refresh token must not hide a
-    // stored key that works. OutOfMemory stays fatal, as it does for them.
-    var fx_login_status: FxLoginReadStatus = .absent;
-    const fx_login = loadFxLoginForPrecedence(alloc, transport, mode) catch |err| blk: {
-        if (err == error.OutOfMemory) return err;
-        fx_login_status = .unavailable;
-        debug_trace.logf("auth", "fx login load failed mode={t} err={s}; using precedence", .{ mode, @errorName(err) });
-        break :blk null;
-    };
-    if (fx_login) |credential| return .{ .credential = credential };
-
-    if (secret_store.isDisabled()) return .{ .fx_login_status = fx_login_status };
+    if (secret_store.isDisabled()) return .{};
 
     var status: StoredKeyReadStatus = .not_found;
     const stored = loadSource(alloc, transport, secret_store, .stored_key) catch |err| blk: {
@@ -354,24 +312,13 @@ pub fn resolvePreferring(
         debug_trace.logf("auth", "stored key load failed err={s} status={t}", .{ @errorName(err), status });
         break :blk null;
     };
-    if (stored) |credential| return .{ .credential = credential, .fx_login_status = fx_login_status };
-    return .{ .stored_key_status = status, .fx_login_status = fx_login_status };
+    if (stored) |credential| return .{ .credential = credential };
+    return .{ .stored_key_status = status };
 }
 
-fn loadFxLoginForPrecedence(
-    alloc: std.mem.Allocator,
-    transport: oauth_transport.Provider,
-    mode: LoadMode,
-) !?Credential {
-    return switch (mode) {
-        .stored => loadStoredFxLoginCredential(alloc),
-        .refresh_if_needed => loadFxLoginCredential(alloc, transport),
-    };
-}
-
-/// `loadSource` always refreshes an expired fx login, which `.stored` mode
-/// forbids: a diagnostic must not rewrite the session file or make an OAuth
-/// request. Honour the mode for the preferred source too.
+/// Loading a subscription source may refresh an expired credential, which
+/// `.stored` mode forbids: a diagnostic must not rewrite the session file or
+/// make an OAuth request. Honour the mode for the preferred source too.
 fn loadPreferredSource(
     alloc: std.mem.Allocator,
     transport: oauth_transport.Provider,
@@ -380,10 +327,6 @@ fn loadPreferredSource(
     source: Source,
 ) !?Credential {
     return switch (source) {
-        .fx_login => switch (mode) {
-            .stored => loadStoredFxLoginCredential(alloc),
-            .refresh_if_needed => loadFxLoginCredential(alloc, transport),
-        },
         .chatgpt_subscription => switch (mode) {
             .stored => loadStoredChatGptCredential(alloc),
             .refresh_if_needed => loadChatGptCredential(alloc, transport, .if_needed),
@@ -406,7 +349,6 @@ pub fn loadSource(
         .vercel_oidc_token => loadEnvCredential(alloc, "VERCEL_OIDC_TOKEN", source),
         .ai_gateway_api_key => loadEnvCredential(alloc, "AI_GATEWAY_API_KEY", source),
         .openai_api_key => loadEnvCredential(alloc, "OPENAI_API_KEY", source),
-        .fx_login => loadFxLoginCredential(alloc, transport),
         .stored_key => loadStoredKeyCredential(alloc, secret_store),
         .chatgpt_subscription => loadChatGptCredential(alloc, transport, .if_needed),
         .grok_subscription => loadGrokCredential(alloc, transport, .if_needed),
@@ -422,18 +364,6 @@ pub fn sourceExists(
         .vercel_oidc_token => nonEmptyEnvValue("VERCEL_OIDC_TOKEN") != null,
         .ai_gateway_api_key => nonEmptyEnvValue("AI_GATEWAY_API_KEY") != null,
         .openai_api_key => nonEmptyEnvValue("OPENAI_API_KEY") != null,
-        .fx_login => blk: {
-            const loaded = oauth_session.load(alloc) catch |err| switch (err) {
-                error.OutOfMemory => return err,
-                else => {
-                    debug_trace.logf("auth", "source probe failed source=fx_login err={s}", .{@errorName(err)});
-                    break :blk false;
-                },
-            };
-            var session = loaded orelse break :blk false;
-            defer session.deinit(alloc);
-            break :blk true;
-        },
         .chatgpt_subscription => chatgpt_oauth.sourceExists(alloc),
         .grok_subscription => grok_oauth.sourceExists(alloc),
         .stored_key => blk: {
@@ -529,33 +459,6 @@ fn nonEmptyValue(value: ?[]const u8) ?[]const u8 {
     return raw;
 }
 
-pub fn loadFxLoginCredential(
-    alloc: std.mem.Allocator,
-    transport: oauth_transport.Provider,
-) !?Credential {
-    var session = (try oauth_session.load(alloc)) orelse return null;
-    defer session.deinit(alloc);
-
-    if (session.expired(io_mod.milliTimestamp())) {
-        return refreshFxLoginCredentialLocked(alloc, transport, .if_needed);
-    }
-
-    return takeCredentialFromSession(&session, null);
-}
-
-fn loadStoredFxLoginCredential(alloc: std.mem.Allocator) !?Credential {
-    var session = (try oauth_session.load(alloc)) orelse return null;
-    defer session.deinit(alloc);
-    return takeCredentialFromSession(&session, null);
-}
-
-pub fn refreshFxLoginCredential(
-    alloc: std.mem.Allocator,
-    transport: oauth_transport.Provider,
-) !?Credential {
-    return refreshFxLoginCredentialLocked(alloc, transport, .force);
-}
-
 pub fn refreshChatGptCredential(
     alloc: std.mem.Allocator,
     transport: oauth_transport.Provider,
@@ -570,96 +473,11 @@ pub fn refreshGrokCredential(
     return loadGrokCredential(alloc, transport, .force);
 }
 
-fn refreshFxLoginCredentialLocked(
-    alloc: std.mem.Allocator,
-    transport: oauth_transport.Provider,
-    mode: FxLoginRefreshMode,
-) !?Credential {
-    var mutation = (try oauth_session.beginExistingMutation()) orelse return null;
-    defer mutation.deinit();
-
-    var session = (try mutation.load(alloc)) orelse return null;
-    defer session.deinit(alloc);
-
-    var refreshed_at_ms: ?i64 = null;
-    if (mode == .force or session.expired(io_mod.milliTimestamp())) {
-        try refreshFxSession(alloc, transport, &mutation, &session);
-        refreshed_at_ms = io_mod.milliTimestamp();
-    }
-    return takeCredentialFromSession(&session, refreshed_at_ms);
-}
-
-pub fn refreshFxSession(
-    alloc: std.mem.Allocator,
-    transport: oauth_transport.Provider,
-    mutation: *oauth_session.Mutation,
-    session: *oauth_session.Session,
-) !void {
-    const issuer_url = session.issuer;
-    var metadata = try oauth.discover(alloc, transport, issuer_url);
-    defer metadata.deinit(alloc);
-    try oauth_session.validateE2EEndpoint(issuer_url, metadata.token_endpoint);
-
-    var refreshed = try oauth.refreshToken(
-        alloc,
-        transport,
-        metadata,
-        session.client_id,
-        session.refresh_token,
-    );
-    defer refreshed.deinit(alloc);
-
-    secret.zeroAndFree(alloc, session.access_token);
-    session.access_token = refreshed.access_token;
-    refreshed.access_token = &.{};
-
-    if (refreshed.refresh_token) |value| {
-        secret.zeroAndFree(alloc, session.refresh_token);
-        session.refresh_token = value;
-        refreshed.refresh_token = null;
-    }
-
-    alloc.free(session.scope);
-    session.scope = refreshed.scope;
-    refreshed.scope = &.{};
-
-    alloc.free(session.token_type);
-    session.token_type = refreshed.token_type;
-    refreshed.token_type = &.{};
-
-    session.expires_at_ms = try oauth.expiry_timestamp_ms(io_mod.milliTimestamp(), refreshed.expires_in);
-    try mutation.save(alloc, session.*);
-}
-
-fn takeCredentialFromSession(session: *oauth_session.Session, refreshed_at_ms: ?i64) Credential {
-    const token = session.access_token;
-    session.access_token = &.{};
-    const team_id = session.team_id;
-    session.team_id = null;
-    const team_slug = session.team_slug;
-    session.team_slug = null;
-    return .{
-        .token = token,
-        .source = .fx_login,
-        .team_id = team_id,
-        .team_slug = team_slug,
-        .refresh_after_ms = credentialRefreshAfterMs(session.expires_at_ms, refreshed_at_ms),
-    };
-}
-
-fn credentialRefreshAfterMs(expires_at_ms: i64, refreshed_at_ms: ?i64) i64 {
-    const refresh_after_ms = oauth_session.refresh_deadline_ms(expires_at_ms);
-    const refreshed_at = refreshed_at_ms orelse return refresh_after_ms;
-    if (refresh_after_ms > refreshed_at) return refresh_after_ms;
-    return expires_at_ms;
-}
-
 pub fn sourceLabel(source: Source) []const u8 {
     return switch (source) {
         .vercel_oidc_token => "VERCEL_OIDC_TOKEN",
         .ai_gateway_api_key => "AI_GATEWAY_API_KEY",
         .openai_api_key => "OPENAI_API_KEY",
-        .fx_login => "fx login",
         .stored_key => "stored API key (" ++ stored_key_backend_label ++ ")",
         .chatgpt_subscription => "Codex subscription",
         .grok_subscription => "Grok subscription",
@@ -667,33 +485,27 @@ pub fn sourceLabel(source: Source) []const u8 {
 }
 
 pub fn sourceRefreshable(source: Source) bool {
-    return source == .fx_login or source == .chatgpt_subscription or source == .grok_subscription;
+    return source == .chatgpt_subscription or source == .grok_subscription;
 }
 
 test "stored key label discloses the backend that answered" {
     try std.testing.expect(std.mem.find(u8, sourceLabel(.stored_key), stored_key_backend_label) != null);
     try std.testing.expect(std.mem.find(u8, unreadable_store_message, stored_key_backend_label) != null);
-    for ([_]Source{ .vercel_oidc_token, .ai_gateway_api_key, .fx_login }) |source| {
+    for ([_]Source{ .vercel_oidc_token, .ai_gateway_api_key }) |source| {
         try std.testing.expect(!std.mem.eql(u8, sourceLabel(source), sourceLabel(.stored_key)));
     }
 }
 
 test "missing credential messages use surface commands in preferred order" {
-    const cli_login = std.mem.find(u8, missing_credential_message, "fx login").?;
-    const cli_env = std.mem.find(u8, missing_credential_message, "AI_GATEWAY_API_KEY").?;
-
-    try std.testing.expect(cli_login < cli_env);
-
-    const tui_login = std.mem.find(u8, missing_interactive_credential_message, "/login").?;
-    const tui_env = std.mem.find(u8, missing_interactive_credential_message, "AI_GATEWAY_API_KEY").?;
-
-    try std.testing.expect(tui_login < tui_env);
+    try std.testing.expect(std.mem.find(u8, missing_credential_message, "OPENAI_API_KEY") != null);
+    try std.testing.expect(std.mem.find(u8, missing_credential_message, "fx login codex") != null);
+    try std.testing.expect(std.mem.find(u8, missing_interactive_credential_message, "/login") != null);
 }
 
 test "credential gateway team prefers team id" {
     var credential = Credential{
         .token = try std.testing.allocator.dupe(u8, "token"),
-        .source = .fx_login,
+        .source = .vercel_oidc_token,
         .team_id = try std.testing.allocator.dupe(u8, "team_123"),
         .team_slug = try std.testing.allocator.dupe(u8, "vercel-labs"),
     };
@@ -709,9 +521,9 @@ test "catalog access isolates public and authenticated provider credentials" {
     try std.testing.expect(missing.authorizationCredential() == null);
     try std.testing.expect(missing.teamContext() == null);
 
-    const refresh_failed = catalogAccessAfterRefreshFailure(.fx_login);
+    const refresh_failed = catalogAccessAfterRefreshFailure(.chatgpt_subscription);
     try std.testing.expectEqual(CatalogPublicOnlyReason.credential_refresh_failed, refresh_failed.publicOnlyReason().?);
-    try std.testing.expectEqual(Source.fx_login, refresh_failed.credentialSource().?);
+    try std.testing.expectEqual(Source.chatgpt_subscription, refresh_failed.credentialSource().?);
 
     const chatgpt = catalogAccessForCredential(
         .chatgpt_subscription,
@@ -740,41 +552,6 @@ test "catalog access isolates public and authenticated provider credentials" {
     try std.testing.expect(rejected.teamContext() == null);
 }
 
-test "selected fx login authorizes its team model catalog" {
-    var login = Credential{
-        .token = try std.testing.allocator.dupe(u8, "login-token"),
-        .source = .fx_login,
-        .team_id = try std.testing.allocator.dupe(u8, "team_123"),
-    };
-    defer login.deinit(std.testing.allocator);
-
-    const access = catalogAccessAt(login, 0);
-    try std.testing.expectEqual(Source.fx_login, access.credentialSource().?);
-    try std.testing.expect(access.authorizationCredential() != null);
-    try std.testing.expectEqualStrings("login-token", access.authorizationCredential().?);
-    try std.testing.expectEqualStrings("team_123", access.teamContext().?);
-}
-
-test "fx login catalog access requires a fresh credential and selected team" {
-    var login = Credential{
-        .token = try std.testing.allocator.dupe(u8, "login-token"),
-        .source = .fx_login,
-        .refresh_after_ms = 10,
-    };
-    defer login.deinit(std.testing.allocator);
-
-    const expired = catalogAccessAt(login, 10);
-    try std.testing.expectEqual(CatalogPublicOnlyReason.fx_login_refresh_required, expired.publicOnlyReason().?);
-    try std.testing.expect(expired.authorizationCredential() == null);
-    try std.testing.expect(expired.teamContext() == null);
-
-    login.refresh_after_ms = null;
-    const missing_team = catalogAccessAt(login, 10);
-    try std.testing.expectEqual(CatalogPublicOnlyReason.fx_login_team_required, missing_team.publicOnlyReason().?);
-    try std.testing.expect(missing_team.authorizationCredential() == null);
-    try std.testing.expect(missing_team.teamContext() == null);
-}
-
 test "authenticated catalog access carries source and permitted request context" {
     for ([_]Source{ .vercel_oidc_token, .ai_gateway_api_key, .stored_key }) |source| {
         var credential = Credential{
@@ -797,12 +574,6 @@ test "authenticated catalog access carries source and permitted request context"
         try std.testing.expect(fallback.teamContext() == null);
         try std.testing.expect(fallback.publicFallbackAfterRejection() == null);
     }
-}
-
-test "fresh short-lived credential remains ready for its admitted action" {
-    try std.testing.expectEqual(@as(i64, 70_000), credentialRefreshAfterMs(130_000, null));
-    try std.testing.expectEqual(@as(i64, 130_000), credentialRefreshAfterMs(130_000, 100_000));
-    try std.testing.expectEqual(@as(i64, 140_000), credentialRefreshAfterMs(200_000, 100_000));
 }
 
 var stable_credential_test_environ: ?*std.process.Environ.Map = null;
@@ -939,23 +710,6 @@ test "a remembered choice outranks the environment" {
     try std.testing.expectEqualStrings("api-key", credential.token);
 }
 
-test "a remembered fx login never refreshes in stored mode" {
-    const alloc = std.testing.allocator;
-    const env = try CredentialTestEnv.install(alloc, &.{});
-    defer env.deinit();
-
-    // No session exists, so both modes resolve to nothing. What matters is the
-    // route taken: `.stored` must reach loadStoredFxLoginCredential, which never
-    // performs the network refresh that a diagnostic is forbidden from making.
-    for ([_]LoadMode{ .stored, .refresh_if_needed }) |mode| {
-        var resolution = try resolvePreferring(alloc, oauth_transport.unavailable_provider, host.unavailable_secret_store, mode, .fx_login);
-        defer if (resolution.credential) |*credential| credential.deinit(alloc);
-        try std.testing.expect(resolution.credential == null);
-    }
-
-    try std.testing.expect((try loadPreferredSource(alloc, oauth_transport.unavailable_provider, host.unavailable_secret_store, .stored, .vercel_oidc_token)) == null);
-}
-
 test "a remembered choice that no longer resolves falls back to precedence" {
     const alloc = std.testing.allocator;
     const env = try CredentialTestEnv.install(alloc, &.{
@@ -963,8 +717,8 @@ test "a remembered choice that no longer resolves falls back to precedence" {
     });
     defer env.deinit();
 
-    // fx_login is remembered but no session exists, so precedence must still answer.
-    const resolution = try resolvePreferring(alloc, oauth_transport.unavailable_provider, host.unavailable_secret_store, .refresh_if_needed, .fx_login);
+    // The remembered direct key is absent, so precedence must still answer.
+    const resolution = try resolvePreferring(alloc, oauth_transport.unavailable_provider, host.unavailable_secret_store, .refresh_if_needed, .openai_api_key);
     var credential = resolution.credential orelse return error.TestExpectedCredential;
     defer credential.deinit(alloc);
     try std.testing.expectEqual(Source.ai_gateway_api_key, credential.source);
@@ -1038,110 +792,4 @@ test "credential resolution preserves unreadable store classification" {
     try std.testing.expectEqual(@as(usize, 1), store_fixture.load_calls);
     try std.testing.expect(resolution.credential == null);
     try std.testing.expectEqual(StoredKeyReadStatus.unavailable, resolution.stored_key_status);
-}
-
-test "a failed fx-login refresh falls through to the stored key" {
-    const alloc = std.testing.allocator;
-    var fixture = try ExpiredFxLoginFixture.install(alloc);
-    defer fixture.deinit();
-    var store_fixture = SecretStoreFixture{ .value = "stored-key-that-works" };
-
-    // The refresh cannot succeed, but a working stored key is right behind it.
-    var resolution = try resolve(
-        alloc,
-        oauth_transport.unavailable_provider,
-        store_fixture.provider(),
-        .refresh_if_needed,
-    );
-    defer if (resolution.credential) |*credential| credential.deinit(alloc);
-
-    const credential = resolution.credential orelse return error.TestExpectedCredential;
-    try std.testing.expectEqual(Source.stored_key, credential.source);
-    try std.testing.expectEqualStrings("stored-key-that-works", credential.token);
-    try std.testing.expectEqual(FxLoginReadStatus.unavailable, resolution.fx_login_status);
-    try std.testing.expectEqual(@as(usize, 1), store_fixture.load_calls);
-}
-
-test "a failed fx-login refresh is still reported when nothing else resolves" {
-    const alloc = std.testing.allocator;
-    var fixture = try ExpiredFxLoginFixture.install(alloc);
-    defer fixture.deinit();
-    var store_fixture = SecretStoreFixture{};
-
-    // Falling through must not erase why the login was silent: an unrepairable
-    // session is a different problem from never having logged in.
-    var resolution = try resolve(
-        alloc,
-        oauth_transport.unavailable_provider,
-        store_fixture.provider(),
-        .refresh_if_needed,
-    );
-    defer if (resolution.credential) |*credential| credential.deinit(alloc);
-
-    try std.testing.expect(resolution.credential == null);
-    try std.testing.expectEqual(FxLoginReadStatus.unavailable, resolution.fx_login_status);
-    try std.testing.expectEqual(StoredKeyReadStatus.not_found, resolution.stored_key_status);
-}
-
-/// A HOME holding an fx login whose session is expired and whose refresh token
-/// the issuer rejects, which is what an expired or revoked login looks like on
-/// disk. Paired with `oauth_transport.unavailable_provider`, the refresh fails.
-const ExpiredFxLoginFixture = struct {
-    alloc: std.mem.Allocator,
-    tmp: std.testing.TmpDir,
-    env: *CredentialTestEnv,
-    home: []u8,
-
-    fn install(alloc: std.mem.Allocator) !ExpiredFxLoginFixture {
-        var tmp = std.testing.tmpDir(.{});
-        errdefer tmp.cleanup();
-        const home = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "");
-        errdefer alloc.free(home);
-
-        try tmp.dir.createDirPath(io_mod.getIo(), ".fx");
-        const auth_path = try std.fs.path.join(alloc, &.{ home, ".fx", "auth.json" });
-        defer alloc.free(auth_path);
-        var file = try std.Io.Dir.createFileAbsolute(io_mod.getIo(), auth_path, .{
-            .truncate = true,
-            .permissions = std.Io.File.Permissions.fromMode(0o600),
-        });
-        defer file.close(io_mod.getIo());
-        try file.writeStreamingAll(
-            io_mod.getIo(),
-            "{\"version\":1,\"issuer\":\"https://vercel.com\",\"client_id\":\"client\"," ++
-                "\"access_token\":\"access\",\"refresh_token\":\"rejected-refresh\"," ++
-                "\"expires_at_ms\":1,\"scope\":\"openid offline_access\"," ++
-                "\"token_type\":\"Bearer\",\"team_slug\":\"team-slug\",\"team_id\":\"team-id\"}",
-        );
-
-        const env = try CredentialTestEnv.install(alloc, &.{.{ "HOME", home }});
-        return .{ .alloc = alloc, .tmp = tmp, .env = env, .home = home };
-    }
-
-    fn deinit(self: *ExpiredFxLoginFixture) void {
-        self.env.deinit();
-        self.alloc.free(self.home);
-        self.tmp.cleanup();
-    }
-};
-
-test "a disabled store still reports why the fx login was silent" {
-    const alloc = std.testing.allocator;
-    var fixture = try ExpiredFxLoginFixture.install(alloc);
-    defer fixture.deinit();
-    var store_fixture = SecretStoreFixture{ .disabled = true };
-
-    // The store is switched off, so resolution ends at the login. Its failure is
-    // still the useful diagnostic and must survive the early return.
-    var resolution = try resolve(
-        alloc,
-        oauth_transport.unavailable_provider,
-        store_fixture.provider(),
-        .refresh_if_needed,
-    );
-    defer if (resolution.credential) |*credential| credential.deinit(alloc);
-
-    try std.testing.expect(resolution.credential == null);
-    try std.testing.expectEqual(FxLoginReadStatus.unavailable, resolution.fx_login_status);
-    try std.testing.expectEqual(StoredKeyReadStatus.not_attempted, resolution.stored_key_status);
 }

@@ -3144,7 +3144,6 @@ const RoutingFakeApp = struct {
     load_more_session_count: usize = 0,
     selected_credential_source: ?types.CredentialSource = null,
     selected_auth_action: ?auth_runtime.AcquisitionAction = null,
-    selected_auth_team: ?usize = null,
     upgrade_apply_count: usize = 0,
     upgrade_denied_count: usize = 0,
     suspend_count: usize = 0,
@@ -3384,7 +3383,6 @@ const RoutingFakeApp = struct {
             .provider => {},
             .source => |source| _ = try self.selectCredentialSource(source),
             .action => |action| self.selected_auth_action = action,
-            .team => |index| self.selected_auth_team = index,
         }
     }
 
@@ -3786,12 +3784,12 @@ test "app_input_runtime routes auth picker navigation before composer history" {
     const alloc = std.testing.allocator;
     var app = try RoutingFakeApp.init(alloc);
     defer app.deinit();
-    app.auth.source_inventory = auth_runtime.SourceSet.initMany(&.{ .ai_gateway_api_key, .fx_login });
+    app.auth.source_inventory = auth_runtime.SourceSet.initMany(&.{ .ai_gateway_api_key, .stored_key });
     app.auth.openPicker(alloc);
 
     try Runtime(RoutingFakeApp).routeModifiedHistory(&app, .down, 1);
 
-    try std.testing.expect((auth_runtime.Choice{ .action = .chatgpt_login }).eql(app.auth.pickerView().selected_choice.?));
+    try std.testing.expect((auth_runtime.Choice{ .action = .grok_login }).eql(app.auth.pickerView().selected_choice.?));
     try std.testing.expectEqual(@as(?usize, null), app.input_runtime.composer_history.activeIndex());
 }
 
@@ -3799,12 +3797,12 @@ test "app_input_runtime Tab cycles the active auth picker" {
     const alloc = std.testing.allocator;
     var app = try RoutingFakeApp.init(alloc);
     defer app.deinit();
-    app.auth.source_inventory = auth_runtime.SourceSet.initMany(&.{ .ai_gateway_api_key, .fx_login });
+    app.auth.source_inventory = auth_runtime.SourceSet.initMany(&.{ .ai_gateway_api_key, .stored_key });
     app.auth.openPicker(alloc);
 
     try Runtime(RoutingFakeApp).handleByte(&app, '\t', 4096, 100);
 
-    try std.testing.expect((auth_runtime.Choice{ .action = .chatgpt_login }).eql(app.auth.pickerView().selected_choice.?));
+    try std.testing.expect((auth_runtime.Choice{ .action = .grok_login }).eql(app.auth.pickerView().selected_choice.?));
 }
 
 test "app_input_runtime Tab leaves a dismissed slash query unchanged" {
@@ -3886,7 +3884,7 @@ test "app_input_runtime auth picker enter closes before selecting a switched sou
     const alloc = std.testing.allocator;
     var app = try RoutingFakeApp.init(alloc);
     defer app.deinit();
-    app.auth.source_inventory = auth_runtime.SourceSet.initMany(&.{ .ai_gateway_api_key, .fx_login });
+    app.auth.source_inventory = auth_runtime.SourceSet.initMany(&.{ .ai_gateway_api_key, .stored_key });
     app.auth.openPicker(alloc);
     app.auth.openSwitchCredentialPicker(alloc);
     _ = app.auth.movePicker(1);
@@ -3894,20 +3892,20 @@ test "app_input_runtime auth picker enter closes before selecting a switched sou
     try Runtime(RoutingFakeApp).handleByte(&app, '\r', 4096, 100);
 
     try std.testing.expect(!app.auth.pickerView().active);
-    try std.testing.expectEqual(types.CredentialSource.fx_login, app.selected_credential_source.?);
+    try std.testing.expectEqual(types.CredentialSource.stored_key, app.selected_credential_source.?);
 }
 
 test "app_input_runtime auth picker delegates typed acquisition actions" {
     const alloc = std.testing.allocator;
     var app = try RoutingFakeApp.init(alloc);
     defer app.deinit();
-    app.auth.source_inventory = auth_runtime.SourceSet.initMany(&.{ .ai_gateway_api_key, .fx_login });
+    app.auth.source_inventory = auth_runtime.SourceSet.initMany(&.{ .ai_gateway_api_key, .stored_key });
     app.auth.openPicker(alloc);
 
     try Runtime(RoutingFakeApp).handleByte(&app, '\r', 4096, 100);
 
     try std.testing.expect(!app.auth.pickerView().active);
-    try std.testing.expectEqual(auth_runtime.AcquisitionAction.login, app.selected_auth_action.?);
+    try std.testing.expectEqual(auth_runtime.AcquisitionAction.chatgpt_login, app.selected_auth_action.?);
 }
 
 test "app_input_runtime Escape closes auth picker without arming composer clear" {
@@ -3943,7 +3941,7 @@ test "app_input_runtime auth stage Escape pops before closing the picker" {
     app.auth.source_inventory = auth_runtime.SourceSet.initOne(.stored_key);
     app.auth.openPicker(alloc);
 
-    for (0..5) |_| _ = app.auth.movePicker(1);
+    for (0..3) |_| _ = app.auth.movePicker(1);
     try std.testing.expect((auth_runtime.Choice{ .action = .switch_credential }).eql(
         app.auth.pickerView().selected_choice.?,
     ));
@@ -3961,26 +3959,6 @@ test "app_input_runtime auth stage Escape pops before closing the picker" {
 
     try Runtime(RoutingFakeApp).resolveEscape(&app, false, 2);
     try std.testing.expect(!app.auth.pickerView().active);
-    try std.testing.expectEqual(@as(usize, 0), app.transcript.items.len);
-}
-
-test "app_input_runtime disabled change team action stays silent" {
-    const alloc = std.testing.allocator;
-    var app = try RoutingFakeApp.init(alloc);
-    defer app.deinit();
-    app.auth.source_inventory = auth_runtime.SourceSet.initOne(.stored_key);
-    app.auth.openPicker(alloc);
-
-    for (0..4) |_| _ = app.auth.movePicker(1);
-    try std.testing.expect((auth_runtime.Choice{ .action = .change_team }).eql(
-        app.auth.pickerView().selected_choice.?,
-    ));
-
-    try Runtime(RoutingFakeApp).handleByte(&app, '\r', 4096, 100);
-
-    try std.testing.expect(app.auth.pickerView().active);
-    try std.testing.expectEqual(auth_runtime.PickerStage.root, app.auth.pickerView().stage);
-    try std.testing.expect(app.selected_auth_action == null);
     try std.testing.expectEqual(@as(usize, 0), app.transcript.items.len);
 }
 
@@ -7644,7 +7622,7 @@ fn openRoutingAuthPicker(app: *RoutingFakeApp) !void {
     app.auth.source_inventory.insert(.ai_gateway_api_key);
     app.auth.openPicker(app.alloc);
     try std.testing.expect(app.auth.movePicker(1));
-    try std.testing.expectEqual(@as(usize, 6), app.auth.pickerView().choiceCount());
+    try std.testing.expectEqual(@as(usize, 4), app.auth.pickerView().choiceCount());
     try std.testing.expectEqual(@as(usize, 1), app.auth.pickerView().selectedIndex());
 }
 

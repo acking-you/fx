@@ -3814,7 +3814,7 @@ test "trace auth summary preserves missing and loaded status text" {
 
     var credential = credentials.Credential{
         .token = try alloc.dupe(u8, "token"),
-        .source = .fx_login,
+        .source = .chatgpt_subscription,
     };
     defer credential.deinit(alloc);
     _ = app.auth.adoptCredential(alloc, &credential);
@@ -3822,7 +3822,7 @@ test "trace auth summary preserves missing and loaded status text" {
     defer loaded.deinit();
     try writeAuthStateSummary(&loaded.writer, &app);
     try std.testing.expectEqualStrings(
-        "auth: source=fx login refreshable=true gateway_team=unset\n",
+        "auth: source=Codex subscription refreshable=true gateway_team=unset\n",
         loaded.written(),
     );
 }

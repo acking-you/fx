@@ -89,14 +89,14 @@ pub const top_level_specs = [_]TopLevelSpec{
     .{
         .kind = .login,
         .token = "login",
-        .usage = "login [vercel|codex|grok]",
-        .summary = "Sign in to Vercel or a selected provider",
+        .usage = "login <codex|grok>",
+        .summary = "Sign in to Codex or Grok",
     },
     .{
         .kind = .logout,
         .token = "logout",
-        .usage = "logout [vercel|codex|grok]",
-        .summary = "Sign out of Vercel or a selected provider session",
+        .usage = "logout <codex|grok>",
+        .summary = "Sign out of a Codex or Grok session",
     },
     .{
         .kind = .status,
@@ -154,12 +154,6 @@ pub const top_level_specs = [_]TopLevelSpec{
         .details = &.{
             "With no target, lists the persisted background command history.",
         },
-    },
-    .{
-        .kind = .teams,
-        .token = "teams",
-        .usage = "teams",
-        .summary = "Choose the Vercel team used by AI Gateway",
     },
     .{
         .kind = .session,
@@ -288,10 +282,9 @@ pub const top_level_help_groups = [_]TopLevelHelpGroup{
         .{ .kind = .replay, .usage = "replay <tape>" },
     } },
     .{ .entries = &.{
-        .{ .kind = .login, .usage = "login [vercel|codex|grok]" },
-        .{ .kind = .logout, .usage = "logout [vercel|codex|grok]" },
+        .{ .kind = .login, .usage = "login <codex|grok>" },
+        .{ .kind = .logout, .usage = "logout <codex|grok>" },
         .{ .kind = .provider, .usage = "provider <gateway|codex|grok>" },
-        .{ .kind = .teams, .usage = "teams" },
         .{ .kind = .credits, .usage = "credits|balance" },
         .{ .kind = .usage, .usage = "usage [--period <24h|7d|30d>|--codex]" },
     } },
@@ -415,7 +408,7 @@ pub const slash_specs = [_]SlashSpec{
     .{ .kind = .continue_recovery, .command = "/continue", .help_entry = "/continue", .completion_description = "continue a paused model response", .presentation_category = .session, .requires_prompt_credential = true },
     .{ .kind = .rename_session, .command = "/rename", .help_entry = "/rename <title>", .completion_description = "rename the current session", .presentation_category = .session, .has_args = true, .accepts_payload = true },
     .{ .kind = .login, .command = "/login", .help_entry = "/login", .completion_description = "choose a provider sign-in", .presentation_category = .account },
-    .{ .kind = .logout, .command = "/logout", .help_entry = "/logout [vercel|codex|grok]", .completion_description = "sign out of a provider session", .presentation_category = .account, .has_args = true, .accepts_payload = true },
+    .{ .kind = .logout, .command = "/logout", .help_entry = "/logout <codex|grok>", .completion_description = "sign out of a provider session", .presentation_category = .account, .has_args = true, .accepts_payload = true },
     .{ .kind = .stats, .command = "/stats", .help_entry = "/stats", .completion_description = "show token and turn statistics", .presentation_category = .account },
     .{ .kind = .usage, .command = "/usage", .aliases = &.{"/cost"}, .help_entry = "/usage (/cost)", .completion_description = "show local fx tokens, models, and spend", .presentation_category = .account },
     .{ .kind = .status, .command = "/status", .help_entry = "/status", .completion_description = "show runtime configuration", .presentation_category = .general, .show_in_welcome = true },

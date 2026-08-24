@@ -645,11 +645,8 @@ fn fetchCredits(
     );
 }
 
-/// An fx login can reach several teams, so `/v1/credits` rejects it outright
-/// unless the request names one. The endpoint reads the team from a `teamId`
-/// query value and ignores `x-vercel-ai-gateway-team`, which is the reverse of
-/// the inference endpoint. An API key carries its own team and resolves to no
-/// team here, so the query value is added for logins only.
+/// The credits endpoint reads an optional team from a `teamId` query value and
+/// ignores `x-vercel-ai-gateway-team`, unlike the inference endpoint.
 fn fetchCreditsWithFetch(
     alloc: Allocator,
     api_key: ?[]const u8,
@@ -2279,13 +2276,11 @@ fn prepareModelCatalogRequest(
 ) !ModelCatalogRequestPlan {
     const route = modelCatalogRoute(access);
     if (route == .vercel_gateway) {
-        const team_path = try modelCatalogTeamPath(alloc, path, access);
-        defer if (team_path) |owned| alloc.free(owned);
         return .{
             .route = route,
-            .url = try modelCatalogUrl(alloc, team_path orelse path, gateway_base_override),
+            .url = try modelCatalogUrl(alloc, path, gateway_base_override),
             .api_key = access.authorizationCredential(),
-            .gateway_team = modelCatalogHeaderTeam(access),
+            .gateway_team = access.teamContext(),
         };
     }
 
@@ -2348,22 +2343,6 @@ fn fetchModelCatalogResponse(
         },
         .codex_responses_oauth => unreachable,
     };
-}
-
-fn modelCatalogTeamPath(
-    alloc: Allocator,
-    path: []const u8,
-    access: credentials.CatalogAccess,
-) Allocator.Error!?[]u8 {
-    if (access.credentialSource() != .fx_login) return null;
-    const team = access.teamContext() orelse return null;
-    if (!shared_types.validGatewayTeam(team)) return null;
-    return try std.fmt.allocPrint(alloc, "{s}?teamId={s}", .{ path, team });
-}
-
-fn modelCatalogHeaderTeam(access: credentials.CatalogAccess) ?[]const u8 {
-    if (access.credentialSource() == .fx_login) return null;
-    return access.teamContext();
 }
 
 fn catalogRequestFailure(err: anyerror) model_catalog.Failure {
