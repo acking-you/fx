@@ -6,6 +6,7 @@ const call_ids = [_][]const u8{ "first", "second" };
 const samples_per_batch = 100;
 const comparison_batches = 9;
 const growth_batches = 5;
+const qualification_updates = 500_000;
 const ratio_scale = 1_000;
 const max_ratio = 2 * ratio_scale;
 const Harness = struct {
@@ -111,6 +112,12 @@ fn growthRatio(io: std.Io, alloc: std.mem.Allocator) !u64 {
     return ratio(try measureP95(io, &candidate, alloc), initial);
 }
 
+fn runQualificationWorkload(alloc: std.mem.Allocator) !void {
+    var candidate = try Harness.init(alloc, .candidate);
+    defer candidate.transcript.deinit(alloc);
+    try runUpdates(&candidate, alloc, qualification_updates);
+}
+
 const Gate = struct {
     median: u64,
     breaches: usize,
@@ -139,6 +146,11 @@ pub fn main(init: std.process.Init) !void {
     for (&growth_ratios) |*value| value.* = try growthRatio(init.io, alloc);
     const comparison = evaluate(&comparison_ratios, 5);
     const growth = evaluate(&growth_ratios, 3);
+
+    // The distributed gate compares whole-process wall time on shared hosts.
+    // Keep representative lifecycle work dominant so a scheduler pause cannot
+    // outweigh the ten-percent regression budget of an otherwise short run.
+    try runQualificationWorkload(alloc);
 
     var buffer: [512]u8 = undefined;
     var writer = std.Io.File.stdout().writer(init.io, &buffer);
