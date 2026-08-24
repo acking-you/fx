@@ -233,6 +233,7 @@ fn cleanupCompletedForegroundTarget(
     {
         try refreshForegroundTargetTree(descendants, target_pid);
         signaled += descendants.signalAll(std.posix.SIG.KILL);
+        try reapExitedForegroundDescendants();
         if (descendants.anyAlive()) {
             empty_scans = 0;
         } else {
@@ -243,7 +244,27 @@ fn cleanupCompletedForegroundTarget(
     }
     try refreshForegroundTargetTree(descendants, target_pid);
     signaled += descendants.signalAll(std.posix.SIG.KILL);
+    try reapExitedForegroundDescendants();
     return signaled;
+}
+
+// Linux adopts escaped command descendants into this subreaper. Reap them
+// after signaling so they cannot remain zombies under a passive PID 1.
+fn reapExitedForegroundDescendants() !void {
+    if (comptime builtin.os.tag != .linux) return;
+
+    var status: c_int = undefined;
+    while (true) {
+        const result = std.posix.system.waitpid(-1, &status, std.posix.W.NOHANG);
+        switch (std.posix.errno(result)) {
+            .SUCCESS => {
+                if (result <= 0) return;
+            },
+            .INTR => continue,
+            .CHILD => return,
+            else => |err| return std.posix.unexpectedErrno(err),
+        }
+    }
 }
 
 fn refreshForegroundTargetTree(
@@ -296,6 +317,7 @@ fn waitForForegroundTargetDescendants(
         }
         if (forced.*) {
             _ = descendants.signalAll(std.posix.SIG.KILL);
+            try reapExitedForegroundDescendants();
         }
         if (descendants.anyAlive()) {
             empty_scans = 0;
@@ -3470,15 +3492,18 @@ test "natural command completion terminates redirected descendant after setsid" 
     const command = try std.fmt.allocPrint(
         alloc,
         "python3 -c 'import os,time\n" ++
+            "ready_r,ready_w=os.pipe()\n" ++
             "pid=os.fork()\n" ++
             "if pid == 0:\n" ++
+            " os.close(ready_r)\n" ++
             " os.setsid()\n" ++
             " null=os.open(\"/dev/null\",os.O_RDWR)\n" ++
             " os.dup2(null,0); os.dup2(null,1); os.dup2(null,2)\n" ++
             " open(\"{s}\",\"w\").write(str(os.getpid()))\n" ++
+            " os.write(ready_w,b\"1\"); os.close(ready_w)\n" ++
             " time.sleep(30)\n" ++
             "else:\n" ++
-            " pass'",
+            " os.close(ready_w); os.read(ready_r,1); os.close(ready_r)'",
         .{pid_path},
     );
     defer alloc.free(command);
