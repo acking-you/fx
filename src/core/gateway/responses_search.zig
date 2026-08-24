@@ -17,6 +17,76 @@ pub fn buildNamespaceToolAlloc(alloc: Allocator) ![]u8 {
     return alloc.dupe(u8, codex_web_run_namespace_json);
 }
 
+pub const NamespaceProjectionOptions = struct {
+    /// Provider-executed tools do not have a function schema in the shared
+    /// projection. Codex executes web.run through fx, so its provider boundary
+    /// must append the namespace when web_search remains effectively advertised.
+    include_web_search: bool = false,
+};
+
+/// Replaces fx's provider-neutral `web_search` function declaration with the
+/// exact namespace contract accepted by ChatGPT Codex. Other tool declarations
+/// are preserved as JSON values, and ambiguous duplicate search declarations
+/// are rejected before a request is sent.
+pub fn projectNamespaceToolAlloc(
+    alloc: Allocator,
+    serialized_tools: []const u8,
+    options: NamespaceProjectionOptions,
+) ![]u8 {
+    var parsed = std.json.parseFromSlice(JsonValue, alloc, serialized_tools, .{}) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidResponsesTools,
+    };
+    defer parsed.deinit();
+    if (parsed.value != .array) return error.InvalidResponsesTools;
+
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    errdefer out.deinit();
+    try out.writer.writeByte('[');
+    var search_declared = false;
+    var wrote_tool = false;
+    for (parsed.value.array.items) |tool| {
+        if (wrote_tool) try out.writer.writeByte(',');
+        if (isLocalWebSearchFunction(tool)) {
+            if (search_declared) return error.AmbiguousResponsesWebSearchTools;
+            search_declared = true;
+            try out.writer.writeAll(codex_web_run_namespace_json);
+        } else {
+            if (isWebRunNamespace(tool)) {
+                if (search_declared) return error.AmbiguousResponsesWebSearchTools;
+                search_declared = true;
+            }
+            try std.json.Stringify.value(tool, .{}, &out.writer);
+        }
+        wrote_tool = true;
+    }
+    if (options.include_web_search and !search_declared) {
+        if (wrote_tool) try out.writer.writeByte(',');
+        try out.writer.writeAll(codex_web_run_namespace_json);
+    }
+    try out.writer.writeByte(']');
+    return out.toOwnedSlice();
+}
+
+fn isLocalWebSearchFunction(tool: JsonValue) bool {
+    if (tool != .object) return false;
+    const type_value = tool.object.get("type") orelse return false;
+    if (type_value != .string or !std.mem.eql(u8, type_value.string, "function")) return false;
+    const fields = tool.object.get("function") orelse tool;
+    if (fields != .object) return false;
+    const name = fields.object.get("name") orelse return false;
+    return name == .string and std.mem.eql(u8, name.string, "web_search");
+}
+
+fn isWebRunNamespace(tool: JsonValue) bool {
+    if (tool != .object) return false;
+    const type_value = tool.object.get("type") orelse return false;
+    const name = tool.object.get("name") orelse return false;
+    return type_value == .string and name == .string and
+        std.mem.eql(u8, type_value.string, "namespace") and
+        std.mem.eql(u8, name.string, "web");
+}
+
 pub const Request = struct {
     id: []const u8,
     model: []const u8,
@@ -293,6 +363,49 @@ test "Responses standalone search tool declares the latest command surface" {
     try std.testing.expectEqualStrings(
         "Whether to filter by recency, as a number of recent days.",
         recency.get("description").?.string,
+    );
+}
+
+test "Responses standalone search projection replaces only local web_search" {
+    const projected = try projectNamespaceToolAlloc(
+        std.testing.allocator,
+        "[{\"type\":\"function\",\"name\":\"read_file\"},{\"type\":\"function\",\"name\":\"web_search\"}]",
+        .{},
+    );
+    defer std.testing.allocator.free(projected);
+    var parsed = try std.json.parseFromSlice(JsonValue, std.testing.allocator, projected, .{});
+    defer parsed.deinit();
+    const tools = parsed.value.array.items;
+    try std.testing.expectEqual(@as(usize, 2), tools.len);
+    try std.testing.expectEqualStrings("read_file", tools[0].object.get("name").?.string);
+    try std.testing.expectEqualStrings("namespace", tools[1].object.get("type").?.string);
+    try std.testing.expectEqualStrings("web", tools[1].object.get("name").?.string);
+}
+
+test "Responses standalone search projection appends an effectively advertised web namespace" {
+    const projected = try projectNamespaceToolAlloc(
+        std.testing.allocator,
+        "[{\"type\":\"function\",\"name\":\"read_file\"}]",
+        .{ .include_web_search = true },
+    );
+    defer std.testing.allocator.free(projected);
+    var parsed = try std.json.parseFromSlice(JsonValue, std.testing.allocator, projected, .{});
+    defer parsed.deinit();
+    const tools = parsed.value.array.items;
+    try std.testing.expectEqual(@as(usize, 2), tools.len);
+    try std.testing.expectEqualStrings("read_file", tools[0].object.get("name").?.string);
+    try std.testing.expectEqualStrings("namespace", tools[1].object.get("type").?.string);
+    try std.testing.expectEqualStrings("web", tools[1].object.get("name").?.string);
+}
+
+test "Responses standalone search projection rejects duplicate web declarations" {
+    try std.testing.expectError(
+        error.AmbiguousResponsesWebSearchTools,
+        projectNamespaceToolAlloc(
+            std.testing.allocator,
+            "[{\"type\":\"function\",\"name\":\"web_search\"},{\"type\":\"namespace\",\"name\":\"web\",\"tools\":[]}]",
+            .{},
+        ),
     );
 }
 

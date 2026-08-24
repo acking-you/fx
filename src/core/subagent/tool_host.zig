@@ -22,7 +22,9 @@ const session_store = @import("../session/session_store.zig");
 const mcp_access = @import("../mcp/access_policy.zig");
 const mode_registry = @import("../modes/mode_registry.zig");
 const model_provider = @import("../config/model_provider.zig");
+const parent_delivery_projector = @import("parent_delivery_projector.zig");
 const permissions = @import("../permissions/permissions.zig");
+const runtime_deps = @import("../agent/runtime/deps.zig");
 const session_permission_state = @import("../permissions/session_permission_state.zig");
 const tool_dispatch = @import("../tooling/tool_dispatch.zig");
 const tool_set_contract = @import("../tooling/tool_set.zig");
@@ -1323,6 +1325,22 @@ pub const Runtime = struct {
 
     pub fn recoveryState(self: *const Runtime) RecoveryState {
         return self.recovery_state.load(.acquire);
+    }
+
+    /// Projects durable child deliveries only after restart reconciliation has
+    /// made every terminal result visible to the target parent session.
+    pub fn prepareParentTurnContext(
+        self: *Runtime,
+        alloc: Allocator,
+        target_session_id: []const u8,
+    ) (execution.RecoveryError || parent_delivery_projector.Error)!?runtime_deps.PreparedParentTurnContext {
+        _ = try self.reconcileAfterRestart(io_mod.milliTimestamp());
+        return parent_delivery_projector.prepare(
+            alloc,
+            self.sessions,
+            target_session_id,
+            self.manager.options.child_store,
+        );
     }
 
     pub fn requestRetirementSweep(self: *Runtime, timestamp_ms: i64) void {
@@ -5219,6 +5237,27 @@ const ConcurrentRecovery = struct {
     }
 };
 
+const ConcurrentParentPreparation = struct {
+    host: *Runtime,
+    target_session_id: []const u8,
+    completed: *std.atomic.Value(bool),
+    failure: ?anyerror = null,
+
+    fn run(self: *ConcurrentParentPreparation) void {
+        var arena_state = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+        defer arena_state.deinit();
+        _ = self.host.prepareParentTurnContext(
+            arena_state.allocator(),
+            self.target_session_id,
+        ) catch |err| {
+            self.failure = err;
+            self.completed.store(true, .seq_cst);
+            return;
+        };
+        self.completed.store(true, .seq_cst);
+    }
+};
+
 test "recovery policy admits one automatic pass and explicit-only retries" {
     const StartCase = struct {
         state: RecoveryState,
@@ -5493,10 +5532,12 @@ test "background recovery is single flight while manager projection stays readab
     } };
     var recovery_mutex_locked = false;
     var explicit_thread: ?std.Thread = null;
+    var preparation_thread: ?std.Thread = null;
     defer {
         if (recovery_mutex_locked) recovered.recovery_mutex.unlock(std.testing.io);
         barrier.release.store(true, .seq_cst);
         if (explicit_thread) |thread| thread.join();
+        if (preparation_thread) |thread| thread.join();
     }
     recovered.recovery_mutex.lockUncancelable(std.testing.io);
     recovery_mutex_locked = true;
@@ -5544,10 +5585,32 @@ test "background recovery is single flight while manager projection stays readab
         ),
     }
 
+    var preparation_completed = std.atomic.Value(bool).init(false);
+    var preparation = ConcurrentParentPreparation{
+        .host = recovered,
+        .target_session_id = root_id,
+        .completed = &preparation_completed,
+    };
+    preparation_thread = try std.Thread.spawn(
+        .{},
+        ConcurrentParentPreparation.run,
+        .{&preparation},
+    );
+    const preparation_observation_deadline = io_mod.milliTimestamp() + 100;
+    while (!preparation_completed.load(.seq_cst) and
+        io_mod.milliTimestamp() < preparation_observation_deadline)
+    {
+        std.Thread.yield() catch std.atomic.spinLoopHint();
+    }
+    try std.testing.expect(!preparation_completed.load(.seq_cst));
+
     barrier.release.store(true, .seq_cst);
     explicit_thread.?.join();
     explicit_thread = null;
+    preparation_thread.?.join();
+    preparation_thread = null;
     try std.testing.expect(explicit.failure == null);
+    try std.testing.expect(preparation.failure == null);
     try std.testing.expectEqual(@as(usize, 0), explicit.report.sessions_changed);
     const deadline = io_mod.milliTimestamp() + 5_000;
     while ((recovered.recoveryState() == .scheduled or

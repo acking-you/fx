@@ -588,12 +588,7 @@ pub fn Bindings(comptime App: type) type {
             if (comptime @hasField(App, "session_persistence")) {
                 const host = app_session_runtime.Runtime(App).subagentHost(app) orelse return null;
                 const session_id = app_session_runtime.Runtime(App).activeSessionId(app) orelse return null;
-                return parent_delivery_projector.prepare(
-                    arena,
-                    host.sessions,
-                    session_id,
-                    host.manager.options.child_store,
-                );
+                return host.prepareParentTurnContext(arena, session_id);
             }
             return null;
         }

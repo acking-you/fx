@@ -3243,7 +3243,15 @@ fn needsEarlyThreadedIo(args: []const [:0]const u8) bool {
         std.mem.eql(u8, command, "status") or
         std.mem.eql(u8, command, "doctor") or
         std.mem.eql(u8, command, "models") or
-        std.mem.eql(u8, command, "credits");
+        std.mem.eql(u8, command, "credits") or
+        (std.mem.eql(u8, command, "usage") and hasExactArg(args, "--codex"));
+}
+
+fn hasExactArg(args: []const [:0]const u8, expected: []const u8) bool {
+    for (args) |arg| {
+        if (std.mem.eql(u8, arg, expected)) return true;
+    }
+    return false;
 }
 
 test "auth and upgrade commands use early threaded io without full entry config" {
@@ -3263,6 +3271,15 @@ test "credential-reading commands use early threaded io without full entry confi
         try std.testing.expect(!needsFullEntryConfig(args));
         try std.testing.expect(needsEarlyThreadedIo(args));
     }
+    try std.testing.expect(needsEarlyThreadedIo(&.{
+        @as([:0]const u8, "usage"),
+        @as([:0]const u8, "--codex"),
+    }));
+    try std.testing.expect(!needsEarlyThreadedIo(&.{
+        @as([:0]const u8, "usage"),
+        @as([:0]const u8, "--period"),
+        @as([:0]const u8, "7d"),
+    }));
 }
 
 test "early threaded io is resolved after global launch args" {
@@ -3922,6 +3939,8 @@ test {
     _ = @import("gateway/openai_codex_models.zig");
     _ = @import("gateway/openai_codex.zig");
     _ = @import("gateway/openai_codex_permission_reviewer.zig");
+    _ = @import("gateway/openai_codex_search.zig");
+    _ = @import("gateway/openai_codex_usage.zig");
     _ = @import("core/auth/grok_session.zig");
     _ = @import("core/auth/grok_oauth.zig");
     _ = @import("gateway/xai_grok_models.zig");
@@ -4030,6 +4049,8 @@ test {
     _ = @import("core/tooling/web_fetch_runtime.zig");
     _ = @import("core/tooling/web_search_policy.zig");
     _ = @import("core/tooling/web_search_runtime.zig");
+    _ = @import("core/gateway/responses_search.zig");
+    _ = @import("core/gateway/codex_usage.zig");
     _ = @import("gateway/web_search.zig");
     _ = @import("gateway/web_search_types.zig");
     _ = @import("tools/web/content.zig");

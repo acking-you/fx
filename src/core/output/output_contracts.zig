@@ -1,6 +1,7 @@
 const std = @import("std");
 const auth_runtime = @import("../auth/auth_runtime.zig");
 const credentials = @import("../auth/credentials.zig");
+const codex_usage = @import("../gateway/codex_usage.zig");
 const background_store = @import("../background/background_store.zig");
 const doctor_runtime = @import("../cli/doctor_runtime.zig");
 const model_provider = @import("../config/model_provider.zig");
@@ -1437,6 +1438,216 @@ pub const BackgroundDetailSnapshot = struct {
     }
 };
 
+pub const CodexAccountUsageSnapshot = struct {
+    data: ?codex_usage.Snapshot = null,
+    failure: ?codex_usage.Failure = null,
+
+    pub fn deinit(self: *CodexAccountUsageSnapshot, _: Allocator) void {
+        if (self.data) |*data| data.deinit();
+        self.* = undefined;
+    }
+
+    pub fn render(
+        self: *const CodexAccountUsageSnapshot,
+        alloc: Allocator,
+        format: OutputFormat,
+    ) ![]u8 {
+        return switch (format) {
+            .text => self.renderText(alloc),
+            .json => self.renderJson(alloc),
+        };
+    }
+
+    pub fn renderText(self: *const CodexAccountUsageSnapshot, alloc: Allocator) ![]u8 {
+        var out: std.Io.Writer.Allocating = .init(alloc);
+        defer out.deinit();
+
+        if (self.failure) |failure| {
+            try out.writer.print("[codex usage] error: {s}", .{codexUsageFailureMessage(failure.kind)});
+            if (failure.http_status) |status| {
+                try out.writer.print(" (HTTP {d})", .{@intFromEnum(status)});
+            }
+            try out.writer.writeByte('\n');
+            return out.toOwnedSlice();
+        }
+        const data = self.data orelse {
+            try out.writer.writeAll("[codex usage] no data returned\n");
+            return out.toOwnedSlice();
+        };
+
+        try out.writer.writeAll("Codex account usage\n");
+        try out.writer.print("Fetched at (ms): {d}\n", .{data.fetched_at_ms});
+        try out.writer.writeAll("Plan: ");
+        try writeTerminalSafe(&out.writer, alloc, data.plan_type);
+        try out.writer.writeByte('\n');
+        try out.writer.writeAll("Rate limits:\n");
+        for (data.rate_limits) |limit| {
+            try out.writer.writeAll("  ");
+            try writeTerminalSafe(&out.writer, alloc, limit.id);
+            if (limit.name) |name| {
+                try out.writer.writeAll(" (");
+                try writeTerminalSafe(&out.writer, alloc, name);
+                try out.writer.writeByte(')');
+            }
+            if (limit.allowed) |allowed| {
+                try out.writer.print(" allowed={s}", .{if (allowed) "true" else "false"});
+            }
+            if (limit.limit_reached) |reached| {
+                try out.writer.print(" limit_reached={s}", .{if (reached) "true" else "false"});
+            }
+            try out.writer.writeByte('\n');
+            if (limit.primary_window) |window| {
+                try writeCodexUsageWindowText(&out.writer, "primary", window);
+            }
+            if (limit.secondary_window) |window| {
+                try writeCodexUsageWindowText(&out.writer, "secondary", window);
+            }
+        }
+        if (data.credits) |credits| {
+            try out.writer.print("Credits: has_credits={s} unlimited={s}", .{
+                if (credits.has_credits) "true" else "false",
+                if (credits.unlimited) "true" else "false",
+            });
+            if (credits.balance) |balance| {
+                try out.writer.writeAll(" balance=");
+                try writeTerminalSafe(&out.writer, alloc, balance);
+            }
+            try out.writer.writeByte('\n');
+        }
+        if (data.spend_control) |control| {
+            try out.writer.print("Spend control: reached={s}\n", .{if (control.reached) "true" else "false"});
+            if (control.individual_limit) |limit| {
+                if (limit.source) |source| {
+                    try out.writer.writeAll("  source=");
+                    try writeTerminalSafe(&out.writer, alloc, source);
+                    try out.writer.writeByte('\n');
+                }
+                try out.writer.writeAll("  individual limit=");
+                try writeTerminalSafe(&out.writer, alloc, limit.limit);
+                try out.writer.writeAll(" used=");
+                try writeTerminalSafe(&out.writer, alloc, limit.used);
+                try out.writer.writeAll(" remaining=");
+                try writeTerminalSafe(&out.writer, alloc, limit.remaining);
+                try out.writer.print(
+                    " used_percent={d} remaining_percent={d} reset_after_seconds={d} reset_at={d}\n",
+                    .{
+                        limit.used_percent,
+                        limit.remaining_percent,
+                        limit.reset_after_seconds,
+                        limit.reset_at,
+                    },
+                );
+            }
+        }
+        if (data.rate_limit_reached_type) |reached_type| {
+            try out.writer.writeAll("Rate limit reached type: ");
+            try writeTerminalSafe(&out.writer, alloc, reached_type);
+            try out.writer.writeByte('\n');
+        }
+        if (data.rate_limit_reset_credits_available) |available| {
+            try out.writer.print("Rate limit reset credits: {d}\n", .{available});
+        }
+
+        const stats = data.token_usage;
+        try out.writer.writeAll("Token activity:");
+        var wrote_stat = false;
+        inline for (.{
+            .{ "lifetime_tokens", stats.lifetime_tokens },
+            .{ "peak_daily_tokens", stats.peak_daily_tokens },
+            .{ "longest_running_turn_sec", stats.longest_running_turn_sec },
+            .{ "current_streak_days", stats.current_streak_days },
+            .{ "longest_streak_days", stats.longest_streak_days },
+        }) |field| {
+            if (field[1]) |value| {
+                try out.writer.print(" {s}={d}", .{ field[0], value });
+                wrote_stat = true;
+            }
+        }
+        if (!wrote_stat) try out.writer.writeAll(" unavailable");
+        try out.writer.writeByte('\n');
+        for (data.daily_usage_buckets) |bucket| {
+            try out.writer.writeAll("  ");
+            try writeTerminalSafe(&out.writer, alloc, bucket.start_date);
+            try out.writer.print(": {d} tokens\n", .{bucket.tokens});
+        }
+        return out.toOwnedSlice();
+    }
+
+    pub fn renderJson(self: *const CodexAccountUsageSnapshot, alloc: Allocator) ![]u8 {
+        var out: std.Io.Writer.Allocating = .init(alloc);
+        defer out.deinit();
+
+        if (self.failure) |failure| {
+            try out.writer.writeAll("{\"kind\":\"codex_account_usage\",\"schema_version\":1,\"error\":{\"code\":");
+            try std.json.Stringify.value(@tagName(failure.kind), .{}, &out.writer);
+            try out.writer.writeAll(",\"http_status\":");
+            if (failure.http_status) |status| {
+                try out.writer.print("{d}", .{@intFromEnum(status)});
+            } else {
+                try out.writer.writeAll("null");
+            }
+            try out.writer.writeAll("}}");
+            return out.toOwnedSlice();
+        }
+        const data = self.data orelse {
+            try out.writer.writeAll("{\"kind\":\"codex_account_usage\",\"schema_version\":1,\"error\":{\"code\":\"invalid_response\",\"http_status\":null}}");
+            return out.toOwnedSlice();
+        };
+        try std.json.Stringify.value(.{
+            .kind = "codex_account_usage",
+            .schema_version = @as(u8, 1),
+            .fetched_at_ms = data.fetched_at_ms,
+            .plan_type = data.plan_type,
+            .rate_limits = data.rate_limits,
+            .credits = data.credits,
+            .spend_control = data.spend_control,
+            .rate_limit_reached_type = data.rate_limit_reached_type,
+            .rate_limit_reset_credits_available = data.rate_limit_reset_credits_available,
+            .token_usage = data.token_usage,
+            .daily_usage_buckets = data.daily_usage_buckets,
+        }, .{}, &out.writer);
+        return out.toOwnedSlice();
+    }
+};
+
+fn writeCodexUsageWindowText(
+    writer: *std.Io.Writer,
+    label: []const u8,
+    window: codex_usage.Window,
+) !void {
+    try writer.print(
+        "    {s}: used_percent={d} window_seconds={d} reset_after_seconds={d} reset_at={d}\n",
+        .{
+            label,
+            window.used_percent,
+            window.limit_window_seconds,
+            window.reset_after_seconds,
+            window.reset_at,
+        },
+    );
+}
+
+fn codexUsageFailureMessage(kind: codex_usage.FailureKind) []const u8 {
+    return switch (kind) {
+        .unsupported_credential_source => "available only with a Codex subscription login",
+        .missing_credential => "Codex access token is missing",
+        .missing_account_id => "Codex account identity is missing",
+        .credential_unavailable => "stored Codex credential is unavailable",
+        .credential_changed => "Codex credential changed during the request",
+        .unauthorized => "Codex authentication failed",
+        .forbidden => "Codex account usage is forbidden",
+        .rate_limited => "Codex account usage request was rate limited",
+        .http_error => "Codex account usage request failed",
+        .invalid_endpoint => "Codex account usage endpoint is invalid",
+        .response_too_large => "Codex account usage response is too large",
+        .invalid_response => "Codex account usage response is invalid",
+        .timeout => "Codex account usage request timed out",
+        .cancelled => "Codex account usage request was cancelled",
+        .transport => "Codex account usage transport failed",
+        .resource_exhausted => "insufficient memory for Codex account usage",
+    };
+}
+
 pub const CreditsSnapshot = struct {
     balance: ?[]const u8 = null,
     used: ?[]const u8 = null,
@@ -1466,23 +1677,33 @@ pub const CreditsSnapshot = struct {
         defer out.deinit();
 
         if (self.err_message) |msg| {
-            try out.writer.print("[credits] error: {s}\n", .{msg});
+            try out.writer.writeAll("[credits] error: ");
+            try writeTerminalSafe(&out.writer, alloc, msg);
+            try out.writer.writeByte('\n');
             return try out.toOwnedSlice();
         }
 
         if (self.balance) |b| {
-            try out.writer.print("[credits] balance={s}\n", .{b});
+            try out.writer.writeAll("[credits] balance=");
+            try writeTerminalSafe(&out.writer, alloc, b);
+            try out.writer.writeByte('\n');
         }
         if (self.used) |u| {
-            try out.writer.print("[credits] used={s}\n", .{u});
+            try out.writer.writeAll("[credits] used=");
+            try writeTerminalSafe(&out.writer, alloc, u);
+            try out.writer.writeByte('\n');
         }
         if (self.plan) |p| {
-            try out.writer.print("[credits] plan={s}\n", .{p});
+            try out.writer.writeAll("[credits] plan=");
+            try writeTerminalSafe(&out.writer, alloc, p);
+            try out.writer.writeByte('\n');
         }
 
         if (self.balance == null and self.used == null and self.plan == null) {
             if (self.raw_json) |raw| {
-                try out.writer.print("[credits] {s}\n", .{raw});
+                try out.writer.writeAll("[credits] ");
+                try writeTerminalSafe(&out.writer, alloc, raw);
+                try out.writer.writeByte('\n');
             } else {
                 try out.writer.writeAll("[credits] no data returned by gateway\n");
             }
@@ -1495,25 +1716,31 @@ pub const CreditsSnapshot = struct {
         var out: std.Io.Writer.Allocating = .init(alloc);
         defer out.deinit();
 
-        if (self.err_message) |msg| return alloc.dupe(u8, msg);
+        if (self.err_message) |msg| {
+            try writeTerminalSafe(&out.writer, alloc, msg);
+            return out.toOwnedSlice();
+        }
         var wrote_field = false;
         if (self.balance) |balance| {
-            try out.writer.print("balance={s}", .{balance});
+            try out.writer.writeAll("balance=");
+            try writeTerminalSafe(&out.writer, alloc, balance);
             wrote_field = true;
         }
         if (self.used) |used| {
             if (wrote_field) try out.writer.writeByte('\n');
-            try out.writer.print("used={s}", .{used});
+            try out.writer.writeAll("used=");
+            try writeTerminalSafe(&out.writer, alloc, used);
             wrote_field = true;
         }
         if (self.plan) |plan| {
             if (wrote_field) try out.writer.writeByte('\n');
-            try out.writer.print("plan={s}", .{plan});
+            try out.writer.writeAll("plan=");
+            try writeTerminalSafe(&out.writer, alloc, plan);
             wrote_field = true;
         }
         if (self.balance == null and self.used == null and self.plan == null) {
             if (self.raw_json) |raw| {
-                try out.writer.writeAll(raw);
+                try writeTerminalSafe(&out.writer, alloc, raw);
             } else {
                 try out.writer.writeAll("no data returned by gateway");
             }
@@ -2768,6 +2995,59 @@ test "core credits snapshot renders error output" {
     );
 }
 
+test "Codex account usage failure has stable text and JSON contracts" {
+    const snapshot = CodexAccountUsageSnapshot{ .failure = .{
+        .kind = .rate_limited,
+        .http_status = .too_many_requests,
+    } };
+
+    const text_output = try snapshot.renderText(std.testing.allocator);
+    defer std.testing.allocator.free(text_output);
+    try std.testing.expectEqualStrings(
+        "[codex usage] error: Codex account usage request was rate limited (HTTP 429)\n",
+        text_output,
+    );
+
+    const json_output = try snapshot.renderJson(std.testing.allocator);
+    defer std.testing.allocator.free(json_output);
+    try std.testing.expectEqualStrings(
+        "{\"kind\":\"codex_account_usage\",\"schema_version\":1,\"error\":{\"code\":\"rate_limited\",\"http_status\":429}}",
+        json_output,
+    );
+}
+
+test "Codex account usage text visibly escapes provider controls" {
+    const usage_json =
+        \\{"plan_type":"pro\u001b[31m","credits":{"has_credits":true,"unlimited":false,"balance":"7\n50"},"spend_control":{"reached":false,"individual_limit":{"source":"user\rname","limit":"1\t00","used":"2\u001b","remaining":"8\n0","used_percent":20,"remaining_percent":80,"reset_after_seconds":60,"reset_at":100}},"additional_rate_limits":[{"limit_name":"Code\nreview","metered_feature":"codex\tfeature"}],"rate_limit_reached_type":{"type":"hard\rlimit"}}
+    ;
+    const profile_json =
+        \\{"stats":{"daily_usage_buckets":[{"start_date":"2026-08-24\u001b","tokens":10}]}}
+    ;
+    const data = try codex_usage.parseSnapshot(
+        std.testing.allocator,
+        usage_json,
+        profile_json,
+        1234,
+    );
+    var snapshot = CodexAccountUsageSnapshot{ .data = data };
+    defer snapshot.deinit(std.testing.allocator);
+
+    const text_output = try snapshot.renderText(std.testing.allocator);
+    defer std.testing.allocator.free(text_output);
+    try std.testing.expect(std.mem.findScalar(u8, text_output, 0x1b) == null);
+    for ([_][]const u8{
+        "Plan: pro\\x1b[31m\n",
+        "codex\\x09feature (Code\\x0areview)",
+        "balance=7\\x0a50",
+        "source=user\\x0dname",
+        "limit=1\\x0900 used=2\\x1b remaining=8\\x0a0",
+        "Rate limit reached type: hard\\x0dlimit",
+        "2026-08-24\\x1b: 10 tokens",
+    }) |escaped| {
+        try std.testing.expect(std.mem.find(u8, text_output, escaped) != null);
+    }
+}
+
 test "core credits snapshot renders parsed, raw, and empty fallbacks" {
     const parsed = CreditsSnapshot{ .balance = "10", .used = "2", .plan = "pro" };
 
@@ -2801,6 +3081,32 @@ test "core credits snapshot renders parsed, raw, and empty fallbacks" {
     const empty_text = try (CreditsSnapshot{}).renderText(std.testing.allocator);
     defer std.testing.allocator.free(empty_text);
     try std.testing.expectEqualStrings("[credits] no data returned by gateway\n", empty_text);
+
+    const hostile = CreditsSnapshot{
+        .balance = "1\x1b",
+        .used = "2\n",
+        .plan = "pro\r",
+    };
+    const hostile_text = try hostile.renderText(std.testing.allocator);
+    defer std.testing.allocator.free(hostile_text);
+    try std.testing.expectEqualStrings(
+        "[credits] balance=1\\x1b\n[credits] used=2\\x0a\n[credits] plan=pro\\x0d\n",
+        hostile_text,
+    );
+    const hostile_interactive = try hostile.renderInteractiveBody(std.testing.allocator);
+    defer std.testing.allocator.free(hostile_interactive);
+    try std.testing.expectEqualStrings(
+        "balance=1\\x1b\nused=2\\x0a\nplan=pro\\x0d",
+        hostile_interactive,
+    );
+
+    const hostile_raw = CreditsSnapshot{ .raw_json = "{\"raw\":\"\x1b\n\"}" };
+    const hostile_raw_text = try hostile_raw.renderText(std.testing.allocator);
+    defer std.testing.allocator.free(hostile_raw_text);
+    try std.testing.expectEqualStrings(
+        "[credits] {\"raw\":\"\\x1b\\x0a\"}\n",
+        hostile_raw_text,
+    );
 }
 
 test "core upgrade snapshot renders errors and statuses" {
