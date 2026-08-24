@@ -906,7 +906,9 @@ class AcpClient {
   }
 
   async waitForExit(timeoutMs = 10_000): Promise<number | null> {
-    if (this.proc.exitCode !== null) return this.proc.exitCode;
+    if (this._closed || this.proc.exitCode !== null || this.proc.signalCode !== null) {
+      return this.proc.exitCode;
+    }
     return await new Promise<number | null>((resolve, reject) => {
       const timer = setTimeout(
         () => reject(new Error("ACP process exit timeout")),
@@ -6815,6 +6817,7 @@ describe("acp: model-independent", () => {
         expect(Array.isArray(parent.result?.configOptions)).toBe(true);
 
         await client.close();
+        await client.waitForExit();
         client = null;
         const acknowledged = await runFx([
           "ask",
@@ -6829,7 +6832,11 @@ describe("acp: model-independent", () => {
           timeoutMs: TIMEOUT,
         });
         expect(acknowledged.code).toBe(0);
-        expect(gateway.requests.at(-1)?.body).toContain(
+        expect(acknowledged.stderr).toBe("");
+        const acknowledgementRequest = gateway.requests.find((request) =>
+          request.body.includes("Acknowledge the completed one-off result.")
+        );
+        expect(acknowledgementRequest?.body).toContain(
           "ACP_ONE_OFF_LOAD_CHILD_DONE",
         );
         await waitForCondition(
