@@ -215,11 +215,13 @@ const AcpContext = struct {
 
     fn toolContext(self: *AcpContext) tool_runtime.Context {
         const session = if (self.state.active_session) |*active| active else unreachable;
-        const provider_capabilities = self.state.cfg.provider_set.select(session.provider).capabilities;
-        if (provider_capabilities.fx_search) {
-            self.state.web_search_runtime.configure(.{
+        const provider_bundle = self.state.cfg.provider_set.select(session.provider);
+        const provider_capabilities = provider_bundle.capabilities;
+        if (provider_capabilities.fx_search and provider_bundle.fx_search != null) {
+            self.state.web_search_runtime.configureForProvider(provider_bundle.fx_search.?, .{
                 .api_key = session.api_key,
                 .credential_source = session.credential_source,
+                .account_id = session.account_id,
                 .gateway_team = self.state.gateway_team,
                 .worker_model = session.model,
                 .gateway_retry_count = self.state.cfg.gateway_retry_count,
@@ -291,8 +293,11 @@ const AcpContext = struct {
             .web_fetch_runtime = &self.state.web_fetch_runtime,
             .web_fetch_artifact_store = session.session_rt.webFetchArtifactStore(),
             .web_fetch_artifact_error = session.session_rt.webFetchArtifactError(),
-            .web_search_runtime_ready = false,
-            .web_search_backend = if (provider_capabilities.fx_search) self.state.web_search_runtime.dispatchBackend() else null,
+            .web_search_runtime_ready = provider_bundle.fxSearchRuntimeReady(),
+            .web_search_backend = if (provider_capabilities.fx_search and provider_bundle.fx_search != null)
+                self.state.web_search_runtime.dispatchBackend()
+            else
+                null,
             .model_capability_resolver = .{
                 .ctx = @ptrCast(self),
                 .resolve_fn = resolveModelCapabilities,

@@ -84,6 +84,36 @@ pub const CreditsProvider = struct {
     }
 };
 
+pub const AccountUsageLookupInput = struct {
+    credential: ?[]const u8,
+    account_id: ?[]const u8,
+    credential_source: ?credentials.Source = null,
+    oauth_transport: oauth_transport.Provider,
+    cancel_flag: ?*std.atomic.Value(bool) = null,
+};
+
+pub const FetchAccountUsageFn = *const fn (
+    ?*anyopaque,
+    Allocator,
+    AccountUsageLookupInput,
+) output_contracts.CodexAccountUsageSnapshot;
+
+pub const AccountUsageProvider = struct {
+    /// When set, context must remain valid until every in-flight `fetch` returns.
+    context: ?*anyopaque = null,
+    fetch_fn: FetchAccountUsageFn,
+
+    /// The returned snapshot owns all parsed provider fields. The caller must
+    /// call `CodexAccountUsageSnapshot.deinit`.
+    pub fn fetch(
+        self: AccountUsageProvider,
+        alloc: Allocator,
+        input: AccountUsageLookupInput,
+    ) output_contracts.CodexAccountUsageSnapshot {
+        return self.fetch_fn(self.context, alloc, input);
+    }
+};
+
 fn fetchCreditsUnavailable(
     _: ?*anyopaque,
     alloc: Allocator,
@@ -138,6 +168,42 @@ test "credits lookup dispatches through the injected provider" {
     try std.testing.expectEqual(@as(usize, 1), fake.calls);
     try std.testing.expect(fake.saw_expected_input);
     try std.testing.expectEqualStrings("10", snapshot.balance.?);
+}
+
+test "account usage lookup dispatches the bound Codex identity" {
+    const Fake = struct {
+        calls: usize = 0,
+        saw_identity: bool = false,
+
+        fn fetch(
+            raw: ?*anyopaque,
+            _: Allocator,
+            input: AccountUsageLookupInput,
+        ) output_contracts.CodexAccountUsageSnapshot {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            self.calls += 1;
+            self.saw_identity = input.credential_source == .chatgpt_subscription and
+                std.mem.eql(u8, input.credential orelse "", "access") and
+                std.mem.eql(u8, input.account_id orelse "", "account");
+            return .{};
+        }
+    };
+
+    var fake: Fake = .{};
+    const provider = AccountUsageProvider{
+        .context = &fake,
+        .fetch_fn = Fake.fetch,
+    };
+    var snapshot = provider.fetch(std.testing.allocator, .{
+        .credential = "access",
+        .account_id = "account",
+        .credential_source = .chatgpt_subscription,
+        .oauth_transport = oauth_transport.unavailable_provider,
+    });
+    defer snapshot.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), fake.calls);
+    try std.testing.expect(fake.saw_identity);
 }
 
 const CapabilityResolverState = enum {

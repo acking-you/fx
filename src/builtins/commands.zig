@@ -220,15 +220,17 @@ pub const top_level_specs = [_]TopLevelSpec{
     .{
         .kind = .usage,
         .token = "usage",
-        .usage = "usage [--period <24h|7d|30d>] [--json]",
-        .summary = "Show local fx token usage and spend",
+        .usage = "usage [--period <24h|7d|30d>|--codex] [--json]",
+        .summary = "Show local fx usage or Codex account limits",
         .options = &.{
             .{ .flag = "--period <24h|7d|30d>", .description = "Select a rolling window (default: 30d)" },
+            .{ .flag = "--codex", .description = "Query account-wide Codex subscription usage" },
             json_option,
         },
         .details = &.{
             "Reports only usage recorded by fx on this machine.",
-            "This command reads local state and does not query account-wide Gateway reports.",
+            "With --codex, queries the signed-in Codex account instead of local state.",
+            "This command does not query account-wide AI Gateway reports.",
         },
     },
     .{
@@ -298,7 +300,7 @@ pub const top_level_help_groups = [_]TopLevelHelpGroup{
         .{ .kind = .setup, .usage = "setup" },
         .{ .kind = .teams, .usage = "teams" },
         .{ .kind = .credits, .usage = "credits|balance" },
-        .{ .kind = .usage, .usage = "usage [--period <24h|7d|30d>]" },
+        .{ .kind = .usage, .usage = "usage [--period <24h|7d|30d>|--codex]" },
     } },
     .{ .entries = &.{
         .{ .kind = .status, .usage = "status" },

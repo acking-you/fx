@@ -36,6 +36,7 @@ pub const Config = struct {
     policy: ?web_search_policy.WebSearchPolicy = null,
     api_key: []const u8 = "",
     credential_source: ?types.CredentialSource = null,
+    account_id: ?[]const u8 = null,
     gateway_team: ?[]const u8 = null,
     worker_model: []const u8 = "",
     gateway_retry_count: usize = 3,
@@ -47,8 +48,11 @@ pub const Config = struct {
 pub const Inputs = web_search_provider.Inputs;
 
 const OwnedInputs = struct {
+    provider: ?web_search_provider.Provider,
+    policy: web_search_policy.WebSearchPolicy,
     api_key: []u8,
     credential_source: ?types.CredentialSource = null,
+    account_id: ?[]u8 = null,
     gateway_team: ?[]u8 = null,
     worker_model: []u8,
     gateway_retry_count: usize,
@@ -59,6 +63,7 @@ const OwnedInputs = struct {
 
     fn deinit(self: *OwnedInputs, alloc: Allocator) void {
         alloc.free(self.api_key);
+        if (self.account_id) |account_id| alloc.free(account_id);
         if (self.gateway_team) |team| alloc.free(team);
         alloc.free(self.worker_model);
         alloc.free(self.gateway_chat_url);
@@ -69,6 +74,7 @@ const OwnedInputs = struct {
         return .{
             .api_key = self.api_key,
             .credential_source = self.credential_source,
+            .account_id = self.account_id,
             .gateway_team = self.gateway_team,
             .worker_model = self.worker_model,
             .gateway_retry_count = self.gateway_retry_count,
@@ -87,6 +93,7 @@ pub const Runtime = struct {
     policy: web_search_policy.WebSearchPolicy,
     api_key: []const u8,
     credential_source: ?types.CredentialSource = null,
+    account_id: ?[]const u8 = null,
     gateway_team: ?[]const u8 = null,
     worker_model: []const u8,
     gateway_retry_count: usize,
@@ -103,6 +110,7 @@ pub const Runtime = struct {
             .policy = config.policy orelse if (config.provider) |provider| provider.policy else .{},
             .api_key = config.api_key,
             .credential_source = config.credential_source,
+            .account_id = config.account_id,
             .gateway_team = config.gateway_team,
             .worker_model = config.worker_model,
             .gateway_retry_count = config.gateway_retry_count,
@@ -117,8 +125,27 @@ pub const Runtime = struct {
     pub fn configure(self: *Runtime, inputs: Inputs) void {
         self.config_mutex.lockUncancelable(io_mod.getIo());
         defer self.config_mutex.unlock(io_mod.getIo());
+        self.configureUnlocked(inputs);
+    }
+
+    /// Rebinds transport policy and credentials as one coherent snapshot when
+    /// the active model provider changes between turns.
+    pub fn configureForProvider(
+        self: *Runtime,
+        provider: web_search_provider.Provider,
+        inputs: Inputs,
+    ) void {
+        self.config_mutex.lockUncancelable(io_mod.getIo());
+        defer self.config_mutex.unlock(io_mod.getIo());
+        self.provider = provider;
+        self.policy = provider.policy;
+        self.configureUnlocked(inputs);
+    }
+
+    fn configureUnlocked(self: *Runtime, inputs: Inputs) void {
         self.api_key = inputs.api_key;
         self.credential_source = inputs.credential_source;
+        self.account_id = inputs.account_id;
         self.gateway_team = inputs.gateway_team;
         self.worker_model = inputs.worker_model;
         self.gateway_retry_count = inputs.gateway_retry_count;
@@ -153,8 +180,8 @@ pub const Runtime = struct {
         defer inputs.deinit(alloc);
         if (cancel_flag.load(.seq_cst)) return error.Cancelled;
 
-        var policy = self.policy;
-        if (self.provider) |provider| {
+        var policy = inputs.policy;
+        if (inputs.provider) |provider| {
             if (try provider.preferredBackends()) |preferred_backends| {
                 policy.preferred_backends = preferred_backends;
             }
@@ -164,11 +191,11 @@ pub const Runtime = struct {
             .has_blocked_domains = hasValues(input.blocked_domains),
         }) orelse return error.UnsupportedWebSearchFeatures;
         if (!model_request_budget.searchWorkerInputFitsLimit(
-            if (self.provider) |provider| provider.input_overhead_bytes else 0,
+            if (inputs.provider) |provider| provider.input_overhead_bytes else 0,
             input.query,
             input.allowed_domains,
             input.blocked_domains,
-            self.policy.max_input_bytes,
+            policy.max_input_bytes,
         )) return error.WebSearchRequestTooLarge;
         if (cancel_flag.load(.seq_cst)) return error.Cancelled;
 
@@ -177,16 +204,19 @@ pub const Runtime = struct {
             .query = input.query,
             .allowed_domains = input.allowed_domains,
             .blocked_domains = input.blocked_domains,
-            .max_uses = self.policy.max_uses,
-            .max_results = self.policy.max_results,
-            .max_output_tokens = self.policy.max_output_tokens,
-            .max_output_chars = self.policy.max_output_chars,
-            .timeout_ms = self.policy.timeout_ms,
+            .commands_json = input.commands_json,
+            .input_json = input.input_json,
+            .request_id = input.request_id,
+            .max_uses = policy.max_uses,
+            .max_results = policy.max_results,
+            .max_output_tokens = policy.max_output_tokens,
+            .max_output_chars = policy.max_output_chars,
+            .timeout_ms = policy.timeout_ms,
             .cancel_flag = cancel_flag,
         };
 
         const transport_started_at_ms = self.clock.now();
-        var response = self.executeProvider(alloc, inputs.borrowed(), request, on_progress, progress_ctx) catch |err| {
+        var response = executeProvider(inputs.provider, alloc, inputs.borrowed(), request, on_progress, progress_ctx) catch |err| {
             if (shouldRecordFailedNetworkCall(err)) {
                 recordNetworkCall(inputs.worker_model, transport_started_at_ms, self.clock.now(), 0, null, null, @errorName(err));
             }
@@ -224,6 +254,8 @@ pub const Runtime = struct {
         defer self.config_mutex.unlock(io_mod.getIo());
         const api_key = try alloc.dupe(u8, self.api_key);
         errdefer alloc.free(api_key);
+        const account_id = if (self.account_id) |value| try alloc.dupe(u8, value) else null;
+        errdefer if (account_id) |value| alloc.free(value);
         const gateway_team = if (self.gateway_team) |team| try alloc.dupe(u8, team) else null;
         errdefer if (gateway_team) |team| alloc.free(team);
         const worker_model = try alloc.dupe(u8, self.worker_model);
@@ -231,7 +263,10 @@ pub const Runtime = struct {
         const gateway_chat_url = try alloc.dupe(u8, self.gateway_chat_url);
         return .{
             .api_key = api_key,
+            .provider = self.provider,
+            .policy = self.policy,
             .credential_source = self.credential_source,
+            .account_id = account_id,
             .gateway_team = gateway_team,
             .worker_model = worker_model,
             .gateway_retry_count = self.gateway_retry_count,
@@ -242,15 +277,15 @@ pub const Runtime = struct {
     }
 
     fn executeProvider(
-        self: *Runtime,
+        provider: ?web_search_provider.Provider,
         alloc: Allocator,
         inputs: Inputs,
         request: web_search_contract.ProviderRequest,
         on_progress: ?web_search_contract.ProgressFn,
         progress_ctx: ?*anyopaque,
     ) !web_search_contract.ProviderResponse {
-        const provider = self.provider orelse return error.MissingWebSearchProvider;
-        return provider.execute(alloc, inputs, request, on_progress, progress_ctx);
+        const active = provider orelse return error.MissingWebSearchProvider;
+        return active.execute(alloc, inputs, request, on_progress, progress_ctx);
     }
 };
 
@@ -835,6 +870,7 @@ test "web_search runtime updates its worker model during configuration" {
     var runtime = Runtime.init(.{});
     runtime.configure(.{
         .api_key = "key",
+        .account_id = "account",
         .worker_model = "provider/model",
         .gateway_retry_count = 2,
         .gateway_chat_url = "https://gateway.test/chat",
@@ -842,8 +878,30 @@ test "web_search runtime updates its worker model during configuration" {
 
     try std.testing.expectEqualStrings("provider/model", runtime.worker_model);
     try std.testing.expectEqualStrings("key", runtime.api_key);
+    try std.testing.expectEqualStrings("account", runtime.account_id.?);
     try std.testing.expectEqual(@as(usize, 2), runtime.gateway_retry_count);
     try std.testing.expectEqualStrings("https://gateway.test/chat", runtime.gateway_chat_url);
+}
+
+test "web_search runtime rebinds provider and identity as one snapshot" {
+    const alloc = std.testing.allocator;
+    var first = FakeProvider{};
+    var second = FakeProvider{};
+    var runtime = Runtime.init(.{ .provider = first.provider() });
+    runtime.configureForProvider(second.provider(), .{
+        .api_key = "provider-key",
+        .account_id = "account-2",
+        .worker_model = "provider/private-worker",
+        .gateway_retry_count = 2,
+        .gateway_chat_url = "https://gateway.test/chat",
+    });
+    var cancel_flag = std.atomic.Value(bool).init(false);
+    var output = try runtime.execute(alloc, .{ .query = "latest Zig release" }, &cancel_flag);
+    defer output.deinit(alloc);
+
+    try std.testing.expectEqual(@as(usize, 0), first.calls);
+    try std.testing.expectEqual(@as(usize, 1), second.calls);
+    try std.testing.expectEqualStrings("account-2", runtime.account_id.?);
 }
 
 test "web_search runtime preserves session usage through worker input snapshots" {

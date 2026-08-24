@@ -164,7 +164,12 @@ pub fn run(
     routed_config.tool_context.model = admission.model;
     routed_config.tool_context.provider = admission.provider;
     routed_config.tool_context.provider_capabilities = config.provider_set.select(admission.provider).capabilities;
-    if (!routed_config.tool_context.provider_capabilities.fx_search) {
+    // The backend points at the parent runtime's credential snapshot. A
+    // cross-provider subagent must not reuse it until subagents own a routed
+    // search runtime of their own.
+    if (!routed_config.tool_context.provider_capabilities.fx_search or
+        admission.provider != config.tool_context.provider)
+    {
         routed_config.tool_context.web_search_backend = null;
         routed_config.tool_context.web_search_runtime_ready = false;
     }

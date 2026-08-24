@@ -6,6 +6,8 @@ const openai_responses_permission_reviewer = @import("../gateway/openai_response
 const openai_codex = @import("../gateway/openai_codex.zig");
 const openai_codex_models = @import("../gateway/openai_codex_models.zig");
 const openai_codex_permission_reviewer = @import("../gateway/openai_codex_permission_reviewer.zig");
+const openai_codex_search = @import("../gateway/openai_codex_search.zig");
+const openai_codex_usage = @import("../gateway/openai_codex_usage.zig");
 const xai_grok = @import("../gateway/xai_grok.zig");
 const xai_grok_models = @import("../gateway/xai_grok_models.zig");
 const xai_grok_permission_reviewer = @import("../gateway/xai_grok_permission_reviewer.zig");
@@ -55,6 +57,7 @@ pub const native = provider_set.Set{
         break :blk bundle;
     },
     .codex = .{
+        .capabilities = .{ .fx_search = true },
         .presentation = provider_catalog.find(.codex),
         .auth_strategy = .chatgpt,
         .agent_stream = openai_codex.agent_stream_provider,
@@ -62,6 +65,9 @@ pub const native = provider_set.Set{
         .model_catalog = openai_codex_models.model_catalog_provider,
         .permission_reviewer = openai_codex_permission_reviewer.provider,
         .responses_compaction = openai_responses.compaction_provider,
+        .fx_search = openai_codex_search.provider,
+        .fx_search_execution = .fx_runtime,
+        .account_usage = openai_codex_usage.provider,
     },
     .grok = .{
         .presentation = provider_catalog.find(.grok),

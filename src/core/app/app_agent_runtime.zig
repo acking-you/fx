@@ -294,10 +294,19 @@ pub fn Runtime(comptime App: type) type {
                 ctx.on_web_fetch_progress = app_callbacks.Bindings(App).onWebFetchProgress;
             }
             if (comptime @hasField(App, "web_search_runtime")) {
-                if (provider_capabilities.fx_search) {
-                    app.web_search_runtime.configure(.{
+                const search_bundle = if (comptime @hasDecl(App, "providerSet"))
+                    app.providerSet().select(selected_provider)
+                else
+                    provider_set.Bundle{
+                        .capabilities = provider_capabilities,
+                        .fx_search = app.web_search_runtime.provider,
+                    };
+                const search_provider = search_bundle.fx_search;
+                if (provider_capabilities.fx_search and search_provider != null) {
+                    app.web_search_runtime.configureForProvider(search_provider.?, .{
                         .api_key = app.auth.apiKey() orelse "",
                         .credential_source = app.auth.credentialSource(),
+                        .account_id = app.auth.accountId(),
                         .gateway_team = app.auth.gatewayTeam(),
                         .worker_model = provider_runtime.model(app),
                         .gateway_retry_count = gateway_retry_count,
@@ -307,7 +316,7 @@ pub fn Runtime(comptime App: type) type {
                     });
                     ctx.web_search_backend = app.web_search_runtime.dispatchBackend();
                 }
-                ctx.web_search_runtime_ready = false;
+                ctx.web_search_runtime_ready = search_bundle.fxSearchRuntimeReady();
                 ctx.web_search_progress_ctx = @ptrCast(app);
                 ctx.on_web_search_progress = app_callbacks.Bindings(App).onWebSearchProgress;
             }

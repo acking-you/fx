@@ -927,11 +927,13 @@ const AskContext = struct {
     }
 
     fn toolContext(self: *AskContext) tool_runtime.Context {
-        const provider_capabilities = self.cfg.provider_set.select(self.provider).capabilities;
-        if (provider_capabilities.fx_search) {
-            self.web_search_runtime.configure(.{
+        const provider_bundle = self.cfg.provider_set.select(self.provider);
+        const provider_capabilities = provider_bundle.capabilities;
+        if (provider_capabilities.fx_search and provider_bundle.fx_search != null) {
+            self.web_search_runtime.configureForProvider(provider_bundle.fx_search.?, .{
                 .api_key = self.api_key,
                 .credential_source = self.credential_source,
+                .account_id = self.account_id,
                 .gateway_team = self.gateway_team,
                 .worker_model = self.model,
                 .gateway_retry_count = self.cfg.gateway_retry_count,
@@ -1000,8 +1002,11 @@ const AskContext = struct {
             .web_fetch_artifact_error = self.session.webFetchArtifactError(),
             .web_fetch_progress_ctx = @ptrCast(self),
             .on_web_fetch_progress = onWebFetchProgress,
-            .web_search_runtime_ready = false,
-            .web_search_backend = if (provider_capabilities.fx_search) self.web_search_runtime.dispatchBackend() else null,
+            .web_search_runtime_ready = provider_bundle.fxSearchRuntimeReady(),
+            .web_search_backend = if (provider_capabilities.fx_search and provider_bundle.fx_search != null)
+                self.web_search_runtime.dispatchBackend()
+            else
+                null,
             .web_search_progress_ctx = @ptrCast(self),
             .on_web_search_progress = onWebSearchProgress,
             .model_capability_resolver = .{

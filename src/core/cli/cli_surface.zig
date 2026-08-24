@@ -236,6 +236,7 @@ const SessionListOptions = struct {
 const UsageOptions = struct {
     format: output_contracts.OutputFormat = .text,
     scope: usage_report.Scope = .days_30,
+    codex_account: bool = false,
 };
 
 const WorkspaceOptions = struct {
@@ -1582,6 +1583,44 @@ fn runNonInteractiveWithDeps(
                 try writeUsageOrJsonError(alloc, cfg.command_catalog, deps, .usage, "usage", err, rest);
                 return .handled_failure;
             };
+            if (opts.codex_account) {
+                const account_usage = cfg.provider_set.codex.account_usage orelse {
+                    try writeUsageCommandFailure(alloc, deps, error.AccountUsageUnavailable, opts.format);
+                    return .handled_failure;
+                };
+                var resolution = credentials.resolveForProvider(
+                    alloc,
+                    cfg.gateway_provider.oauth_transport,
+                    cfg.secret_store,
+                    .refresh_if_needed,
+                    .codex,
+                    .chatgpt_subscription,
+                ) catch |err| {
+                    try writeUsageCommandFailure(alloc, deps, err, opts.format);
+                    return .handled_failure;
+                };
+                defer if (resolution.credential) |*credential| credential.deinit(alloc);
+                const credential = if (resolution.credential) |*value| value else null;
+                var snapshot = account_usage.fetch(alloc, .{
+                    .credential = if (credential) |value| value.token else null,
+                    .account_id = if (credential) |value| value.accountId() else null,
+                    .credential_source = if (credential) |value| value.source else null,
+                    .oauth_transport = cfg.gateway_provider.oauth_transport,
+                });
+                defer snapshot.deinit(alloc);
+                const rendered = try snapshot.render(alloc, opts.format);
+                defer alloc.free(rendered);
+                if (snapshot.failure != null) {
+                    if (opts.format == .json) {
+                        try writeFormattedOutput(deps, rendered, opts.format);
+                    } else {
+                        try writeStderr(deps, rendered);
+                    }
+                    return .handled_failure;
+                }
+                try writeFormattedOutput(deps, rendered, opts.format);
+                return .handled_success;
+            }
             const home = deps.getenv(deps.env_ctx, "HOME") orelse {
                 try writeUsageCommandFailure(
                     alloc,
@@ -3129,6 +3168,7 @@ fn parseSessionListArgs(args: []const [:0]const u8) !SessionListOptions {
 fn parseUsageArgs(args: []const [:0]const u8) !UsageOptions {
     var options = UsageOptions{};
     var period_seen = false;
+    var codex_seen = false;
     var json_seen = false;
     var index: usize = 0;
     while (index < args.len) : (index += 1) {
@@ -3137,6 +3177,12 @@ fn parseUsageArgs(args: []const [:0]const u8) !UsageOptions {
             if (json_seen) return error.InvalidUsageArgs;
             json_seen = true;
             options.format = .json;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--codex")) {
+            if (codex_seen) return error.InvalidUsageArgs;
+            codex_seen = true;
+            options.codex_account = true;
             continue;
         }
         if (std.mem.eql(u8, arg, "--period")) {
@@ -3155,6 +3201,7 @@ fn parseUsageArgs(args: []const [:0]const u8) !UsageOptions {
         }
         return error.InvalidUsageArgs;
     }
+    if (options.codex_account and period_seen) return error.InvalidUsageArgs;
     return options;
 }
 
@@ -3537,7 +3584,7 @@ test "help aliases route to help" {
     try std.testing.expectEqual(Command.help, parse(command_catalog, &.{@constCast("-h")}));
 }
 
-test "usage arguments accept only rolling periods and one JSON flag" {
+test "usage arguments select local windows or Codex account usage" {
     const defaults = try parseUsageArgs(&.{});
     try std.testing.expectEqual(usage_report.Scope.days_30, defaults.scope);
     try std.testing.expectEqual(output_contracts.OutputFormat.text, defaults.format);
@@ -3550,11 +3597,17 @@ test "usage arguments accept only rolling periods and one JSON flag" {
     try std.testing.expectEqual(usage_report.Scope.days_7, selected.scope);
     try std.testing.expectEqual(output_contracts.OutputFormat.json, selected.format);
 
+    const codex = try parseUsageArgs(&.{ @constCast("--codex"), @constCast("--json") });
+    try std.testing.expect(codex.codex_account);
+    try std.testing.expectEqual(output_contracts.OutputFormat.json, codex.format);
+
     for ([_][]const [:0]const u8{
         &.{@constCast("--period")},
         &.{ @constCast("--period"), @constCast("session") },
         &.{ @constCast("--period"), @constCast("24h"), @constCast("--period"), @constCast("7d") },
         &.{ @constCast("--json"), @constCast("--json") },
+        &.{ @constCast("--codex"), @constCast("--codex") },
+        &.{ @constCast("--codex"), @constCast("--period"), @constCast("7d") },
         &.{@constCast("30d")},
     }) |invalid| {
         try std.testing.expectError(error.InvalidUsageArgs, parseUsageArgs(invalid));
