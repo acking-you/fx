@@ -572,6 +572,7 @@ const App = struct {
     fast_mode: bool = false,
     thought_entry_id: ?u32 = null,
     thought_body: std.ArrayList(u8) = .empty,
+    thought_heading_locked: bool = false,
     auto_upgrade_enabled: bool = true,
     effort: ReasoningEffort = .auto,
     diff_entries: std.ArrayList(@import("core/output/diff.zig").DiffEntry) = .empty,
@@ -2121,10 +2122,20 @@ const App = struct {
         return self.shell.refreshReplaceableSemanticNotice(self.alloc, entry_id, notice);
     }
 
-    /// Render only a bounded tail in the transcript. Provider replay uses the
-    /// separate, untruncated reasoning stored on the assistant message.
-    fn renderThoughtNotice(self: *App) types.SemanticNotice {
-        const visible = thought_presentation.visibleBody(
+    fn renderActiveThoughtNotice(self: *App) types.SemanticNotice {
+        const visible = thought_presentation.activeBody(
+            self.thought_body.items,
+            thought_presentation.default_visible_lines,
+        );
+        return .{
+            .topic = "thinking",
+            .tone = .neutral,
+            .body = visible.text,
+        };
+    }
+
+    fn renderFinalThoughtNotice(self: *App) types.SemanticNotice {
+        const visible = thought_presentation.finalizedBody(
             self.thought_body.items,
             thought_presentation.default_visible_lines,
         );
@@ -2142,26 +2153,35 @@ const App = struct {
             const copied = chunk[0..@min(chunk.len, remaining)];
             try self.thought_body.appendSlice(self.alloc, copied);
         }
-        const notice = self.renderThoughtNotice();
+        // Once a complete activity heading is visible, keep it stable while
+        // retaining later chunks for the finalized summary. This avoids a
+        // transcript rebuild for every reasoning token.
+        if (self.thought_heading_locked) return;
+
+        const notice = self.renderActiveThoughtNotice();
         if (self.thought_entry_id) |entry_id| {
             _ = try self.refreshReplaceableDomainNotice(entry_id, notice);
+            self.thought_heading_locked = thought_presentation.firstBoldHeading(self.thought_body.items) != null;
             return;
         }
         self.thought_entry_id = try self.appendReplaceableDomainNotice(notice);
+        self.thought_heading_locked = thought_presentation.firstBoldHeading(self.thought_body.items) != null;
     }
 
     pub fn finalizeThoughtDisplay(self: *App) !void {
         const entry_id = self.thought_entry_id orelse {
             self.thought_body.clearRetainingCapacity();
+            self.thought_heading_locked = false;
             return;
         };
         if (self.thought_body.items.len > 0) {
-            _ = self.replaceDomainNotice(entry_id, self.renderThoughtNotice()) catch |err| {
+            _ = self.replaceDomainNotice(entry_id, self.renderFinalThoughtNotice()) catch |err| {
                 debug_trace.logf("ui", "thought display finalize failed err={s}", .{@errorName(err)});
             };
         }
         self.thought_entry_id = null;
         self.thought_body.clearRetainingCapacity();
+        self.thought_heading_locked = false;
     }
 
     pub fn writeCommandOutputChunk(self: *App, stream: command_output_content.Stream, text: []const u8, record: bool) !void {

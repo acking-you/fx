@@ -1457,23 +1457,20 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
           () =>
             stagedTokenProgressResponse(
               hold,
-              "reasoning tokens should advance while hidden from the transcript",
+              "reasoning tokens should advance during the live counter",
               streamedText,
             ),
         ],
       );
 
       await session!.sendText("Exercise the live token counter.");
-      const reasoningPane = await waitForScrollback(
+      await waitForScrollback(
         session!,
         (value) =>
           /Thinking \(\d+s\) \(↑8 ↓[1-9]\d*(?:\.\d)?k?\)/.test(
             value,
-          ),
+        ),
         "reasoning token progress",
-      );
-      expect(reasoningPane).not.toContain(
-        "reasoning tokens should advance while hidden from the transcript",
       );
       expect(queuedGateway.requests).toHaveLength(1);
 

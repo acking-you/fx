@@ -33,6 +33,7 @@ pub var tag_style: []const u8 = "\x1b[1;38;5;255m";
 pub var subtitle_style: []const u8 = "\x1b[1;38;5;255m";
 pub var system_notice_label_style: []const u8 = "\x1b[1;38;5;252m";
 pub var system_notice_text_style: []const u8 = "\x1b[38;5;250m";
+pub var reasoning_summary_style: []const u8 = "\x1b[3;38;5;245m";
 pub var dim_style: []const u8 = "\x1b[38;5;245m";
 pub var warning_style: []const u8 = "\x1b[38;5;252m";
 pub var green_style: []const u8 = "\x1b[38;5;252m";
@@ -74,6 +75,7 @@ pub fn initTheme(light: bool, terminal_bg: ?TerminalRgb) void {
         subtitle_style = "\x1b[1;38;5;235m";
         system_notice_label_style = "\x1b[1;38;5;238m";
         system_notice_text_style = "\x1b[38;5;241m";
+        reasoning_summary_style = "\x1b[3;38;5;247m";
         dim_style = "\x1b[38;5;247m";
         warning_style = "\x1b[38;5;238m";
         green_style = "\x1b[38;5;238m";
@@ -92,6 +94,7 @@ pub fn initTheme(light: bool, terminal_bg: ?TerminalRgb) void {
         subtitle_style = "\x1b[1;38;5;255m";
         system_notice_label_style = "\x1b[1;38;5;252m";
         system_notice_text_style = "\x1b[38;5;250m";
+        reasoning_summary_style = "\x1b[3;38;5;245m";
         dim_style = "\x1b[38;5;245m";
         warning_style = "\x1b[38;5;252m";
         green_style = "\x1b[38;5;252m";
