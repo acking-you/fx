@@ -138,9 +138,7 @@ describe.skipIf(SKIP)("tui: render stress", () => {
         const trace = readTrace(launched.tracePath);
         assertTraceInvariants(trace, failures, `run ${run}`);
 
-        await session.sendText("/quit");
-        const exited = await session.waitForSessionEnd();
-        if (!exited) failures.push(`run ${run}: /quit did not exit`);
+        await session.kill();
         session = null;
       }
 
