@@ -1477,11 +1477,18 @@ pub const CodexAccountUsageSnapshot = struct {
 
         try out.writer.writeAll("Codex account usage\n");
         try out.writer.print("Fetched at (ms): {d}\n", .{data.fetched_at_ms});
-        try out.writer.print("Plan: {s}\n", .{data.plan_type});
+        try out.writer.writeAll("Plan: ");
+        try writeTerminalSafe(&out.writer, alloc, data.plan_type);
+        try out.writer.writeByte('\n');
         try out.writer.writeAll("Rate limits:\n");
         for (data.rate_limits) |limit| {
-            try out.writer.print("  {s}", .{limit.id});
-            if (limit.name) |name| try out.writer.print(" ({s})", .{name});
+            try out.writer.writeAll("  ");
+            try writeTerminalSafe(&out.writer, alloc, limit.id);
+            if (limit.name) |name| {
+                try out.writer.writeAll(" (");
+                try writeTerminalSafe(&out.writer, alloc, name);
+                try out.writer.writeByte(')');
+            }
             if (limit.allowed) |allowed| {
                 try out.writer.print(" allowed={s}", .{if (allowed) "true" else "false"});
             }
@@ -1501,19 +1508,29 @@ pub const CodexAccountUsageSnapshot = struct {
                 if (credits.has_credits) "true" else "false",
                 if (credits.unlimited) "true" else "false",
             });
-            if (credits.balance) |balance| try out.writer.print(" balance={s}", .{balance});
+            if (credits.balance) |balance| {
+                try out.writer.writeAll(" balance=");
+                try writeTerminalSafe(&out.writer, alloc, balance);
+            }
             try out.writer.writeByte('\n');
         }
         if (data.spend_control) |control| {
             try out.writer.print("Spend control: reached={s}\n", .{if (control.reached) "true" else "false"});
             if (control.individual_limit) |limit| {
-                if (limit.source) |source| try out.writer.print("  source={s}\n", .{source});
+                if (limit.source) |source| {
+                    try out.writer.writeAll("  source=");
+                    try writeTerminalSafe(&out.writer, alloc, source);
+                    try out.writer.writeByte('\n');
+                }
+                try out.writer.writeAll("  individual limit=");
+                try writeTerminalSafe(&out.writer, alloc, limit.limit);
+                try out.writer.writeAll(" used=");
+                try writeTerminalSafe(&out.writer, alloc, limit.used);
+                try out.writer.writeAll(" remaining=");
+                try writeTerminalSafe(&out.writer, alloc, limit.remaining);
                 try out.writer.print(
-                    "  individual limit={s} used={s} remaining={s} used_percent={d} remaining_percent={d} reset_after_seconds={d} reset_at={d}\n",
+                    " used_percent={d} remaining_percent={d} reset_after_seconds={d} reset_at={d}\n",
                     .{
-                        limit.limit,
-                        limit.used,
-                        limit.remaining,
                         limit.used_percent,
                         limit.remaining_percent,
                         limit.reset_after_seconds,
@@ -1523,7 +1540,9 @@ pub const CodexAccountUsageSnapshot = struct {
             }
         }
         if (data.rate_limit_reached_type) |reached_type| {
-            try out.writer.print("Rate limit reached type: {s}\n", .{reached_type});
+            try out.writer.writeAll("Rate limit reached type: ");
+            try writeTerminalSafe(&out.writer, alloc, reached_type);
+            try out.writer.writeByte('\n');
         }
         if (data.rate_limit_reset_credits_available) |available| {
             try out.writer.print("Rate limit reset credits: {d}\n", .{available});
@@ -1547,7 +1566,9 @@ pub const CodexAccountUsageSnapshot = struct {
         if (!wrote_stat) try out.writer.writeAll(" unavailable");
         try out.writer.writeByte('\n');
         for (data.daily_usage_buckets) |bucket| {
-            try out.writer.print("  {s}: {d} tokens\n", .{ bucket.start_date, bucket.tokens });
+            try out.writer.writeAll("  ");
+            try writeTerminalSafe(&out.writer, alloc, bucket.start_date);
+            try out.writer.print(": {d} tokens\n", .{bucket.tokens});
         }
         return out.toOwnedSlice();
     }
@@ -2977,6 +2998,38 @@ test "Codex account usage failure has stable text and JSON contracts" {
         "{\"kind\":\"codex_account_usage\",\"schema_version\":1,\"error\":{\"code\":\"rate_limited\",\"http_status\":429}}",
         json_output,
     );
+}
+
+test "Codex account usage text visibly escapes provider controls" {
+    const usage_json =
+        \\{"plan_type":"pro\u001b[31m","credits":{"has_credits":true,"unlimited":false,"balance":"7\n50"},"spend_control":{"reached":false,"individual_limit":{"source":"user\rname","limit":"1\t00","used":"2\u001b","remaining":"8\n0","used_percent":20,"remaining_percent":80,"reset_after_seconds":60,"reset_at":100}},"additional_rate_limits":[{"limit_name":"Code\nreview","metered_feature":"codex\tfeature"}],"rate_limit_reached_type":{"type":"hard\rlimit"}}
+    ;
+    const profile_json =
+        \\{"stats":{"daily_usage_buckets":[{"start_date":"2026-08-24\u001b","tokens":10}]}}
+    ;
+    const data = try codex_usage.parseSnapshot(
+        std.testing.allocator,
+        usage_json,
+        profile_json,
+        1234,
+    );
+    var snapshot = CodexAccountUsageSnapshot{ .data = data };
+    defer snapshot.deinit(std.testing.allocator);
+
+    const text_output = try snapshot.renderText(std.testing.allocator);
+    defer std.testing.allocator.free(text_output);
+    try std.testing.expect(std.mem.findScalar(u8, text_output, 0x1b) == null);
+    for ([_][]const u8{
+        "Plan: pro\\x1b[31m\n",
+        "codex\\x09feature (Code\\x0areview)",
+        "balance=7\\x0a50",
+        "source=user\\x0dname",
+        "limit=1\\x0900 used=2\\x1b remaining=8\\x0a0",
+        "Rate limit reached type: hard\\x0dlimit",
+        "2026-08-24\\x1b: 10 tokens",
+    }) |escaped| {
+        try std.testing.expect(std.mem.find(u8, text_output, escaped) != null);
+    }
 }
 
 test "core credits snapshot renders parsed, raw, and empty fallbacks" {
