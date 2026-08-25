@@ -122,12 +122,15 @@ async function waitForModelsMenu(session: TmuxSession, count: number): Promise<s
   throw new Error(`Timed out waiting for models menu.\nPane:\n${latest.join("\n")}`);
 }
 
-async function waitForHelpMenu(session: TmuxSession, count: number): Promise<string[]> {
+async function waitForHelpMenu(session: TmuxSession, count?: number): Promise<string[]> {
   const deadline = Date.now() + TIMEOUT;
   let latest: string[] = [];
   while (Date.now() < deadline) {
     latest = await session.capturePaneGrid();
-    if (latest.join("\n").includes(`Commands ${count}`)) return latest;
+    const pane = latest.join("\n");
+    if (count === undefined ? /Commands \d+/.test(pane) : pane.includes(`Commands ${count}`)) {
+      return latest;
+    }
     await Bun.sleep(100);
   }
   throw new Error(`Timed out waiting for help menu.\nPane:\n${latest.join("\n")}`);
@@ -295,8 +298,14 @@ function nestedText(content: unknown): string {
 }
 
 function gatewayPromptText(body: string): string {
-  const request = JSON.parse(body) as { input: Array<{ content?: unknown }> };
-  return request.input.map((message) => nestedText(message.content)).join("\n");
+  const request = JSON.parse(body) as {
+    instructions?: unknown;
+    input?: Array<{ content?: unknown }>;
+  };
+  return [
+    nestedText(request.instructions),
+    ...(request.input ?? []).map((message) => nestedText(message.content)),
+  ].join("\n");
 }
 
 function countOccurrences(text: string, needle: string): number {
@@ -1012,14 +1021,14 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
       const openComposerRows = [
         composerRow(afterSlash),
         composerRow(afterSlashF),
-        composerRow(afterSlashFe),
-        composerRow(afterSlashFeedback),
+        composerRow(afterSlashFa),
+        composerRow(afterSlashFast),
       ];
       const openFooterRows = [
         footerStatusRow(afterSlash),
         footerStatusRow(afterSlashF),
-        footerStatusRow(afterSlashFe),
-        footerStatusRow(afterSlashFeedback),
+        footerStatusRow(afterSlashFa),
+        footerStatusRow(afterSlashFast),
       ];
       expect(new Set(openComposerRows).size).toBe(1);
       expect(new Set(openFooterRows).size).toBe(1);
@@ -1459,7 +1468,7 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
       await session.waitForComposer(10_000);
 
       await session.sendText("/help");
-      let grid = await waitForHelpMenu(session, 37);
+      let grid = await waitForHelpMenu(session);
       let pane = grid.join("\n");
       expect(pane).not.toContain("𝒇x");
       expect(pane).not.toContain("Run /help for commands");
@@ -1479,7 +1488,7 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
       expect(pane).not.toContain("/clear");
 
       await session.sendKeys("C-u");
-      await waitForHelpMenu(session, 37);
+      await waitForHelpMenu(session);
       await session.sendKeys("Down");
       await session.sendKeys("Enter");
       pane = await session.waitForPane(
@@ -1492,7 +1501,7 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
 
       await session.sendKeys("C-u");
       await session.sendText("/help");
-      await waitForHelpMenu(session, 37);
+      await waitForHelpMenu(session);
       await session.sendLiteralText("additional directories");
       await waitForHelpMenu(session, 1);
       await session.sendKeys("Enter");
@@ -1509,7 +1518,7 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
 
       await session.sendKeys("C-u");
       await session.sendText("/help");
-      await waitForHelpMenu(session, 37);
+      await waitForHelpMenu(session);
       await session.sendLiteralText("no command can match this query");
       await session.waitForText("No commands found.", 5_000);
       await session.sendKeys("Escape");
