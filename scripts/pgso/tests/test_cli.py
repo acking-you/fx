@@ -42,7 +42,6 @@ class PgsoCliTests(unittest.TestCase):
 
         self.assertEqual("all", arguments.command)
         self.assertEqual("aarch64-macos", arguments.target)
-        self.assertEqual("stable", arguments.update_channel)
         self.assertEqual(50, arguments.samples)
         self.assertGreater(arguments.timeout_seconds, 0)
         self.assertTrue(str(arguments.corpus).endswith("scripts/pgso/corpus.json"))

@@ -63,7 +63,6 @@ jobs:
             --llvm-bin "${{ steps.setup.outputs.llvm-bin }}" \
             --output-dir "$RUNNER_TEMP/fx-pgso-seed" \
             --target aarch64-macos \
-            --update-channel stable \
             --bun "${{ steps.setup.outputs.bun-bin }}" \
             --hyperfine "${{ steps.setup.outputs.hyperfine-bin }}"
 

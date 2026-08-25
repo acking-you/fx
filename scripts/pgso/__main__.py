@@ -85,11 +85,6 @@ def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--llvm-bin", required=True)
     parser.add_argument("--output-dir", required=True, type=pathlib.Path)
     parser.add_argument("--target", default=SUPPORTED_TARGET)
-    parser.add_argument(
-        "--update-channel",
-        choices=("stable", "dev"),
-        default="stable",
-    )
     parser.add_argument("--corpus", type=pathlib.Path, default=DEFAULT_CORPUS)
     parser.add_argument("--samples", type=int, default=50)
     parser.add_argument("--timeout-seconds", type=float, default=1800)
@@ -178,7 +173,6 @@ def _profile_summary(
 def _configuration(arguments: argparse.Namespace) -> dict[str, object]:
     return {
         "target": arguments.target,
-        "update_channel": arguments.update_channel,
         "corpus": str(arguments.corpus.resolve()),
         "llvm_bin": str(pathlib.Path(arguments.llvm_bin).resolve()),
         "samples": arguments.samples,
@@ -316,7 +310,6 @@ def run_command(arguments: argparse.Namespace) -> pathlib.Path:
         spec = ArtifactSpec(
             repo_root=REPO_ROOT,
             target=arguments.target,
-            update_channel=arguments.update_channel,
         )
         stage = "control"
         recorder.stage(stage, "running")
@@ -351,7 +344,6 @@ def run_command(arguments: argparse.Namespace) -> pathlib.Path:
             llvm_version=toolchain.llvm_version,
             bitcode_sha256=bitcode_sha256,
             corpus_sha256=corpus.manifest_sha256,
-            update_channel=arguments.update_channel,
             generation_flags=GENERATION_FLAGS,
         )
         recorder.stage(

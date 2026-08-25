@@ -35,7 +35,6 @@ python3 -m scripts.pgso all \
   --llvm-bin "$(brew --prefix llvm@21)/bin" \
   --output-dir /tmp/fx-pgso-candidate \
   --target aarch64-macos \
-  --update-channel stable \
   --samples 50
 ```
 

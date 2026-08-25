@@ -138,7 +138,7 @@ jobs:
           node-version: "24"
 
       - name: Build ReleaseSafe addon
-        run: zig build -Dnapi-surface=core -Doptimize=ReleaseSafe -Dupdate-channel=${{ needs.metadata.outputs.channel }}
+        run: zig build -Dnapi-surface=core -Doptimize=ReleaseSafe
 
       - name: Test native addon
         run: npm run --prefix sdk test:node-napi
@@ -178,8 +178,8 @@ jobs:
 
       - name: Build ReleaseSmall WebAssembly surfaces
         run: |
-          zig build -Dwasm-surface=core -Doptimize=ReleaseSmall -Dupdate-channel=${{ needs.metadata.outputs.channel }}
-          zig build -Dwasm-surface=term -Doptimize=ReleaseSmall -Dupdate-channel=${{ needs.metadata.outputs.channel }}
+          zig build -Dwasm-surface=core -Doptimize=ReleaseSmall
+          zig build -Dwasm-surface=term -Doptimize=ReleaseSmall
 
       - name: Install terminal test dependencies
         run: npm ci --prefix sdk/node

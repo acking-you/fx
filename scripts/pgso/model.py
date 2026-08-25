@@ -21,7 +21,6 @@ class BuildIdentity:
     llvm_version: str
     bitcode_sha256: str
     corpus_sha256: str
-    update_channel: str
     generation_flags: tuple[str, ...]
 
 

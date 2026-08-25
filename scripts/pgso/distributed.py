@@ -177,7 +177,6 @@ def identity_from_mapping(value: object) -> BuildIdentity:
         "llvm_version",
         "bitcode_sha256",
         "corpus_sha256",
-        "update_channel",
     )
     values: dict[str, str] = {}
     for field in fields:
@@ -194,8 +193,6 @@ def identity_from_mapping(value: object) -> BuildIdentity:
 def validate_seed_identity(identity: BuildIdentity) -> None:
     if identity.target != SUPPORTED_TARGET or identity.host_arch != "arm64":
         raise PgsoError("seed identity is not native macOS arm64")
-    if identity.update_channel != "stable":
-        raise PgsoError("seed identity must use the stable update channel")
     if identity.generation_flags != GENERATION_FLAGS:
         raise PgsoError("seed identity has unexpected profile generation flags")
 
@@ -848,7 +845,6 @@ def run_candidate(arguments: argparse.Namespace) -> pathlib.Path:
     spec = ArtifactSpec(
         repo_root=REPO_ROOT,
         target=identity.target,
-        update_channel=identity.update_channel,
     )
     emit_bitcode(toolchain, spec, paths, expected_sha256=identity.bitcode_sha256)
     apply_profile(toolchain, paths, identity.bitcode_sha256)

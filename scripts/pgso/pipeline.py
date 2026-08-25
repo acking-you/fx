@@ -80,7 +80,6 @@ class ArtifactSpec:
     repo_root: pathlib.Path
     target: str = SUPPORTED_TARGET
     optimize: str = "ReleaseSafe"
-    update_channel: str = "stable"
     selector: str = "fx"
 
     def __post_init__(self) -> None:
@@ -88,10 +87,6 @@ class ArtifactSpec:
             raise PgsoError(f"unsupported artifact target: {self.target}")
         if self.optimize != "ReleaseSafe":
             raise PgsoError("PGSO input must use Zig ReleaseSafe")
-        if self.update_channel not in ("stable", "dev"):
-            raise PgsoError(
-                f"unsupported update channel: {self.update_channel}"
-            )
         if self.selector not in ARTIFACT_LAYOUTS:
             raise PgsoError(f"unsupported pipeline artifact: {self.selector}")
 
@@ -284,7 +279,6 @@ def zig_build_argv(
         (
             f"-Dtarget={spec.target}",
             f"-Doptimize={spec.optimize}",
-            f"-Dupdate-channel={spec.update_channel}",
             "--prefix",
             str(prefix),
             "--cache-dir",

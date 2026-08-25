@@ -228,7 +228,6 @@ class ShardAggregationTests(unittest.TestCase):
             llvm_version="21.1.8",
             bitcode_sha256="b" * 64,
             corpus_sha256="c" * 64,
-            update_channel="stable",
             generation_flags=GENERATION_FLAGS,
         )
 
@@ -336,8 +335,6 @@ class ShardAggregationTests(unittest.TestCase):
     def test_seed_identity_requires_the_pinned_production_contract(self) -> None:
         validate_seed_identity(self.identity)
 
-        with self.assertRaisesRegex(PgsoError, "stable update channel"):
-            validate_seed_identity(dataclasses.replace(self.identity, update_channel="dev"))
         with self.assertRaisesRegex(PgsoError, "profile generation flags"):
             validate_seed_identity(
                 dataclasses.replace(self.identity, generation_flags=("--different",))
