@@ -17,6 +17,7 @@ from scripts.pgso.distributed import (
 )
 from scripts.pgso.model import BuildIdentity, PgsoError
 from scripts.pgso.pipeline import GENERATION_FLAGS
+from scripts.pgso.qualify import STARTUP_MINIMUM_SAMPLES
 
 
 def scenario(name: str, timeout_seconds: float) -> Scenario:
@@ -351,15 +352,15 @@ class ShardAggregationTests(unittest.TestCase):
             "measurement": {
                 "name": name,
                 "argv": ["help"],
-                "requested_samples": 100,
-                "control_samples": [1.0] * 100,
-                "candidate_samples": [0.9] * 100,
+                "requested_samples": STARTUP_MINIMUM_SAMPLES,
+                "control_samples": [1.0] * STARTUP_MINIMUM_SAMPLES,
+                "candidate_samples": [0.9] * STARTUP_MINIMUM_SAMPLES,
                 "control_failures": 0,
                 "candidate_failures": 0,
                 "errors": [],
                 "comparison": {
-                    "control_samples": [1.0] * 100,
-                    "candidate_samples": [0.9] * 100,
+                    "control_samples": [1.0] * STARTUP_MINIMUM_SAMPLES,
+                    "candidate_samples": [0.9] * STARTUP_MINIMUM_SAMPLES,
                     "control_p50": 1.0,
                     "control_p95": 1.0,
                     "candidate_p50": 0.9,
@@ -437,10 +438,13 @@ class ShardAggregationTests(unittest.TestCase):
     def test_measurement_aggregate_rejects_truncated_samples(self) -> None:
         document = self.measurement("startup-help")
         measurement = dict(document["measurement"])
-        measurement["candidate_samples"] = [0.9] * 99
+        measurement["candidate_samples"] = [0.9] * (STARTUP_MINIMUM_SAMPLES - 1)
         document["measurement"] = measurement
 
-        with self.assertRaisesRegex(PgsoError, "requires exactly 100 samples"):
+        with self.assertRaisesRegex(
+            PgsoError,
+            f"requires exactly {STARTUP_MINIMUM_SAMPLES} samples",
+        ):
             aggregate_measurement_shards(
                 (document,),
                 phase="startup",
