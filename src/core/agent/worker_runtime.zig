@@ -66,7 +66,6 @@ pub const QueuedPrompt = struct {
     model: []u8,
     provider: model_provider.ProviderId = .gateway,
     api_key: []u8,
-    gateway_team: ?[]u8 = null,
     credential_source: ?types.CredentialSource = null,
     account_id: ?[]u8 = null,
     permission_mode: types.PermissionMode,
@@ -2107,7 +2106,6 @@ pub fn freeQueuedPrompt(alloc: std.mem.Allocator, prompt: QueuedPrompt) void {
     types.freeImageAttachmentSlice(alloc, prompt.authorized_image_catalog);
     alloc.free(prompt.model);
     secret.zeroAndFree(alloc, prompt.api_key);
-    if (prompt.gateway_team) |team| alloc.free(team);
     if (prompt.account_id) |account_id| alloc.free(account_id);
     types.freeHistoryTurnSlice(alloc, prompt.history);
     if (prompt.root_user_intent_context.len > 0) alloc.free(prompt.root_user_intent_context);

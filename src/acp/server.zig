@@ -29,6 +29,7 @@ const session_codec = @import("../core/session/session_codec.zig");
 const session_log = @import("../core/session/session_log.zig");
 const session_store = @import("../core/session/session_store.zig");
 const session_runtime = @import("../core/session/session.zig");
+const session_usage = @import("../core/session/session_usage.zig");
 const worker_runtime = @import("../core/agent/worker_runtime.zig");
 const background_runtime = @import("../core/background/background_runtime.zig");
 const terminal_client_runtime = @import("../core/terminal/client.zig");
@@ -319,7 +320,6 @@ pub const ServerState = struct {
     api_key: []u8 = &.{},
     credential_source: ?types.CredentialSource = null,
     account_id: ?[]u8 = null,
-    gateway_team: ?[]u8 = null,
     selected_model: []u8 = &.{},
     provider: model_provider.ProviderId = .gateway,
     configured_model: []u8 = &.{},
@@ -369,7 +369,6 @@ pub const ServerState = struct {
         self.workspace_access.deinit(self.alloc);
         if (self.workspace_root.len > 0) self.alloc.free(self.workspace_root);
         if (self.api_key.len > 0) secret.zeroAndFree(self.alloc, self.api_key);
-        if (self.gateway_team) |team| self.alloc.free(team);
         if (self.account_id) |account_id| self.alloc.free(account_id);
         if (self.selected_model.len > 0) self.alloc.free(self.selected_model);
         if (self.configured_model.len > 0) self.alloc.free(self.configured_model);
@@ -402,7 +401,6 @@ fn credentialMatchesProvider(
 fn adoptServerCredential(state: *ServerState, credential: *credentials.Credential) void {
     if (state.active_session) |*active| active.api_key = &.{};
     if (state.api_key.len > 0) secret.zeroAndFree(state.alloc, state.api_key);
-    if (state.gateway_team) |team| state.alloc.free(team);
     if (state.account_id) |account_id| state.alloc.free(account_id);
 
     state.api_key = credential.token;
@@ -410,23 +408,10 @@ fn adoptServerCredential(state: *ServerState, credential: *credentials.Credentia
     state.credential_source = credential.source;
     state.account_id = credential.account_id;
     credential.account_id = null;
-    state.gateway_team = if (credential.team_id) |team| team else credential.team_slug;
-    if (credential.team_id != null) {
-        credential.team_id = null;
-        if (credential.team_slug) |slug| state.alloc.free(slug);
-        credential.team_slug = null;
-    } else {
-        credential.team_slug = null;
-    }
     if (state.active_session) |*active| {
         active.api_key = state.api_key;
         active.credential_source = state.credential_source;
         active.account_id = state.account_id;
-        if (comptime !host_target.is_wasm) {
-            if (state.credential_source == .chatgpt_subscription or state.credential_source == .grok_subscription) {
-                active.session_rt.usage.clearReconciliationCredential();
-            }
-        }
     }
 }
 
@@ -528,24 +513,8 @@ pub fn releaseActiveSession(state: *ServerState) !void {
     const active = if (state.active_session) |*session| session else return;
     disableSubagentHost(state);
     if (comptime !host_target.is_wasm) {
-        active.session_rt.usage.cancelReconciliation();
         active.session_rt.usage.finishProfilePublicationsBeforeShutdown();
-        flushActiveSessionUsage(state) catch |err| {
-            if (state.cfg.provider_set.select(active.provider).deferred_usage == null) {
-                active.session_rt.usage.clearReconciliationCredential();
-            } else if (active.credential_source) |source| {
-                active.session_rt.usage.replaceProviderReconciliationCredential(
-                    state.alloc,
-                    active.provider,
-                    source,
-                    active.account_id,
-                    state.api_key,
-                );
-            } else {
-                active.session_rt.usage.clearReconciliationCredential();
-            }
-            return err;
-        };
+        flushActiveSessionUsage(state) catch |err| return err;
         active.session_rt.usage.configurePublicationSink(null);
         active.session_rt.usage.configureCheckpointSink(null);
     }
@@ -556,7 +525,6 @@ fn closeActiveSession(state: *ServerState) !void {
     const active = if (state.active_session) |*session| session else return;
     disableSubagentHost(state);
     if (comptime !host_target.is_wasm) {
-        active.session_rt.usage.cancelReconciliation();
         active.session_rt.usage.finishProfilePublicationsBeforeShutdown();
         flushActiveSessionUsage(state) catch |err| {
             destroyActiveSession(state);
@@ -756,9 +724,7 @@ pub fn runWithTransport(
         .alloc = alloc,
         .cfg = cfg,
         .writer = writer_value,
-        .web_search_runtime = web_search_runtime.Runtime.init(.{
-            .provider = cfg.provider_set.gateway.fx_search.?,
-        }),
+        .web_search_runtime = web_search_runtime.Runtime.init(.{}),
         .background = background_runtime.BackgroundRuntime.init(
             cfg.background_process_provider,
         ),
@@ -1545,7 +1511,6 @@ fn handleInitialize(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message
             .access = credentials.catalogAccessForCredentialAndAccount(
                 state.credential_source,
                 state.api_key,
-                state.gateway_team,
                 state.account_id,
             ),
             .endpoint = state.cfg.gateway_models_path,
@@ -1773,7 +1738,6 @@ fn handleSetConfigOption(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Me
             const access = credentials.catalogAccessForCredentialAndAccount(
                 staged_credential.source,
                 staged_credential.token,
-                staged_credential.gatewayTeam(),
                 staged_credential.accountId(),
             );
             const fetched = try catalog_provider.fetch(alloc, .{
@@ -2941,15 +2905,12 @@ test "ACP usage flush preserves snapshot ownership on allocation failure" {
     var runtime_owned = true;
     defer if (runtime_owned) runtime.deinit(alloc);
     try runtime.appendAssistantHistoryTurn(alloc, "question", "answer");
-    const sequence = try runtime.usage.reserveInvocation();
-    try runtime.usage.finishObservedInvocation(
+    const observation = try session_usage.InvocationObservation.begin(&runtime.usage);
+    try observation.completeDirect(
         alloc,
-        sequence,
-        1,
-        .observed_generation,
-        "gen_01ARZ3NDEKTSV4RRFFQ69G5FAV",
-        "https://ai-gateway.vercel.sh",
-        null,
+        "provider/model",
+        .{ .input_tokens = 10, .output_tokens = 2 },
+        .{ .http_ok = true, .terminal_finish_reason = .stop },
     );
 
     var durable = try acpModelTestState(

@@ -227,9 +227,6 @@ fn mergeRichExtensions(
         target.reasoning_tokens = source.reasoning_tokens;
         target.request_count = source.request_count;
     }
-    for (durable.pending, rich.pending) |*target, source| {
-        target.observed_at_ms = source.observed_at_ms;
-    }
     carryRecoveryState(durable, rich);
 }
 
@@ -331,27 +328,13 @@ test "usage sidecar restores rich fields only for its bound session and projecti
 
     var usage = session_usage.Usage.initFresh();
     defer usage.deinit(alloc);
-    const sequence = try usage.reserveInvocation();
-    try usage.finishObservedInvocation(
+    const observation = try session_usage.InvocationObservation.begin(&usage);
+    try observation.completeDirect(
         alloc,
-        sequence,
-        5,
-        .observed_generation,
-        "gen_01ARZ3NDEKTSV4RRFFQ69G5FAV",
-        "https://ai-gateway.vercel.sh",
-        null,
+        "provider/model",
+        .{ .input_tokens = 10, .output_tokens = 4, .cached_input_tokens = 2, .cache_write_input_tokens = 1, .reasoning_output_tokens = 3 },
+        .{ .http_ok = true, .terminal_finish_reason = .stop },
     );
-    try usage.applyGeneration(alloc, .{
-        .id = "gen_01ARZ3NDEKTSV4RRFFQ69G5FAV",
-        .model = "provider/model",
-        .total_cost = 0.01,
-        .input_tokens = 10,
-        .output_tokens = 4,
-        .cache_read_tokens = 2,
-        .cache_write_tokens = 1,
-        .reasoning_tokens = 3,
-        .billable_web_search_calls = 0,
-    });
     var rich = try usage.snapshot(alloc);
     defer rich.deinit(alloc);
     try write(alloc, &verified, "session-one", rich);
@@ -442,27 +425,13 @@ test "non-billing rollback changes keep canonical values and rich metrics" {
 
     var usage = session_usage.Usage.initFresh();
     defer usage.deinit(alloc);
-    const sequence = try usage.reserveInvocation();
-    try usage.finishObservedInvocation(
+    const observation = try session_usage.InvocationObservation.begin(&usage);
+    try observation.completeDirect(
         alloc,
-        sequence,
-        5,
-        .observed_generation,
-        "gen_01ARZ3NDEKTSV4RRFFQ69G5FAV",
-        "https://ai-gateway.vercel.sh",
-        null,
+        "provider/model",
+        .{ .input_tokens = 10, .output_tokens = 4, .cached_input_tokens = 2, .cache_write_input_tokens = 1, .reasoning_output_tokens = 3 },
+        .{ .http_ok = true, .terminal_finish_reason = .stop },
     );
-    try usage.applyGeneration(alloc, .{
-        .id = "gen_01ARZ3NDEKTSV4RRFFQ69G5FAV",
-        .model = "provider/model",
-        .total_cost = 0.01,
-        .input_tokens = 10,
-        .output_tokens = 4,
-        .cache_read_tokens = 2,
-        .cache_write_tokens = 1,
-        .reasoning_tokens = 3,
-        .billable_web_search_calls = 0,
-    });
     var rich = try usage.snapshot(alloc);
     defer rich.deinit(alloc);
     try write(alloc, &verified, "session-one", rich);

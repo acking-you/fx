@@ -18,22 +18,13 @@ const checkpoint = (message) => { if (trace) console.error(`[core-smoke] ${messa
 
 const encoded = new TextEncoder();
 const catalogModels = [
-  {
-    id: "sdk/catalog-alpha",
-    type: "language",
-    released: 2,
-    tags: ["tool-use", "reasoning"],
-    reasoning_options: [{ type: "effort", values: ["high"] }],
-    fast_options: [{ type: "toggle" }],
-  },
-  { id: "sdk/catalog-beta", type: "language", released: 1, tags: ["reasoning"] },
+  { id: "gpt-5.6-sol", object: "model", created: 2, owned_by: "openai" },
+  { id: "gpt-5.4-mini", object: "model", created: 1, owned_by: "openai" },
 ];
 let fetchCalls = 0;
 let requestedModel;
-let requestedSessionId;
-let requestedSessionAffinity;
 const persistedConfig = new Map([
-  ["model", "sdk/catalog-alpha"],
+  ["model", "gpt-5.6-sol"],
   ["effort", "high"],
   ["fast_mode", "fast"],
   ["mode", "code"],
@@ -50,20 +41,16 @@ const mockFetch = async (url, init) => {
   fetchCalls++;
   if (init.method !== "POST") throw new Error(`unexpected method ${init.method}`);
   const requestBody = JSON.parse(new TextDecoder().decode(init.body));
-  const headers = new Headers(init.headers);
-  requestedModel = headers.get("ai-language-model-id");
-  requestedSessionId = headers.get("x-session-id");
-  requestedSessionAffinity = headers.get("x-session-affinity");
-  if (!Array.isArray(requestBody.prompt) && !Array.isArray(requestBody.messages)) {
-    throw new Error("gateway request did not contain prompt messages");
+  requestedModel = requestBody.model;
+  if (!Array.isArray(requestBody.input)) {
+    throw new Error("Responses request did not contain input items");
   }
   return new Response(new ReadableStream({
     async start(controller) {
-      controller.enqueue(encoded.encode('data: {"type":"text-delta","delta":"hello"}\n'));
+      controller.enqueue(encoded.encode('data: {"type":"response.output_text.delta","item_id":"answer","output_index":0,"content_index":0,"delta":"hello"}\n\n'));
       await new Promise((resolve) => setTimeout(resolve, 10));
-      controller.enqueue(encoded.encode('data: {"type":"text-delta","delta":" world"}\n'));
-      controller.enqueue(encoded.encode('data: {"type":"finish","finishReason":{"unified":"stop"},"usage":{"inputTokens":{"total":3},"outputTokens":{"total":2}}}\n'));
-      controller.enqueue(encoded.encode("data: [DONE]\n"));
+      controller.enqueue(encoded.encode('data: {"type":"response.output_text.delta","item_id":"answer","output_index":0,"content_index":0,"delta":" world"}\n\n'));
+      controller.enqueue(encoded.encode('data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}}}\n\n'));
       controller.close();
     },
   }), { status: 200, headers: { "content-type": "text/event-stream" } });
@@ -108,7 +95,7 @@ const sessionStore = {
 const events = [];
 let initializeTimeout;
 const agent = await Promise.race([
-  createFxAgent({ backend: "wasm", wasm: await readFile(wasmPath), fetch: mockFetch, env: { AI_GATEWAY_API_KEY: "sdk-test-key" }, configStore, sessionStore, onEvent(event) { events.push(event); }, traceWasi: trace }),
+  createFxAgent({ backend: "wasm", wasm: await readFile(wasmPath), fetch: mockFetch, env: { OPENAI_API_KEY: "sdk-test-key" }, configStore, sessionStore, onEvent(event) { events.push(event); }, traceWasi: trace }),
   new Promise((_, reject) => {
     initializeTimeout = setTimeout(() => reject(new Error("timed out waiting for fx-core initialize")), 5000);
   }),
@@ -134,7 +121,7 @@ if (fastOption.currentValue !== "fast") throw new Error(`session/new did not res
 for (const model of catalogModels) {
   if (!modelOption.options.some((option) => option.value === model.id)) throw new Error(`model catalog omitted ${model.id}`);
 }
-if (modelOption.currentValue !== "sdk/catalog-alpha") throw new Error(`stored model was not restored through ACP: ${modelOption.currentValue}`);
+if (modelOption.currentValue !== "gpt-5.6-sol") throw new Error(`stored model was not restored through ACP: ${modelOption.currentValue}`);
 if (session.modes.currentModeId !== "code") throw new Error(`stored mode was not restored through ACP: ${session.modes.currentModeId}`);
 await session.setModel("sdk/browser-test-model");
 if (session.configOptions.some((option) => option.id === "provider")) throw new Error("WASM model update advertised unsupported provider switching");
@@ -182,8 +169,6 @@ if (chunks.filter((chunk) => chunk.trim().length > 0).length < 2) throw new Erro
 if (stopReason !== "end_turn") throw new Error(`unexpected stop reason: ${stopReason}`);
 if (fetchCalls !== 1) throw new Error(`expected one gateway fetch, got ${fetchCalls}`);
 if (requestedModel !== "sdk/browser-test-model") throw new Error(`gateway request used unexpected model: ${requestedModel}`);
-if (requestedSessionId !== session.id) throw new Error(`gateway request used unexpected session id: ${requestedSessionId}`);
-if (requestedSessionAffinity !== session.id) throw new Error(`gateway request used unexpected session affinity: ${requestedSessionAffinity}`);
 
 await session.close();
 let closedSessionRejected = false;
@@ -228,26 +213,16 @@ const directFetch = async (url, init) => {
   if (headers.get("authorization") !== `Bearer ${directKey}`) {
     throw new Error("direct Responses request omitted its scoped bearer credential");
   }
-  if (requestUrl.startsWith("https://ai-gateway.vercel.sh")) {
-    throw new Error("OpenAI credential was routed to Vercel");
-  }
   if (init.method === "GET" && requestUrl === `${directBaseUrl}/models`) {
-    if (headers.has("x-vercel-ai-gateway-team")) throw new Error("direct model catalog leaked a Vercel team header");
     return Response.json({ object: "list", data: [{ id: "gpt-5.4", object: "model", created: 7 }] });
   }
   if (init.method !== "POST" || requestUrl !== `${directBaseUrl}/responses`) {
     throw new Error(`unexpected direct Responses request: ${init.method} ${requestUrl}`);
   }
   if (headers.get("accept") !== "text/event-stream") throw new Error("direct Responses request omitted SSE accept header");
-  if (headers.has("ai-gateway-protocol-version") || headers.has("ai-language-model-id")) {
-    throw new Error("direct Responses request retained Vercel gateway headers");
-  }
   const requestBody = JSON.parse(new TextDecoder().decode(init.body));
   if (requestBody.model !== "gpt-5.4" || requestBody.stream !== true || !Array.isArray(requestBody.input)) {
     throw new Error("direct request did not use the Responses schema");
-  }
-  if (requestBody.prompt !== undefined || requestBody.messages !== undefined) {
-    throw new Error("direct request retained a Vercel gateway body shape");
   }
   return new Response(new ReadableStream({
     start(controller) {

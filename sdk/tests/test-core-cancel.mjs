@@ -18,7 +18,7 @@ const fetchStarted = new Promise((resolve) => { fetchStartedResolve = resolve; }
 let fetchAborted = false;
 const stalledFetch = async (url, init) => {
   if (init.method === "GET" && String(url).endsWith("/v1/models")) {
-    return Response.json({ object: "list", data: [{ id: "sdk/cancel-model", type: "language", released: 1 }] });
+    return Response.json({ object: "list", data: [{ id: "sdk/cancel-model", object: "model", created: 1 }] });
   }
   let controller;
   const body = new ReadableStream({ start(value) { controller = value; } });
@@ -42,7 +42,7 @@ const agent = await Promise.race([
   backend: "wasm",
     wasm: await readFile(wasmPath),
     fetch: stalledFetch,
-    env: { AI_GATEWAY_API_KEY: "sdk-test-key" },
+    env: { OPENAI_API_KEY: "sdk-test-key" },
   }),
   timeout("fx-core initialize"),
 ]);

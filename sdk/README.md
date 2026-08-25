@@ -15,8 +15,8 @@ Requirements:
 - Node.js 20 or later
 - Chrome or Edge 137 or later for browser WebAssembly
 - JSPI when using the WebAssembly backend
-- A Vercel AI Gateway credential, an OpenAI-compatible Responses API key, or
-  a host-provided authenticated `fetch`
+- An OpenAI-compatible Responses API key or a host-provided authenticated
+  `fetch`
 
 The package includes:
 
@@ -52,7 +52,7 @@ import { createFxAgent } from "libfx";
 
 const agent = await createFxAgent({
   env: {
-    AI_GATEWAY_API_KEY: process.env.AI_GATEWAY_API_KEY,
+    OPENAI_API_KEY: process.env.OPENAI_API_KEY,
   },
   onEvent(event) {
     console.log(event.type);
@@ -92,10 +92,8 @@ const agent = await createFxAgent({
 });
 ```
 
-When both `AI_GATEWAY_API_KEY` and `OPENAI_API_KEY` are non-empty, the Vercel
-AI Gateway credential keeps precedence. Credentials and base URL overrides are
-scoped to one agent runtime and are not copied into the Node process
-environment.
+Credentials and base URL overrides are scoped to one agent runtime and are not
+copied into the Node process environment.
 
 A prompt may be a string or an array of text and resource blocks:
 
@@ -175,7 +173,7 @@ if (!supportsJspi()) {
 
 const agent = await createFxAgent({
   env: {
-    AI_GATEWAY_API_KEY: "<short-lived credential>",
+    OPENAI_API_KEY: "<short-lived credential>",
   },
 });
 
@@ -231,7 +229,7 @@ fit.fit();
 const runtime = await createFxTerminal({
   terminal: xtermAdapter(terminal),
   env: {
-    AI_GATEWAY_API_KEY: "<short-lived credential>",
+    OPENAI_API_KEY: "<short-lived credential>",
   },
 });
 
@@ -253,7 +251,6 @@ The terminal runtime provides:
 | `resize()` | Notifies fx of terminal geometry changes |
 | `abort()` | Stops the terminal and releases subscriptions |
 
-Try the hosted terminal at [fx.sh/try](https://fx.sh/try).
 
 ## Backend selection
 
@@ -303,7 +300,7 @@ Hosts may provide adapters for runtime state and external effects:
 
 | Option | Purpose |
 | --- | --- |
-| `fetch` | Routes Gateway requests through the host |
+| `fetch` | Routes Responses API requests through the host |
 | `env` | Supplies runtime configuration without changing process globals |
 | `onEvent` | Receives runtime, ACP, terminal, and lifecycle events |
 | `onPermission` | Resolves agent permission requests |
@@ -315,12 +312,12 @@ Hosts may provide adapters for runtime state and external effects:
 
 ## Security boundaries
 
-`nativeAddon` and `env.FX_GATEWAY_CHAT_URL` are trusted host configuration. Do
+`nativeAddon` and `env.FX_RESPONSES_BASE_URL` are trusted host configuration. Do
 not populate them from request, tenant, or other untrusted input.
 
-The native backend sends production credentials only to the canonical Vercel
-AI Gateway endpoint. Custom Gateway endpoints are limited to explicit loopback
-HTTP URLs for local development.
+The native backend sends the credential to the configured Responses API root.
+Custom roots must use HTTPS, except for explicit loopback HTTP URLs with a
+port.
 
 The WebAssembly runtime intentionally does not provide:
 
@@ -379,5 +376,5 @@ These are local development pages and are not publicly hosted links.
 
 Maintainer references:
 
-- [SDK contributor guide](https://github.com/vercel-labs/fx/blob/main/sdk/AGENTS.md)
-- [Native Node-API design and security model](https://github.com/vercel-labs/fx/blob/main/sdk/NAPI.md)
+- [SDK contributor guide](https://github.com/acking-you/fx/blob/byok/sdk/AGENTS.md)
+- [Native Node-API design and security model](https://github.com/acking-you/fx/blob/byok/sdk/NAPI.md)

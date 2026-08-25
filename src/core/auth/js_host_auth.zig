@@ -129,7 +129,7 @@ test "request bounds reject cancellation before touching the JS host" {
     var cancelled = std.atomic.Value(bool).init(true);
     try std.testing.expectError(error.Cancelled, checkRequestBounds(.{
         .method = .get,
-        .url = "https://vercel.test",
+        .url = "https://provider.test",
         .cancel_flag = &cancelled,
     }));
 }

@@ -23,9 +23,9 @@ const fetch = async () => new Response(new ReadableStream({
   start(controller) {
     for (let offset = 0; offset < markdown.length; offset += 4) {
       const delta = markdown.slice(offset, offset + 4);
-      controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "text-delta", delta })}\n\n`));
+      controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "response.output_text.delta", item_id: "answer_1", output_index: 0, content_index: 0, delta })}\n\n`));
     }
-    controller.enqueue(encoder.encode('data: {"type":"finish","finishReason":{"unified":"stop"},"usage":{"inputTokens":{"total":1},"outputTokens":{"total":2}}}\n\n'));
+    controller.enqueue(encoder.encode('data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}\n\n'));
     controller.enqueue(encoder.encode("data: [DONE]\n\n"));
     controller.close();
   },
@@ -35,7 +35,7 @@ const runtime = await createFxTerminal({
   backend: "wasm",
   wasm: await readFile(wasmPath),
   terminal: xtermAdapter(terminal),
-  env: { AI_GATEWAY_API_KEY: "table-stream-key" },
+  env: { OPENAI_API_KEY: "table-stream-key" },
   fetch,
   configStore: { get(id) { return id === "model" ? "test/table-model" : null; }, set() {} },
 });

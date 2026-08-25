@@ -26,9 +26,21 @@ function runWorker(index) {
         params: { protocolVersion: 1, clientCapabilities: {} },
       }) + "\\n"));
       const deadline = Date.now() + 5000;
+      const pause = new Int32Array(new SharedArrayBuffer(4));
       let output = "";
       while (Date.now() < deadline && !output.includes('"result"')) {
+        const fetchBytes = addon.takeCoreFetch(core);
+        if (fetchBytes) {
+          const fetch = JSON.parse(fetchBytes.toString("utf8"));
+          addon.startCoreFetchResponse(core, fetch.handle, 200);
+          addon.pushCoreFetchResponse(core, fetch.handle, Buffer.from(JSON.stringify({
+            object: "list",
+            data: [{ id: "gpt-5.4", object: "model", created: 1, owned_by: "test" }],
+          })));
+          addon.finishCoreFetch(core, fetch.handle);
+        }
         output += addon.drainCore(core).toString("utf8");
+        if (!output.includes('"result"')) Atomics.wait(pause, 0, 0, 2);
       }
       addon.closeCore(core);
       addon.destroyCore(core);

@@ -3,7 +3,6 @@ const stream_provider = @import("../agent/stream_provider.zig");
 const model_provider = @import("../config/model_provider.zig");
 const model_capabilities = @import("../config/model_capabilities.zig");
 const provider_catalog = @import("../auth/provider_catalog.zig");
-const generation_usage_provider = @import("../session/generation_usage_provider.zig");
 const gateway_provider = @import("gateway_provider.zig");
 const web_search_contract = @import("../tooling/web_search_contract.zig");
 const web_search_provider = @import("../tooling/web_search_provider.zig");
@@ -15,20 +14,14 @@ const Allocator = std.mem.Allocator;
 
 pub const Bundle = struct {
     pub const AuthStrategy = enum {
-        vercel,
+        api_key,
         chatgpt,
         grok,
     };
     pub const Capabilities = struct {
         fx_search: bool = false,
         vision_fallback: bool = false,
-        deferred_usage: bool = false,
     };
-    pub const FxSearchExecution = enum {
-        provider_executed,
-        fx_runtime,
-    };
-
     capabilities: Capabilities = .{},
     presentation: ?*const provider_catalog.Entry = null,
     auth_strategy: ?AuthStrategy = null,
@@ -38,11 +31,8 @@ pub const Bundle = struct {
     model_catalog: ?model_catalog.Provider = null,
     responses_compaction: ?responses_compaction_provider.Provider = null,
     permission_reviewer: ?auto_classifier.Provider = null,
-    deferred_usage: ?generation_usage_provider.Provider = null,
-    credits: ?gateway_provider.CreditsProvider = null,
     account_usage: ?gateway_provider.AccountUsageProvider = null,
     fx_search: ?web_search_provider.Provider = null,
-    fx_search_execution: FxSearchExecution = .provider_executed,
 
     pub fn agent_stream_or_unavailable(self: Bundle) stream_provider.Provider {
         return self.agent_stream orelse stream_provider.unavailable_provider;
@@ -54,8 +44,7 @@ pub const Bundle = struct {
 
     pub fn fxSearchRuntimeReady(self: Bundle) bool {
         return self.capabilities.fx_search and
-            self.fx_search != null and
-            self.fx_search_execution == .fx_runtime;
+            self.fx_search != null;
     }
 };
 
@@ -73,14 +62,6 @@ pub const Set = struct {
             .gateway => self.gateway,
             .codex => self.codex,
             .grok => self.grok,
-        };
-    }
-
-    pub fn deferredUsageProviders(self: Set) generation_usage_provider.Set {
-        return .{
-            .gateway = self.gateway.deferred_usage,
-            .codex = self.codex.deferred_usage,
-            .grok = self.grok.deferred_usage,
         };
     }
 };
@@ -106,7 +87,6 @@ test "provider set selects each provider's complete route" {
         ) gateway_provider.CliModelCatalogResult {
             return .{ .failure = .{
                 .access = .init(.{ .public_only = .no_credential }),
-                .anonymous_fallback_used = false,
                 .failure = .{ .category = .runtime },
             } };
         }
@@ -145,9 +125,9 @@ test "provider set selects each provider's complete route" {
     };
 
     const gateway = Bundle{
-        .capabilities = .{ .fx_search = true, .vision_fallback = true, .deferred_usage = true },
+        .capabilities = .{ .fx_search = true, .vision_fallback = true },
         .presentation = provider_catalog.find(.gateway),
-        .auth_strategy = .vercel,
+        .auth_strategy = .api_key,
         .agent_stream = stream_provider.Provider{
             .context = &gateway_tag,
             .stream_fn = stream_provider.unavailable_provider.stream_fn,
@@ -155,7 +135,6 @@ test "provider set selects each provider's complete route" {
         .cli_model_catalog = .{ .context = &gateway_tag, .fetch_fn = Fake.cli_catalog },
         .model_catalog = .{ .context = &gateway_tag, .fetch_fn = Fake.model_catalog_fetch },
         .permission_reviewer = .{ .context = &gateway_tag, .review_fn = Fake.review },
-        .deferred_usage = generation_usage_provider.unavailable_provider,
     };
     const codex = Bundle{
         .capabilities = .{ .fx_search = true },
@@ -171,7 +150,6 @@ test "provider set selects each provider's complete route" {
             .preferred_backends_fn = Fake.search_backends,
             .execute_fn = Fake.search,
         },
-        .fx_search_execution = .fx_runtime,
     };
     const grok = Bundle{
         .agent_stream = stream_provider.Provider{
@@ -187,15 +165,11 @@ test "provider set selects each provider's complete route" {
     try std.testing.expect(providers.select(.gateway).agent_stream.?.context.? == @as(*anyopaque, @ptrCast(&gateway_tag)));
     try std.testing.expect(providers.select(.gateway).capabilities.fx_search);
     try std.testing.expect(providers.select(.gateway).capabilities.vision_fallback);
-    try std.testing.expect(providers.select(.gateway).capabilities.deferred_usage);
-    try std.testing.expect(providers.select(.gateway).deferred_usage != null);
-    try std.testing.expectEqualStrings("vercel", providers.select(.gateway).presentation.?.slug);
-    try std.testing.expectEqual(Bundle.AuthStrategy.vercel, providers.select(.gateway).auth_strategy.?);
+    try std.testing.expectEqualStrings("byok", providers.select(.gateway).presentation.?.slug);
+    try std.testing.expectEqual(Bundle.AuthStrategy.api_key, providers.select(.gateway).auth_strategy.?);
     try std.testing.expect(providers.select(.codex).capabilities.fx_search);
     try std.testing.expect(providers.select(.codex).fxSearchRuntimeReady());
     try std.testing.expect(!providers.select(.gateway).fxSearchRuntimeReady());
-    try std.testing.expect(!providers.select(.codex).capabilities.deferred_usage);
-    try std.testing.expect(providers.select(.codex).deferred_usage == null);
     try std.testing.expect(providers.select(.gateway).cli_model_catalog.?.context.? == @as(*anyopaque, @ptrCast(&gateway_tag)));
     try std.testing.expect(providers.select(.codex).model_catalog.?.context.? == @as(*anyopaque, @ptrCast(&codex_tag)));
     try std.testing.expect(providers.select(.grok).permission_reviewer.?.context.? == @as(*anyopaque, @ptrCast(&grok_tag)));

@@ -38,14 +38,20 @@ function sse(events: object[]) {
 function toolCall(id: string, name: string, input: object) {
   return sse([
     {
-      type: "tool-call",
-      toolCallId: id,
-      toolName: name,
-      input,
+      type: "response.output_item.added",
+      output_index: 0,
+      item: { type: "function_call", id: `${id}_item`, call_id: id, name },
     },
     {
-      type: "finish",
-      finishReason: { unified: "tool-calls", raw: "tool-calls" },
+      type: "response.function_call_arguments.done",
+      item_id: `${id}_item`,
+      call_id: id,
+      output_index: 0,
+      arguments: JSON.stringify(input),
+    },
+    {
+      type: "response.completed",
+      response: { status: "completed" },
     },
   ]);
 }
@@ -60,13 +66,18 @@ function permissionDecision(decision: "clear" | "caution" = "clear") {
 
 function finalText(text: string) {
   return sse([
-    { type: "text-delta", id: "answer_1", delta: text },
     {
-      type: "finish",
-      finishReason: { unified: "stop", raw: "stop" },
-      usage: {
-        inputTokens: { total: 11 },
-        outputTokens: { total: 13 },
+      type: "response.output_text.delta",
+      item_id: "answer_1",
+      output_index: 0,
+      content_index: 0,
+      delta: text,
+    },
+    {
+      type: "response.completed",
+      response: {
+        status: "completed",
+        usage: { input_tokens: 11, output_tokens: 13, total_tokens: 24 },
       },
     },
   ]);
@@ -88,16 +99,21 @@ function contentText(content: unknown): string {
 
 function toolResultOutput(body: string, callId: string): string {
   const request = JSON.parse(body) as {
-    prompt: Array<{ content: unknown }>;
+    input: Array<{ type?: string; call_id?: string; output?: unknown }>;
   };
-  const parts = request.prompt.flatMap((message) =>
-    Array.isArray(message.content) ? message.content : []
-  ) as Array<Record<string, unknown>>;
-  const result = parts.find((part) =>
-    part.type === "tool-result" && part.toolCallId === callId
+  const result = request.input.find((item) =>
+    item.type === "function_call_output" && item.call_id === callId
   );
   if (!result) throw new Error(`Missing tool result for ${callId}`);
   return contentText(result.output);
+}
+
+function hasCurrentToolResult(body: string, callId: string): boolean {
+  const request = JSON.parse(body) as {
+    input: Array<{ type?: string; call_id?: string }>;
+  };
+  const latest = request.input.at(-1);
+  return latest?.type === "function_call_output" && latest.call_id === callId;
 }
 
 function occurrenceCount(text: string, needle: string) {
@@ -147,12 +163,14 @@ function startFakeGateway(
     port: 0,
     async fetch(req) {
       const url = new URL(req.url);
-      if (url.pathname === "/coding-agent/v1/models") {
+      if (url.pathname === "/v1/models") {
         return Response.json({
-          data: [{ id: MODEL, type: "language", tags: ["tool-use"] }],
+          data: [{ id: MODEL, object: "model" }],
         });
       }
-      if (req.method !== "POST") return new Response("not found", { status: 404 });
+      if (req.method !== "POST" || url.pathname !== "/v1/responses") {
+        return new Response("not found", { status: 404 });
+      }
       const body = await req.text();
       if (body.includes("\"permission_decision\"")) {
         classifierRequests.push({ body });
@@ -168,8 +186,7 @@ function startFakeGateway(
   });
 
   return {
-    baseUrl: `http://127.0.0.1:${server.port}`,
-    chatUrl: `http://127.0.0.1:${server.port}/v3/ai/language-model`,
+    baseUrl: `http://127.0.0.1:${server.port}/v1`,
     requests,
     classifierRequests,
     remainingResponseCount() {
@@ -206,14 +223,9 @@ function gatewayEnv(
 ) {
   return {
     HOME: home,
-    AI_GATEWAY_API_KEY: "fake-file-paths-key",
-    VERCEL_OIDC_TOKEN: undefined,
-    FX_GATEWAY_BASE_URL: gateway.baseUrl,
-    FX_GATEWAY_CHAT_URL: gateway.chatUrl,
-    FX_E2E_GATEWAY_CHAT_URL: gateway.chatUrl,
-    FX_E2E_GATEWAY_MODELS_URL: `${gateway.baseUrl}/coding-agent/v1/models`,
+    OPENAI_API_KEY: "fake-file-paths-key",
+    FX_RESPONSES_BASE_URL: gateway.baseUrl,
     FX_MODEL: MODEL,
-    FX_AUTO_UPGRADE: "0",
     ...extra,
   };
 }
@@ -497,7 +509,7 @@ describe("filesystem path handling", () => {
         body.includes(childPrompt) && !body.includes("parent_create_1");
       const gate = createChildReadGate(8_000);
       const routeChildAndParent = async (body: string) => {
-        if (body.includes('"toolCallId":"child_read_1"')) {
+        if (hasCurrentToolResult(body, "child_read_1")) {
           gate.capture(toolResultOutput(body, "child_read_1"));
           return finalText("Child read the added-root fixture.");
         }
@@ -671,9 +683,7 @@ describe("filesystem path handling", () => {
             cwd: root.workspace,
             env: {
               HOME: root.home,
-              FX_AUTO_UPGRADE: "0",
-              FX_GATEWAY_BASE_URL: undefined,
-              FX_GATEWAY_CHAT_URL: undefined,
+                            FX_RESPONSES_BASE_URL: undefined,
               FX_MODEL: process.env.FX_WORKSPACE_ACCESS_LIVE_MODEL ?? EVAL_MODEL,
             },
             timeoutMs: 120_000,
@@ -1008,7 +1018,7 @@ describe("filesystem path handling", () => {
         expect(trace).toContain(
           "event=auto_review_compose_result result=ready",
         );
-        expect(trace).toContain("event=auto_review_transport_start");
+        expect(trace).toContain("event=auto_review_send attempt=1");
         expect(trace).toContain(
           "event=auto_review_result tool_name=write_file decision=caution",
         );

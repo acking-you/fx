@@ -59,12 +59,6 @@ pub const Failure = struct {
             .http_status, .runtime => error.Unavailable,
         };
     }
-
-    pub fn allowsPublicFallback(self: Failure) bool {
-        if (self.category != .authentication) return false;
-        const status = self.http_status orelse return false;
-        return status == .unauthorized or status == .forbidden;
-    }
 };
 
 pub fn failureForHttpStatus(status: std.http.Status) Failure {
@@ -113,13 +107,10 @@ pub const AccessMetadata = struct {
 
 pub const Provenance = struct {
     access: AccessMetadata,
-    anonymous_fallback_used: bool = false,
-    fallback_failure: ?Failure = null,
 };
 
 pub const FailedOutcome = struct {
     access: AccessMetadata,
-    anonymous_fallback_used: bool,
     failure: Failure,
 };
 
@@ -154,60 +145,38 @@ pub const FetchResult = union(enum) {
     failed: FailedOutcome,
 };
 
-fn failedOutcome(access: credentials.CatalogAccess, anonymous_fallback_used: bool, failure: Failure) FetchResult {
+fn failedOutcome(access: credentials.CatalogAccess, failure: Failure) FetchResult {
     return .{ .failed = .{
         .access = .init(access),
-        .anonymous_fallback_used = anonymous_fallback_used,
         .failure = failure,
     } };
 }
 
-pub fn fetchWithPublicFallback(
+pub fn fetchCatalog(
     provider: Provider,
     alloc: Allocator,
     input: FetchInput,
 ) FetchResult {
     const requested_access = AccessMetadata.init(input.access);
-    const result = fetchWithPublicFallbackUntraced(provider, alloc, input);
+    const result = fetchCatalogUntraced(provider, alloc, input);
     traceCatalogLoad(requested_access, &result);
     return result;
 }
 
-fn fetchWithPublicFallbackUntraced(
+fn fetchCatalogUntraced(
     provider: Provider,
     alloc: Allocator,
     input: FetchInput,
 ) FetchResult {
-    var attempt = input;
-    const first = provider.fetch(alloc, attempt) catch
-        return failedOutcome(attempt.access, false, .{ .category = .resource_exhausted });
-    switch (first) {
+    const result = provider.fetch(alloc, input) catch
+        return failedOutcome(input.access, .{ .category = .resource_exhausted });
+    return switch (result) {
         .catalog => |catalog| return .{ .loaded = .{
             .catalog = catalog,
-            .provenance = .{ .access = .init(attempt.access) },
+            .provenance = .{ .access = .init(input.access) },
         } },
-        .failure => |failure| {
-            if (!failure.allowsPublicFallback()) {
-                return failedOutcome(attempt.access, false, failure);
-            }
-            attempt.access = attempt.access.publicFallbackAfterRejection() orelse
-                return failedOutcome(attempt.access, false, failure);
-
-            const fallback = provider.fetch(alloc, attempt) catch
-                return failedOutcome(attempt.access, true, .{ .category = .resource_exhausted });
-            return switch (fallback) {
-                .catalog => |catalog| .{ .loaded = .{
-                    .catalog = catalog,
-                    .provenance = .{
-                        .access = .init(attempt.access),
-                        .anonymous_fallback_used = true,
-                        .fallback_failure = failure,
-                    },
-                } },
-                .failure => |fallback_failure| failedOutcome(attempt.access, true, fallback_failure),
-            };
-        },
-    }
+        .failure => |failure| failedOutcome(input.access, failure),
+    };
 }
 
 fn traceCatalogLoad(requested: AccessMetadata, result: *const FetchResult) void {
@@ -215,14 +184,12 @@ fn traceCatalogLoad(requested: AccessMetadata, result: *const FetchResult) void 
         .loaded => |loaded| traceCatalogLoadOutcome(
             requested,
             loaded.provenance.access,
-            loaded.provenance.anonymous_fallback_used,
             "loaded",
-            loaded.provenance.fallback_failure,
+            null,
         ),
         .failed => |failed| traceCatalogLoadOutcome(
             requested,
             failed.access,
-            failed.anonymous_fallback_used,
             "failed",
             failed.failure,
         ),
@@ -232,7 +199,6 @@ fn traceCatalogLoad(requested: AccessMetadata, result: *const FetchResult) void 
 fn traceCatalogLoadOutcome(
     requested: AccessMetadata,
     effective: AccessMetadata,
-    anonymous_fallback_used: bool,
     outcome: []const u8,
     failure: ?Failure,
 ) void {
@@ -243,13 +209,12 @@ fn traceCatalogLoadOutcome(
         if (detail.retryable) "true" else "false"
     else
         "none";
-    const common_format = "requested_access={s} credential_source={s} effective_access={s} public_only_reason={s} anonymous_fallback={s} outcome={s} failure_category={s}";
+    const common_format = "requested_access={s} credential_source={s} effective_access={s} public_only_reason={s} outcome={s} failure_category={s}";
     const common_args = .{
         @tagName(requested.level),
         credential_source,
         @tagName(effective.level),
         public_only_reason,
-        if (anonymous_fallback_used) "true" else "false",
         outcome,
         failure_category,
     };
@@ -626,28 +591,6 @@ fn pickerCatalogContains(entries: []const ModelCatalogEntry, needle: []const u8)
     return false;
 }
 
-const FallbackProbe = struct {
-    failures: [2]?Failure,
-    calls: usize = 0,
-    anonymous_retry: bool = false,
-
-    fn fetch(raw: ?*anyopaque, _: Allocator, input: FetchInput) Allocator.Error!ProviderResult {
-        const self: *FallbackProbe = @ptrCast(@alignCast(raw.?));
-        const index = self.calls;
-        self.calls += 1;
-        if (index == 1) {
-            self.anonymous_retry = input.access.authorizationCredential() == null and
-                input.access.teamContext() == null;
-        }
-        if (self.failures[index]) |failure| return .{ .failure = failure };
-        return .{ .catalog = .empty };
-    }
-
-    fn provider(self: *FallbackProbe) Provider {
-        return .{ .context = self, .fetch_fn = fetch };
-    }
-};
-
 test "catalog HTTP failure classification preserves policy evidence" {
     for ([_]struct { status: std.http.Status, category: FailureCategory, retryable: bool }{
         .{ .status = .unauthorized, .category = .authentication, .retryable = false },
@@ -661,144 +604,6 @@ test "catalog HTTP failure classification preserves policy evidence" {
         try std.testing.expectEqual(expected.category, failure.category);
         try std.testing.expectEqual(expected.status, failure.http_status.?);
         try std.testing.expectEqual(expected.retryable, failure.retryable);
-    }
-}
-
-test "catalog authentication fallback is anonymous and bounded" {
-    const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
-    defer alloc.free(root);
-    const trace_path = try std.fs.path.join(alloc, &.{ root, "catalog-trace.log" });
-    defer alloc.free(trace_path);
-    debug_trace.resetForTest();
-    defer debug_trace.resetForTest();
-    try debug_trace.configureForTestWithScopes(alloc, trace_path, "catalog");
-
-    const access = credentials.catalogAccessForCredential(.ai_gateway_api_key, "test-key", "team_123");
-    const rejection = Failure{ .category = .authentication, .http_status = .unauthorized };
-    var accepted = FallbackProbe{ .failures = .{ rejection, null } };
-    var loaded = fetchWithPublicFallback(accepted.provider(), std.testing.allocator, .{
-        .access = access,
-        .endpoint = "/v1/models",
-    });
-    defer freeModelCatalog(std.testing.allocator, &loaded.loaded.catalog);
-    try std.testing.expectEqual(AccessLevel.public_only, loaded.loaded.provenance.access.level);
-    try std.testing.expectEqual(credentials.Source.ai_gateway_api_key, loaded.loaded.provenance.access.source.?);
-    try std.testing.expectEqual(credentials.CatalogPublicOnlyReason.authenticated_credential_rejected, loaded.loaded.provenance.access.public_only_reason.?);
-    try std.testing.expect(loaded.loaded.provenance.access.private_models_may_be_hidden);
-    try std.testing.expect(loaded.loaded.provenance.anonymous_fallback_used);
-    try std.testing.expectEqual(FailureCategory.authentication, loaded.loaded.provenance.fallback_failure.?.category);
-    try std.testing.expectEqual(std.http.Status.unauthorized, loaded.loaded.provenance.fallback_failure.?.http_status.?);
-    try std.testing.expect(!loaded.loaded.provenance.fallback_failure.?.retryable);
-    try std.testing.expectEqual(@as(usize, 2), accepted.calls);
-    try std.testing.expect(accepted.anonymous_retry);
-
-    for ([_]Failure{
-        .{ .category = .authentication },
-        .{ .category = .cancellation },
-        .{ .category = .transport, .retryable = true },
-    }) |failure| {
-        var rejected = FallbackProbe{ .failures = .{ failure, null } };
-        const failed = fetchWithPublicFallback(rejected.provider(), std.testing.allocator, .{
-            .access = access,
-            .endpoint = "/v1/models",
-        }).failed;
-        try std.testing.expectEqual(failure.category, failed.failure.category);
-        try std.testing.expectEqual(AccessLevel.authenticated, failed.access.level);
-        try std.testing.expect(!failed.anonymous_fallback_used);
-        try std.testing.expectEqual(@as(usize, 1), rejected.calls);
-    }
-
-    var twice = FallbackProbe{ .failures = .{ rejection, rejection } };
-    const failed = fetchWithPublicFallback(twice.provider(), std.testing.allocator, .{
-        .access = access,
-        .endpoint = "/v1/models",
-    }).failed;
-    try std.testing.expectEqual(AccessLevel.public_only, failed.access.level);
-    try std.testing.expect(failed.anonymous_fallback_used);
-    try std.testing.expectEqual(std.http.Status.unauthorized, failed.failure.http_status.?);
-    try std.testing.expectEqual(@as(usize, 2), twice.calls);
-
-    debug_trace.shutdown();
-    var trace_file = try std.Io.Dir.openFileAbsolute(io_mod.getIo(), trace_path, .{});
-    defer trace_file.close(io_mod.getIo());
-    const trace = try io_mod.readFileToEnd(alloc, &trace_file, 8192);
-    defer alloc.free(trace);
-    try std.testing.expectEqual(@as(usize, 5), std.mem.count(u8, trace, "event=model_catalog_load "));
-    try std.testing.expect(std.mem.find(
-        u8,
-        trace,
-        "requested_access=authenticated credential_source=ai_gateway_api_key effective_access=public_only public_only_reason=authenticated_credential_rejected anonymous_fallback=true outcome=loaded failure_category=authentication http_status=401 retryable=false",
-    ) != null);
-    try std.testing.expect(std.mem.find(
-        u8,
-        trace,
-        "requested_access=authenticated credential_source=ai_gateway_api_key effective_access=authenticated public_only_reason=none anonymous_fallback=false outcome=failed failure_category=transport http_status=none retryable=true",
-    ) != null);
-    try std.testing.expect(std.mem.find(u8, trace, "test-key") == null);
-    try std.testing.expect(std.mem.find(u8, trace, "team_123") == null);
-    try std.testing.expect(std.mem.find(u8, trace, "/v1/models") == null);
-}
-
-test "catalog fallback classification stays bounded across repeated cycles" {
-    const access = credentials.catalogAccessForCredential(
-        .ai_gateway_api_key,
-        "repeated-test-key",
-        "repeated-team",
-    );
-    const terminal_failures = [_]Failure{
-        .{ .category = .authentication },
-        .{ .category = .rate_limited, .http_status = .too_many_requests, .retryable = true },
-        .{ .category = .gateway_unavailable, .http_status = .service_unavailable, .retryable = true },
-        .{ .category = .cancellation },
-        .{ .category = .transport, .retryable = true },
-        .{ .category = .malformed_response },
-        .{ .category = .http_status, .http_status = .bad_request },
-    };
-
-    for (0..128) |iteration| {
-        const status: std.http.Status = if (iteration % 2 == 0) .unauthorized else .forbidden;
-        const rejection = Failure{ .category = .authentication, .http_status = status };
-        var fallback = FallbackProbe{ .failures = .{ rejection, null } };
-        var loaded = fetchWithPublicFallback(fallback.provider(), std.testing.allocator, .{
-            .access = access,
-            .endpoint = "/v1/models",
-        });
-        switch (loaded) {
-            .loaded => |*result| {
-                defer freeModelCatalog(std.testing.allocator, &result.catalog);
-                try std.testing.expectEqual(AccessLevel.public_only, result.provenance.access.level);
-                try std.testing.expectEqual(status, result.provenance.fallback_failure.?.http_status.?);
-                try std.testing.expect(result.provenance.anonymous_fallback_used);
-            },
-            .failed => return error.TestExpectedEqual,
-        }
-        try std.testing.expectEqual(@as(usize, 2), fallback.calls);
-        try std.testing.expect(fallback.anonymous_retry);
-
-        const expected = terminal_failures[iteration % terminal_failures.len];
-        var terminal = FallbackProbe{ .failures = .{ expected, null } };
-        const failed = fetchWithPublicFallback(terminal.provider(), std.testing.allocator, .{
-            .access = access,
-            .endpoint = "/v1/models",
-        });
-        switch (failed) {
-            .loaded => |result| {
-                var catalog = result.catalog;
-                freeModelCatalog(std.testing.allocator, &catalog);
-                return error.TestExpectedEqual;
-            },
-            .failed => |result| {
-                try std.testing.expectEqual(expected.category, result.failure.category);
-                try std.testing.expectEqual(expected.http_status, result.failure.http_status);
-                try std.testing.expectEqual(AccessLevel.authenticated, result.access.level);
-                try std.testing.expect(!result.anonymous_fallback_used);
-            },
-        }
-        try std.testing.expectEqual(@as(usize, 1), terminal.calls);
-        try std.testing.expect(!terminal.anonymous_retry);
     }
 }
 

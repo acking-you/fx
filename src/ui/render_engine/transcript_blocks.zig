@@ -2799,7 +2799,7 @@ test "thinking notice renders a dim italic bullet summary" {
 
 test "semantic notice keeps an OSC 8 target hidden and clickable" {
     const alloc = std.testing.allocator;
-    const url = "https://fx.sh/feedback";
+    const url = "https://example.com/report";
     const body = try std.fmt.allocPrint(
         alloc,
         "\x1b]8;;{s}\x1b\\Open feedback form\x1b]8;;\x1b\\.",

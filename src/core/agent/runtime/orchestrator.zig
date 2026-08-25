@@ -1068,19 +1068,6 @@ fn appendProviderExecutedToolResult(
             .call = visible_call,
             .status_started = true,
         };
-    } else if (runtime_tool_presentation.isProviderSearchAlias(call.name)) {
-        provider_visible_lifecycle = .{
-            .call = call,
-            .status_started = try runtime_tool_presentation.startToolVisibleLifecycle(
-                deps,
-                arena,
-                turn_id,
-                stream_ctx.provisional_statuses.presentation_group_id,
-                call,
-                null,
-                advertised_dynamic_tool_names,
-            ),
-        };
     }
     debug_trace.eventf(
         "tool",
@@ -1609,19 +1596,14 @@ test "potentially sent recovery rejects missing or changed credential authority"
         .chatgpt_subscription,
         "acct_1",
     ));
-    legacy.authority.credential_source = .ai_gateway_api_key;
+    legacy.authority.credential_source = .openai_api_key;
     legacy.authority.credential_identity = credential_authority.derive(
-        .ai_gateway_api_key,
+        .openai_api_key,
         null,
     );
     try std.testing.expect(!shouldRejectRecoveryAuthority(
         legacy,
-        .ai_gateway_api_key,
-        null,
-    ));
-    try std.testing.expect(shouldRejectRecoveryAuthority(
-        legacy,
-        .stored_key,
+        .openai_api_key,
         null,
     ));
     legacy.authority.credential_source = null;
@@ -2009,20 +1991,6 @@ fn refreshGatewayCredentialForJob(
     if (source == .chatgpt_subscription and job.account_id == null) {
         secret.zeroAndFree(alloc, refreshed);
         return error.MissingCodexAccountId;
-    }
-    const previous_api_key = active_api_key.*;
-    if (comptime !host_target.is_wasm) {
-        if (deps.usage) |usage| {
-            if (source == .chatgpt_subscription or source == .grok_subscription) {
-                usage.clearReconciliationCredential();
-            } else {
-                usage.refreshReconciliationCredential(
-                    deps.usage_allocator,
-                    previous_api_key,
-                    refreshed,
-                );
-            }
-        }
     }
     if (owned_api_key.*) |old| secret.zeroAndFree(alloc, old);
     owned_api_key.* = refreshed;
@@ -3374,7 +3342,6 @@ fn processQueuedPromptLoop(
                     .secret = active_api_key,
                     .source = job.credential_source,
                     .account_id = job.account_id,
-                    .tenant = job.gateway_team,
                 },
                 .session_id = lifecycle.scope.session_id,
                 .model = gateway_model,
@@ -3408,7 +3375,7 @@ fn processQueuedPromptLoop(
                 deps.agent_stream_provider,
                 arena,
                 model_request,
-                if (config.provider_capabilities.deferred_usage) deps.usage else null,
+                null,
                 deps.usage_allocator,
             ) catch |err| {
                 const codex_credential_changed_before_send =
@@ -4733,7 +4700,9 @@ fn processQueuedPromptLoop(
         try runtime_assistant_stream.emitProviderLengthNotice(deps, arena, disposition);
         const terminal_provider_completion = isTerminalProviderExecutedCompletion(completion);
 
-        if (disposition == .length_limited and completion.tool_calls.len > 0) {
+        if (disposition == .length_limited and
+            (completion.tool_calls.len > 0 or stream_ctx.saw_tool_start))
+        {
             const assistant_text = try runtime_assistant_stream.finishLengthLimitedToolCallCompletion(deps, arena, completion, stream_ctx.raw_text.items.len);
             debug_trace.eventf("agent", "provider_completion_blocked", step_ctx, "finish_reason={s} tool_calls={d}", .{
                 finish_reason.label(),

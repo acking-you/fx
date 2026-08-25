@@ -5,7 +5,22 @@ import { resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Worker } from "node:worker_threads";
 
-const server = createServer((request) => request.resume());
+const server = createServer((request, response) => {
+  if (request.method === "GET" && request.url?.endsWith("/models")) {
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({
+      object: "list",
+      data: [{
+        id: "native/test-model",
+        object: "model",
+        created: 1,
+        owned_by: "test",
+      }],
+    }));
+    return;
+  }
+  request.resume();
+});
 await new Promise((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
 const { port } = server.address();
 const scriptDir = fileURLToPath(new URL(".", import.meta.url));
@@ -21,8 +36,8 @@ try {
         nativeAddon: workerData.addonPath,
         backend: "native",
         env: {
-          AI_GATEWAY_API_KEY: "worker-termination-key",
-          FX_GATEWAY_CHAT_URL: workerData.gatewayUrl,
+          OPENAI_API_KEY: "worker-termination-key",
+          FX_RESPONSES_BASE_URL: workerData.gatewayUrl,
           FX_MODEL: "native/test-model",
         },
       });
@@ -35,7 +50,7 @@ try {
     workerData: {
       addonPath,
       nodeModuleUrl,
-      gatewayUrl: `http://127.0.0.1:${port}/stall`,
+      gatewayUrl: `http://127.0.0.1:${port}/v1`,
     },
   });
   await new Promise((resolveStarted, reject) => {

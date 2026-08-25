@@ -47,40 +47,11 @@ for (const [source, replacement] of replacements) {
 
 await rm(outputDir, { recursive: true, force: true });
 await mkdir(outputDir, { recursive: true });
-const vercelConfig = {
-  headers: [
-    {
-      source: "/",
-      headers: [{ key: "Cache-Control", value: "public, max-age=0, must-revalidate" }],
-    },
-    {
-      source: "/index.html",
-      headers: [{ key: "Cache-Control", value: "public, max-age=0, must-revalidate" }],
-    },
-    {
-      source: `/${browserName}`,
-      headers: [{ key: "Cache-Control", value: "public, max-age=31536000, immutable" }],
-    },
-    {
-      source: `/${sdkName}`,
-      headers: [{ key: "Cache-Control", value: "public, max-age=31536000, immutable" }],
-    },
-    {
-      source: `/${wasmName}`,
-      headers: [{ key: "Cache-Control", value: "public, max-age=31536000, immutable" }],
-    },
-    {
-      source: "/manifest.json",
-      headers: [{ key: "Cache-Control", value: "no-store" }],
-    },
-  ],
-};
 await Promise.all([
   writeFile(resolve(outputDir, "index.html"), html),
   writeFile(resolve(outputDir, browserName), packagedBrowser),
   writeFile(resolve(outputDir, sdkName), sdkBytes),
   writeFile(resolve(outputDir, wasmName), wasmBytes),
-  writeFile(resolve(outputDir, "vercel.json"), `${JSON.stringify(vercelConfig, null, 2)}\n`),
 ]);
 
 const manifest = {

@@ -359,7 +359,7 @@ pub fn composeHintRow(
     else if (danger_text.len > 0)
         danger_text
     else
-        ctx.upgrade_status;
+        "";
     const right_width = display_width.visibleWidth(right_text);
     const danger_visible = danger_text.len > 0 and right_text.ptr == danger_text.ptr;
     const left_width: u16 = if (!danger_visible and right_width > 0 and width_usize > right_width)
@@ -1463,65 +1463,6 @@ test "compose hint row does not advertise background terminals or the manager sh
     try std.testing.expect(std.mem.find(u8, row.items, "ctrl+x manager") == null);
 }
 
-test "compose hint row right-aligns upgrade status" {
-    var input = InputRuntime{};
-    defer input.deinit(std.testing.allocator);
-
-    const ctx: RenderContext = .{
-        .stream = .{},
-        .has_api_key = true,
-        .model = "gpt-5.1",
-        .queued_count = 0,
-        .subagent_count = 0,
-        .subagent_view_active = false,
-        .selected_subagent_id = null,
-        .selected_subagent_label = null,
-        .selected_subagent_status = null,
-        .upgrade_status = "update ready: ctrl+g to reload",
-        .statusline = .{
-            .workspace_label = "/a/long/workspace/path/that/uses/the/statusline-tail",
-        },
-        .input = &input,
-    };
-
-    var row = try composeHintRow(std.testing.allocator, false, null, ctx, 48);
-    defer row.deinit(std.testing.allocator);
-
-    try std.testing.expect(std.mem.find(u8, row.items, "gpt-5.1") != null);
-    try std.testing.expect(std.mem.find(u8, row.items, "update ready: ctrl+g to reload") != null);
-    try std.testing.expect(std.mem.find(u8, row.items, "\x1b[19G") != null);
-}
-
-test "compose hint row right-aligns upgrade status after styled auto mode" {
-    var input = InputRuntime{};
-    defer input.deinit(std.testing.allocator);
-
-    const ctx: RenderContext = .{
-        .stream = .{},
-        .has_api_key = true,
-        .model = "openai/gpt-4o",
-        .permission_mode = .auto,
-        .queued_count = 0,
-        .subagent_count = 0,
-        .subagent_view_active = false,
-        .selected_subagent_id = null,
-        .selected_subagent_label = null,
-        .selected_subagent_status = null,
-        .upgrade_status = "update ready: ctrl+g to reload",
-        .input = &input,
-    };
-
-    ui_render.initTheme(false, null);
-    var row = try composeHintRow(std.testing.allocator, false, null, ctx, 56);
-    defer row.deinit(std.testing.allocator);
-
-    try std.testing.expect(std.mem.find(u8, row.items, "auto") != null);
-    try std.testing.expect(std.mem.find(u8, row.items, "gpt-4o") != null);
-    try std.testing.expect(std.mem.find(u8, row.items, "update ready: ctrl+g to reload") != null);
-    try std.testing.expect(std.mem.find(u8, row.items, "\x1b[27G") != null);
-    try std.testing.expect(display_width.visibleWidthIgnoringAnsi(row.items) <= 56);
-}
-
 test "compose hint row prioritizes red yolo warning with compact fallback" {
     var input = InputRuntime{};
     defer input.deinit(std.testing.allocator);
@@ -1583,7 +1524,7 @@ fn syncHintTestQuestion(prompt: *question_prompt.QuestionPrompt) !void {
     try prompt.syncFrom(std.testing.allocator, &entries);
 }
 
-test "question hint row excludes model and upgrade status at supported widths" {
+test "question hint row excludes the model at supported widths" {
     var prompt = question_prompt.QuestionPrompt{};
     defer prompt.deinit(std.testing.allocator);
     try syncHintTestQuestion(&prompt);
@@ -1610,13 +1551,11 @@ test "question hint row excludes model and upgrade status at supported widths" {
         var ctx = testRenderContext(&input);
         ctx.question = prompt.projection();
         ctx.model = "model-x";
-        ctx.upgrade_status = "update ready: ctrl+g to reload";
         var row = try composeHintRow(std.testing.allocator, false, null, ctx, case.width);
         defer row.deinit(std.testing.allocator);
 
         try std.testing.expect(std.mem.find(u8, row.items, case.hint) != null);
         try std.testing.expect(std.mem.find(u8, row.items, "model-x") == null);
-        try std.testing.expect(std.mem.find(u8, row.items, "update ready: ctrl+g to reload") == null);
         try std.testing.expect(display_width.visibleWidthIgnoringAnsi(row.items) <= case.width);
     }
 }

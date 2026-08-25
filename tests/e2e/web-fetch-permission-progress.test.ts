@@ -6,9 +6,7 @@ import { runFx } from "../evals/eval-helpers";
 
 const TIMEOUT = 15_000;
 const NO_GATEWAY_AUTH = {
-  AI_GATEWAY_API_KEY: undefined,
   OPENAI_API_KEY: undefined,
-  VERCEL_OIDC_TOKEN: undefined,
   CODEX_HOME: undefined,
   FX_CODEX_AUTH_FILE: undefined,
   FX_DISABLE_KEYCHAIN: "1",
@@ -47,7 +45,7 @@ describe("web_fetch permission progress", () => {
       ]);
 
       expect(result.code).toBe(1);
-      expect(result.stderr).toContain("Fx needs a model credential. Set OPENAI_API_KEY for a Responses API, use fx login codex for ChatGPT Codex, use fx login grok for Grok, or set AI_GATEWAY_API_KEY for Vercel AI Gateway.");
+      expect(result.stderr).toContain("Fx needs a model credential. Set OPENAI_API_KEY for a Responses API, use fx login codex for ChatGPT Codex, or use fx login grok for Grok.");
       expectNoFetchProgress(result.stderr);
     },
     TIMEOUT,

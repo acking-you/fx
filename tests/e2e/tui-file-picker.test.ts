@@ -218,12 +218,9 @@ function mockFxEnvironment(
 ): Record<string, string | undefined> {
   return {
     HOME: current.home,
-    AI_GATEWAY_API_KEY: "fake-file-picker-key",
-    VERCEL_OIDC_TOKEN: undefined,
-    FX_GATEWAY_BASE_URL: activeGateway.baseUrl,
-    FX_GATEWAY_CHAT_URL: activeGateway.chatUrl,
+    OPENAI_API_KEY: "fake-file-picker-key",
+        FX_RESPONSES_BASE_URL: activeGateway.baseUrl,
     FX_MODEL: FAKE_GATEWAY_MODEL,
-    FX_AUTO_UPGRADE: "0",
     FX_TRACE_LOG: current.tracePath,
     FX_TRACE_SCOPES: "input,core,prompt,gateway,resize",
     FX_RECORD: current.tapePath,
@@ -1653,12 +1650,13 @@ describe("@ file picker", () => {
 
       expect(gateway?.requests).toHaveLength(1);
       const request = JSON.parse(gateway!.requests[0]!.body) as {
-        prompt: Array<{ role: string; content: unknown }>;
+        input: Array<{ type?: string; role?: string; content?: unknown }>;
       };
-      expect(request.prompt.at(-1)).toEqual({
+      expect(request.input.at(-1)).toEqual({
+        type: "message",
         role: "user",
         content: [{
-          type: "text",
+          type: "input_text",
           text: '@"~/space dir/item.txt" Reply with FILESYSTEM_PATH_PROMPT_OK.',
         }],
       });
@@ -1853,9 +1851,7 @@ describe("@ file picker", () => {
         cwd: current.workspace,
         env: {
           HOME: current.home,
-          AI_GATEWAY_API_KEY: process.env.AI_GATEWAY_API_KEY,
-          VERCEL_OIDC_TOKEN: process.env.VERCEL_OIDC_TOKEN,
-          FX_AUTO_UPGRADE: "0",
+          OPENAI_API_KEY: process.env.OPENAI_API_KEY,
           FX_MODEL: process.env.FX_FILE_PICKER_LIVE_MODEL ?? "anthropic/claude-sonnet-4.6",
           FX_TRACE_LOG: current.tracePath,
           FX_TRACE_SCOPES: "input,prompt,gateway",

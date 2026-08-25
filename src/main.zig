@@ -30,7 +30,6 @@ const app_agent_runtime = @import("core/app/app_agent_runtime.zig");
 const app_runtime_setup = @import("core/app/app_runtime_setup.zig");
 const app_render_runtime = @import("core/app/app_render_runtime.zig");
 const app_session_runtime = @import("core/app/app_session_runtime.zig");
-const app_upgrade_runtime = @import("core/app/app_upgrade_runtime.zig");
 const app_worker_runtime = @import("core/app/app_worker_runtime.zig");
 const app_workspace_runtime = @import("core/app/app_workspace_runtime.zig");
 const app_callbacks = @import("core/app/app_callbacks.zig");
@@ -48,13 +47,12 @@ const prompt_policy = @import("core/config/prompt_policy.zig");
 const builtin_commands = @import("builtins/commands.zig");
 const command_specs = @import("core/slash_commands/command_specs.zig");
 const builtin_context = @import("builtins/context.zig");
-const builtin_gateway = @import("builtins/gateway.zig");
+const builtin_gateway = @import("builtins/responses.zig");
 const builtin_providers = @import("builtins/providers.zig");
 const gateway_provider = @import("core/gateway/gateway_provider.zig");
 const responses_compaction_provider = @import("core/gateway/responses_compaction_provider.zig");
 const provider_set = @import("core/gateway/provider_set.zig");
 const provider_catalog = @import("core/auth/provider_catalog.zig");
-const vercel_model_policy = @import("gateway/vercel_model_policy.zig");
 const model_catalog = @import("core/gateway/model_catalog.zig");
 const agent_stream_provider = @import("core/agent/stream_provider.zig");
 const builtin_hooks = @import("builtins/hooks.zig");
@@ -91,11 +89,6 @@ const permission_auto_classifier = @import("core/permissions/auto_classifier.zig
 const auto_classifier_context = @import("core/permissions/auto_classifier_context.zig");
 const agent_runtime = @import("core/agent/agent_runtime.zig");
 const assistant_presentation = @import("core/agent/assistant_presentation.zig");
-const auto_upgrade = @import("core/upgrade/auto_upgrade.zig");
-const update_target = @import("core/upgrade/update_target.zig");
-
-const compiled_update_channel = update_target.Channel.parse(build_options.update_channel) orelse
-    @compileError("invalid compiled update channel");
 const background_runtime = @import("core/background/background_runtime.zig");
 const background_process_provider = @import(
     "core/execution/background_process_provider.zig",
@@ -356,19 +349,10 @@ const WorkspaceHostRuntime = if (host_target.is_wasm) js_host_workspace.Runtime 
 const wasm_skill_root_policy: @import("core/skills/skill_contract.zig").RootPolicy = .{
     .managed_root_source = null,
 };
-fn currentBuild() update_target.CurrentBuild {
-    return .{
-        .channel = compiled_update_channel,
-        .version = version,
-        .revision = build_options.git_commit,
-    };
-}
-
 const App = struct {
     pub const app_version = version;
     pub const host_profile = if (host_target.is_wasm) host_runtime_profile.wasm else host_runtime_profile.native;
     pub const input_limits = paste_framing.default_input_limits;
-    pub const build_update_channel = compiled_update_channel;
     pub const build_revision = build_options.git_commit;
     const Self = @This();
     const AgentAppRuntime = app_agent_runtime.Runtime(Self);
@@ -383,7 +367,6 @@ const App = struct {
     const HerdrAppRuntime = builtin_hooks.Runtime(Self);
     const RenderAppRuntime = app_render_runtime.Runtime(Self);
     const SessionAppRuntime = app_session_runtime.Runtime(Self);
-    const UpgradeAppRuntime = app_upgrade_runtime.Runtime(Self);
     const WorkerAppRuntime = app_worker_runtime.Runtime(Self);
     const WorkspaceAppRuntime = app_workspace_runtime.Runtime(Self);
 
@@ -424,12 +407,6 @@ const App = struct {
             js_host_url_opener.opener
         else
             host.unavailable_url_opener;
-    }
-
-    pub fn creditsProvider(self: *const Self) gateway_provider.CreditsProvider {
-        return self.providerSet()
-            .select(self.provider_selection.selection().provider)
-            .credits orelse gateway_provider.unavailable_credits_provider;
     }
 
     pub fn agentStreamProvider(self: *const Self) agent_stream_provider.Provider {
@@ -508,7 +485,7 @@ const App = struct {
             builtin_gateway.oauth_transport_provider
         else
             oauth_transport.unavailable_provider,
-        if (host_target.is_wasm) host.unavailable_secret_store else native_host.secret_store,
+        if (host_target.is_wasm) host.unavailable_secret_store else host.unavailable_secret_store,
     ),
     provider_selection: provider_runtime.Runtime = provider_runtime.Runtime.init(std.heap.c_allocator),
     model_cache: model_cache_runtime.Runtime = model_cache_runtime.Runtime.init(std.heap.c_allocator, builtin_gateway.models_path),
@@ -529,13 +506,7 @@ const App = struct {
     notifications: builtin_hooks.notifications.State = .{},
     herdr: builtin_hooks.Client = .{},
 
-    session: SessionRuntime = SessionRuntime.initWithProviders(
-        max_history_turns,
-        if (host_profile.generation_usage)
-            builtin_providers.native.deferredUsageProviders()
-        else
-            .{},
-    ),
+    session: SessionRuntime = SessionRuntime.init(max_history_turns),
     session_persistence: app_session_runtime.Persistence = .{},
     prompt_history: PromptHistoryRuntime = .{},
     requested_resume: ?cli_surface.ResumeTarget = null,
@@ -558,7 +529,6 @@ const App = struct {
     terminal_client: terminal_client_runtime.Runtime = .{},
     terminal_direct: terminal_direct_runtime.Runtime = .{},
     terminal_takeover: app_terminal_takeover_runtime.Controller = .{},
-    upgrader: auto_upgrade.AutoUpgrade = .{},
     subagents: ui_subagents.Controller = .{},
     change_tracker: change_tracker_mod.ChangeTracker = .{},
     mcp: app_mcp_runtime.State = .{},
@@ -571,7 +541,6 @@ const App = struct {
     thought_entry_id: ?u32 = null,
     thought_body: std.ArrayList(u8) = .empty,
     thought_heading_locked: bool = false,
-    auto_upgrade_enabled: bool = true,
     effort: ReasoningEffort = .auto,
     diff_entries: std.ArrayList(@import("core/output/diff.zig").DiffEntry) = .empty,
     next_diff_id: u32 = 1,
@@ -652,28 +621,13 @@ const App = struct {
         app.context_limits.applyCommandLine(launch.modifiers.context_limit_overrides);
         if (comptime host_profile.durable_sessions or host_profile.js_host_sessions) {
             if (app.requested_resume != null) {
-                if (launch.upgrade_relaunch) {
-                    try SessionAppRuntime.resumeRequestedSessionAfterUpgrade(
-                        &app,
-                        app_version,
-                    );
-                } else {
-                    try SessionAppRuntime.resumeRequestedSession(&app);
-                }
+                try SessionAppRuntime.resumeRequestedSession(&app);
                 SessionAppRuntime.syncTerminalTitle(&app);
             }
         }
         if (comptime host_profile.durable_sessions) {
             SessionAppRuntime.primeSessionPicker(&app);
         }
-        const env_disabled = if (io_mod.getenv("FX_AUTO_UPGRADE")) |val|
-            std.mem.eql(u8, val, "0") or std.ascii.eqlIgnoreCase(val, "false")
-        else
-            false;
-        if (env_disabled or !auto_upgrade.shouldEnableForCurrentExecutable()) {
-            app.auto_upgrade_enabled = false;
-        }
-        if (comptime !host_profile.auto_upgrade) app.auto_upgrade_enabled = false;
         try HostConfigAppRuntime.restore(&app, builtin_modes.registry);
         SessionAppRuntime.syncTerminalTitle(&app);
         return app;
@@ -762,39 +716,6 @@ const App = struct {
         NotificationAppRuntime.dispatchAttentionRequired(self, turn_id, kind);
     }
 
-    /// Must be called after init() returns so the AutoUpgrade thread
-    /// captures a pointer to the final App location (not a temporary).
-    pub fn startAutoUpgrade(self: *App) void {
-        if (self.auto_upgrade_enabled) {
-            self.upgrader.start(self.alloc, currentBuild());
-        }
-    }
-
-    pub fn applyReadyUpgradeShortcut(self: *App) !void {
-        try UpgradeAppRuntime.applyReadyUpgrade(self);
-    }
-
-    pub fn prepareResumeHandoffForUpgrade(self: *App) !void {
-        try SessionAppRuntime.prepareResumeHandoff(self);
-    }
-
-    pub fn requestUpgradeRelaunch(
-        self: *App,
-        executable_path: []const u8,
-    ) !void {
-        try self.upgrader.requestRelaunch(executable_path);
-    }
-
-    pub fn requestResumeHandoffForUpgrade(self: *App) void {
-        SessionAppRuntime.requestUpgradeResumeHandoff(self);
-    }
-
-    pub fn takeUpgradeRelaunchRequest(
-        self: *App,
-    ) ?auto_upgrade.RelaunchRequest {
-        return self.upgrader.takeRelaunchRequest();
-    }
-
     pub fn deinit(self: *App) void {
         _ = self.deinitImpl(false);
     }
@@ -823,7 +744,6 @@ const App = struct {
 
         self.worker.requestShutdown();
         self.background.requestStop();
-        self.upgrader.stop();
         self.file_index.requestStop();
 
         self.terminal_takeover.shutdown(App, self);
@@ -1180,10 +1100,6 @@ const App = struct {
         try SessionAppRuntime.finishLiveSessionResume(self);
     }
 
-    pub fn startResumedSessionReconciliation(self: *App) void {
-        SessionAppRuntime.startResumedSessionReconciliation(self);
-    }
-
     pub fn resumeSelectedSession(self: *App) !bool {
         return SessionAppRuntime.resumeSelectedSession(self);
     }
@@ -1291,11 +1207,6 @@ const App = struct {
         const api_key_copy = try std.heap.c_allocator.dupe(u8, gateway_credential.api_key);
         errdefer secret.zeroAndFree(std.heap.c_allocator, api_key_copy);
 
-        const gateway_team_copy = if (gateway_credential.gateway_team) |team|
-            try std.heap.c_allocator.dupe(u8, team)
-        else
-            null;
-        errdefer if (gateway_team_copy) |team| std.heap.c_allocator.free(team);
         const account_id_copy = if (self.auth.accountId()) |account_id|
             try std.heap.c_allocator.dupe(u8, account_id)
         else
@@ -1372,7 +1283,6 @@ const App = struct {
             .model = model_copy,
             .provider = self.provider_selection.selection().provider,
             .api_key = api_key_copy,
-            .gateway_team = gateway_team_copy,
             .credential_source = gateway_credential.source,
             .account_id = account_id_copy,
             .permission_mode = self.permission_engine.mode,
@@ -1582,6 +1492,9 @@ const App = struct {
             .permission_mode = permission_mode,
             .permission_rules = permission_rules,
             .subagent_available = self.session_persistence.subagent_host != null,
+            .web_search_available = self.providerSet()
+                .select(self.provider_selection.selection().provider)
+                .fxSearchRuntimeReady(),
         });
     }
 
@@ -1627,8 +1540,8 @@ const App = struct {
                     .vision_fallback = host_profile.tools,
                 },
                 .presentation = provider_catalog.find(.gateway),
-                .auth_strategy = .vercel,
-                .fallback_model_capabilities_fn = vercel_model_policy.capabilitiesForModel,
+                .auth_strategy = .api_key,
+                .fallback_model_capabilities_fn = model_capabilities.capabilitiesForModel,
                 .agent_stream = js_host_stream_provider.provider(),
                 .model_catalog = js_host_model_catalog.provider,
                 .permission_reviewer = if (comptime host_profile.tools)
@@ -1807,7 +1720,7 @@ const App = struct {
 
     /// Must be called after init() returns so the loader thread captures
     /// a pointer to the final App location (not a temporary). Same hazard
-    /// as `startAutoUpgrade` above.
+    /// after initialization so the loader observes the final App location.
     pub fn startFileIndex(self: *App) void {
         WorkspaceAppRuntime.startFileIndex(self);
     }
@@ -2558,9 +2471,6 @@ const App = struct {
             self.terminal_input_runtime.terminal_theme_monitor.poll(io_mod.milliTimestamp());
         }
 
-        if (comptime !host_target.is_wasm) {
-            UpgradeAppRuntime.collectUpgradeFacts(self);
-        }
         app_permission_runtime.Runtime(App).tick(
             self,
             app_permission_runtime.monotonicMillis(),
@@ -3201,7 +3111,6 @@ fn needsEarlyThreadedIo(args: []const [:0]const u8) bool {
     return std.mem.eql(u8, command, "login") or
         std.mem.eql(u8, command, "logout") or
         std.mem.eql(u8, command, "provider") or
-        std.mem.eql(u8, command, "upgrade") or
         // Resolve a stored credential, which reads the platform key store out of process.
         std.mem.eql(u8, command, "status") or
         std.mem.eql(u8, command, "doctor") or
@@ -3217,10 +3126,7 @@ fn hasExactArg(args: []const [:0]const u8, expected: []const u8) bool {
     return false;
 }
 
-test "auth and upgrade commands use early threaded io without full entry config" {
-    const args = &.{@as([:0]const u8, "upgrade")};
-    try std.testing.expect(!needsFullEntryConfig(args));
-    try std.testing.expect(needsEarlyThreadedIo(args));
+test "auth commands use early threaded io without full entry config" {
     try std.testing.expect(needsEarlyThreadedIo(&.{@as([:0]const u8, "login")}));
     try std.testing.expect(needsEarlyThreadedIo(&.{@as([:0]const u8, "logout")}));
     try std.testing.expect(needsEarlyThreadedIo(&.{@as([:0]const u8, "provider")}));
@@ -3318,7 +3224,6 @@ fn fullEntryConfig() app_entry_runtime.Config {
     return .{
         .version = version,
         .revision = build_options.git_commit,
-        .build_channel = compiled_update_channel,
         .command_catalog = builtin_commands.top_level_registry,
         .default_model = builtin_gateway.default_model,
         .default_agent_step_limit = default_max_agent_steps,
@@ -3329,7 +3234,7 @@ fn fullEntryConfig() app_entry_runtime.Config {
         .provider_set = builtin_providers.native,
         .background_process_provider = background_process.provider,
         .url_opener = url_opener.native_opener,
-        .secret_store = native_host.secret_store,
+        .secret_store = host.unavailable_secret_store,
         .prompt_policy = builtin_context.prompt_policy,
         .skill_root_policy = builtin_skills.root_policy,
         .ignored_list_entries = &ignored_list_entries,
@@ -3353,7 +3258,6 @@ fn localEntryConfig() app_entry_runtime.Config {
     return .{
         .version = version,
         .revision = build_options.git_commit,
-        .build_channel = compiled_update_channel,
         .command_catalog = builtin_commands.top_level_registry,
         .default_model = builtin_gateway.default_model,
         .default_agent_step_limit = default_max_agent_steps,
@@ -3364,7 +3268,7 @@ fn localEntryConfig() app_entry_runtime.Config {
         .provider_set = builtin_providers.native,
         .background_process_provider = background_process.provider,
         .url_opener = url_opener.native_opener,
-        .secret_store = native_host.secret_store,
+        .secret_store = host.unavailable_secret_store,
         .prompt_policy = .{ .system_prompt = "" },
         .skill_root_policy = builtin_skills.root_policy,
         .ignored_list_entries = &.{},
@@ -3388,7 +3292,6 @@ fn emptyEntryConfig() app_entry_runtime.Config {
     return .{
         .version = version,
         .revision = build_options.git_commit,
-        .build_channel = compiled_update_channel,
         .command_catalog = builtin_commands.top_level_registry,
         .default_model = "",
         .default_agent_step_limit = 0,
@@ -3399,7 +3302,7 @@ fn emptyEntryConfig() app_entry_runtime.Config {
         .provider_set = builtin_providers.native,
         .background_process_provider = background_process.provider,
         .url_opener = url_opener.native_opener,
-        .secret_store = native_host.secret_store,
+        .secret_store = host.unavailable_secret_store,
         .prompt_policy = .{ .system_prompt = "" },
         .skill_root_policy = builtin_skills.root_policy,
         .ignored_list_entries = &.{},
@@ -3861,7 +3764,6 @@ test {
     _ = @import("core/app/app_terminal_takeover_runtime.zig");
     _ = @import("core/app/app_runtime_setup.zig");
     _ = @import("core/app/app_session_runtime.zig");
-    _ = @import("core/app/app_upgrade_runtime.zig");
     _ = @import("core/app/app_worker_runtime.zig");
     _ = @import("ui/event_loop.zig");
     _ = @import("ui/resize_tests.zig");
@@ -3871,7 +3773,6 @@ test {
     _ = @import("ui/subagent/controller.zig");
     _ = @import("ui/subagent/runtime.zig");
     _ = @import("core/agent/assistant_presentation.zig");
-    _ = @import("core/upgrade/auto_upgrade.zig");
     _ = @import("core/background/background.zig");
     _ = @import("core/background/background_commands.zig");
     _ = @import("core/background/background_runtime.zig");
@@ -3889,7 +3790,7 @@ test {
     _ = @import("ui/footer/settings_menu_presentation.zig");
     _ = @import("ui/settings_screen.zig");
     _ = @import("builtins/context.zig");
-    _ = @import("builtins/gateway.zig");
+    _ = @import("builtins/responses.zig");
     _ = @import("core/shared/debug_trace.zig");
     _ = @import("core/output/diff.zig");
     _ = @import("core/shared/display_width.zig");
@@ -3910,7 +3811,6 @@ test {
     _ = credentials;
     _ = @import("core/auth/oauth.zig");
     _ = @import("core/workspace/file_index.zig");
-    _ = @import("gateway/vercel_protocol.zig");
     _ = @import("core/gateway/provider_set.zig");
     _ = @import("core/github/git_context.zig");
     _ = @import("core/github/github_publish.zig");
@@ -4011,16 +3911,12 @@ test {
     _ = @import("core/tooling/web_search_runtime.zig");
     _ = @import("core/gateway/responses_search.zig");
     _ = @import("core/gateway/codex_usage.zig");
-    _ = @import("gateway/web_search.zig");
-    _ = @import("gateway/web_search_types.zig");
     _ = @import("tools/web/content.zig");
     _ = @import("tools/web/html_to_markdown.zig");
     _ = @import("tools/filesystem/read_file.zig");
     _ = @import("tools/filesystem/semantic_search.zig");
     _ = @import("tools/skills/install_skill.zig");
     _ = @import("tools/skills/skill.zig");
-    _ = @import("core/upgrade/upgrade_helpers.zig");
-    _ = @import("core/upgrade/upgrade_runtime.zig");
     _ = @import("core/shared/types.zig");
     _ = @import("core/input/composer_history.zig");
     _ = @import("core/input/kill_ring.zig");

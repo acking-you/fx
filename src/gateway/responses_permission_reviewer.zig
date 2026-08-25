@@ -3,7 +3,7 @@ const permission_auto_classifier = @import("../core/permissions/auto_classifier.
 const stream_provider = @import("../core/agent/stream_provider.zig");
 const types = @import("../core/shared/types.zig");
 const io_mod = @import("../core/shared/io.zig");
-const vercel_protocol = @import("vercel_protocol.zig");
+const message_history = @import("../core/gateway/message_history.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -61,14 +61,13 @@ fn buildReviewPayload(
     raw: *anyopaque,
     alloc: Allocator,
     model: []const u8,
-    _: []const u8,
     messages: []const types.ChatMessage,
     target_call_id: []const u8,
     deadline: std.Io.Clock.Timestamp,
     cancel_flag: *std.atomic.Value(bool),
 ) ![]u8 {
     const runtime: *Runtime = @ptrCast(@alignCast(raw));
-    const expanded = try vercel_protocol.expandPendingToolReviewMessages(
+    const expanded = try message_history.expandPendingToolReviewMessages(
         alloc,
         messages,
         target_call_id,
@@ -99,7 +98,7 @@ pub fn buildPayloadForTest(
     var runtime = Runtime{
         .input = .{},
         .adapter = .{
-            .source = .ai_gateway_api_key,
+            .source = .openai_api_key,
             .model = model,
             .build_fn = build_fn,
             .validate_fn = validateUnavailable,
@@ -110,7 +109,6 @@ pub fn buildPayloadForTest(
         &runtime,
         alloc,
         model,
-        "",
         messages,
         target_call_id,
         deadline,
@@ -167,7 +165,6 @@ fn sendReview(
             .secret = runtime.input.credential,
             .source = runtime.adapter.source,
             .account_id = runtime.input.account_id,
-            .tenant = runtime.input.tenant,
         },
         .model = model,
         .retry_count = 1,

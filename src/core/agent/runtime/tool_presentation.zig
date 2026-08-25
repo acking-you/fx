@@ -24,15 +24,10 @@ const AgentRuntimeDeps = runtime_deps.AgentRuntimeDeps;
 const DiffEntryPayload = runtime_tool_contracts.DiffEntryPayload;
 const ToolExecutionResult = runtime_tool_contracts.ToolExecutionResult;
 
-pub fn isProviderSearchAlias(tool_name: []const u8) bool {
-    return tooling_presentation.isProviderSearchAlias(tool_name);
-}
-
 pub fn streamStartMayHaveExecutedAtProvider(
     registry: tool_dispatch.Registry,
     tool_name: []const u8,
 ) bool {
-    if (isProviderSearchAlias(tool_name)) return true;
     const spec = registry.lookup(tool_name) orelse return false;
     return spec.provider_executed;
 }
@@ -82,12 +77,6 @@ pub const ProvisionalToolStatuses = struct {
     }
 
     pub fn preflight(registry: tool_dispatch.Registry, tool_name: []const u8) ?StartPreflight {
-        if (tooling_presentation.isProviderSearchAlias(tool_name)) {
-            return .{ .eligible = .{
-                .action_label = "Searching",
-                .activity_kind = .read,
-            } };
-        }
         const lookup_name = if (std.mem.eql(u8, tool_name, "run_command"))
             "terminal"
         else
@@ -679,7 +668,6 @@ pub fn transitionPresentationGroup(
 }
 
 pub fn activityKind(registry: tool_dispatch.Registry, tool_name: []const u8) types.ToolActivityKind {
-    if (tooling_presentation.isProviderSearchAlias(tool_name)) return .read;
     return tool_dispatch.toolActivityKind(registry, tool_name);
 }
 
@@ -688,7 +676,6 @@ pub fn activityKindForCall(
     registry: tool_dispatch.Registry,
     call: ToolCall,
 ) types.ToolActivityKind {
-    if (tooling_presentation.isProviderSearchAlias(call.name)) return .read;
     return tool_dispatch.toolActivityKindForCall(alloc, registry, call);
 }
 
@@ -1364,37 +1351,6 @@ test "provisional lifecycle preflight distinguishes unknown eligible and ineligi
         .eligible => |metadata| try std.testing.expectEqualStrings("Reading", metadata.action_label),
         .ineligible => return error.TestExpectedEqual,
     }
-
-    for ([_][]const u8{ "perplexity_search", "parallel_search" }) |name| {
-        const provider_preflight = ProvisionalToolStatuses.preflight(test_tool_registry, name) orelse return error.TestExpectedEqual;
-        switch (provider_preflight) {
-            .eligible => |metadata| try std.testing.expectEqualStrings("Searching", metadata.action_label),
-            .ineligible => return error.TestExpectedEqual,
-        }
-    }
-}
-
-test "stream start execution certainty follows provider ownership" {
-    const provider_registry = tool_dispatch.Registry{
-        .tools = &.{test_builtin_tools.web_search},
-    };
-
-    try std.testing.expect(!streamStartMayHaveExecutedAtProvider(
-        test_tool_registry,
-        "read_file",
-    ));
-    try std.testing.expect(streamStartMayHaveExecutedAtProvider(
-        provider_registry,
-        "web_search",
-    ));
-    try std.testing.expect(streamStartMayHaveExecutedAtProvider(
-        test_tool_registry,
-        "perplexity_search",
-    ));
-    try std.testing.expect(streamStartMayHaveExecutedAtProvider(
-        test_tool_registry,
-        "parallel_search",
-    ));
 }
 
 test "tool lifecycle uses activity metadata from the supplied registry" {
@@ -1905,7 +1861,7 @@ test "native web_search completion status includes searches and duration" {
     try std.testing.expect(std.mem.find(u8, line, "17ms") != null);
 }
 
-test "provider search completion keeps terminal result detail" {
+test "provider-executed completion keeps terminal result detail" {
     const alloc = std.testing.allocator;
     var arena_state = std.heap.ArenaAllocator.init(alloc);
     defer arena_state.deinit();
@@ -1921,7 +1877,7 @@ test "provider search completion keeps terminal result detail" {
         3,
         .{
             .id = "provider_search",
-            .name = "perplexity_search",
+            .name = "provider_tool",
             .arguments_json = "{}",
             .provenance = .provider_executed,
         },

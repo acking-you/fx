@@ -1,4 +1,4 @@
-// Model-backed eval helpers. Requires a built binary and AI_GATEWAY_API_KEY.
+// Shared process helpers for deterministic E2E tests and optional live checks.
 import { expect } from "bun:test";
 import { execFileSync, execSync, spawn as nodeSpawn } from "node:child_process";
 import {
@@ -16,8 +16,7 @@ export const FX_BIN = resolve(import.meta.dirname, "../../zig-out/bin/fx");
 export const REPO_ROOT = resolve(import.meta.dirname, "../..");
 
 export const EVAL_MODELS = [
-  "anthropic/claude-sonnet-4.6",
-  "xai/grok-4.20-multi-agent-beta",
+  "gpt-5.4",
 ] as const;
 
 export const EVAL_MODEL: string = process.env.EVAL_MODEL ?? EVAL_MODELS[0];
@@ -527,5 +526,5 @@ export async function runFx(
 }
 
 export const HAS_API_KEY: boolean = !!(
-  process.env.AI_GATEWAY_API_KEY || process.env.VERCEL_OIDC_TOKEN
+  process.env.OPENAI_API_KEY
 );

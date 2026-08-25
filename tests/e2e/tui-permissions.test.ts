@@ -21,6 +21,12 @@ import {
   fakeGatewayToolCall as toolCall,
   type FakeGatewayResponse,
   isVolatileTokenStatusRow,
+  responseCompleted,
+  responseFunctionCall,
+  responseFunctionCallDelta,
+  responseFunctionCallDone,
+  responseFunctionCallStart,
+  responseTextDelta,
   startFakeGateway as startGateway,
   TmuxSession,
   tmuxAvailable,
@@ -96,13 +102,10 @@ function gatewayEnv(
 ) {
   return {
     HOME: root.home,
-    AI_GATEWAY_API_KEY: "fake-file-approval-key",
-    VERCEL_OIDC_TOKEN: undefined,
-    FX_GATEWAY_BASE_URL: gateway.baseUrl,
-    FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+    OPENAI_API_KEY: "fake-file-approval-key",
+        FX_RESPONSES_BASE_URL: gateway.baseUrl,
     FX_MODEL: FAKE_GATEWAY_MODEL,
     FX_PERMISSION_MODE: "ask",
-    FX_AUTO_UPGRADE: "0",
     NO_COLOR: "1",
     ...overrides,
   };
@@ -272,32 +275,16 @@ function chunkedWriteToolCall(id: string, path: string, content: string) {
   const chunkBytes = 32 * 1024;
   const deltas = Array.from(
     { length: Math.ceil(argumentsJson.length / chunkBytes) },
-    (_, index) => ({
-      type: "tool-input-delta",
+    (_, index) => responseFunctionCallDelta(
       id,
-      delta: argumentsJson.slice(index * chunkBytes, (index + 1) * chunkBytes),
-    }),
+      argumentsJson.slice(index * chunkBytes, (index + 1) * chunkBytes),
+    ),
   );
   return fakeGatewaySse([
-    {
-      type: "tool-input-start",
-      id,
-      toolName: "write_file",
-    },
+    responseFunctionCallStart(id, "write_file"),
     ...deltas,
-    {
-      type: "tool-input-end",
-      id,
-    },
-    {
-      type: "tool-call",
-      toolCallId: id,
-      toolName: "write_file",
-    },
-    {
-      type: "finish",
-      finishReason: { unified: "tool-calls", raw: "tool-calls" },
-    },
+    responseFunctionCallDone(id, argumentsJson),
+    responseCompleted(),
   ]);
 }
 
@@ -410,24 +397,17 @@ describe.skipIf(!tmuxAvailable())("tui: file permissions", () => {
       const tapePath = join(root.root, "pacer-gate.fxtape");
       const gateway = startFakeGateway([
         fakeGatewaySse([
-          {
-            type: "text-delta",
-            id: "answer_1",
-            delta: `x${marker} ${"x".repeat(2_048)}`,
-          },
-          {
-            type: "tool-call",
-            toolCallId: "pacer_gate_write",
-            toolName: "write_file",
-            input: {
+          responseTextDelta(`x${marker} ${"x".repeat(2_048)}`),
+          ...responseFunctionCall(
+            "pacer_gate_write",
+            "write_file",
+            {
               path: "pacer-gate.txt",
               content: "must not be written\n",
             },
-          },
-          {
-            type: "finish",
-            finishReason: { unified: "tool-calls", raw: "tool-calls" },
-          },
+            1,
+          ),
+          responseCompleted(),
         ]),
         finalText("file approval pacer gate completed"),
       ]);

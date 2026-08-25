@@ -74,32 +74,31 @@ let secondRequestAt;
 let secondRequestBody;
 let requestCount = 0;
 const mockFetch = async (_url, init) => {
-  requestedModel = new Headers(init.headers).get("ai-language-model-id");
+  const requestBody = JSON.parse(new TextDecoder().decode(init.body));
+  requestedModel = requestBody.model;
   requestCount += 1;
   if (requestCount === 2) {
     secondRequestAt = performance.now();
-    secondRequestBody = JSON.parse(new TextDecoder().decode(init.body));
+    secondRequestBody = requestBody;
     return new Response(new ReadableStream({
       start(controller) {
-        controller.enqueue(encoded.encode(`data: {"type":"text-delta","delta":"${queuedAnswer}"}\n`));
-        controller.enqueue(encoded.encode('data: {"type":"finish","finishReason":{"unified":"stop"},"usage":{"inputTokens":{"total":1},"outputTokens":{"total":2}}}\n'));
-        controller.enqueue(encoded.encode("data: [DONE]\n"));
+        controller.enqueue(encoded.encode(`data: {"type":"response.output_text.delta","item_id":"queued","output_index":0,"content_index":0,"delta":"${queuedAnswer}"}\n\n`));
+        controller.enqueue(encoded.encode('data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}\n\n'));
         controller.close();
       },
     }), { status: 200, headers: { "content-type": "text/event-stream" } });
   }
   return new Response(new ReadableStream({
     async start(controller) {
-      controller.enqueue(encoded.encode('data: {"type":"text-delta","delta":"hello"}\n'));
+      controller.enqueue(encoded.encode('data: {"type":"response.output_text.delta","item_id":"answer","output_index":0,"content_index":0,"delta":"hello"}\n\n'));
       streamStartedAt = performance.now();
       const interval = setInterval(() => {
-        controller.enqueue(encoded.encode('data: {"type":"text-delta","delta":"."}\n'));
+        controller.enqueue(encoded.encode('data: {"type":"response.output_text.delta","item_id":"answer","output_index":0,"content_index":0,"delta":"."}\n\n'));
       }, 20);
       await firstStreamRelease;
       clearInterval(interval);
-      controller.enqueue(encoded.encode('data: {"type":"text-delta","delta":" world"}\n'));
-      controller.enqueue(encoded.encode('data: {"type":"finish","finishReason":{"unified":"stop"},"usage":{"inputTokens":{"total":1},"outputTokens":{"total":2}}}\n'));
-      controller.enqueue(encoded.encode("data: [DONE]\n"));
+      controller.enqueue(encoded.encode('data: {"type":"response.output_text.delta","item_id":"answer","output_index":0,"content_index":0,"delta":" world"}\n\n'));
+      controller.enqueue(encoded.encode('data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}\n\n'));
       controller.close();
       streamFinishedAt = performance.now();
     },
@@ -109,7 +108,7 @@ const runtime = await createFxTerminal({
   backend: "wasm",
   wasm: await readFile(wasmPath),
   terminal,
-  env: { AI_GATEWAY_API_KEY: "term-test-key" },
+  env: { OPENAI_API_KEY: "term-test-key" },
   fetch: mockFetch,
   configStore: {
     get(configId) { return persistedConfig.get(configId) ?? null; },
@@ -180,8 +179,10 @@ if (!(streamStartedAt < streamFinishedAt)) throw new Error("terminal fetch did n
 if (!(draftVisibleAt < streamFinishedAt)) throw new Error("terminal rendered follow-up input only after continuous streaming finished");
 if (!(queuedVisibleAt < streamFinishedAt)) throw new Error("terminal queued follow-up input only after continuous streaming finished");
 if (!(secondRequestAt >= streamFinishedAt)) throw new Error("terminal started queued follow-up before continuous streaming finished");
-const queuedUser = secondRequestBody.prompt?.filter((message) => message.role === "user").at(-1);
-const queuedText = queuedUser?.content?.filter((part) => part.type === "text").map((part) => part.text);
+const queuedUser = secondRequestBody.input?.filter((item) => item.role === "user").at(-1);
+const queuedText = queuedUser?.content
+  ?.filter((part) => part.type === "input_text")
+  .map((part) => part.text);
 if (queuedText?.length !== 1 || queuedText[0] !== liveDraft) {
   throw new Error(`queued follow-up request changed the submitted draft: ${JSON.stringify(queuedText)}`);
 }

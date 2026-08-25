@@ -1669,16 +1669,16 @@ test "installFromDirectory propagates nested metadata allocation failures" {
 test "cloneUrlForSource preserves clone urls and expands owner repo shorthand" {
     const alloc = std.testing.allocator;
 
-    const http_url = try cloneUrlForSource(alloc, "https://github.com/vercel-labs/agent-skills.git");
+    const http_url = try cloneUrlForSource(alloc, "https://github.com/example/agent-skills.git");
     defer alloc.free(http_url);
-    const ssh_url = try cloneUrlForSource(alloc, "git@github.com:vercel-labs/agent-skills.git");
+    const ssh_url = try cloneUrlForSource(alloc, "git@github.com:example/agent-skills.git");
     defer alloc.free(ssh_url);
-    const shorthand_url = try cloneUrlForSource(alloc, "vercel-labs/agent-skills");
+    const shorthand_url = try cloneUrlForSource(alloc, "example/agent-skills");
     defer alloc.free(shorthand_url);
 
-    try std.testing.expectEqualStrings("https://github.com/vercel-labs/agent-skills.git", http_url);
-    try std.testing.expectEqualStrings("git@github.com:vercel-labs/agent-skills.git", ssh_url);
-    try std.testing.expectEqualStrings("https://github.com/vercel-labs/agent-skills.git", shorthand_url);
+    try std.testing.expectEqualStrings("https://github.com/example/agent-skills.git", http_url);
+    try std.testing.expectEqualStrings("git@github.com:example/agent-skills.git", ssh_url);
+    try std.testing.expectEqualStrings("https://github.com/example/agent-skills.git", shorthand_url);
 }
 
 test "install_skill clone output drain consumes stdout and stderr" {
@@ -1714,56 +1714,56 @@ test "normalizeInstallRequest rejects blank input" {
 }
 
 test "normalizeInstallRequest parses npx skills add with skill value" {
-    var request = try normalizeInstallRequest(std.testing.allocator, "npx skills add vercel-labs/agent-skills --skill review -g -y", null);
+    var request = try normalizeInstallRequest(std.testing.allocator, "npx skills add example/agent-skills --skill review -g -y", null);
     defer request.deinit(std.testing.allocator);
 
-    try std.testing.expectEqualStrings("vercel-labs/agent-skills", request.source);
+    try std.testing.expectEqualStrings("example/agent-skills", request.source);
     try std.testing.expectEqualStrings("review", request.filter.?);
 }
 
 test "normalizeInstallRequest parses bunx skills add with skill equals" {
-    var request = try normalizeInstallRequest(std.testing.allocator, "bunx skills add vercel-labs/agent-skills --skill=review --yes", null);
+    var request = try normalizeInstallRequest(std.testing.allocator, "bunx skills add example/agent-skills --skill=review --yes", null);
     defer request.deinit(std.testing.allocator);
 
-    try std.testing.expectEqualStrings("vercel-labs/agent-skills", request.source);
+    try std.testing.expectEqualStrings("example/agent-skills", request.source);
     try std.testing.expectEqualStrings("review", request.filter.?);
 }
 
 test "normalizeInstallRequest parses owner repo skill shorthand" {
-    var request = try normalizeInstallRequest(std.testing.allocator, "vercel-labs/agent-skills@vercel-react-best-practices", null);
+    var request = try normalizeInstallRequest(std.testing.allocator, "example/agent-skills@frontend-best-practices", null);
     defer request.deinit(std.testing.allocator);
 
-    try std.testing.expectEqualStrings("vercel-labs/agent-skills", request.source);
-    try std.testing.expectEqualStrings("vercel-react-best-practices", request.filter.?);
+    try std.testing.expectEqualStrings("example/agent-skills", request.source);
+    try std.testing.expectEqualStrings("frontend-best-practices", request.filter.?);
 }
 
 test "normalizeInstallRequest parses skills dot sh urls" {
-    var request = try normalizeInstallRequest(std.testing.allocator, "https://skills.sh/vercel-labs/agent-skills/vercel-react-best-practices", null);
+    var request = try normalizeInstallRequest(std.testing.allocator, "https://skills.sh/example/agent-skills/frontend-best-practices", null);
     defer request.deinit(std.testing.allocator);
 
-    try std.testing.expectEqualStrings("vercel-labs/agent-skills", request.source);
-    try std.testing.expectEqualStrings("vercel-react-best-practices", request.filter.?);
+    try std.testing.expectEqualStrings("example/agent-skills", request.source);
+    try std.testing.expectEqualStrings("frontend-best-practices", request.filter.?);
 }
 
 test "normalizeInstallRequest rejects conflicting filters" {
     try std.testing.expectError(
         error.ConflictingSkillInstallFilter,
-        normalizeInstallRequest(std.testing.allocator, "npx skills add vercel-labs/agent-skills@inline --skill command", "explicit"),
+        normalizeInstallRequest(std.testing.allocator, "npx skills add example/agent-skills@inline --skill command", "explicit"),
     );
 }
 
 test "normalizeInstallRequest ignores empty filters and allows identical duplicates" {
-    var request = try normalizeInstallRequest(std.testing.allocator, "npx skills add vercel-labs/agent-skills@same --skill=", "same");
+    var request = try normalizeInstallRequest(std.testing.allocator, "npx skills add example/agent-skills@same --skill=", "same");
     defer request.deinit(std.testing.allocator);
 
-    try std.testing.expectEqualStrings("vercel-labs/agent-skills", request.source);
+    try std.testing.expectEqualStrings("example/agent-skills", request.source);
     try std.testing.expectEqualStrings("same", request.filter.?);
 }
 
 test "looksLikeInstallCommand trims and rejects non npx bunx commands" {
-    try std.testing.expect(looksLikeInstallCommand(" \n\tnpx skills add vercel-labs/agent-skills\r\n"));
-    try std.testing.expect(looksLikeInstallCommand("bunx skills add vercel-labs/agent-skills"));
-    try std.testing.expect(!looksLikeInstallCommand("pnpm dlx skills add vercel-labs/agent-skills"));
+    try std.testing.expect(looksLikeInstallCommand(" \n\tnpx skills add example/agent-skills\r\n"));
+    try std.testing.expect(looksLikeInstallCommand("bunx skills add example/agent-skills"));
+    try std.testing.expect(!looksLikeInstallCommand("pnpm dlx skills add example/agent-skills"));
     try std.testing.expect(!looksLikeInstallCommand("npx skills list"));
 }
 
@@ -1929,19 +1929,19 @@ fn staticCommandRequest(skills_dir: []const u8, static_ctx: *StaticSkillCtx) Com
 }
 
 test "built-in skills command parses install aliases and filters" {
-    const add_command = parseCommand("add vercel-labs/agent-skills --skill review");
+    const add_command = parseCommand("add example/agent-skills --skill review");
     switch (add_command) {
         .install => |install| {
-            try std.testing.expectEqualStrings("vercel-labs/agent-skills", install.source);
+            try std.testing.expectEqualStrings("example/agent-skills", install.source);
             try std.testing.expectEqualStrings("review", install.filter.?);
         },
         else => return error.TestExpectedEqual,
     }
 
-    const install_command = parseCommand("install vercel-labs/agent-skills --skill=workflow");
+    const install_command = parseCommand("install example/agent-skills --skill=workflow");
     switch (install_command) {
         .install => |install| {
-            try std.testing.expectEqualStrings("vercel-labs/agent-skills", install.source);
+            try std.testing.expectEqualStrings("example/agent-skills", install.source);
             try std.testing.expectEqualStrings("workflow", install.filter.?);
         },
         else => return error.TestExpectedEqual,

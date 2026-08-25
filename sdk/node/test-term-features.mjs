@@ -16,8 +16,8 @@ const requests = [];
 const catalog = {
   object: "list",
   data: [
-    { id: "test/feature-model", type: "language", released: 2, tags: ["tool-use", "reasoning"], context_window: 128000, max_tokens: 8192 },
-    { id: "test/other-model", type: "language", released: 1, tags: ["tool-use"], context_window: 64000, max_tokens: 4096 },
+    { id: "test/feature-model", object: "model", created: 2 },
+    { id: "test/other-model", object: "model", created: 1 },
   ],
 };
 const encoder = new TextEncoder();
@@ -32,9 +32,9 @@ const fetch = async (url, init = {}) => {
   const response = turn === 1 ? "first answer" : "second answer";
   return new Response(new ReadableStream({
     start(controller) {
-      controller.enqueue(encoder.encode(`data: {"type":"text-delta","delta":"${response}"}\n`));
-      controller.enqueue(encoder.encode('data: {"type":"finish","finishReason":{"unified":"stop"},"usage":{"inputTokens":{"total":1},"outputTokens":{"total":2}}}\n'));
-      controller.enqueue(encoder.encode("data: [DONE]\n"));
+      controller.enqueue(encoder.encode(`data: {"type":"response.output_text.delta","item_id":"answer_${turn}","output_index":0,"content_index":0,"delta":"${response}"}\n\n`));
+      controller.enqueue(encoder.encode('data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}\n\n'));
+      controller.enqueue(encoder.encode("data: [DONE]\n\n"));
       controller.close();
     },
   }), { status: 200, headers: { "content-type": "text/event-stream" } });
@@ -46,7 +46,7 @@ const runtime = await createFxTerminal({
   wasm: await readFile(wasmPath),
   terminal: xtermAdapter(terminal),
   env: {
-    AI_GATEWAY_API_KEY: "feature-key",
+    OPENAI_API_KEY: "feature-key",
     FX_TRACE_STDERR: "1",
     FX_TRACE_SCOPES: "full_transcript,full_transcript_cache,frame_schedule",
   },
@@ -94,9 +94,6 @@ await waitFor(() => terminal.buffer.active.type === "normal", "full transcript c
 
 runtime.write("/login\r");
 await waitFor(() => grid().includes("Accounts") && grid().includes("Switch credential"), "credential hub");
-if (grid().includes("Vercel sign-in") || grid().includes("Change team")) {
-  throw new Error(`removed Vercel account actions remain in the credential hub:\n${grid()}`);
-}
 runtime.write("\x1b");
 await waitFor(() => !grid().includes("Switch credential"), "credential hub close");
 await command("/resume", "Session resume is owned by the embedding SDK");

@@ -7,7 +7,6 @@ const text_utils = @import("../shared/text_utils.zig");
 const tool_result_errors = @import("../tooling/tool_result_errors.zig");
 const session_permission_state = @import("../permissions/session_permission_state.zig");
 const image_attachments = @import("../images/image_attachments.zig");
-const generation_usage_provider = @import("generation_usage_provider.zig");
 const web_fetch_artifacts = @import("web_fetch_artifacts.zig");
 pub const session_usage = @import("session_usage.zig");
 pub const profile_usage_runtime = @import("profile_usage_runtime.zig");
@@ -1597,22 +1596,8 @@ pub const SessionRuntime = struct {
     /// It is runtime-only and deliberately does not persist across restores.
     history_generation: u64 = 1,
 
-    pub fn init(
-        max_history_turns: usize,
-        provider: generation_usage_provider.Provider,
-    ) SessionRuntime {
+    pub fn init(max_history_turns: usize) SessionRuntime {
         return .{
-            .usage = session_usage.Usage.initFreshWithProvider(provider),
-            .max_history_turns = max_history_turns,
-        };
-    }
-
-    pub fn initWithProviders(
-        max_history_turns: usize,
-        providers: generation_usage_provider.Set,
-    ) SessionRuntime {
-        return .{
-            .usage = session_usage.Usage.initFreshWithProviders(providers),
             .max_history_turns = max_history_turns,
         };
     }
@@ -2556,7 +2541,7 @@ test "assistant Responses reasoning identity is owned and projected across user 
     try std.testing.expectEqual(@as(usize, 2), tool_assistant.reasoning_items.len);
 }
 
-test "unavailable profile usage keeps reconciled generation pending in host runtime" {
+test "unavailable profile usage keeps direct publication durable in host runtime" {
     const alloc = std.testing.allocator;
     const Checkpoint = struct {
         calls: usize = 0,
@@ -2581,35 +2566,20 @@ test "unavailable profile usage keeps reconciled generation pending in host runt
         .persist = Checkpoint.persist,
     });
 
-    const sequence = try runtime.usage.reserveInvocation();
-    try runtime.usage.finishObservedInvocation(
+    const observation = try session_usage.InvocationObservation.begin(&runtime.usage);
+    try observation.completeDirect(
         alloc,
-        sequence,
-        1,
-        .observed_generation,
-        "gen_01ARZ3NDEKTSV4RRFFQ69G5FAV",
-        "https://ai-gateway.vercel.sh",
-        null,
+        "provider/model",
+        .{ .input_tokens = 10, .output_tokens = 2, .cached_input_tokens = 1, .reasoning_output_tokens = 1 },
+        .{ .http_ok = true, .terminal_finish_reason = .stop },
     );
-    try runtime.usage.applyGeneration(alloc, .{
-        .id = "gen_01ARZ3NDEKTSV4RRFFQ69G5FAV",
-        .created_at_ms = 1000,
-        .model = "provider/model",
-        .total_cost = 0.25,
-        .input_tokens = 10,
-        .output_tokens = 2,
-        .cache_read_tokens = 1,
-        .cache_write_tokens = 0,
-        .reasoning_tokens = 1,
-        .billable_web_search_calls = 0,
-    });
 
     var snapshot = try runtime.usage.snapshot(alloc);
     defer snapshot.deinit(alloc);
-    try std.testing.expectEqual(session_usage.Availability.pending, snapshot.billing);
-    try std.testing.expectEqual(@as(usize, 1), snapshot.pending.len);
-    try std.testing.expectEqual(@as(u64, 0), snapshot.input_tokens);
-    try std.testing.expectEqual(@as(usize, 1), checkpoint.calls);
+    try std.testing.expectEqual(session_usage.Availability.complete, snapshot.billing);
+    try std.testing.expectEqual(@as(usize, 1), snapshot.publication_backlog.len);
+    try std.testing.expectEqual(@as(u64, 10), snapshot.input_tokens);
+    try std.testing.expectEqual(@as(usize, 2), checkpoint.calls);
 }
 
 test "readable profile usage does not attach publishers or flush recovery" {
@@ -2641,28 +2611,13 @@ test "readable profile usage does not attach publishers or flush recovery" {
         .persist = Checkpoint.persist,
     });
 
-    const sequence = try runtime.usage.reserveInvocation();
-    try runtime.usage.finishObservedInvocation(
+    const observation = try session_usage.InvocationObservation.begin(&runtime.usage);
+    try observation.completeDirect(
         alloc,
-        sequence,
-        1,
-        .observed_generation,
-        "gen_01ARZ3NDEKTSV4RRFFQ69G5FAV",
-        "https://ai-gateway.vercel.sh",
-        null,
+        "provider/model",
+        .{ .input_tokens = 10, .output_tokens = 2, .cached_input_tokens = 1, .reasoning_output_tokens = 1 },
+        .{ .http_ok = true, .terminal_finish_reason = .stop },
     );
-    try runtime.usage.applyGeneration(alloc, .{
-        .id = "gen_01ARZ3NDEKTSV4RRFFQ69G5FAV",
-        .created_at_ms = 1000,
-        .model = "provider/model",
-        .total_cost = 0.25,
-        .input_tokens = 10,
-        .output_tokens = 2,
-        .cache_read_tokens = 1,
-        .cache_write_tokens = 0,
-        .reasoning_tokens = 1,
-        .billable_web_search_calls = 0,
-    });
 
     const checkpoint_calls = checkpoint.calls;
     try std.testing.expectEqual(

@@ -4,8 +4,6 @@ const io_mod = @import("../shared/io.zig");
 
 const Allocator = std.mem.Allocator;
 
-pub const vercel_gateway_base_url = "https://ai-gateway.vercel.sh";
-pub const vercel_gateway_endpoint = vercel_gateway_base_url ++ "/v3/ai/language-model";
 pub const openai_base_url = "https://api.openai.com/v1";
 pub const openai_responses_endpoint = openai_base_url ++ "/responses";
 pub const openai_responses_compact_endpoint = openai_responses_endpoint ++ "/compact";
@@ -14,7 +12,6 @@ pub const codex_responses_endpoint = codex_base_url ++ "/responses";
 pub const codex_responses_compact_endpoint = codex_responses_endpoint ++ "/compact";
 pub const codex_search_endpoint = codex_base_url ++ "/alpha/search";
 
-pub const fx_default_model = "zai/glm-5.2";
 pub const openai_default_model = "gpt-5.4";
 pub const codex_default_model = "gpt-5.6-sol";
 
@@ -25,19 +22,16 @@ pub const responses_base_url_env = "FX_RESPONSES_BASE_URL";
 pub const codex_base_url_env = "FX_CODEX_BASE_URL";
 
 pub const WireApi = enum {
-    vercel_ai_gateway,
     openai_responses,
 };
 
 pub const AccountHeader = enum {
     none,
-    vercel_team,
     chatgpt_account_id,
 
     pub fn name(self: AccountHeader) ?[]const u8 {
         return switch (self) {
             .none => null,
-            .vercel_team => "x-vercel-ai-gateway-team",
             .chatgpt_account_id => "ChatGPT-Account-ID",
         };
     }
@@ -54,14 +48,11 @@ pub const HeaderCapabilities = struct {
 };
 
 pub const DirectUsage = enum {
-    /// Usage is reconciled after the stream through the Gateway generation API.
-    gateway_generation,
     /// Usage is authoritative in the terminal Responses event.
     response_body,
 };
 
 pub const CatalogKind = enum {
-    vercel_gateway,
     openai_models,
     codex_builtin,
 };
@@ -81,34 +72,16 @@ pub const ProviderContract = struct {
     usage: DirectUsage,
     catalog: CatalogKind,
     supports_max_output_tokens: bool,
-    /// This flag means post-stream Gateway generation reconciliation, not
-    /// whether the provider reports token usage at all.
-    supports_usage_reconciliation: bool,
     supports_catalog: bool,
-    supports_credits: bool,
-    supports_teams: bool,
     remote_compaction: RemoteCompactionSupport,
 };
 
 pub const ProviderRoute = enum {
-    vercel_gateway,
     openai_responses_byok,
     codex_responses_oauth,
 
     pub fn contract(self: ProviderRoute) ProviderContract {
         return switch (self) {
-            .vercel_gateway => .{
-                .wire_api = .vercel_ai_gateway,
-                .headers = .{ .account_header = .vercel_team },
-                .usage = .gateway_generation,
-                .catalog = .vercel_gateway,
-                .supports_max_output_tokens = true,
-                .supports_usage_reconciliation = true,
-                .supports_catalog = true,
-                .supports_credits = true,
-                .supports_teams = true,
-                .remote_compaction = .unsupported,
-            },
             .openai_responses_byok => .{
                 .wire_api = .openai_responses,
                 .headers = .{
@@ -118,10 +91,7 @@ pub const ProviderRoute = enum {
                 .usage = .response_body,
                 .catalog = .openai_models,
                 .supports_max_output_tokens = true,
-                .supports_usage_reconciliation = false,
                 .supports_catalog = true,
-                .supports_credits = false,
-                .supports_teams = false,
                 .remote_compaction = .v2,
             },
             .codex_responses_oauth => .{
@@ -134,10 +104,7 @@ pub const ProviderRoute = enum {
                 .catalog = .codex_builtin,
                 // The ChatGPT Codex endpoint currently rejects this field.
                 .supports_max_output_tokens = false,
-                .supports_usage_reconciliation = false,
                 .supports_catalog = true,
-                .supports_credits = false,
-                .supports_teams = false,
                 .remote_compaction = .v2,
             },
         };
@@ -145,7 +112,6 @@ pub const ProviderRoute = enum {
 
     pub fn defaultBaseUrl(self: ProviderRoute) []const u8 {
         return switch (self) {
-            .vercel_gateway => vercel_gateway_base_url,
             .openai_responses_byok => openai_base_url,
             .codex_responses_oauth => codex_base_url,
         };
@@ -153,7 +119,6 @@ pub const ProviderRoute = enum {
 
     pub fn defaultEndpoint(self: ProviderRoute) []const u8 {
         return switch (self) {
-            .vercel_gateway => vercel_gateway_endpoint,
             .openai_responses_byok => openai_responses_endpoint,
             .codex_responses_oauth => codex_responses_endpoint,
         };
@@ -161,7 +126,6 @@ pub const ProviderRoute = enum {
 
     pub fn defaultCompactEndpoint(self: ProviderRoute) ?[]const u8 {
         return switch (self) {
-            .vercel_gateway => null,
             .openai_responses_byok => openai_responses_compact_endpoint,
             .codex_responses_oauth => codex_responses_compact_endpoint,
         };
@@ -169,7 +133,7 @@ pub const ProviderRoute = enum {
 
     pub fn defaultSearchEndpoint(self: ProviderRoute) ?[]const u8 {
         return switch (self) {
-            .vercel_gateway, .openai_responses_byok => null,
+            .openai_responses_byok => null,
             .codex_responses_oauth => codex_search_endpoint,
         };
     }
@@ -179,7 +143,6 @@ pub const ProviderRoute = enum {
 /// compile until its provider route is assigned here.
 pub fn fromCredentialSource(source: types.CredentialSource) ?ProviderRoute {
     return switch (source) {
-        .vercel_oidc_token, .ai_gateway_api_key, .stored_key => .vercel_gateway,
         .openai_api_key => .openai_responses_byok,
         .chatgpt_subscription => .codex_responses_oauth,
         .grok_subscription => null,
@@ -189,22 +152,14 @@ pub fn fromCredentialSource(source: types.CredentialSource) ?ProviderRoute {
 /// Projects an Fx catalog model ID to the ID sent on the selected wire API.
 /// Returned slices borrow `model` unless a route default is returned.
 pub fn wireModel(route: ProviderRoute, model: []const u8) []const u8 {
-    if (route == .vercel_gateway) return model;
-
     const has_openai_prefix = std.mem.startsWith(u8, model, openai_model_prefix);
     const responses_model = if (has_openai_prefix)
         model[openai_model_prefix.len..]
     else
         model;
     return switch (route) {
-        .vercel_gateway => unreachable,
-        .openai_responses_byok => if (std.mem.eql(u8, responses_model, fx_default_model))
-            openai_default_model
-        else
-            responses_model,
-        .codex_responses_oauth => if (std.mem.eql(u8, model, fx_default_model))
-            codex_default_model
-        else if (has_openai_prefix and isKnownCodexModelAlias(responses_model))
+        .openai_responses_byok => responses_model,
+        .codex_responses_oauth => if (has_openai_prefix and isKnownCodexModelAlias(responses_model))
             responses_model
         else
             model,
@@ -236,7 +191,6 @@ pub fn reconciledDefaultModel(
     if (has_process_override or !isKnownDefaultModel(model)) return null;
 
     const target = switch (fromCredentialSource(source) orelse return null) {
-        .vercel_gateway => fx_default_model,
         .openai_responses_byok => openai_default_model,
         .codex_responses_oauth => codex_default_model,
     };
@@ -245,7 +199,6 @@ pub fn reconciledDefaultModel(
 }
 
 fn isKnownDefaultModel(model: []const u8) bool {
-    if (std.mem.eql(u8, model, fx_default_model)) return true;
     const responses_model = if (std.mem.startsWith(u8, model, openai_model_prefix))
         model[openai_model_prefix.len..]
     else
@@ -294,8 +247,6 @@ pub fn resolveEndpointAlloc(
     route: ProviderRoute,
     overrides: EndpointOverrides,
 ) ResolveEndpointError![]u8 {
-    if (route == .vercel_gateway) return alloc.dupe(u8, vercel_gateway_endpoint);
-
     const base_url = try resolveBaseUrlAlloc(alloc, route, overrides);
     defer alloc.free(base_url);
     return appendResponsesEndpointAlloc(alloc, base_url);
@@ -303,7 +254,7 @@ pub fn resolveEndpointAlloc(
 
 /// Resolves the dedicated compact endpoint for direct Responses routes. The
 /// same scoped base-URL and origin validation used by ordinary Responses
-/// transport applies here; Vercel Gateway has no compatible endpoint.
+/// transport applies here; subscription providers have their own endpoints.
 pub fn resolveCompactEndpointAlloc(
     alloc: Allocator,
     route: ProviderRoute,
@@ -339,7 +290,6 @@ pub fn resolveBaseUrlAlloc(
     overrides: EndpointOverrides,
 ) ResolveEndpointError![]u8 {
     const base_url = switch (route) {
-        .vercel_gateway => vercel_gateway_base_url,
         .openai_responses_byok => overrides.responses_base_url orelse
             overrides.openai_base_url orelse
             openai_base_url,
@@ -479,7 +429,6 @@ test "credential sources map to one typed provider route" {
         }
         const route = fromCredentialSource(source) orelse return error.UnmappedCredentialSource;
         const expected: ProviderRoute = switch (source) {
-            .vercel_oidc_token, .ai_gateway_api_key, .stored_key => .vercel_gateway,
             .openai_api_key => .openai_responses_byok,
             .chatgpt_subscription => .codex_responses_oauth,
             .grok_subscription => unreachable,
@@ -488,22 +437,18 @@ test "credential sources map to one typed provider route" {
     }
 }
 
-test "wire model preserves Gateway IDs and projects Responses IDs" {
+test "wire model projects Responses IDs" {
     const cases = [_]struct {
         route: ProviderRoute,
         model: []const u8,
         expected: []const u8,
     }{
-        .{ .route = .vercel_gateway, .model = fx_default_model, .expected = fx_default_model },
-        .{ .route = .vercel_gateway, .model = "openai/gpt-5.4", .expected = "openai/gpt-5.4" },
         .{ .route = .openai_responses_byok, .model = "openai/gpt-5.4", .expected = "gpt-5.4" },
-        .{ .route = .openai_responses_byok, .model = fx_default_model, .expected = openai_default_model },
         .{ .route = .openai_responses_byok, .model = "corporate/custom-model", .expected = "corporate/custom-model" },
         .{ .route = .codex_responses_oauth, .model = "openai/gpt-5.6-sol", .expected = "gpt-5.6-sol" },
         .{ .route = .codex_responses_oauth, .model = "gpt-5.3-codex", .expected = "gpt-5.3-codex" },
         .{ .route = .codex_responses_oauth, .model = "openai/o3", .expected = "o3" },
         .{ .route = .codex_responses_oauth, .model = "o4-mini", .expected = "o4-mini" },
-        .{ .route = .codex_responses_oauth, .model = fx_default_model, .expected = codex_default_model },
         .{ .route = .codex_responses_oauth, .model = "anthropic/claude", .expected = "anthropic/claude" },
         .{ .route = .codex_responses_oauth, .model = "openrouter/custom", .expected = "openrouter/custom" },
         .{ .route = .codex_responses_oauth, .model = "openai/company-custom", .expected = "openai/company-custom" },
@@ -515,38 +460,26 @@ test "wire model preserves Gateway IDs and projects Responses IDs" {
 
 test "credential source model projection uses its assigned route" {
     try std.testing.expectEqualStrings(
-        "openai/gpt-5.4",
-        wireModelForCredentialSource(.ai_gateway_api_key, "openai/gpt-5.4"),
-    );
-    try std.testing.expectEqualStrings(
         "gpt-5.4",
-        wireModelForCredentialSource(.openai_api_key, fx_default_model),
+        wireModelForCredentialSource(.openai_api_key, "openai/gpt-5.4"),
     );
     try std.testing.expectEqualStrings(
         "gpt-5.6-sol",
-        wireModelForCredentialSource(.chatgpt_subscription, fx_default_model),
+        wireModelForCredentialSource(.chatgpt_subscription, "openai/gpt-5.6-sol"),
     );
 }
 
 test "route default reconciliation normalizes only known defaults" {
     try std.testing.expectEqualStrings(
-        codex_default_model,
-        reconciledDefaultModel(.chatgpt_subscription, fx_default_model, false).?,
-    );
-    try std.testing.expectEqualStrings(
         openai_default_model,
         reconciledDefaultModel(.openai_api_key, codex_default_model, false).?,
-    );
-    try std.testing.expectEqualStrings(
-        fx_default_model,
-        reconciledDefaultModel(.ai_gateway_api_key, openai_default_model, false).?,
     );
     try std.testing.expectEqualStrings(
         codex_default_model,
         reconciledDefaultModel(.chatgpt_subscription, "openai/" ++ openai_default_model, false).?,
     );
     try std.testing.expect(reconciledDefaultModel(.chatgpt_subscription, "company/custom-model", false) == null);
-    try std.testing.expect(reconciledDefaultModel(.chatgpt_subscription, fx_default_model, true) == null);
+    try std.testing.expect(reconciledDefaultModel(.chatgpt_subscription, openai_default_model, true) == null);
     try std.testing.expect(reconciledDefaultModel(.chatgpt_subscription, codex_default_model, false) == null);
 }
 
@@ -567,26 +500,13 @@ test "Responses base URLs normalize to their model catalog endpoint" {
 }
 
 test "provider contracts keep protocol and product capabilities separate" {
-    const vercel = ProviderRoute.vercel_gateway.contract();
-    try std.testing.expectEqual(WireApi.vercel_ai_gateway, vercel.wire_api);
-    try std.testing.expectEqualStrings("x-vercel-ai-gateway-team", vercel.headers.account_header.name().?);
-    try std.testing.expect(vercel.supports_max_output_tokens);
-    try std.testing.expect(vercel.supports_usage_reconciliation);
-    try std.testing.expect(vercel.supports_catalog);
-    try std.testing.expect(vercel.supports_credits);
-    try std.testing.expect(vercel.supports_teams);
-    try std.testing.expectEqual(RemoteCompactionSupport.unsupported, vercel.remote_compaction);
-
     const openai = ProviderRoute.openai_responses_byok.contract();
     try std.testing.expectEqual(WireApi.openai_responses, openai.wire_api);
     try std.testing.expect(openai.headers.account_header.name() == null);
     try std.testing.expect(openai.headers.openai_organization);
     try std.testing.expect(openai.headers.openai_project);
     try std.testing.expect(openai.supports_max_output_tokens);
-    try std.testing.expect(!openai.supports_usage_reconciliation);
     try std.testing.expect(openai.supports_catalog);
-    try std.testing.expect(!openai.supports_credits);
-    try std.testing.expect(!openai.supports_teams);
     try std.testing.expectEqual(RemoteCompactionSupport.v2, openai.remote_compaction);
 
     const codex = ProviderRoute.codex_responses_oauth.contract();
@@ -594,21 +514,15 @@ test "provider contracts keep protocol and product capabilities separate" {
     try std.testing.expectEqualStrings("ChatGPT-Account-ID", codex.headers.account_header.name().?);
     try std.testing.expect(codex.headers.originator);
     try std.testing.expect(!codex.supports_max_output_tokens);
-    try std.testing.expect(!codex.supports_usage_reconciliation);
     try std.testing.expect(codex.supports_catalog);
-    try std.testing.expect(!codex.supports_credits);
-    try std.testing.expect(!codex.supports_teams);
     try std.testing.expectEqual(RemoteCompactionSupport.v2, codex.remote_compaction);
 }
 
 test "provider routes expose stable default bases and endpoints" {
-    try std.testing.expectEqualStrings(vercel_gateway_base_url, ProviderRoute.vercel_gateway.defaultBaseUrl());
-    try std.testing.expectEqualStrings(vercel_gateway_endpoint, ProviderRoute.vercel_gateway.defaultEndpoint());
     try std.testing.expectEqualStrings(openai_base_url, ProviderRoute.openai_responses_byok.defaultBaseUrl());
     try std.testing.expectEqualStrings(openai_responses_endpoint, ProviderRoute.openai_responses_byok.defaultEndpoint());
     try std.testing.expectEqualStrings(codex_base_url, ProviderRoute.codex_responses_oauth.defaultBaseUrl());
     try std.testing.expectEqualStrings(codex_responses_endpoint, ProviderRoute.codex_responses_oauth.defaultEndpoint());
-    try std.testing.expect(ProviderRoute.vercel_gateway.defaultCompactEndpoint() == null);
     try std.testing.expectEqualStrings(
         openai_responses_compact_endpoint,
         ProviderRoute.openai_responses_byok.defaultCompactEndpoint().?,
@@ -617,7 +531,6 @@ test "provider routes expose stable default bases and endpoints" {
         codex_responses_compact_endpoint,
         ProviderRoute.codex_responses_oauth.defaultCompactEndpoint().?,
     );
-    try std.testing.expect(ProviderRoute.vercel_gateway.defaultSearchEndpoint() == null);
     try std.testing.expect(ProviderRoute.openai_responses_byok.defaultSearchEndpoint() == null);
     try std.testing.expectEqualStrings(
         codex_search_endpoint,
@@ -654,11 +567,6 @@ test "Responses compact endpoints share direct-route base URL policy" {
         "http://localhost:43123/backend-api/codex/responses/compact",
         codex,
     );
-
-    try std.testing.expectError(
-        error.UnsupportedProviderRoute,
-        resolveCompactEndpointAlloc(alloc, .vercel_gateway, .{}),
-    );
 }
 
 test "Codex search endpoint is pinned to the validated Codex route" {
@@ -684,12 +592,10 @@ test "Codex search endpoint is pinned to the validated Codex route" {
     defer alloc.free(already_search);
     try std.testing.expectEqualStrings(codex_search_endpoint, already_search);
 
-    inline for (.{ ProviderRoute.vercel_gateway, ProviderRoute.openai_responses_byok }) |route| {
-        try std.testing.expectError(
-            error.UnsupportedProviderRoute,
-            resolveSearchEndpointAlloc(alloc, route, .{}),
-        );
-    }
+    try std.testing.expectError(
+        error.UnsupportedProviderRoute,
+        resolveSearchEndpointAlloc(alloc, .openai_responses_byok, .{}),
+    );
 }
 
 test "Responses endpoint resolution applies scoped override precedence" {
@@ -722,12 +628,6 @@ test "Responses endpoint resolution applies scoped override precedence" {
     });
     defer alloc.free(codex);
     try std.testing.expectEqualStrings("http://127.0.0.1:43123/backend-api/codex/responses", codex);
-
-    const vercel = try resolveEndpointAlloc(alloc, .vercel_gateway, .{
-        .responses_base_url = "https://ignored.example.test/v1",
-    });
-    defer alloc.free(vercel);
-    try std.testing.expectEqualStrings(vercel_gateway_endpoint, vercel);
 }
 
 test "Codex remains pinned to its default origin without its explicit override" {

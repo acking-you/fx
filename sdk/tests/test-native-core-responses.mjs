@@ -23,11 +23,8 @@ function headerMap(serialized) {
 function assertDirectRequest(request, expectedBase, expectedMethod) {
   assert.equal(request.method, expectedMethod);
   assert.equal(request.url, `${expectedBase}/${expectedMethod === "GET" ? "models" : "responses"}`);
-  assert.doesNotMatch(request.url, /ai-gateway\.vercel\.sh|api\.openai\.com/);
   const headers = headerMap(request.headers);
   assert.equal(headers.get("authorization"), `Bearer ${openaiKey}`);
-  assert.equal(headers.has("ai-gateway-protocol-version"), false);
-  assert.equal(headers.has("x-vercel-ai-gateway-team"), false);
 }
 
 const highLevelBase = "http://127.0.0.1:43101/v1";
@@ -95,7 +92,6 @@ const core = addon.createCore({
   apiKey: openaiKey,
   credentialSource: "openai_api_key",
   responsesBaseUrl: lowLevelBase,
-  gatewayChatUrl: "http://127.0.0.1:43104/vercel-trap",
   model,
   home: "/tmp",
   workspaceRoot: "/tmp",

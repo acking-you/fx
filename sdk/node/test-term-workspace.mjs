@@ -17,7 +17,7 @@ const requestDecoder = new TextDecoder();
 const stderrDecoder = new TextDecoder();
 const catalog = {
   object: "list",
-  data: [{ id: "test/workspace-model", type: "language", released: 1, tags: ["tool-use"], context_window: 128000, max_tokens: 8192 }],
+  data: [{ id: "test/workspace-model", object: "model", created: 1 }],
 };
 const execCalls = [];
 let abortStarted = false;
@@ -72,28 +72,28 @@ function sse(events) {
 
 function toolCall(id, command) {
   return sse([
-    { type: "tool-call", toolCallId: id, toolName: "terminal", input: { action: "exec", command } },
-    { type: "finish", finishReason: { unified: "tool-calls", raw: "tool-calls" } },
+    { type: "response.output_item.added", output_index: 0, item: { type: "function_call", id: `${id}_item`, call_id: id, name: "terminal" } },
+    { type: "response.function_call_arguments.done", item_id: `${id}_item`, call_id: id, output_index: 0, arguments: JSON.stringify({ action: "exec", command }) },
+    { type: "response.completed", response: { status: "completed", usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } } },
   ]);
 }
 
 function terminalToolCalls(calls) {
-  const events = calls.flatMap(({ id, input }) => {
+  const events = calls.flatMap(({ id, input }, output_index) => {
     const serialized = JSON.stringify(input);
     const deltas = [];
     for (let offset = 0; offset < serialized.length; offset += 4096) {
-      deltas.push({ type: "tool-input-delta", id, delta: serialized.slice(offset, offset + 4096) });
+      deltas.push({ type: "response.function_call_arguments.delta", item_id: `${id}_item`, call_id: id, output_index, delta: serialized.slice(offset, offset + 4096) });
     }
     return [
-      { type: "tool-input-start", id, toolName: "terminal" },
+      { type: "response.output_item.added", output_index, item: { type: "function_call", id: `${id}_item`, call_id: id, name: "terminal" } },
       ...deltas,
-      { type: "tool-input-end", id },
-      { type: "tool-call", toolCallId: id, toolName: "terminal" },
+      { type: "response.function_call_arguments.done", item_id: `${id}_item`, call_id: id, output_index, arguments: serialized },
     ];
   });
   const responseEvents = [
     ...events,
-    { type: "finish", finishReason: { unified: "tool-calls", raw: "tool-calls" } },
+    { type: "response.completed", response: { status: "completed", usage: { input_tokens: 1, output_tokens: calls.length, total_tokens: calls.length + 1 } } },
   ];
   return new Response(new ReadableStream({
     start(controller) {
@@ -108,28 +108,25 @@ function terminalToolCalls(calls) {
 
 function textResponse(value) {
   return sse([
-    { type: "text-delta", delta: value },
-    { type: "finish", finishReason: { unified: "stop", raw: "stop" } },
+    { type: "response.output_text.delta", item_id: "answer_1", output_index: 0, content_index: 0, delta: value },
+    { type: "response.completed", response: { status: "completed", usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } } },
   ]);
 }
 
 function toolResult(body, id) {
-  const prompt = body.prompt || [];
-  let lastUser = -1;
-  for (let index = prompt.length - 1; index >= 0; index -= 1) {
-    if (prompt[index].role === "user") {
-      lastUser = index;
-      break;
-    }
-  }
-  return prompt.slice(lastUser + 1)
-    .flatMap((message) => Array.isArray(message.content) ? message.content : [])
-    .find((part) => part.type === "tool-result" && part.toolCallId === id);
+  return (body.input || []).find((item) =>
+    item.type === "function_call_output" && item.call_id === id
+  );
+}
+
+function latestToolResult(body) {
+  const item = (body.input || []).at(-1);
+  return item?.type === "function_call_output" ? item : null;
 }
 
 function latestUserText(body) {
-  for (let index = (body.prompt || []).length - 1; index >= 0; index -= 1) {
-    const message = body.prompt[index];
+  for (let index = (body.input || []).length - 1; index >= 0; index -= 1) {
+    const message = body.input[index];
     if (message.role === "user") return JSON.stringify(message.content);
   }
   return "";
@@ -154,7 +151,7 @@ const fetch = async (_url, init = {}) => {
     if (body.tools?.length !== 1 || body.tools[0]?.name !== "terminal") {
       throw new Error(`workspace advertised unexpected tools: ${JSON.stringify(body.tools)}`);
     }
-    const schema = body.tools[0]?.inputSchema;
+    const schema = body.tools[0]?.parameters;
     if (JSON.stringify(schema?.required) !== JSON.stringify(["action", "command"]) ||
         schema?.properties?.action?.enum?.[0] !== "exec" ||
         schema?.properties?.command?.maxLength !== 65_536 ||
@@ -164,26 +161,32 @@ const fetch = async (_url, init = {}) => {
     }
     checkedToolProjection = true;
   }
-  if (toolResult(body, "workspace-success")) {
+  const latestResult = latestToolResult(body);
+  if (latestResult?.call_id === "workspace-success") {
     requireResult(body, "workspace-success", ["adapter-success", "exit_code=0"]);
     return textResponse("success record checked");
   }
-  if (toolResult(body, "workspace-truncated")) {
+  if (latestResult?.call_id === "workspace-truncated") {
     const serialized = requireResult(body, "workspace-truncated", ["start", "exit_code=0"]);
     if (serialized.includes("\\nend\\n")) throw new Error("workspace output was not truncated");
     if (serialized.includes("�")) throw new Error("truncated workspace output split a UTF-8 sequence");
     if (truncatedBytes <= 65_536) throw new Error("truncation fixture did not exceed the ABI output cap");
     return textResponse("truncation record checked");
   }
-  if (toolResult(body, "workspace-timeout")) {
+  if (latestResult?.call_id === "workspace-timeout") {
     requireResult(body, "workspace-timeout", ["timeout_ms=30000"]);
     return textResponse("timeout mapping checked");
   }
-  if (toolResult(body, "workspace-abort")) {
+  if (latestResult?.call_id === "workspace-abort") {
     requireResult(body, "workspace-abort", ["cancelled"]);
     return textResponse("abort mapping checked");
   }
-  if (toolResult(body, "workspace-oversized")) {
+  if ([
+    "workspace-oversized",
+    "workspace-profile",
+    "workspace-durable",
+    "workspace-unknown",
+  ].includes(latestResult?.call_id)) {
     requireResult(body, "workspace-oversized", ["exceeds 65536 bytes"]);
     requireResult(body, "workspace-profile", ["accepts only the", "action", "command", "fields"]);
     requireResult(body, "workspace-durable", ["action must be", "exec"]);
@@ -212,7 +215,7 @@ const runtime = await createFxTerminal({
   backend: "wasm",
   wasm: await readFile(wasmPath),
   terminal: xtermAdapter(terminal),
-  env: { AI_GATEWAY_API_KEY: "workspace-key" },
+  env: { OPENAI_API_KEY: "workspace-key" },
   fetch,
   configStore: { get(id) { return config.get(id) ?? null; }, set(id, value) { config.set(id, value); } },
   stderr(chunk) { stderr += stderrDecoder.decode(chunk, { stream: true }); },

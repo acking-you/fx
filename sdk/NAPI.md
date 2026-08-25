@@ -196,7 +196,7 @@ Do not replace the tagged wrapped object with a numeric pointer, externalized ad
 
 ## Secret handling
 
-The API key is copied from the JavaScript string into native heap memory and passed as an in-memory credential override together with its typed source. It is not read from process-global environment state, written into generated package artifacts, or intentionally logged. `sdk/node.js` gives `AI_GATEWAY_API_KEY` precedence over `OPENAI_API_KEY` when both are non-empty. Per-runtime overrides also avoid mutating environment variables shared by concurrent runtimes and workers.
+The API key is copied from the JavaScript string into native heap memory and passed as an in-memory credential override together with its typed source. It is not read from process-global environment state, written into generated package artifacts, or intentionally logged. Per-runtime overrides also avoid mutating environment variables shared by concurrent runtimes and workers.
 
 For a direct Responses credential, `FX_RESPONSES_BASE_URL` takes precedence
 over `OPENAI_BASE_URL`. The selected root crosses the N-API boundary as the

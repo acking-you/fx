@@ -19,10 +19,9 @@ const TMUX_CAPTURE_MAX_BUFFER = 32 * 1024 * 1024;
 const TMUX_HEX_CHUNK_BYTES = 256;
 const COMPOSER_LINE = /^[ \t]*(?:┃|❯|>)(?:[ \t]|$)/;
 const AUTH_ENV_KEYS = [
-  "AI_GATEWAY_API_KEY",
   "OPENAI_API_KEY",
-  "VERCEL_OIDC_TOKEN",
 ] as const;
+const stagedAuthEnvKey = (key: string) => `FX_E2E_AUTH_${key}`;
 const DEFAULT_UNSET_ENV_KEYS = [
   ...AUTH_ENV_KEYS,
   "FX_CREDENTIAL_SOURCE",
@@ -31,15 +30,11 @@ const DEFAULT_UNSET_ENV_KEYS = [
   "FX_CODEX_BASE_URL",
   "FX_CODEX_AUTH_FILE",
   "FX_CODEX_ISSUER",
-  "FX_E2E_GATEWAY_CHAT_URL",
-  "FX_E2E_GATEWAY_MODELS_URL",
-  "FX_E2E_GATEWAY_CREDITS_URL",
+  "FX_E2E_OPENAI_MODELS_URL",
   "FX_E2E_UPGRADE_BASE_URL",
   "FX_PERMISSION_MODE",
 ] as const;
 const MIRRORED_ENV_KEYS = [
-  "FX_GATEWAY_BASE_URL",
-  "FX_GATEWAY_CHAT_URL",
   "FX_MAX_AGENT_STEPS",
   "FX_MODEL",
 ] as const;
@@ -129,6 +124,91 @@ export function hasEmptyComposer(pane: string): boolean {
   return pane.split("\n").some(isEmptyComposerLine);
 }
 
+export function responseTextDelta(
+  delta: string,
+  id = "answer_1",
+  outputIndex = 0,
+) {
+  return {
+    type: "response.output_text.delta",
+    item_id: id,
+    output_index: outputIndex,
+    content_index: 0,
+    delta,
+  };
+}
+
+export function responseFunctionCallStart(
+  id: string,
+  name: string,
+  outputIndex = 0,
+) {
+  return {
+    type: "response.output_item.added",
+    output_index: outputIndex,
+    item: {
+      type: "function_call",
+      id: `${id}_item`,
+      call_id: id,
+      name,
+    },
+  };
+}
+
+export function responseFunctionCallDelta(
+  id: string,
+  delta: string,
+  outputIndex = 0,
+) {
+  return {
+    type: "response.function_call_arguments.delta",
+    item_id: `${id}_item`,
+    call_id: id,
+    output_index: outputIndex,
+    delta,
+  };
+}
+
+export function responseFunctionCallDone(
+  id: string,
+  input: object | string,
+  outputIndex = 0,
+) {
+  return {
+    type: "response.function_call_arguments.done",
+    item_id: `${id}_item`,
+    call_id: id,
+    output_index: outputIndex,
+    arguments: typeof input === "string" ? input : JSON.stringify(input),
+  };
+}
+
+export function responseFunctionCall(
+  id: string,
+  name: string,
+  input: object | string,
+  outputIndex = 0,
+) {
+  return [
+    responseFunctionCallStart(id, name, outputIndex),
+    responseFunctionCallDone(id, input, outputIndex),
+  ];
+}
+
+export function responseCompleted(inputTokens = 0, outputTokens = 0) {
+  return {
+    type: "response.completed",
+    response: {
+      status: "completed",
+      usage: {
+        input_tokens: inputTokens,
+        output_tokens: outputTokens,
+        total_tokens: inputTokens + outputTokens,
+      },
+    },
+  };
+}
+
 export function fakeGatewaySse(events: object[]) {
   return new Response(
     `${events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("")}data: [DONE]\n\n`,
@@ -143,24 +223,31 @@ export function fakeGatewayToolCall(
 ) {
   return fakeGatewaySse([
     {
-      type: "tool-call",
-      toolCallId: id,
-      toolName: name,
-      input,
+      type: "response.output_item.added",
+      output_index: 0,
+      item: { type: "function_call", call_id: id, name },
     },
     {
-      type: "finish",
-      finishReason: { unified: "tool-calls", raw: "tool-calls" },
+      type: "response.function_call_arguments.done",
+      output_index: 0,
+      arguments: JSON.stringify(input),
+    },
+    {
+      type: "response.completed",
+      response: {
+        status: "completed",
+        usage: { input_tokens: 3, output_tokens: 5, total_tokens: 8 },
+      },
     },
   ]);
 }
 
 export function fakeGatewayPermissionDecision(
   decision: "clear" | "caution" = "clear",
-  toolCallId = "permission_decision_1",
+  callId = "permission_decision_1",
   rationale = "test fixture",
 ) {
-  return fakeGatewayToolCall(toolCallId, "permission_decision", {
+  return fakeGatewayToolCall(callId, "permission_decision", {
     risk: decision === "clear" ? "low" : "high",
     decision,
     rationale,
@@ -169,11 +256,11 @@ export function fakeGatewayPermissionDecision(
 
 export function classifierEvidenceFromRequest(body: string): string {
   const parsed = JSON.parse(body) as any;
-  const instruction = parsed.prompt.at(-1);
-  if (instruction?.role !== "system" || typeof instruction.content !== "string") {
+  const instruction = parsed.instructions;
+  if (typeof instruction !== "string") {
     throw new Error("classifier instruction missing");
   }
-  return instruction.content;
+  return instruction;
 }
 
 export function fakeGatewaySerializedToolCall(
@@ -184,30 +271,36 @@ export function fakeGatewaySerializedToolCall(
 ) {
   return fakeGatewaySse([
     ...(assistantText
-      ? [{ type: "text-delta", id: "answer_1", delta: assistantText }]
+      ? [{ type: "response.output_text.delta", item_id: "answer_1", output_index: 0, content_index: 0, delta: assistantText }]
       : []),
     {
-      type: "tool-call",
-      toolCallId: id,
-      toolName: name,
-      input,
+      type: "response.output_item.added",
+      output_index: 1,
+      item: { type: "function_call", call_id: id, name },
     },
     {
-      type: "finish",
-      finishReason: { unified: "tool-calls", raw: "tool-calls" },
+      type: "response.function_call_arguments.done",
+      output_index: 1,
+      arguments: input,
+    },
+    {
+      type: "response.completed",
+      response: {
+        status: "completed",
+        usage: { input_tokens: 3, output_tokens: 5, total_tokens: 8 },
+      },
     },
   ]);
 }
 
 export function fakeGatewayFinalText(text: string) {
   return fakeGatewaySse([
-    { type: "text-delta", id: "answer_1", delta: text },
+    { type: "response.output_text.delta", item_id: "answer_1", output_index: 0, content_index: 0, delta: text },
     {
-      type: "finish",
-      finishReason: { unified: "stop", raw: "stop" },
-      usage: {
-        inputTokens: { total: 3 },
-        outputTokens: { total: 5 },
+      type: "response.completed",
+      response: {
+        status: "completed",
+        usage: { input_tokens: 3, output_tokens: 5, total_tokens: 8 },
       },
     },
   ]);
@@ -239,13 +332,12 @@ export function heldFakeGatewayFinalText() {
     }
     stopTimer();
     controller.enqueue(encoder.encode(
-      `data: ${JSON.stringify({ type: "text-delta", id: "answer_1", delta: text })}\n\n` +
+      `data: ${JSON.stringify({ type: "response.output_text.delta", item_id: "answer_1", output_index: 0, content_index: 0, delta: text })}\n\n` +
         `data: ${JSON.stringify({
-          type: "finish",
-          finishReason: { unified: "stop", raw: "stop" },
-          usage: {
-            inputTokens: { total: 3 },
-            outputTokens: { total: 5 },
+          type: "response.completed",
+          response: {
+            status: "completed",
+            usage: { input_tokens: 3, output_tokens: 5, total_tokens: 8 },
           },
         })}\n\ndata: [DONE]\n\n`,
     ));
@@ -289,22 +381,9 @@ export type FakeGatewayResponse =
 
 export type FakeGatewayModel = {
   id: string;
-  type?: string;
+  object?: "model";
+  created?: number;
   owned_by?: string;
-  released?: number;
-  tags?: string[];
-  context_window?: number;
-  max_tokens?: number;
-  pricing?: Record<string, unknown>;
-  reasoning_options?: Array<{
-    type: string;
-    values?: string[];
-    [key: string]: unknown;
-  }>;
-  fast_options?: Array<{
-    type: string;
-    [key: string]: unknown;
-  }>;
 };
 
 export type FakeGatewayModelRequest = {
@@ -321,10 +400,6 @@ export type FakeGatewayOptions = {
       | Promise<FakeGatewayModel[] | Response>);
   classifierDecision?: "clear" | "caution";
   classifierResponses?: FakeGatewayResponse[];
-  generationResponse?: (
-    generationId: string,
-    request: Request,
-  ) => Response | Promise<Response>;
 };
 
 function serveFakeGateway(
@@ -335,12 +410,11 @@ function serveFakeGateway(
   const classifierRequests: Array<{ body: string; headers: Headers }> = [];
   const classifierResponses = [...(options.classifierResponses ?? [])];
   const modelRequests: FakeGatewayModelRequest[] = [];
-  const generationRequests: string[] = [];
   const server = Bun.serve({
     port: 0,
     idleTimeout: 0,
     async fetch(req) {
-      if (new URL(req.url).pathname === "/coding-agent/v1/models") {
+      if (new URL(req.url).pathname === "/v1/models") {
         modelRequests.push({ headers: new Headers(req.headers), url: req.url });
         const models = typeof options.models === "function"
           ? await options.models(req)
@@ -348,24 +422,18 @@ function serveFakeGateway(
         if (models instanceof Response) return models;
         return Response.json({
           data: models ?? [{
-            id: FAKE_GATEWAY_MODEL,
-            type: "language",
-            tags: ["tool-use"],
+            id: "gpt-5",
+            object: "model",
+            owned_by: "openai",
           }],
         });
       }
-      if (req.method === "GET" && new URL(req.url).pathname === "/v1/generation") {
-        const generationId = new URL(req.url).searchParams.get("id") ?? "";
-        generationRequests.push(generationId);
-        if (options.generationResponse) {
-          return options.generationResponse(generationId, req);
-        }
+      if (req.method !== "POST" || new URL(req.url).pathname !== "/v1/responses") {
         return new Response("not found", { status: 404 });
       }
-      if (req.method !== "POST") return new Response("not found", { status: 404 });
       const body = await req.text();
       const headers = new Headers(req.headers);
-      if (body.includes("\"permission_decision\"")) {
+      if (body.includes("permission_decision")) {
         classifierRequests.push({ body, headers });
         const next = classifierResponses.shift();
         if (next) return typeof next === "function" ? await next(body) : next;
@@ -376,11 +444,9 @@ function serveFakeGateway(
     },
   });
   return {
-    baseUrl: `http://127.0.0.1:${server.port}`,
-    chatUrl: `http://127.0.0.1:${server.port}/v3/ai/language-model`,
+    baseUrl: `http://127.0.0.1:${server.port}/v1`,
     requests,
     classifierRequests,
-    generationRequests,
     modelRequests,
     requestCount() {
       return requests.length;
@@ -483,8 +549,19 @@ export class TmuxSession {
       value === undefined || authEnvKeys.has(key) ? [] : [shellQuote(`${key}=${value}`)]
     );
     const sessionEnvArgs = Object.entries(env).flatMap(([key, value]) =>
-      value === undefined || !authEnvKeys.has(key) ? [] : ["-e", `${key}=${value}`]
+      value === undefined || !authEnvKeys.has(key)
+        ? []
+        : ["-e", `${stagedAuthEnvKey(key)}=${value}`]
     );
+    const stagedAuthUnsetArgs = Object.entries(env).flatMap(([key, value]) => {
+      if (value === undefined || !authEnvKeys.has(key)) return [];
+      return ["-u", stagedAuthEnvKey(key)];
+    });
+    const authAssignmentArgs = Object.entries(env).flatMap(([key, value]) => {
+      if (value === undefined || !authEnvKeys.has(key)) return [];
+      const staged = stagedAuthEnvKey(key);
+      return [`${key}=\"$${staged}\"`];
+    });
     const mirroredEnv = MIRRORED_ENV_KEYS.flatMap((key) =>
       Object.prototype.hasOwnProperty.call(env, key)
         ? []
@@ -507,9 +584,11 @@ export class TmuxSession {
       ...unsetArgs,
       ...mirroredUnsetArgs,
       ...defaultUnsetArgs,
+      ...stagedAuthUnsetArgs,
       ...defaultArgs,
       ...mirroredAssignmentArgs,
       ...assignmentArgs,
+      ...authAssignmentArgs,
     ];
     const envStr = envArgs.length > 0 ? `/usr/bin/env ${envArgs.join(" ")}` : "";
     const command = envStr ? `${envStr} ${cmd}` : cmd;
@@ -526,7 +605,7 @@ export class TmuxSession {
     };
     for (const key of DEFAULT_UNSET_ENV_KEYS) delete processEnv[key];
 
-    const gatedLaunch = remainOnExit || minimumHistoryLines !== undefined;
+    const gatedLaunch = remainOnExit || minimumHistoryLines !== undefined || sessionEnvArgs.length > 0;
     const tmuxCommand = gatedLaunch
       ? `tmux wait-for ${shellQuote(startGate)} && exec ${observedCmd}`
       : observedCmd;
@@ -659,7 +738,7 @@ export class TmuxSession {
     }
     const session = new TmuxSession(name, exitStatusPath, resolvedSocketName);
     try {
-      for (const key of AUTH_ENV_KEYS) {
+      for (const key of AUTH_ENV_KEYS.flatMap((authKey) => [authKey, stagedAuthEnvKey(authKey)])) {
         try {
           execFileSync(
             "tmux",

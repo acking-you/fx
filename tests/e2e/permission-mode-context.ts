@@ -11,19 +11,15 @@ export function expectPermissionModeContext(
   mode: keyof typeof permissionModeContext,
 ) {
   const request = JSON.parse(body) as {
-    prompt: Array<{ role?: string; content?: unknown }>;
+    instructions?: string;
   };
-  const messages = request.prompt.map((message) => ({
-    role: message.role,
-    text: typeof message.content === "string" ? message.content : "",
-  }));
   const expected = permissionModeContext[mode];
-  const matching = messages.filter((message) => message.text === expected);
+  const instructions = request.instructions ?? "";
+  const matching = instructions.split("\n\n").filter((text) => text === expected);
 
   expect(matching).toHaveLength(1);
   for (const [candidateMode, context] of Object.entries(permissionModeContext)) {
     if (candidateMode === mode) continue;
-    expect(messages.some((message) => message.text === context)).toBe(false);
+    expect(instructions.includes(context)).toBe(false);
   }
-  expect(matching[0]!.role).toBe("system");
 }

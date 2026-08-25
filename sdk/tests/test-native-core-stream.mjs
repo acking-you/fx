@@ -11,6 +11,19 @@ let firstResponse;
 let firstConnectionClosedResolve;
 const firstConnectionClosed = new Promise((resolveClosed) => { firstConnectionClosedResolve = resolveClosed; });
 const server = createServer((request, response) => {
+  if (request.method === "GET" && request.url?.endsWith("/models")) {
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({
+      object: "list",
+      data: [{
+        id: "native/test-model",
+        object: "model",
+        created: 1,
+        owned_by: "test",
+      }],
+    }));
+    return;
+  }
   if (request.method !== "POST") {
     response.writeHead(404).end();
     return;
@@ -30,14 +43,14 @@ const server = createServer((request, response) => {
         events.push("first-connection-close");
         firstConnectionClosedResolve();
       });
-      response.write('data: {"type":"text-delta","delta":"native one"}\n\n');
-      response.write('data: {"type":"finish","finishReason":{"unified":"stop","raw":"stop"},"usage":{"inputTokens":{"total":1},"outputTokens":{"total":2}}}\n\n');
+      response.write('data: {"type":"response.output_text.delta","item_id":"answer_1","output_index":0,"content_index":0,"delta":"native one"}\n\n');
+      response.write('data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}\n\n');
       events.push("first-finish-sent");
       return;
     }
     assert.equal(requestCount, 2, "only two Gateway requests are expected");
-    response.write('data: {"type":"text-delta","delta":"native two"}\n\n');
-    response.write('data: {"type":"finish","finishReason":{"unified":"stop","raw":"stop"},"usage":{"inputTokens":{"total":1},"outputTokens":{"total":2}}}\n\n');
+    response.write('data: {"type":"response.output_text.delta","item_id":"answer_2","output_index":0,"content_index":0,"delta":"native two"}\n\n');
+    response.write('data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}\n\n');
     response.end("data: [DONE]\n\n");
   });
 });
@@ -52,27 +65,28 @@ const timeout = (label, ms = 5000) => new Promise((_, reject) => {
 });
 let agent;
 try {
-  let fetchCalls = 0;
+  let responsesFetchCalls = 0;
   let firstAbortResolve;
   const firstAbort = new Promise((resolveAbort) => { firstAbortResolve = resolveAbort; });
   agent = await createFxAgent({
     nativeAddon: addon,
     backend: "native",
     fetch(input, init) {
-      fetchCalls += 1;
-      if (fetchCalls === 1) {
+      if (init.method !== "POST") return fetch(input, init);
+      responsesFetchCalls += 1;
+      if (responsesFetchCalls === 1) {
         init.signal.addEventListener("abort", () => {
           events.push("first-abort");
           firstAbortResolve();
         }, { once: true });
-      } else if (fetchCalls === 2) {
+      } else if (responsesFetchCalls === 2) {
         events.push("second-fetch");
       }
       return fetch(input, init);
     },
     env: {
-      AI_GATEWAY_API_KEY: "native-core-stream-key",
-      FX_GATEWAY_CHAT_URL: `http://127.0.0.1:${port}/chat`,
+      OPENAI_API_KEY: "native-core-stream-key",
+      FX_RESPONSES_BASE_URL: `http://127.0.0.1:${port}/v1`,
       FX_MODEL: "native/test-model",
     },
   });
@@ -102,7 +116,7 @@ try {
   }
   assert.equal(secondText.trimEnd(), "native two");
   assert.equal((await secondTurn.result).stopReason, "end_turn");
-  assert.equal(fetchCalls, 2, "both prompts must use the Node-owned fetch option");
+  assert.equal(responsesFetchCalls, 2, "both prompts must use the Node-owned fetch option");
   const releaseEvents = [events.indexOf("first-abort"), events.indexOf("first-connection-close")]
     .filter((index) => index >= 0);
   assert.ok(releaseEvents.length > 0, "the first response must be aborted or closed");

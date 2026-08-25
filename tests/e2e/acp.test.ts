@@ -17,8 +17,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { FX_BIN, HAS_API_KEY, REPO_ROOT, runFx } from "../evals/eval-helpers";
 import {
-  AUTO_PERPLEXITY_SERIALIZED_TOOL_NAMES,
-  customProviderGuidanceState,
+  AUTO_RESPONSES_SERIALIZED_TOOL_NAMES,
   findUnavailableCapabilityReferences,
   parseGatewayRequest,
   serializedToolNames,
@@ -139,16 +138,36 @@ function fileToolCall(id: string, path: string, content: string) {
 
 function lengthLimitedCommandCall(command: string) {
   return fakeGatewaySse([
-    { type: "text-delta", id: "answer_1", delta: "ACP partial output" },
     {
-      type: "tool-call",
-      toolCallId: "command_1",
-      toolName: "terminal",
-      input: { action: "exec", command },
+      type: "response.output_text.delta",
+      item_id: "answer_1",
+      output_index: 0,
+      content_index: 0,
+      delta: "ACP partial output",
     },
     {
-      type: "finish",
-      finishReason: { unified: "length", raw: "length" },
+      type: "response.output_item.added",
+      output_index: 1,
+      item: {
+        type: "function_call",
+        id: "command_item_1",
+        call_id: "command_1",
+        name: "terminal",
+      },
+    },
+    {
+      type: "response.function_call_arguments.done",
+      item_id: "command_item_1",
+      call_id: "command_1",
+      output_index: 1,
+      arguments: JSON.stringify({ action: "exec", command }),
+    },
+    {
+      type: "response.incomplete",
+      response: {
+        status: "incomplete",
+        incomplete_details: { reason: "max_output_tokens" },
+      },
     },
   ]);
 }
@@ -156,8 +175,11 @@ function lengthLimitedCommandCall(command: string) {
 function noToolLength() {
   return fakeGatewaySse([
     {
-      type: "finish",
-      finishReason: { unified: "length", raw: "length" },
+      type: "response.incomplete",
+      response: {
+        status: "incomplete",
+        incomplete_details: { reason: "max_output_tokens" },
+      },
     },
   ]);
 }
@@ -178,8 +200,10 @@ function retryAfterUnavailable(seconds: number): Response {
 function partialEofResponse(text: string): Response {
   return new Response(
     `data: ${JSON.stringify({
-      type: "text-delta",
-      id: "answer_1",
+      type: "response.output_text.delta",
+      item_id: "answer_1",
+      output_index: 0,
+      content_index: 0,
       delta: text,
     })}\n\n`,
     { headers: { "content-type": "text/event-stream" } },
@@ -192,12 +216,9 @@ function fakeGatewayEnv(
 ) {
   return {
     HOME: root.home,
-    AI_GATEWAY_API_KEY: "fake-acp-file-key",
-    VERCEL_OIDC_TOKEN: "",
-    FX_GATEWAY_BASE_URL: gateway.baseUrl,
-    FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+    OPENAI_API_KEY: "fake-acp-file-key",
+        FX_RESPONSES_BASE_URL: gateway.baseUrl,
     FX_MODEL: FAKE_GATEWAY_MODEL,
-    FX_AUTO_UPGRADE: "0",
   };
 }
 
@@ -217,23 +238,29 @@ function acpContentText(content: unknown): string {
 
 function acpGatewayRequest(body: string) {
   return JSON.parse(body) as {
-    prompt: Array<{ role?: string; content: unknown }>;
+    instructions?: string;
+    input: Array<{
+      type?: string;
+      role?: string;
+      content?: unknown;
+      call_id?: string;
+      output?: unknown;
+    }>;
     tools: Array<{
       name: string;
-      inputSchema: {
+      parameters: {
         type: string;
         properties: Record<string, { type: string; description?: string }>;
         required?: string[];
         additionalProperties?: boolean;
       };
     }>;
+    max_output_tokens?: number;
   };
 }
 
 function acpTaggedBlock(body: string, tag: string): string {
-  const text = acpGatewayRequest(body).prompt
-    .map((message) => acpContentText(message.content))
-    .join("\n");
+  const text = acpPromptText(body);
   const start = text.indexOf(`<${tag}>`);
   const end = text.indexOf(`</${tag}>`, start);
   if (start < 0 || end < 0) throw new Error(`Missing <${tag}> block`);
@@ -241,11 +268,8 @@ function acpTaggedBlock(body: string, tag: string): string {
 }
 
 function acpToolResultText(body: string, callId: string): string {
-  const parts = acpGatewayRequest(body).prompt.flatMap((message) =>
-    Array.isArray(message.content) ? message.content : []
-  ) as Array<Record<string, unknown>>;
-  const result = parts.find((part) =>
-    part.type === "tool-result" && part.toolCallId === callId
+  const result = acpGatewayRequest(body).input.find((item) =>
+    item.type === "function_call_output" && item.call_id === callId
   );
   if (!result) throw new Error(`Missing tool result for ${callId}`);
   return acpContentText(result.output);
@@ -256,14 +280,17 @@ function occurrenceCount(text: string, needle: string): number {
 }
 
 function acpPromptText(body: string): string {
-  return acpGatewayRequest(body).prompt
-    .map((message) => acpContentText(message.content))
-    .join("\n");
+  const request = acpGatewayRequest(body);
+  return [
+    request.instructions ?? "",
+    ...request.input.map((item) => acpContentText(item.content ?? item.output)),
+  ].join("\n");
 }
 
 function acpLatestPromptText(body: string): string {
-  const prompt = acpGatewayRequest(body).prompt;
-  return acpContentText(prompt.at(-1)?.content);
+  const input = acpGatewayRequest(body).input;
+  const latest = input.findLast((item) => item.role === "user");
+  return acpContentText(latest?.content);
 }
 
 function expectNoAcpParentDeliveries(body: string) {
@@ -1495,23 +1522,17 @@ describe("acp: model-independent", () => {
         expect(gateway.requests).toHaveLength(1);
         const request = acpGatewayRequest(gateway.requests[0]!.body);
         const oracleRequest = parseGatewayRequest(gateway.requests[0]!.body);
-        const prompt = request.prompt
+        const prompt = request.input
           .map((message) => acpContentText(message.content))
           .join("\n");
         expect(prompt).toContain(submitted);
-        expect(request.tools).toHaveLength(26);
+        expect(request.tools).toHaveLength(25);
         const toolNames = serializedToolNames(oracleRequest);
         expect(toolNames).toEqual(
-          AUTO_PERPLEXITY_SERIALIZED_TOOL_NAMES,
+          AUTO_RESPONSES_SERIALIZED_TOOL_NAMES,
         );
         expect(toolNames.filter((name) => name === "terminal")).toHaveLength(1);
-        expect(toolNames.filter((name) => name === "perplexity_search"))
-          .toHaveLength(1);
         expect(findUnavailableCapabilityReferences(oracleRequest)).toEqual([]);
-        expect(customProviderGuidanceState(oracleRequest)).toEqual({
-          providerToolIndices: [23],
-          guidanceMessageIndices: [1],
-        });
         expect(gateway.requests[0]!.body).not.toContain(
           "Treat it as interrupting any previous tool plan.",
         );
@@ -1686,7 +1707,7 @@ describe("acp: model-independent", () => {
   );
 
   test(
-    "ACP sends a prompt above the old CLI limit with one capability snapshot",
+    "ACP sends a prompt above the old CLI limit with one model snapshot",
     async () => {
       const root = createIsolatedRoot("fx-acp-large-prompt-");
       const gateway = startFakeGateway(
@@ -1694,10 +1715,7 @@ describe("acp: model-independent", () => {
         {
           models: [{
             id: FAKE_GATEWAY_MODEL,
-            type: "language",
-            tags: ["tool-use"],
-            context_window: 256_000,
-            max_tokens: 64_000,
+            object: "model",
           }],
         },
       );
@@ -1715,13 +1733,9 @@ describe("acp: model-independent", () => {
         expect(result.promptResult.result.stopReason).toBe("end_turn");
         expect(gateway.requests).toHaveLength(1);
         expect(gateway.modelRequests).toHaveLength(1);
-        const request = JSON.parse(gateway.requests[0]!.body) as {
-          maxOutputTokens?: number;
-          prompt: Array<{ role: string; content: Array<{ type: string; text?: string }> }>;
-        };
-        expect(request.maxOutputTokens).toBe(64_000);
-        const user = request.prompt.findLast((message) => message.role === "user");
-        expect(user?.content.find((part) => part.type === "text")?.text).toBe(submitted);
+        const request = acpGatewayRequest(gateway.requests[0]!.body);
+        const user = request.input.findLast((item) => item.role === "user");
+        expect(acpContentText(user?.content)).toBe(submitted);
         expect(client.stderr).toBe("");
       } finally {
         await client?.close();
@@ -1965,9 +1979,7 @@ describe("acp: model-independent", () => {
 
         expect(gateway.requests).toHaveLength(2);
         for (const request of gateway.requests) {
-          const prompt = acpGatewayRequest(request.body).prompt
-            .map((message) => acpContentText(message.content))
-            .join("\n");
+          const prompt = acpPromptText(request.body);
           expect(prompt).toContain("ACP_RULE_PREFIX");
           expect(prompt).not.toContain("ACP_RULE_TAIL_SENTINEL");
           expect(prompt).toContain("project_instruction_file_bytes");
@@ -2014,9 +2026,7 @@ describe("acp: model-independent", () => {
 
           expect(result.promptResult.result.stopReason).toBe("end_turn");
           expect(gateway.requests).toHaveLength(1);
-          const prompt = acpGatewayRequest(gateway.requests[0]!.body).prompt
-            .map((message) => acpContentText(message.content))
-            .join("\n");
+          const prompt = acpPromptText(gateway.requests[0]!.body);
           const omission = [...prompt.matchAll(/<project-rules-omitted[^>]+\/>/g)]
             .map((match) => match[0])
             .find((value) => value.includes("source_bytes="));
@@ -2064,9 +2074,7 @@ describe("acp: model-independent", () => {
 
         expect(result.promptResult.result.stopReason).toBe("end_turn");
         expect(gateway.requests).toHaveLength(1);
-        const prompt = acpGatewayRequest(gateway.requests[0]!.body).prompt
-          .map((message) => acpContentText(message.content))
-          .join("\n");
+        const prompt = acpPromptText(gateway.requests[0]!.body);
         expect(prompt).toContain('reason="oversized rule file"');
         expect(prompt).toContain('reason="selection cap"');
         const notices = result.messages
@@ -2121,9 +2129,7 @@ describe("acp: model-independent", () => {
 
           expect(result.promptResult.result.stopReason).toBe("end_turn");
           expect(gateway.requests).toHaveLength(1);
-          const prompt = acpGatewayRequest(gateway.requests[0]!.body).prompt
-            .map((message) => acpContentText(message.content))
-            .join("\n");
+          const prompt = acpPromptText(gateway.requests[0]!.body);
           expect(prompt.length).toBeLessThan(64 * 1024);
           expect(prompt.match(/<project-rules-omitted from=/g)).toHaveLength(32);
           expect(prompt).toContain("https://example.test/resource/0");
@@ -2160,7 +2166,6 @@ describe("acp: model-independent", () => {
           cwd: root.workspace,
           env: {
             HOME: root.home,
-            VERCEL_OIDC_TOKEN: "",
           },
           timeoutMs: TIMEOUT,
         });
@@ -2171,8 +2176,7 @@ describe("acp: model-independent", () => {
           cwd: root.workspace,
           env: {
             HOME: root.home,
-            AI_GATEWAY_API_KEY: "e2e-placeholder",
-            VERCEL_OIDC_TOKEN: "",
+            OPENAI_API_KEY: "e2e-placeholder",
           },
         });
         const resp = await client.request(
@@ -2240,9 +2244,7 @@ describe("acp: model-independent", () => {
           `${MODERN_HTTP_TOOL_RESULT}:acp`,
         );
 
-        const initialPrompt = acpGatewayRequest(gateway.requests[0]!.body).prompt
-          .map((message) => acpContentText(message.content))
-          .join("\n");
+        const initialPrompt = acpPromptText(gateway.requests[0]!.body);
         expect(initialPrompt).toContain(
           '<server name="fixture" state="ready" tools="1" />',
         );
@@ -4475,8 +4477,7 @@ describe("acp: model-independent", () => {
           cwd: root.workspace,
           env: {
             HOME: root.home,
-            AI_GATEWAY_API_KEY: "e2e-placeholder",
-            VERCEL_OIDC_TOKEN: "",
+            OPENAI_API_KEY: "e2e-placeholder",
           },
         });
 
@@ -4524,8 +4525,7 @@ describe("acp: model-independent", () => {
           cwd: root.workspace,
           env: {
             HOME: root.home,
-            AI_GATEWAY_API_KEY: "e2e-placeholder",
-            VERCEL_OIDC_TOKEN: "",
+            OPENAI_API_KEY: "e2e-placeholder",
           },
         });
         expect(
@@ -4641,8 +4641,7 @@ describe("acp: model-independent", () => {
             cwd: acceptedRoot.workspace,
             env: {
               ...fakeGatewayEnv(acceptedRoot, acceptedGateway),
-              AI_GATEWAY_API_KEY: SEEDED_GATEWAY_TOKEN,
-              VERCEL_OIDC_TOKEN: undefined,
+              OPENAI_API_KEY: SEEDED_GATEWAY_TOKEN,
               FX_DISABLE_KEYCHAIN: "1",
             },
           });
@@ -4657,9 +4656,6 @@ describe("acp: model-independent", () => {
           expect(acceptedGateway.classifierRequests[0]!.headers.get("authorization")).toBe(
             `Bearer ${SEEDED_GATEWAY_TOKEN}`,
           );
-          expect(
-            acceptedGateway.classifierRequests[0]!.headers.get("x-vercel-ai-gateway-team"),
-          ).toBeNull();
           expect(acceptedGateway.classifierRequests[0]!.body).toContain(
             acceptedPrompt,
           );
@@ -5006,8 +5002,11 @@ describe("acp: model-independent", () => {
       const gateway = startFakeGateway([
         fakeGatewaySse([
           {
-            type: "finish",
-            finishReason: { unified: "content-filter", raw: "content_filter" },
+            type: "response.incomplete",
+            response: {
+              status: "incomplete",
+              incomplete_details: { reason: "content_filter" },
+            },
           },
         ]),
       ]);
@@ -5089,7 +5088,7 @@ describe("acp: model-independent", () => {
           message.params?.update?.sessionUpdate === "agent_message_chunk"
         );
         expect(authUpdate?.params.update.content.text).toBe(
-          "AI_GATEWAY_API_KEY authentication failed · HTTP 401",
+          "OPENAI_API_KEY authentication failed · HTTP 401",
         );
         const serialized = JSON.stringify({ messages, response });
         expect(serialized).not.toContain("fake-acp-file-key");
@@ -5282,8 +5281,8 @@ describe("acp: model-independent", () => {
           ),
         ).toBe(false);
         expect(gateway.requests).toHaveLength(2);
-        expect(gateway.requests[1].body).toContain(`"toolCallId":"${malformedCallId}"`);
-        expect(gateway.requests[1].body).toContain('"input":{}');
+        expect(gateway.requests[1].body).toContain(`"call_id":"${malformedCallId}"`);
+        expect(gateway.requests[1].body).toContain('"arguments":"{}"');
         expect(gateway.requests[1].body).toContain("tool_execution_failed");
         expect(gateway.requests[1].body).not.toContain(malformedArguments);
         expect(readFileSync(tracePath, "utf8")).not.toContain(malformedArguments);
@@ -5309,16 +5308,15 @@ describe("acp: model-independent", () => {
           cwd: root.workspace,
           env: {
             HOME: root.home,
-            AI_GATEWAY_API_KEY: "",
             OPENAI_API_KEY: "",
-            VERCEL_OIDC_TOKEN: "",
+            OPENAI_API_KEY: "",
             FX_DISABLE_KEYCHAIN: "1",
           },
         });
         const resp = await client.request("initialize", { protocolVersion: 1 }, 1) as any;
         expect(resp.error).toBeDefined();
         expect(resp.error.message).toContain("fx login");
-        expect(resp.error.message).toContain("AI_GATEWAY_API_KEY");
+        expect(resp.error.message).toContain("OPENAI_API_KEY");
         expect(client.stderr).toBe("");
       } finally {
         await client?.close();
@@ -5332,7 +5330,7 @@ describe("acp: model-independent", () => {
     "invalid JSON returns parse error without stderr",
     async () => {
       client = await AcpClient.create({
-        env: { AI_GATEWAY_API_KEY: "", VERCEL_OIDC_TOKEN: "" },
+        env: { OPENAI_API_KEY: "" },
       });
       (client as any).proc.stdin!.write("this is not json\n");
       const resp = await client.readLine() as any;
@@ -5347,7 +5345,7 @@ describe("acp: model-independent", () => {
     "exact and oversized request frames preserve the ACP connection boundary",
     async () => {
       client = await AcpClient.create({
-        env: { AI_GATEWAY_API_KEY: "", VERCEL_OIDC_TOKEN: "" },
+        env: { OPENAI_API_KEY: "" },
       });
       const stdin = (client as any).proc.stdin!;
       const frameLimit = 8 * 1024 * 1024;
@@ -5398,7 +5396,7 @@ describe("acp: model-independent", () => {
     "method before initialize returns error -32600",
     async () => {
       client = await AcpClient.create({
-        env: { AI_GATEWAY_API_KEY: "", VERCEL_OIDC_TOKEN: "" },
+        env: { OPENAI_API_KEY: "" },
       });
       const resp = await client.request("session/new", {}, 1) as any;
       expect(resp.error).toBeDefined();
@@ -5422,8 +5420,7 @@ describe("acp: model-independent", () => {
           cwd: realpathSync(workspace),
           env: {
             HOME: realpathSync(home),
-            AI_GATEWAY_API_KEY: "e2e-placeholder",
-            VERCEL_OIDC_TOKEN: "",
+            OPENAI_API_KEY: "e2e-placeholder",
             FX_E2E_FAIL_ON_DURABLE_MUTATION: "1",
           },
         });
@@ -5569,8 +5566,7 @@ describe("acp: model-independent", () => {
           cwd: realpathSync(workspace),
           env: {
             HOME: realpathSync(home),
-            AI_GATEWAY_API_KEY: "e2e-placeholder",
-            VERCEL_OIDC_TOKEN: "",
+            OPENAI_API_KEY: "e2e-placeholder",
             FX_E2E_FAIL_ON_DURABLE_MUTATION: "1",
           },
         });
@@ -5596,8 +5592,7 @@ describe("acp: model-independent", () => {
       client = await AcpClient.create({
         omitHome: true,
         env: {
-          AI_GATEWAY_API_KEY: "e2e-placeholder",
-          VERCEL_OIDC_TOKEN: "",
+          OPENAI_API_KEY: "e2e-placeholder",
         },
       });
       expect(
@@ -5657,8 +5652,7 @@ describe("acp: model-independent", () => {
           cwd: workspaceRoot,
           env: {
             HOME: home,
-            AI_GATEWAY_API_KEY: "e2e-placeholder",
-            VERCEL_OIDC_TOKEN: "",
+            OPENAI_API_KEY: "e2e-placeholder",
           },
         });
         expect(
@@ -6087,9 +6081,7 @@ describe("acp: model-independent", () => {
           gateway.requests[0]!.body,
           "available_skills",
         );
-        const promptText = request.prompt
-          .map((message) => acpContentText(message.content))
-          .join("\n");
+        const promptText = acpPromptText(gateway.requests[0]!.body);
         expect(promptText).toContain(
           '<skill_discovery_warning skipped_candidate_count="1" incomplete_root_count="0" missing_from_incomplete_roots="0" />',
         );
@@ -6100,10 +6092,10 @@ describe("acp: model-independent", () => {
 
         const skillSchema = request.tools.find((tool) => tool.name === "skill");
         expect(skillSchema).toBeDefined();
-        expect(skillSchema?.inputSchema.type).toBe("object");
-        expect(skillSchema?.inputSchema.properties.name.type).toBe("string");
-        expect(skillSchema?.inputSchema.properties.location.type).toBe("string");
-        expect(skillSchema?.inputSchema.required).toEqual(["name"]);
+        expect(skillSchema?.parameters.type).toBe("object");
+        expect(skillSchema?.parameters.properties.name.type).toBe("string");
+        expect(skillSchema?.parameters.properties.location.type).toBe("string");
+        expect(skillSchema?.parameters.required).toEqual(["name"]);
 
         const diagnosticNotices = result.messages.filter((message: any) =>
           message.method === "session/update" &&
@@ -6506,8 +6498,8 @@ describe("acp: model-independent", () => {
       const root = createIsolatedRoot("fx-acp-subagent-tools-");
       const childPrompt = "Inspect the workspace without making changes.";
       const routeChildAndParent = (body: string) => {
-        if (body.includes('"toolCallId":"acp_create_1"') &&
-            body.includes('"type":"tool-result"')) {
+        if (body.includes('"call_id":"acp_create_1"') &&
+            body.includes('"type":"function_call_output"')) {
           expect(acpToolResultText(body, "acp_create_1")).toContain(
             '"status":"created"',
           );
@@ -6587,8 +6579,8 @@ describe("acp: model-independent", () => {
         let parentCompleted = false;
         const route = (body: string) => {
           if (
-            body.includes(`"toolCallId":"${childCallId}"`) &&
-            body.includes('"type":"tool-result"')
+            body.includes(`"call_id":"${childCallId}"`) &&
+            body.includes('"type":"function_call_output"')
           ) {
             expect(acpToolResultText(body, childCallId)).toContain(
               `ACP_CHILD_SESSION_RESULT:${childMode}`,
@@ -6597,16 +6589,16 @@ describe("acp: model-independent", () => {
             return finalText(`ACP_${childMode.toUpperCase()}_MCP_CHILD_DONE`);
           }
           if (
-            body.includes(`"toolCallId":"${childSelectId}"`) &&
-            body.includes('"type":"tool-result"')
+            body.includes(`"call_id":"${childSelectId}"`) &&
+            body.includes('"type":"function_call_output"')
           ) {
             return fakeGatewayToolCall(childCallId, MCP_TOOL_NAME, {
               text: childMode,
             });
           }
           if (
-            body.includes(`"toolCallId":"${parentCreateId}"`) &&
-            body.includes('"type":"tool-result"')
+            body.includes(`"call_id":"${parentCreateId}"`) &&
+            body.includes('"type":"function_call_output"')
           ) {
             const created = JSON.parse(
               acpToolResultText(body, parentCreateId),
@@ -6712,7 +6704,7 @@ describe("acp: model-independent", () => {
         if (body.includes("Acknowledge the completed one-off result.")) {
           return finalText("ACP_ONE_OFF_RETIREMENT_ACK_DONE");
         }
-        if (body.includes('"toolCallId":"acp_one_off_load_create"')) {
+        if (body.includes('"call_id":"acp_one_off_load_create"')) {
           expect(body).not.toContain("ACP_ONE_OFF_LOAD_CHILD_DONE");
           parentContinuationChecked = true;
           return finalText("ACP_ONE_OFF_LOAD_PARENT_DONE");
@@ -6897,8 +6889,8 @@ describe("acp: model-independent", () => {
           return finalText("ACP_PARENT_NO_REDELIVERY");
         }
         if (parentPhase === "inspect_result" &&
-            body.includes('"toolCallId":"acp_delivery_inspect_1"') &&
-            body.includes('"type":"tool-result"')) {
+            body.includes('"call_id":"acp_delivery_inspect_1"') &&
+            body.includes('"type":"function_call_output"')) {
           expectNoAcpParentDeliveries(body);
           secondContinuationChecked = true;
           parentPhase = "third_prompt";
@@ -6926,8 +6918,8 @@ describe("acp: model-independent", () => {
           });
         }
         if (parentPhase === "create_result" &&
-            body.includes('"toolCallId":"acp_delivery_create_1"') &&
-            body.includes('"type":"tool-result"')) {
+            body.includes('"call_id":"acp_delivery_create_1"') &&
+            body.includes('"type":"function_call_output"')) {
           if (!parentCompletion) {
             const created = JSON.parse(
               acpToolResultText(body, "acp_delivery_create_1"),
@@ -7060,15 +7052,15 @@ describe("acp: model-independent", () => {
           parts.push(part);
           return finalText(`ACP_64K_PART_${parts.length}_DONE`);
         }
-        if (body.includes('"toolCallId":"acp_64k_send_1"') &&
-            body.includes('"type":"tool-result"')) {
+        if (body.includes('"call_id":"acp_64k_send_1"') &&
+            body.includes('"type":"function_call_output"')) {
           expect(acpToolResultText(body, "acp_64k_send_1")).toContain(
             '"status":"message_queued"',
           );
           return finalText("ACP_64K_CHILD_PRIVATE_DONE");
         }
-        if (body.includes('"toolCallId":"acp_64k_create_1"') &&
-            body.includes('"type":"tool-result"')) {
+        if (body.includes('"call_id":"acp_64k_create_1"') &&
+            body.includes('"type":"function_call_output"')) {
           const created = JSON.parse(
             acpToolResultText(body, "acp_64k_create_1"),
           ) as { child_id: string; status: string };
@@ -7208,10 +7200,9 @@ describe("acp: model-independent", () => {
         await waitForCondition("the code-mode Gateway request", () => gateway.requests.length === 1);
         const codeRequest = parseGatewayRequest(gateway.requests[0]!.body);
         expect(serializedToolNames(codeRequest)).toEqual(
-          AUTO_PERPLEXITY_SERIALIZED_TOOL_NAMES,
+          AUTO_RESPONSES_SERIALIZED_TOOL_NAMES,
         );
         expect(findUnavailableCapabilityReferences(codeRequest)).toEqual([]);
-        expect(customProviderGuidanceState(codeRequest).guidanceMessageIndices).toEqual([1]);
 
         client.send({
           jsonrpc: "2.0",
@@ -7616,7 +7607,7 @@ describe("acp: model catalog credentials", () => {
 
   for (const scenario of [
     {
-      name: "includes private model options for an AI Gateway API key",
+      name: "includes private model options for a Responses API key",
       apiKey: SEEDED_GATEWAY_TOKEN,
       expectedAuthorization: `Bearer ${SEEDED_GATEWAY_TOKEN}`,
       expectPrivate: true,
@@ -7631,9 +7622,9 @@ describe("acp: model catalog credentials", () => {
             const seededAuth = request.headers.get("authorization") ===
               `Bearer ${SEEDED_GATEWAY_TOKEN}`;
             return [
-              { id: FAKE_GATEWAY_MODEL, type: "language", tags: ["tool-use"] },
+              { id: FAKE_GATEWAY_MODEL, object: "model" },
               ...(seededAuth
-                ? [{ id: "private/blue-hornbill", type: "language", tags: ["tool-use"] }]
+                ? [{ id: "private/blue-hornbill", object: "model" }]
                 : []),
             ];
           },
@@ -7643,8 +7634,7 @@ describe("acp: model catalog credentials", () => {
             cwd: root.workspace,
             env: {
               ...fakeGatewayEnv(root, gateway),
-              AI_GATEWAY_API_KEY: scenario.apiKey,
-              VERCEL_OIDC_TOKEN: undefined,
+              OPENAI_API_KEY: scenario.apiKey,
               FX_DISABLE_KEYCHAIN: "1",
             },
           });
@@ -7656,7 +7646,6 @@ describe("acp: model catalog credentials", () => {
             scenario.expectedAuthorization,
           );
           expect(new URL(modelRequest.url).searchParams.get("teamId")).toBeNull();
-          expect(modelRequest.headers.get("x-vercel-ai-gateway-team")).toBeNull();
 
           const modelOpt = resp.result.configOptions.find((o: any) => o.id === "model");
           expect(modelOpt).toBeDefined();
@@ -7682,12 +7671,10 @@ describe("acp: model catalog credentials", () => {
       const root = createIsolatedRoot("fx-acp-model-override-");
       const gateway = startFakeGateway([finalText("override complete")], {
         models: [
-          { id: FAKE_GATEWAY_MODEL, type: "language", tags: ["tool-use"] },
+          { id: FAKE_GATEWAY_MODEL, object: "model" },
           {
             id: "provider/fast-override",
-            type: "language",
-            tags: ["tool-use"],
-            fast_options: [{ type: "toggle" }],
+            object: "model",
           },
         ],
       });
@@ -7708,7 +7695,7 @@ describe("acp: model catalog credentials", () => {
         expect(prompt.promptResult.result.stopReason).toBe("end_turn");
         expect(gateway.requests).toHaveLength(1);
         const request = JSON.parse(gateway.requests[0]!.body);
-        expect(request).not.toHaveProperty("providerOptions.gateway.speed");
+        expect(request).not.toHaveProperty("service_tier");
       } finally {
         await client?.close();
         gateway.stop();
@@ -7886,8 +7873,8 @@ describe.skipIf(!HAS_API_KEY)("acp: model-backed protocol", () => {
       const root = createIsolatedRoot("fx-acp-set-config-");
       const gateway = startFakeGateway([], {
         models: [
-          { id: FAKE_GATEWAY_MODEL, type: "language", tags: ["tool-use"] },
-          { id: "o4-mini", type: "language", tags: ["tool-use"] },
+          { id: FAKE_GATEWAY_MODEL, object: "model" },
+          { id: "o4-mini", object: "model" },
         ],
       });
       try {
@@ -8123,8 +8110,8 @@ describe.skipIf(!HAS_API_KEY)("acp: model-backed protocol", () => {
       const root = createIsolatedRoot("fx-acp-model-options-");
       const gateway = startFakeGateway([], {
         models: [
-          { id: FAKE_GATEWAY_MODEL, type: "language", tags: ["tool-use"] },
-          { id: "openai/gpt-4o", type: "language", tags: ["tool-use"] },
+          { id: FAKE_GATEWAY_MODEL, object: "model" },
+          { id: "openai/gpt-4o", object: "model" },
         ],
       });
       try {

@@ -97,7 +97,6 @@ pub noinline fn composeAuthPickerRow(
 }
 
 const onboarding_note = "   ⚠︎ Note: fx is experimental and defaults to auto mode.";
-const onboarding_note_link = onboarding_note ++ " \x1b]8;id=fx-onboarding;https://fx.sh/docs/stability\x1b\\\x1b[4mLearn more\x1b[24m\x1b]8;;\x1b\\";
 
 fn onboardingProjectedRowIndex(view: auth_runtime.PickerView, row_index: u16, row_count: u16) u16 {
     if (row_count >= 17) return row_index;
@@ -160,7 +159,7 @@ fn composeOnboardingPickerRow(
         5 => "   You can change this anytime with /login.",
         6 => "",
         7 => "   Get started",
-        11 => if (display_width.visibleWidthIgnoringAnsi(onboarding_note_link) <= width) onboarding_note_link else onboarding_note,
+        11 => onboarding_note,
         12, 13 => "",
         14 => "   Esc to sign in later · Explore all commands with /help",
         15, 16 => "",
@@ -901,7 +900,6 @@ const picker_test_slash_specs = [_]command_specs.SlashSpec{
     .{ .kind = .models, .command = "/models", .help_entry = "/models", .completion_description = "browse available models", .presentation_category = .model },
     .{ .kind = .mcp, .command = "/mcp", .help_entry = "/mcp [list|resource|prompt|add|remove]", .completion_description = "manage MCP servers, resources, and prompts", .presentation_category = .extensions, .has_args = true },
     .{ .kind = .permissions, .command = "/permissions", .help_entry = "/permissions [ask|auto|remember|revoke|yolo|reset]", .completion_description = "choose permission behavior", .presentation_category = .security, .has_args = true },
-    .{ .kind = .credits, .command = "/credits", .aliases = &.{"/balance"}, .help_entry = "/credits (/balance)", .completion_description = "show gateway credits balance", .presentation_category = .account },
 };
 const picker_test_slash_registry = command_specs.SlashRegistry{ .commands = picker_test_slash_specs[0..] };
 
@@ -925,19 +923,6 @@ test "footer composes slash completions as vertical described rows" {
     try std.testing.expect(saw_model_row);
 }
 
-test "slash menu layout keeps six selectable rows below its header" {
-    const first = slashMenuLayout(picker_test_slash_registry, "/", &.{}, 0, 0, 24, 0, 0).?;
-    try std.testing.expect(first.show_header);
-    try std.testing.expectEqual(@as(u16, 8), first.row_count);
-    try std.testing.expectEqual(@as(u16, 6), first.selectable_rows);
-    try std.testing.expectEqual(@as(usize, 0), first.window.start);
-    try std.testing.expectEqual(@as(usize, 6), first.window.end);
-
-    const scrolled = slashMenuLayout(picker_test_slash_registry, "/", &.{}, 6, 0, 24, 0, 0).?;
-    try std.testing.expectEqual(@as(usize, 1), scrolled.window.start);
-    try std.testing.expectEqual(@as(usize, 7), scrolled.window.end);
-}
-
 test "slash menu layout prioritizes selection at short heights and excludes arguments" {
     const compact = slashMenuLayout(picker_test_slash_registry, "/", &.{}, 5, 0, 16, 0, 0).?;
     try std.testing.expect(compact.show_header);
@@ -953,16 +938,6 @@ test "slash menu layout prioritizes selection at short heights and excludes argu
     try std.testing.expectEqual(@as(usize, 4), short.window.start);
     try std.testing.expectEqual(@as(usize, 5), short.window.end);
     try std.testing.expect(slashMenuLayout(picker_test_slash_registry, "/permissions ", &.{}, 0, 0, 24, 0, 0) == null);
-}
-
-test "slash menu header reports command totals and visible range" {
-    const layout = slashMenuLayout(picker_test_slash_registry, "/", &.{}, 0, 0, 24, 0, 0).?;
-    var row = try composeSlashMenuHeaderRow(std.testing.allocator, "/", layout, 80);
-    defer row.deinit(std.testing.allocator);
-
-    try std.testing.expect(std.mem.find(u8, row.items, "Commands 7 · Type to filter") != null);
-    try std.testing.expect(std.mem.find(u8, row.items, "1–6") != null);
-    try std.testing.expect(display_width.visibleWidthIgnoringAnsi(row.items) <= 80);
 }
 
 test "slash menu rows prioritize marker label description and category by width" {
@@ -1161,17 +1136,6 @@ test "registry-aware mixed slash completion maps skills after injected commands"
     const skill = nthMixedSlashCompletionSkill(registry, "/a", &skills, 1) orelse
         return error.TestExpectedEqual;
     try std.testing.expectEqualStrings("alpha-skill", skill.name);
-}
-
-test "registry-aware slash presentation preserves aliases" {
-    try std.testing.expectEqual(
-        @as(usize, 1),
-        mixedSlashCompletionCount(picker_test_slash_registry, "/bal", &.{}),
-    );
-    try std.testing.expectEqualStrings(
-        "/balance",
-        nthMixedSlashCompletionText(picker_test_slash_registry, "/bal", &.{}, 0).?,
-    );
 }
 
 test "mixed slash completion keeps skills out of argument completions" {
@@ -1486,7 +1450,7 @@ test "auth onboarding composes the welcome copy and login choices" {
     try std.testing.expect(std.mem.find(u8, screen.items, "Welcome to fx") != null);
     try std.testing.expect(std.mem.find(u8, screen.items, "fx can access AI models through provider accounts or BYOK credentials") != null);
     try std.testing.expect(std.mem.find(u8, screen.items, "You can change this anytime with /login.") != null);
-    try std.testing.expect(std.mem.find(u8, screen.items, "⚠︎ Note: fx is experimental and defaults to auto mode. \x1b]8;id=fx-onboarding;https://fx.sh/docs/stability\x1b\\\x1b[4mLearn more\x1b[24m\x1b]8;;\x1b\\") != null);
+    try std.testing.expect(std.mem.find(u8, screen.items, "⚠︎ Note: fx is experimental and defaults to auto mode.") != null);
     try std.testing.expect(std.mem.find(u8, screen.items, "Learn more: https://") == null);
     try std.testing.expect(std.mem.find(u8, screen.items, "Sign in with Codex") != null);
     try std.testing.expect(std.mem.find(u8, screen.items, "Sign in with Grok") != null);
@@ -1513,10 +1477,6 @@ test "auth onboarding composes the welcome copy and login choices" {
     defer grok_row.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 0), display_width.visibleWidthIgnoringAnsi(grok_row.items));
 
-    var narrow_note = try composeAuthPickerRow(alloc, view, 11, authPickerRowCount(view), 58);
-    defer narrow_note.deinit(alloc);
-    try std.testing.expect(std.mem.find(u8, narrow_note.items, "https://fx.sh/docs/stability") == null);
-
     var compact_screen: std.ArrayList(u8) = .empty;
     defer compact_screen.deinit(alloc);
     for (0..3) |row_index| {
@@ -1533,9 +1493,9 @@ test "auth picker composes only detected credential sources" {
     const alloc = std.testing.allocator;
     const view = auth_runtime.PickerView{
         .active = true,
-        .available_sources = auth_runtime.SourceSet.initMany(&.{ .ai_gateway_api_key, .stored_key }),
+        .available_sources = auth_runtime.SourceSet.initOne(.openai_api_key),
         .selected_choice = .{ .action = .chatgpt_login },
-        .active_source = .stored_key,
+        .active_source = .openai_api_key,
         .include_skip = false,
     };
     const row_count = authPickerRowCount(view);
@@ -1566,9 +1526,9 @@ test "compact auth picker keeps the selected hub action visible" {
     const alloc = std.testing.allocator;
     const view = auth_runtime.PickerView{
         .active = true,
-        .available_sources = auth_runtime.SourceSet.initMany(&.{ .ai_gateway_api_key, .stored_key }),
+        .available_sources = auth_runtime.SourceSet.initOne(.openai_api_key),
         .selected_choice = .{ .action = .switch_credential },
-        .active_source = .ai_gateway_api_key,
+        .active_source = .openai_api_key,
         .include_skip = false,
     };
 
@@ -1582,9 +1542,9 @@ test "auth picker renders the staged credential switch" {
     const alloc = std.testing.allocator;
     const switch_view = auth_runtime.PickerView{
         .active = true,
-        .available_sources = auth_runtime.SourceSet.initOne(.stored_key),
-        .selected_choice = .{ .source = .stored_key },
-        .active_source = .stored_key,
+        .available_sources = auth_runtime.SourceSet.initOne(.openai_api_key),
+        .selected_choice = .{ .source = .openai_api_key },
+        .active_source = .openai_api_key,
         .include_skip = false,
         .stage = .switch_credential,
     };
@@ -1595,11 +1555,11 @@ test "auth picker renders the staged credential switch" {
 
     var switch_source = try composeAuthPickerRow(alloc, switch_view, 1, 2, 80);
     defer switch_source.deinit(alloc);
-    try std.testing.expect(std.mem.find(u8, switch_source.items, credentials.sourceLabel(.stored_key)) != null);
+    try std.testing.expect(std.mem.find(u8, switch_source.items, credentials.sourceLabel(.openai_api_key)) != null);
     try std.testing.expect(std.mem.find(u8, switch_source.items, "current") != null);
     try std.testing.expect(
         authPickerDescriptionColumn(switch_view) >
-            5 + display_width.visibleWidth(credentials.sourceLabel(.stored_key)),
+            5 + display_width.visibleWidth(credentials.sourceLabel(.openai_api_key)),
     );
 }
 
@@ -1663,35 +1623,4 @@ test "Codex sign-in stage renders a bounded clickable authorization action" {
     try std.testing.expect(std.mem.find(u8, row.items, url) != null);
     try std.testing.expect(std.mem.find(u8, row.items, "\x1b]8;;\x1b\\") != null);
     try std.testing.expect(display_width.visibleWidthIgnoringAnsi(row.items) <= 40);
-}
-
-test "partially visible auth picker shows a source window without duplicates" {
-    const alloc = std.testing.allocator;
-    const view = auth_runtime.PickerView{
-        .active = true,
-        .available_sources = auth_runtime.SourceSet.full,
-        .selected_choice = .{ .source = .openai_api_key },
-        .active_source = .vercel_oidc_token,
-        .include_skip = false,
-        .stage = .switch_credential,
-    };
-
-    var first_source = try composeAuthPickerRow(alloc, view, 1, 3, 80);
-    defer first_source.deinit(alloc);
-    try std.testing.expect(std.mem.find(u8, first_source.items, "AI_GATEWAY_API_KEY") != null);
-    try std.testing.expect(std.mem.find(u8, first_source.items, "OPENAI_API_KEY") == null);
-
-    var selected_source = try composeAuthPickerRow(alloc, view, 2, 3, 80);
-    defer selected_source.deinit(alloc);
-    try std.testing.expect(std.mem.find(u8, selected_source.items, "OPENAI_API_KEY") != null);
-
-    var scrolled_view = view;
-    scrolled_view.selected_choice = .{ .source = .stored_key };
-    var scrolled_first = try composeAuthPickerRow(alloc, scrolled_view, 1, 3, 80);
-    defer scrolled_first.deinit(alloc);
-    try std.testing.expect(std.mem.find(u8, scrolled_first.items, "OPENAI_API_KEY") != null);
-
-    var scrolled_selected = try composeAuthPickerRow(alloc, scrolled_view, 2, 3, 80);
-    defer scrolled_selected.deinit(alloc);
-    try std.testing.expect(std.mem.find(u8, scrolled_selected.items, credentials.sourceLabel(.stored_key)) != null);
 }

@@ -105,13 +105,9 @@ function fixtureEnv(
 ) {
   return {
     HOME: root.home,
-    AI_GATEWAY_API_KEY: "fake-mcp-legacy-key",
-    VERCEL_OIDC_TOKEN: undefined,
-    FX_AUTO_UPGRADE: "0",
+    OPENAI_API_KEY: "fake-mcp-legacy-key",
     FX_PERMISSION_MODE: "auto",
-    FX_GATEWAY_BASE_URL: activeGateway.baseUrl,
-    FX_GATEWAY_CHAT_URL: activeGateway.chatUrl,
-    FX_E2E_GATEWAY_CHAT_URL: activeGateway.chatUrl,
+    FX_RESPONSES_BASE_URL: activeGateway.baseUrl,
     FX_MODEL: MODEL,
     FX_TRACE_LOG: root.traceLogPath,
     FX_TRACE_SCOPES: "mcp",
@@ -124,7 +120,7 @@ function startToolGateway(finalText: string) {
     fakeGatewayToolCall("call_mcp", TOOL_NAME, { text: "hello" }),
     fakeGatewayFinalText(finalText),
   ], {
-    models: [{ id: MODEL, type: "language", tags: ["tool-use"] }],
+    models: [{ id: MODEL, object: "model" }],
   });
 }
 
@@ -212,7 +208,7 @@ describe("version-scoped legacy MCP remote transports", () => {
       });
       const root = createRoot("legacy-health", "http", streamable.url);
       gateway = startFakeGateway([fakeGatewayFinalText("unused")], {
-        models: [{ id: MODEL, type: "language", tags: ["tool-use"] }],
+        models: [{ id: MODEL, object: "model" }],
       });
       tui = await TmuxSession.create({
         isolated: true,
@@ -277,7 +273,7 @@ describe("version-scoped legacy MCP remote transports", () => {
       }),
       fakeGatewayFinalText("Legacy MCP features complete."),
     ], {
-      models: [{ id: MODEL, type: "language", tags: ["tool-use"] }],
+      models: [{ id: MODEL, object: "model" }],
     });
 
     const result = await runAsk(root, gateway, "Use the legacy MCP features.");
@@ -323,7 +319,7 @@ describe("version-scoped legacy MCP remote transports", () => {
         fakeGatewayToolCall("call_fresh", freshTool, { text: "changed" }),
         fakeGatewayFinalText(`${version} live refresh complete.`),
       ], {
-        models: [{ id: MODEL, type: "language", tags: ["tool-use"] }],
+        models: [{ id: MODEL, object: "model" }],
       });
 
       const result = await runAsk(root, gateway, "Use the changed legacy tool.");
@@ -384,7 +380,7 @@ describe("version-scoped legacy MCP remote transports", () => {
       fakeGatewayToolCall("call_fresh", freshTool, { text: "changed" }),
       fakeGatewayFinalText("HTTP+SSE live refresh complete."),
     ], {
-      models: [{ id: MODEL, type: "language", tags: ["tool-use"] }],
+      models: [{ id: MODEL, object: "model" }],
     });
 
     const result = await runAsk(root, gateway, "Use the changed SSE tool.");
@@ -631,7 +627,7 @@ describe("version-scoped legacy MCP remote transports", () => {
                 ]),
             fakeGatewayFinalText(`Legacy HTTP ${operation} URL-required complete.`),
           ], {
-            models: [{ id: MODEL, type: "language", tags: ["tool-use"] }],
+            models: [{ id: MODEL, object: "model" }],
           });
           const binary = join(REPO_ROOT, "zig-out", "bin", "fx");
           tui = await TmuxSession.create({
@@ -787,7 +783,7 @@ describe("version-scoped legacy MCP remote transports", () => {
       fakeGatewayToolCall("recovered_call", TOOL_NAME, { text: "recovered" }),
       fakeGatewayFinalText("Session recovery complete."),
     ], {
-      models: [{ id: MODEL, type: "language", tags: ["tool-use"] }],
+      models: [{ id: MODEL, object: "model" }],
     });
 
     const result = await runAsk(
@@ -1004,7 +1000,7 @@ describe("version-scoped legacy MCP remote transports", () => {
         }),
         fakeGatewayFinalText("Invalid SSE version isolated."),
       ], {
-        models: [{ id: MODEL, type: "language", tags: ["tool-use"] }],
+        models: [{ id: MODEL, object: "model" }],
       });
 
       const result = await runAsk(
@@ -1041,7 +1037,7 @@ describe("version-scoped legacy MCP remote transports", () => {
       }),
       fakeGatewayFinalText("Malformed SSE startup isolated."),
     ], {
-      models: [{ id: MODEL, type: "language", tags: ["tool-use"] }],
+      models: [{ id: MODEL, object: "model" }],
     });
 
     const result = await runAsk(

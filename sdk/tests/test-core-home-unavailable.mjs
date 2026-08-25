@@ -15,7 +15,7 @@ if (!supportsJspi()) {
 
 const encoded = new TextEncoder();
 const catalogModels = [
-  { id: "sdk/catalog-alpha", type: "language", released: 2, tags: ["tool-use"] },
+  { id: "gpt-5.4-mini", object: "model", created: 2, owned_by: "openai" },
 ];
 let fetchCalls = 0;
 let workspaceExecs = 0;
@@ -26,15 +26,15 @@ const mockFetch = async (url, init) => {
   fetchCalls++;
   if (init.method !== "POST") throw new Error(`unexpected method ${init.method}`);
   const requestBody = JSON.parse(new TextDecoder().decode(init.body));
-  if (!Array.isArray(requestBody.prompt) && !Array.isArray(requestBody.messages)) {
-    throw new Error("gateway request did not contain prompt messages");
+  if (!Array.isArray(requestBody.input)) {
+    throw new Error("Responses request did not contain input items");
   }
   return new Response(new ReadableStream({
     start(controller) {
-      controller.enqueue(encoded.encode('data: {"type":"text-delta","delta":"hello"}\n'));
-      controller.enqueue(encoded.encode('data: {"type":"text-delta","delta":" world"}\n'));
-      controller.enqueue(encoded.encode('data: {"type":"finish","finishReason":{"unified":"stop"},"usage":{"inputTokens":{"total":3},"outputTokens":{"total":2}}}\n'));
-      controller.enqueue(encoded.encode("data: [DONE]\n"));
+      controller.enqueue(encoded.encode('data: {"type":"response.output_text.delta","item_id":"answer_1","output_index":0,"content_index":0,"delta":"hello"}\n\n'));
+      controller.enqueue(encoded.encode('data: {"type":"response.output_text.delta","item_id":"answer_1","output_index":0,"content_index":0,"delta":" world"}\n\n'));
+      controller.enqueue(encoded.encode('data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}}}\n\n'));
+      controller.enqueue(encoded.encode("data: [DONE]\n\n"));
       controller.close();
     },
   }), { status: 200, headers: { "content-type": "text/event-stream" } });
@@ -55,7 +55,7 @@ const agent = await Promise.race([
     wasm: await readFile(wasmPath),
     fetch: mockFetch,
     env: {
-      AI_GATEWAY_API_KEY: "sdk-test-key",
+      OPENAI_API_KEY: "sdk-test-key",
       HOME: "/repo",
     },
     workspace: {

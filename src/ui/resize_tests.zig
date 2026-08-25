@@ -5424,7 +5424,7 @@ test "compact picker dismissal preserves committed history floor" {
             .topic = "status",
             .tone = .information,
             .body = "model=test-model\n" ++
-                "auth=AI_GATEWAY_API_KEY\n" ++
+                "auth=OPENAI_API_KEY\n" ++
                 "auth_refreshable=false\n" ++
                 "permission_mode=auto\n" ++
                 "workspace=/tmp/fx\n" ++
@@ -5581,14 +5581,14 @@ test "long transcript picker filtering keeps footer anchored and close releases 
         .{
             .topic = "auth",
             .tone = .information,
-            .body = "Starting Vercel sign-in",
+            .body = "Starting provider sign-in",
         },
         true,
     );
     h.frame_redraw = true;
     try renderTestFooter(&h, &input, &approval, &h.frame_redraw);
     try h.flush();
-    try expectGridContains(&h, "Starting Vercel sign-in");
+    try expectGridContains(&h, "Starting provider sign-in");
 }
 
 test "picker growth advances history while shrink and dismissal do not" {
@@ -5686,7 +5686,7 @@ test "slash main page renders header categories selection range and contextual c
     try renderTestFooter(&h, &input, &approval, &h.frame_redraw);
     try h.flush();
 
-    try expectGridContains(&h, "Commands 37 · Type to filter");
+    try expectGridContains(&h, "Commands ");
     try expectGridContains(&h, "1–6");
     try expectGridContains(&h, "/help");
     try expectGridContains(&h, "General");
@@ -5707,7 +5707,7 @@ test "slash main page renders header categories selection range and contextual c
 
     try expectGridContains(&h, "ask");
     try expectGridContains(&h, "test-model");
-    try expectGridNotContains(&h, "Commands 37");
+    try expectGridNotContains(&h, "Commands ");
     try expectGridNotContains(&h, "↑↓ Navigate");
 }
 

@@ -48,7 +48,6 @@ pub fn buildAlloc(
     errdefer alloc.free(normalized_origin);
 
     const binding: types.ResponsesCompactionProviderBinding = switch (route) {
-        .vercel_gateway => unreachable,
         .codex_responses_oauth => .{
             .normalized_origin = normalized_origin,
             .account_id = try dupeRequiredIdentityComponent(alloc, account_id),
@@ -105,7 +104,6 @@ pub fn validate(
     const route = provider_route.fromCredentialSource(credential_source) orelse
         return error.InvalidResponsesCompactionProviderBinding;
     switch (route) {
-        .vercel_gateway => return error.InvalidResponsesCompactionProviderBinding,
         .codex_responses_oauth => {
             try validateRequiredIdentityComponent(binding.account_id);
             if (binding.api_key_sha256 != null or
@@ -155,7 +153,6 @@ pub fn credentialMatches(
     validate(credential_source, binding) catch return false;
     const route = provider_route.fromCredentialSource(credential_source) orelse return false;
     return switch (route) {
-        .vercel_gateway => false,
         .codex_responses_oauth => optionalBytesEql(account_id, binding.account_id),
         .openai_responses_byok => blk: {
             if (credential.len == 0) break :blk false;

@@ -72,7 +72,7 @@ pub fn streamModelCompletion(
         .failed => try observation.fail(.unbilled),
         .completed => |completed| {
             switch (completed.usage) {
-                .immediate => |reference| if (reference == null) {
+                .immediate => {
                     try observation.completeDirect(
                         usage_allocator,
                         request.model,
@@ -82,25 +82,14 @@ pub fn streamModelCompletion(
                             .terminal_finish_reason = completed.completion.finish_reason,
                         },
                     );
-                } else try observation.complete(
-                    usage_allocator,
-                    completed.completion,
-                    completed.usage,
-                ),
-                .deferred, .unavailable => try observation.complete(
-                    usage_allocator,
-                    completed.completion,
-                    completed.usage,
-                ),
-            }
-            if (comptime @import("builtin").os.tag != .wasi) {
-                if (std.meta.activeTag(completed.usage) == .deferred) if (usage) |ledger| {
-                    ledger.startDeferredReconciliation(
-                        usage_allocator,
-                        completed.usage.deferred,
-                        request.credential.secret,
-                    );
-                };
+                },
+                .unavailable => |availability| try observation.fail(switch (availability) {
+                    .unbilled => .unbilled,
+                    .possibly_billed => if (completed.completion.delivery_ambiguous)
+                        .ambiguous_delivery
+                    else
+                        .possibly_billed_without_identity,
+                }),
             }
         },
     }
@@ -376,7 +365,7 @@ test "provider-local immediate usage bypasses durable Gateway observations" {
                     .finish_reason = .stop,
                     .usage = .{ .input_tokens = 3, .output_tokens = 1 },
                 },
-                .usage = .{ .immediate = null },
+                .usage = .immediate,
             } };
         }
     };
@@ -435,5 +424,4 @@ test "provider-local immediate usage bypasses durable Gateway observations" {
     try std.testing.expect(snapshot.api_duration_complete);
     try std.testing.expectEqual(@as(u64, 1), snapshot.next_sequence);
     try std.testing.expectEqual(@as(u64, 0), snapshot.settled_through_sequence);
-    try std.testing.expectEqual(@as(usize, 0), snapshot.pending.len);
 }

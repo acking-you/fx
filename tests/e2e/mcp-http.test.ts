@@ -91,13 +91,9 @@ function fixtureEnv(
 ) {
   return {
     HOME: root.home,
-    AI_GATEWAY_API_KEY: "fake-mcp-http-key",
-    VERCEL_OIDC_TOKEN: undefined,
-    FX_AUTO_UPGRADE: "0",
+    OPENAI_API_KEY: "fake-mcp-http-key",
     FX_PERMISSION_MODE: "auto",
-    FX_GATEWAY_BASE_URL: activeGateway.baseUrl,
-    FX_GATEWAY_CHAT_URL: activeGateway.chatUrl,
-    FX_E2E_GATEWAY_CHAT_URL: activeGateway.chatUrl,
+    FX_RESPONSES_BASE_URL: activeGateway.baseUrl,
     FX_MODEL: MODEL,
     FX_TRACE_LOG: root.traceLogPath,
     FX_TRACE_SCOPES: "mcp",
@@ -110,25 +106,23 @@ function startToolGateway(finalText: string) {
     fakeGatewayToolCall("call_mcp", TOOL_NAME, { text: "hello" }),
     fakeGatewayFinalText(finalText),
   ], {
-    models: [{ id: MODEL, type: "language", tags: ["tool-use"] }],
+    models: [{ id: MODEL, object: "model" }],
   });
 }
 
 function toolResultText(body: string, toolCallId: string): string {
   const request = JSON.parse(body) as {
-    prompt?: Array<{ content?: Array<Record<string, unknown>> }>;
+    input?: Array<Record<string, unknown>>;
   };
-  const result = (request.prompt ?? [])
-    .flatMap((message) => message.content ?? [])
+  const result = (request.input ?? [])
     .find((part) =>
-      part.type === "tool-result" && part.toolCallId === toolCallId
+      part.type === "function_call_output" && part.call_id === toolCallId
     );
   if (!result) throw new Error(`Missing tool result for ${toolCallId}`);
-  const output = result.output as Record<string, unknown>;
-  if (output.type !== "text" || typeof output.value !== "string") {
+  if (typeof result.output !== "string") {
     throw new Error(`Invalid tool result for ${toolCallId}`);
   }
-  return output.value;
+  return result.output;
 }
 
 function preserveHttpFailure(
@@ -203,7 +197,7 @@ describe("modern MCP Streamable HTTP", () => {
       },
       fakeGatewayFinalText("Resource storm coalesced."),
     ], {
-      models: [{ id: MODEL, type: "language", tags: ["tool-use"] }],
+      models: [{ id: MODEL, object: "model" }],
     });
 
     const result = await runFx(
@@ -248,7 +242,7 @@ describe("modern MCP Streamable HTTP", () => {
       },
       fakeGatewayFinalText("Feature refresh recovered."),
     ], {
-      models: [{ id: MODEL, type: "language", tags: ["tool-use"] }],
+      models: [{ id: MODEL, object: "model" }],
     });
 
     const result = await runFx(
@@ -286,7 +280,7 @@ describe("modern MCP Streamable HTTP", () => {
       },
       fakeGatewayFinalText("Feature TTL refresh complete."),
     ], {
-      models: [{ id: MODEL, type: "language", tags: ["tool-use"] }],
+      models: [{ id: MODEL, object: "model" }],
     });
 
     const result = await runFx(
@@ -345,7 +339,7 @@ describe("modern MCP Streamable HTTP", () => {
       }),
       fakeGatewayFinalText("Removed identities rejected."),
     ], {
-      models: [{ id: MODEL, type: "language", tags: ["tool-use"] }],
+      models: [{ id: MODEL, object: "model" }],
     });
 
     const result = await runFx(
@@ -389,7 +383,7 @@ describe("modern MCP Streamable HTTP", () => {
       }),
       fakeGatewayFinalText("Template near miss rejected."),
     ], {
-      models: [{ id: MODEL, type: "language", tags: ["tool-use"] }],
+      models: [{ id: MODEL, object: "model" }],
     });
 
     const result = await runFx(
@@ -424,7 +418,7 @@ describe("modern MCP Streamable HTTP", () => {
       }),
       fakeGatewayFinalText("Deep feature metadata rejected."),
     ], {
-      models: [{ id: MODEL, type: "language", tags: ["tool-use"] }],
+      models: [{ id: MODEL, object: "model" }],
     });
 
     const result = await runFx(
@@ -488,7 +482,7 @@ describe("modern MCP Streamable HTTP", () => {
       }),
       fakeGatewayFinalText("Modern HTTP MCP features complete."),
     ], {
-      models: [{ id: MODEL, type: "language", tags: ["tool-use"] }],
+      models: [{ id: MODEL, object: "model" }],
     });
 
     const result = await runFx(
@@ -558,7 +552,7 @@ describe("modern MCP Streamable HTTP", () => {
       }),
       fakeGatewayFinalText("Modern HTTP resource cancellation complete."),
     ], {
-      models: [{ id: MODEL, type: "language", tags: ["tool-use"] }],
+      models: [{ id: MODEL, object: "model" }],
     });
 
     const result = await runFx(
@@ -605,7 +599,7 @@ describe("modern MCP Streamable HTTP", () => {
       }),
       fakeGatewayFinalText("Modern HTTP completion cancellation complete."),
     ], {
-      models: [{ id: MODEL, type: "language", tags: ["tool-use"] }],
+      models: [{ id: MODEL, object: "model" }],
     });
 
     const result = await runFx(
@@ -644,7 +638,7 @@ describe("modern MCP Streamable HTTP", () => {
       fakeGatewayToolCall("call_fresh", freshTool, { text: "changed" }),
       fakeGatewayFinalText("Live cache refresh complete."),
     ], {
-      models: [{ id: MODEL, type: "language", tags: ["tool-use"] }],
+      models: [{ id: MODEL, object: "model" }],
     });
 
     const result = await runFx(
@@ -702,7 +696,7 @@ describe("modern MCP Streamable HTTP", () => {
       fakeGatewayToolCall("call_stale", TOOL_NAME, { text: "stale" }),
       fakeGatewayFinalText("Stale cache fallback complete."),
     ], {
-      models: [{ id: MODEL, type: "language", tags: ["tool-use"] }],
+      models: [{ id: MODEL, object: "model" }],
     });
 
     const result = await runFx(
@@ -752,7 +746,7 @@ describe("modern MCP Streamable HTTP", () => {
       },
       fakeGatewayFinalText("TTL fallback complete."),
     ], {
-      models: [{ id: MODEL, type: "language", tags: ["tool-use"] }],
+      models: [{ id: MODEL, object: "model" }],
     });
 
     const result = await runFx(
@@ -787,7 +781,7 @@ describe("modern MCP Streamable HTTP", () => {
       },
       fakeGatewayFinalText("Server cancellation TTL fallback complete."),
     ], {
-      models: [{ id: MODEL, type: "language", tags: ["tool-use"] }],
+      models: [{ id: MODEL, object: "model" }],
     });
 
     const result = await runFx(
@@ -825,7 +819,7 @@ describe("modern MCP Streamable HTTP", () => {
       },
       fakeGatewayFinalText("Unexpected acknowledgement TTL fallback complete."),
     ], {
-      models: [{ id: MODEL, type: "language", tags: ["tool-use"] }],
+      models: [{ id: MODEL, object: "model" }],
     });
 
     const result = await runFx(
@@ -870,7 +864,7 @@ describe("modern MCP Streamable HTTP", () => {
       fakeGatewayToolCall("call_fresh", freshTool, { text: "new" }),
       fakeGatewayFinalText("Pre-send invalidation complete."),
     ], {
-      models: [{ id: MODEL, type: "language", tags: ["tool-use"] }],
+      models: [{ id: MODEL, object: "model" }],
     });
 
     const result = await runFx(
@@ -925,7 +919,7 @@ describe("modern MCP Streamable HTTP", () => {
           : []),
         fakeGatewayFinalText("Cache timing observed."),
       ], {
-        models: [{ id: MODEL, type: "language", tags: ["tool-use"] }],
+        models: [{ id: MODEL, object: "model" }],
       });
 
       const result = await runFx(
@@ -965,7 +959,7 @@ describe("modern MCP Streamable HTTP", () => {
       }),
       fakeGatewayFinalText("Delayed pagination expiry observed."),
     ], {
-      models: [{ id: MODEL, type: "language", tags: ["tool-use"] }],
+      models: [{ id: MODEL, object: "model" }],
     });
 
     const result = await runFx(
@@ -1010,7 +1004,7 @@ describe("modern MCP Streamable HTTP", () => {
       }),
       fakeGatewayFinalText("Empty cursor pagination complete."),
     ], {
-      models: [{ id: MODEL, type: "language", tags: ["tool-use"] }],
+      models: [{ id: MODEL, object: "model" }],
     });
 
     const result = await runFx(
@@ -1235,7 +1229,7 @@ describe("modern MCP Streamable HTTP", () => {
       }),
       fakeGatewayFinalText("Invalid modern schema isolated."),
     ], {
-      models: [{ id: MODEL, type: "language", tags: ["tool-use"] }],
+      models: [{ id: MODEL, object: "model" }],
     });
 
     const result = await runFx(
@@ -1357,13 +1351,13 @@ describe("modern MCP Streamable HTTP", () => {
         if (body.includes(afterReloadPrompt)) {
           return fakeGatewayFinalText("AFTER_HTTP_RELOAD_ROOT_READY");
         }
-        if (body.includes('"toolCallId":"reload_http_child_call"')) {
+        if (body.includes('"call_id":"reload_http_child_call"')) {
           return fakeGatewayFinalText("RELOAD_HTTP_CHILD_CANCELLED");
         }
-        if (body.includes('"toolCallId":"reload_http_child_select"')) {
+        if (body.includes('"call_id":"reload_http_child_select"')) {
           return fakeGatewayToolCall("reload_http_child_call", TOOL_NAME, { text: "stall" });
         }
-        if (body.includes('"toolCallId":"reload_http_child_create"')) {
+        if (body.includes('"call_id":"reload_http_child_create"')) {
           return fakeGatewayFinalText("RELOAD_HTTP_PARENT_READY");
         }
         if (body.includes(childPrompt)) {
@@ -1382,7 +1376,7 @@ describe("modern MCP Streamable HTTP", () => {
         });
       }, {
         classifierDecision: "clear",
-        models: [{ id: MODEL, type: "language", tags: ["tool-use"] }],
+        models: [{ id: MODEL, object: "model" }],
       });
       tui = await TmuxSession.create({
         isolated: true,
@@ -1419,14 +1413,14 @@ describe("modern MCP Streamable HTTP", () => {
       const childWakeDeadline = Date.now() + 10_000;
       while (
         !gateway.requests.some((request) =>
-          request.body.includes('"toolCallId":"reload_http_child_call"')
+          request.body.includes('"call_id":"reload_http_child_call"')
         ) &&
         Date.now() < childWakeDeadline
       ) {
         await Bun.sleep(25);
       }
       expect(gateway.requests.some((request) =>
-        request.body.includes('"toolCallId":"reload_http_child_call"')
+        request.body.includes('"call_id":"reload_http_child_call"')
       )).toBe(true);
       expect(
         fixture.requests.filter((entry) => entry.message.method === "tools/call"),

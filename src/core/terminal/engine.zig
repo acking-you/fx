@@ -4167,7 +4167,7 @@ test "OSC 8 hyperlink round-trips through diffBand" {
     defer prev.deinit();
     var next = try prev.clone(testing.allocator);
     defer next.deinit();
-    try next.feed("\x1b]8;;https://x.com/vercel_dev\x1b\\@vercel_dev\x1b]8;;\x1b\\");
+    try next.feed("\x1b]8;;https://x.com/example_dev\x1b\\@example_dev\x1b]8;;\x1b\\");
 
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(testing.allocator);
@@ -4175,7 +4175,7 @@ test "OSC 8 hyperlink round-trips through diffBand" {
     try Grid.diffBand(prev, next, 1, 1, &writer.writer);
     buf = writer.toArrayList();
 
-    try testing.expect(std.mem.find(u8, buf.items, "\x1b]8;;https://x.com/vercel_dev\x1b\\") != null);
+    try testing.expect(std.mem.find(u8, buf.items, "\x1b]8;;https://x.com/example_dev\x1b\\") != null);
     try testing.expect(std.mem.endsWith(u8, buf.items, "\x1b]8;;\x1b\\"));
 }
 

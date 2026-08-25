@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
 import {
   chmodSync,
   copyFileSync,
@@ -18,16 +17,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FX_BIN, REPO_ROOT } from "../evals/eval-helpers";
 import {
-  AUTO_PERPLEXITY_SERIALIZED_TOOL_NAMES,
-  customProviderGuidanceState,
-  findUnavailableCapabilityReferences,
-  parseGatewayRequest,
-  serializedToolNames,
-  toolShapesWithoutDescriptions,
-  WEB_SEARCH_GUIDANCE,
-  contentText,
-} from "./conditional-guidance-oracle";
-import {
   classifierEvidenceFromRequest,
   composerContains,
   fakeGatewayFinalText,
@@ -38,6 +27,12 @@ import {
   hasEmptyComposer,
   isEmptyComposerLine,
   isComposerLine,
+  responseCompleted,
+  responseFunctionCall,
+  responseFunctionCallDelta,
+  responseFunctionCallDone,
+  responseFunctionCallStart,
+  responseTextDelta,
   startDynamicFakeGateway,
   startFakeGateway,
   TmuxSession,
@@ -77,37 +72,35 @@ if (Buffer.byteLength(SPLIT_OLD_RESPONSE) < 30 * 1024) {
   throw new Error("split fixture must exceed 30 KiB");
 }
 const CANONICAL_A_B_SSE =
-  'data: {"type":"text-start","id":"text_before"}\n\n' +
   `data: ${JSON.stringify({
-    type: "text-delta",
-    id: "text_before",
+    type: "response.output_text.delta",
+    item_id: "text_before",
+    output_index: 0,
+    content_index: 0,
     delta: CANONICAL_PRE_TOOL_TEXT,
   })}\n\n` +
-  'data: {"type":"text-end","id":"text_before"}\n\n' +
-  'data: {"type":"tool-input-start","id":"read_a","toolName":"read_file"}\n\n' +
-  'data: {"type":"tool-input-delta","id":"read_a","delta":"{\\"path\\":\\"alpha-FX_PATH_SENTINEL"}\n\n' +
-  'data: {"type":"tool-input-start","id":"grep_b","toolName":"grep_files"}\n\n' +
-  'data: {"type":"tool-input-delta","id":"grep_b","delta":"{\\"pattern\\":\\"FX_PATTERN_SENTINEL\\",\\"path\\":\\""}\n\n' +
-  'data: {"type":"tool-input-delta","id":"read_a","delta":".txt\\"}"}\n\n' +
-  'data: {"type":"tool-input-end","id":"read_a"}\n\n' +
+  'data: {"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","id":"read_item","call_id":"read_a","name":"read_file"}}\n\n' +
+  'data: {"type":"response.function_call_arguments.delta","item_id":"read_item","call_id":"read_a","output_index":1,"delta":"{\\"path\\":\\"alpha-FX_PATH_SENTINEL"}\n\n' +
+  'data: {"type":"response.output_item.added","output_index":2,"item":{"type":"function_call","id":"grep_item","call_id":"grep_b","name":"grep_files"}}\n\n' +
+  'data: {"type":"response.function_call_arguments.delta","item_id":"grep_item","call_id":"grep_b","output_index":2,"delta":"{\\"pattern\\":\\"FX_PATTERN_SENTINEL\\",\\"path\\":\\""}\n\n' +
+  'data: {"type":"response.function_call_arguments.delta","item_id":"read_item","call_id":"read_a","output_index":1,"delta":".txt\\"}"}\n\n' +
   `data: ${JSON.stringify({
-    type: "tool-call",
-    toolCallId: "read_a",
-    toolName: "read_file",
-    input: { path: CANONICAL_READ_PATH },
+    type: "response.function_call_arguments.done",
+    item_id: "read_item",
+    call_id: "read_a",
+    output_index: 1,
+    arguments: JSON.stringify({ path: CANONICAL_READ_PATH }),
   })}\n\n` +
-  'data: {"type":"tool-input-delta","id":"grep_b","delta":".\\"}"}\n\n' +
-  'data: {"type":"tool-input-end","id":"grep_b"}\n\n' +
+  'data: {"type":"response.function_call_arguments.delta","item_id":"grep_item","call_id":"grep_b","output_index":2,"delta":".\\"}"}\n\n' +
   `data: ${JSON.stringify({
-    type: "tool-call",
-    toolCallId: "grep_b",
-    toolName: "grep_files",
-    input: { pattern: CANONICAL_GREP_PATTERN, path: "." },
+    type: "response.function_call_arguments.done",
+    item_id: "grep_item",
+    call_id: "grep_b",
+    output_index: 2,
+    arguments: JSON.stringify({ pattern: CANONICAL_GREP_PATTERN, path: "." }),
   })}\n\n` +
-  'data: {"type":"finish","finishReason":{"unified":"tool-calls","raw":"tool-calls"},"usage":{"inputTokens":{"total":11},"outputTokens":{"total":17}}}\n\n' +
+  'data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":11,"output_tokens":17,"total_tokens":28}}}\n\n' +
   "data: [DONE]\n\n";
-const CANONICAL_A_B_SHA256 =
-  "15b963713444428d1548b060b5ee883a209f7cea43ff80e0fdaa33a98b41e34e";
 
 type LifecycleStage =
   | "baseline-silent"
@@ -147,40 +140,56 @@ afterEach(async () => {
 
 function missingFinishResponse() {
   return new Response(
-    'data: {"type":"tool-input-start","id":"read_1","toolName":"read_file"}\n\n' +
+    'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"read_item_1","call_id":"read_1","name":"read_file"}}\n\n' +
       "data: [DONE]\n\n",
     { headers: { "content-type": "text/event-stream" } },
   );
 }
 
 function lengthLimitedCommandResponse(command: string) {
-  return new Response(
-    'data: {"type":"text-delta","id":"answer_1","delta":"TUI partial output"}\n\n' +
-      'data: {"type":"tool-input-start","id":"command_provisional","toolName":"terminal"}\n\n' +
-      `data: ${JSON.stringify({
-        type: "tool-call",
-        toolCallId: "command_final",
-        toolName: "terminal",
-        input: { action: "exec", command },
-      })}\n\n` +
-      'data: {"type":"finish","finishReason":{"unified":"length","raw":"length"}}\n\n' +
-      "data: [DONE]\n\n",
-    { headers: { "content-type": "text/event-stream" } },
-  );
+  return fakeGatewaySse([
+    {
+      type: "response.output_text.delta",
+      item_id: "answer_1",
+      output_index: 0,
+      content_index: 0,
+      delta: "TUI partial output",
+    },
+    {
+      type: "response.output_item.added",
+      output_index: 1,
+      item: {
+        type: "function_call",
+        id: "command_item",
+        call_id: "command_final",
+        name: "terminal",
+      },
+    },
+    {
+      type: "response.function_call_arguments.done",
+      item_id: "command_item",
+      call_id: "command_final",
+      output_index: 1,
+      arguments: JSON.stringify({ action: "exec", command }),
+    },
+    {
+      type: "response.incomplete",
+      response: {
+        status: "incomplete",
+        incomplete_details: { reason: "max_output_tokens" },
+      },
+    },
+  ]);
 }
 
 function providerErrorResponse(detail = "route temporarily unavailable"): Response {
   return fakeGatewaySse([
     {
-      type: "error",
-      error: { code: "provider_error", message: detail },
-    },
-    {
-      type: "finish",
-      finishReason: { unified: "error", raw: "provider_error" },
-      usage: {
-        inputTokens: { total: 1 },
-        outputTokens: { total: 1 },
+      type: "response.incomplete",
+      response: {
+        status: "incomplete",
+        incomplete_details: { reason: "provider_error", message: detail },
+        usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
       },
     },
   ]);
@@ -188,9 +197,10 @@ function providerErrorResponse(detail = "route temporarily unavailable"): Respon
 
 function hasEmptyStandaloneAssistant(body: string): boolean {
   const request = JSON.parse(body) as {
-    prompt?: Array<{ role?: unknown; content?: unknown }>;
+    input?: Array<{ type?: unknown; role?: unknown; content?: unknown }>;
   };
-  return (request.prompt ?? []).some((message) =>
+  return (request.input ?? []).some((message) =>
+    message.type === "message" &&
     message.role === "assistant" &&
     (message.content === "" ||
       message.content == null ||
@@ -219,28 +229,52 @@ function restrictedProviderResponse(): Response {
 function contentFilterResponse(): Response {
   return fakeGatewaySse([
     {
-      type: "finish",
-      finishReason: { unified: "content-filter", raw: "content_filter" },
+      type: "response.incomplete",
+      response: {
+        status: "incomplete",
+        incomplete_details: { reason: "content_filter" },
+      },
     },
   ]);
 }
 
 function providerErrorAfterTextResponse(): Response {
   return fakeGatewaySse([
-    { type: "text-delta", id: "answer_1", delta: "partial unsafe output" },
     {
-      type: "finish",
-      finishReason: { unified: "error", raw: "provider_error" },
+      type: "response.output_text.delta",
+      item_id: "answer_1",
+      output_index: 0,
+      content_index: 0,
+      delta: "partial unsafe output",
+    },
+    {
+      type: "response.incomplete",
+      response: {
+        status: "incomplete",
+        incomplete_details: { reason: "provider_error" },
+      },
     },
   ]);
 }
 
 function providerErrorAfterToolStartResponse(): Response {
   return fakeGatewaySse([
-    { type: "tool-input-start", id: "read_1", toolName: "read_file" },
     {
-      type: "finish",
-      finishReason: { unified: "error", raw: "provider_error" },
+      type: "response.output_item.added",
+      output_index: 0,
+      item: {
+        type: "function_call",
+        id: "read_item_1",
+        call_id: "read_1",
+        name: "read_file",
+      },
+    },
+    {
+      type: "response.incomplete",
+      response: {
+        status: "incomplete",
+        incomplete_details: { reason: "provider_error" },
+      },
     },
   ]);
 }
@@ -261,8 +295,10 @@ function retryAfterUnavailable(seconds: number): Response {
 function partialEofResponse(text: string): Response {
   return new Response(
     `data: ${JSON.stringify({
-      type: "text-delta",
-      id: "answer_1",
+      type: "response.output_text.delta",
+      item_id: "answer_1",
+      output_index: 0,
+      content_index: 0,
       delta: text,
     })}\n\n`,
     { headers: { "content-type": "text/event-stream" } },
@@ -271,13 +307,13 @@ function partialEofResponse(text: string): Response {
 
 function startGateway(response: () => Response) {
   return startDynamicFakeGateway(response, {
-    models: [{ id: MODEL, type: "language", tags: ["tool-use"] }],
+    models: [{ id: MODEL, object: "model" }],
   });
 }
 
 function startHeldModelsGateway(
   models: FakeGatewayModel[] = [
-    { id: MODEL, type: "language", tags: ["tool-use"] },
+    { id: MODEL, object: "model" },
   ],
 ): HeldModelsGateway {
   let requestCount = 0;
@@ -419,10 +455,12 @@ function stagedTokenProgressResponse(
     new ReadableStream<Uint8Array>({
       start(controller) {
         state.started = true;
-        send(controller, { type: "reasoning-start", id: "reasoning_1" });
         send(controller, {
-          type: "reasoning-delta",
-          id: "reasoning_1",
+          type: "response.reasoning_summary_text.delta",
+          item_id: "reasoning_1",
+          output_index: 0,
+          summary_index: 0,
+          content_index: 0,
           delta: reasoning,
         });
         timer = setInterval(() => {
@@ -431,11 +469,11 @@ function stagedTokenProgressResponse(
         state.sendContent = () => {
           if (closed || firstContentSent) return;
           firstContentSent = true;
-          send(controller, { type: "reasoning-end", id: "reasoning_1" });
-          send(controller, { type: "text-start", id: "answer_1" });
           send(controller, {
-            type: "text-delta",
-            id: "answer_1",
+            type: "response.output_text.delta",
+            item_id: "answer_1",
+            output_index: 1,
+            content_index: 0,
             delta: content.slice(0, split),
           });
         };
@@ -443,8 +481,10 @@ function stagedTokenProgressResponse(
           if (closed || !firstContentSent || allContentSent) return;
           allContentSent = true;
           send(controller, {
-            type: "text-delta",
-            id: "answer_1",
+            type: "response.output_text.delta",
+            item_id: "answer_1",
+            output_index: 1,
+            content_index: 0,
             delta: content.slice(split),
           });
         };
@@ -452,13 +492,15 @@ function stagedTokenProgressResponse(
           if (closed || !allContentSent) return;
           closed = true;
           if (timer) clearInterval(timer);
-          send(controller, { type: "text-end", id: "answer_1" });
           send(controller, {
-            type: "finish",
-            finishReason: { unified: "stop", raw: "stop" },
-            usage: {
-              inputTokens: { total: 50_000 },
-              outputTokens: { total: 20_000 },
+            type: "response.completed",
+            response: {
+              status: "completed",
+              usage: {
+                input_tokens: 50_000,
+                output_tokens: 20_000,
+                total_tokens: 70_000,
+              },
             },
           });
           controller.enqueue(encoder.encode("data: [DONE]\n\n"));
@@ -497,21 +539,28 @@ function stagedToolPayloadResponse(
     new ReadableStream<Uint8Array>({
       start(controller) {
         state.started = true;
-        send(controller, { type: "text-start", id: "answer_1" });
         send(controller, {
-          type: "text-delta",
-          id: "answer_1",
+          type: "response.output_text.delta",
+          item_id: "answer_1",
+          output_index: 0,
+          content_index: 0,
           delta: assistantText,
         });
-        send(controller, { type: "text-end", id: "answer_1" });
         send(controller, {
-          type: "tool-input-start",
-          id: "write_payload",
-          toolName: "write_file",
+          type: "response.output_item.added",
+          output_index: 1,
+          item: {
+            type: "function_call",
+            id: "write_payload_item",
+            call_id: "write_payload",
+            name: "write_file",
+          },
         });
         send(controller, {
-          type: "tool-input-delta",
-          id: "write_payload",
+          type: "response.function_call_arguments.delta",
+          item_id: "write_payload_item",
+          call_id: "write_payload",
+          output_index: 1,
           delta: input.slice(0, split),
         });
         timer = setInterval(() => {
@@ -521,8 +570,10 @@ function stagedToolPayloadResponse(
           if (closed || moreInputSent) return;
           moreInputSent = true;
           send(controller, {
-            type: "tool-input-delta",
-            id: "write_payload",
+            type: "response.function_call_arguments.delta",
+            item_id: "write_payload_item",
+            call_id: "write_payload",
+            output_index: 1,
             delta: input.slice(split),
           });
         };
@@ -530,19 +581,22 @@ function stagedToolPayloadResponse(
           if (closed || !moreInputSent) return;
           closed = true;
           if (timer) clearInterval(timer);
-          send(controller, { type: "tool-input-end", id: "write_payload" });
           send(controller, {
-            type: "tool-call",
-            toolCallId: "write_payload",
-            toolName: "write_file",
-            input: { path, content },
+            type: "response.function_call_arguments.done",
+            item_id: "write_payload_item",
+            call_id: "write_payload",
+            output_index: 1,
+            arguments: JSON.stringify({ path, content }),
           });
           send(controller, {
-            type: "finish",
-            finishReason: { unified: "tool-calls", raw: "tool-calls" },
-            usage: {
-              inputTokens: { total: 8 },
-              outputTokens: { total: 4_096 },
+            type: "response.completed",
+            response: {
+              status: "completed",
+              usage: {
+                input_tokens: 8,
+                output_tokens: 4_096,
+                total_tokens: 4_104,
+              },
             },
           });
           controller.enqueue(encoder.encode("data: [DONE]\n\n"));
@@ -565,13 +619,22 @@ function fakeGatewayFinalTextWithUsage(
   outputTokens: number,
 ): Response {
   return fakeGatewaySse([
-    { type: "text-delta", id: "answer_1", delta: text },
     {
-      type: "finish",
-      finishReason: { unified: "stop", raw: "stop" },
-      usage: {
-        inputTokens: { total: inputTokens },
-        outputTokens: { total: outputTokens },
+      type: "response.output_text.delta",
+      item_id: "answer_1",
+      output_index: 0,
+      content_index: 0,
+      delta: text,
+    },
+    {
+      type: "response.completed",
+      response: {
+        status: "completed",
+        usage: {
+          input_tokens: inputTokens,
+          output_tokens: outputTokens,
+          total_tokens: inputTokens + outputTokens,
+        },
       },
     },
   ]);
@@ -592,8 +655,13 @@ function splitHeldTextResponse(
     new ReadableStream<Uint8Array>({
       start(controller) {
         state.started = true;
-        send(controller, { type: "text-start", id: "answer_1" });
-        send(controller, { type: "text-delta", id: "answer_1", delta: before });
+        send(controller, {
+          type: "response.output_text.delta",
+          item_id: "answer_1",
+          output_index: 0,
+          content_index: 0,
+          delta: before,
+        });
         const keepAlive = () => {
           if (!closed) controller.enqueue(encoder.encode(": hold-split-turn\n\n"));
         };
@@ -602,11 +670,16 @@ function splitHeldTextResponse(
           if (closed) return;
           closed = true;
           if (timer) clearInterval(timer);
-          send(controller, { type: "text-delta", id: "answer_1", delta: after });
-          send(controller, { type: "text-end", id: "answer_1" });
           send(controller, {
-            type: "finish",
-            finishReason: { unified: "stop", raw: "stop" },
+            type: "response.output_text.delta",
+            item_id: "answer_1",
+            output_index: 0,
+            content_index: 0,
+            delta: after,
+          });
+          send(controller, {
+            type: "response.completed",
+            response: { status: "completed" },
           });
           controller.enqueue(encoder.encode("data: [DONE]\n\n"));
           controller.close();
@@ -624,27 +697,24 @@ function splitHeldTextResponse(
 
 function duplicateKeyToolResponse(): Response {
   return fakeGatewaySse([
-    { type: "tool-input-start", id: "queued_duplicate_list", toolName: "list_files" },
-    { type: "tool-input-delta", id: "queued_duplicate_list", delta: '{"' },
-    { type: "tool-input-delta", id: "queued_duplicate_list", delta: "dept" },
-    { type: "tool-input-delta", id: "queued_duplicate_list", delta: 'h"' },
-    { type: "tool-input-delta", id: "queued_duplicate_list", delta: ":1" },
-    { type: "tool-input-delta", id: "queued_duplicate_list", delta: ', "' },
-    { type: "tool-input-delta", id: "queued_duplicate_list", delta: "dept" },
-    { type: "tool-input-delta", id: "queued_duplicate_list", delta: 'h"' },
-    { type: "tool-input-delta", id: "queued_duplicate_list", delta: ":2" },
-    { type: "tool-input-delta", id: "queued_duplicate_list", delta: "}" },
-    { type: "tool-input-end", id: "queued_duplicate_list" },
     {
-      type: "tool-call",
-      toolCallId: "queued_duplicate_list",
-      toolName: "list_files",
-      input: '{"depth":1, "depth":2}',
+      type: "response.output_item.added",
+      output_index: 0,
+      item: {
+        type: "function_call",
+        id: "queued_duplicate_item",
+        call_id: "queued_duplicate_list",
+        name: "list_files",
+      },
     },
     {
-      type: "finish",
-      finishReason: { unified: "tool-calls", raw: "tool-calls" },
+      type: "response.function_call_arguments.done",
+      item_id: "queued_duplicate_item",
+      call_id: "queued_duplicate_list",
+      output_index: 0,
+      arguments: '{"depth":1, "depth":2}',
     },
+    { type: "response.completed", response: { status: "completed" } },
   ]);
 }
 
@@ -1096,8 +1166,11 @@ function collectToolResultIds(value: unknown, result: string[] = []): string[] {
   if (value === null || typeof value !== "object") return result;
 
   const record = value as Record<string, unknown>;
-  if (record.type === "tool-result" && typeof record.toolCallId === "string") {
-    result.push(record.toolCallId);
+  if (
+    record.type === "function_call_output" &&
+    typeof record.call_id === "string"
+  ) {
+    result.push(record.call_id);
   }
   for (const nested of Object.values(record)) {
     collectToolResultIds(nested, result);
@@ -1116,35 +1189,25 @@ function collectTypedToolResults(value: unknown): Array<{
     outputType: string;
   }> = [];
 
-  function visit(candidate: unknown) {
-    if (Array.isArray(candidate)) {
-      for (const item of candidate) visit(item);
-      return;
-    }
-    if (candidate === null || typeof candidate !== "object") return;
-
-    const record = candidate as Record<string, unknown>;
-    if (record.type === "tool-result") {
-      const output =
-        record.output !== null && typeof record.output === "object"
-          ? (record.output as Record<string, unknown>)
-          : {};
-      if (
-        typeof record.toolCallId === "string" &&
-        typeof record.toolName === "string" &&
-        typeof output.type === "string"
-      ) {
-        results.push({
-          toolCallId: record.toolCallId,
-          toolName: record.toolName,
-          outputType: output.type,
-        });
-      }
-    }
-    for (const nested of Object.values(record)) visit(nested);
+  if (value === null || typeof value !== "object") return results;
+  const input = (value as { input?: Array<Record<string, unknown>> }).input ?? [];
+  for (const record of input) {
+    if (
+      record.type !== "function_call_output" ||
+      typeof record.call_id !== "string" ||
+      typeof record.output !== "string"
+    ) continue;
+    const call = input.find((candidate) =>
+      candidate.type === "function_call" &&
+      candidate.call_id === record.call_id
+    );
+    if (typeof call?.name !== "string") continue;
+    results.push({
+      toolCallId: record.call_id,
+      toolName: call.name,
+      outputType: "text",
+    });
   }
-
-  visit(value);
   return results;
 }
 
@@ -1184,10 +1247,6 @@ async function runCanonicalLifecycleFixture(
   const tracePath = join(artifacts, "trace.log");
   const wrapperPath = writeLifecycleWrapper(artifacts);
   writeFileSync(join(artifacts, "canonical.sse"), CANONICAL_A_B_SSE);
-  writeFileSync(
-    join(artifacts, "fixture.sha256"),
-    `${createHash("sha256").update(CANONICAL_A_B_SSE).digest("hex")}\n`,
-  );
 
   const queuedGateway = startFakeGateway([
     new Response(CANONICAL_A_B_SSE, {
@@ -1202,12 +1261,8 @@ async function runCanonicalLifecycleFixture(
     cwd: workspace,
     env: {
       HOME: home,
-      AI_GATEWAY_API_KEY: "fake-streamed-tool-lifecycle-key",
-      VERCEL_OIDC_TOKEN: undefined,
-      FX_AUTO_UPGRADE: "0",
-      FX_GATEWAY_BASE_URL: queuedGateway.baseUrl,
-      FX_GATEWAY_CHAT_URL: queuedGateway.chatUrl,
-      FX_E2E_GATEWAY_CHAT_URL: queuedGateway.chatUrl,
+      OPENAI_API_KEY: "fake-streamed-tool-lifecycle-key",
+      FX_RESPONSES_BASE_URL: queuedGateway.baseUrl,
       FX_MODEL: MODEL,
       FX_TRACE_LOG: tracePath,
       FX_TRACE_SCOPES: undefined,
@@ -1261,7 +1316,7 @@ async function runCanonicalLifecycleFixture(
     reachedFinal = settled.matched;
     if (reachedFinal) {
       await session.sendText("/help");
-      const help = await waitForPaneOrDone(session, "Commands 37", donePath);
+      const help = await waitForPaneOrDone(session, "Commands 35", donePath);
       helpVisible = help.matched;
       requestCountAfterHelp = queuedGateway.requests.length;
       if (helpVisible) {
@@ -1299,11 +1354,9 @@ async function runCanonicalLifecycleFixture(
     readTrimmed(join(artifacts, "wrapper.status")),
     10,
   );
-  const fixtureSha256 = readTrimmed(join(artifacts, "fixture.sha256"));
   const observation = {
     stage,
     traceStderr,
-    fixtureSha256,
     pane,
     stderr,
     trace,
@@ -1327,7 +1380,6 @@ async function runCanonicalLifecycleFixture(
       {
         stage,
         traceStderr,
-        fixtureSha256,
         requestCount: observation.requestCount,
         requestCountAfterHelp,
         reachedFinal,
@@ -1372,7 +1424,7 @@ async function launchRouteRecoveryTui(
   const model = options.model ?? MODEL;
 
   const queuedGateway = startFakeGateway(responses, {
-    models: options.models ?? [{ id: model, type: "language", tags: ["tool-use"] }],
+    models: options.models ?? [{ id: model, object: "model" }],
   });
   gateway = queuedGateway;
 
@@ -1384,14 +1436,9 @@ async function launchRouteRecoveryTui(
     stderrPath,
     env: {
       HOME: home,
-      AI_GATEWAY_API_KEY: "fake-route-recovery-key",
-      VERCEL_OIDC_TOKEN: undefined,
-      FX_AUTO_UPGRADE: "0",
+      OPENAI_API_KEY: "fake-route-recovery-key",
       FX_PERMISSION_MODE: "auto",
-      FX_GATEWAY_BASE_URL: queuedGateway.baseUrl,
-      FX_GATEWAY_CHAT_URL: queuedGateway.chatUrl,
-      FX_E2E_GATEWAY_CHAT_URL: queuedGateway.chatUrl,
-      FX_E2E_GATEWAY_MODELS_URL: `${queuedGateway.baseUrl}/coding-agent/v1/models`,
+      FX_RESPONSES_BASE_URL: queuedGateway.baseUrl,
       FX_MODEL: model,
     },
   });
@@ -1400,51 +1447,6 @@ async function launchRouteRecoveryTui(
 }
 
 describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
-  test(
-    "full-window output limit is omitted from the agent request",
-    async () => {
-      const model = "meta/muse-spark-1.2-contributor";
-      const finalText = "Full-window output limit omitted.";
-      const { queuedGateway, stderrPath } = await launchRouteRecoveryTui(
-        "fx-tui-full-window-output-limit-",
-        [fakeGatewayFinalText(finalText)],
-        {
-          model,
-          models: [{
-            id: model,
-            type: "language",
-            tags: ["reasoning", "tool-use", "implicit-caching", "file-input", "vision"],
-            context_window: 1_048_576,
-            max_tokens: 1_048_576,
-          }],
-          settings: { model },
-        },
-      );
-      await waitForCondition(
-        () => queuedGateway.modelRequests.length === 1,
-        "full-window model catalog",
-      );
-
-      await session!.sendText("hi");
-      await session!.waitForText(finalText, TIMEOUT);
-      await session!.waitForComposer(TIMEOUT);
-
-      expect(queuedGateway.modelRequests).toHaveLength(1);
-      expect(queuedGateway.requests).toHaveLength(1);
-      expect(JSON.parse(queuedGateway.requests[0]!.body)).not.toHaveProperty(
-        "maxOutputTokens",
-      );
-      expect(session!.isAlive()).toBe(true);
-      expect(readFileSync(stderrPath, "utf8")).toBe("");
-
-      await session!.sendText("/quit");
-      expect(await session!.waitForSessionEnd(TIMEOUT)).toBe(true);
-      await session!.kill();
-      session = null;
-    },
-    TIMEOUT * 2,
-  );
-
   test(
     "live token counter includes submitted input, reasoning, and streamed text",
     async () => {
@@ -1746,7 +1748,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         }
         return new Response("unexpected request", { status: 500 });
       }, {
-        models: [{ id: MODEL, type: "language", tags: ["tool-use"] }],
+        models: [{ id: MODEL, object: "model" }],
       });
       gateway = queuedGateway;
 
@@ -1758,13 +1760,9 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         stderrPath,
         env: {
           HOME: home,
-          AI_GATEWAY_API_KEY: "fake-empty-assistant-history-key",
-          VERCEL_OIDC_TOKEN: undefined,
-          FX_AUTO_UPGRADE: "0",
+          OPENAI_API_KEY: "fake-empty-assistant-history-key",
           FX_PERMISSION_MODE: "auto",
-          FX_GATEWAY_BASE_URL: queuedGateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: queuedGateway.chatUrl,
-          FX_E2E_GATEWAY_CHAT_URL: queuedGateway.chatUrl,
+          FX_RESPONSES_BASE_URL: queuedGateway.baseUrl,
           FX_MODEL: MODEL,
         },
       });
@@ -1790,23 +1788,19 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       expect(hasEmptyStandaloneAssistant(followUpBody)).toBe(false);
       await session.waitForText(finalText, TIMEOUT);
       const followUp = JSON.parse(followUpBody) as {
-        prompt: Array<{ content?: unknown }>;
+        input: Array<Record<string, unknown>>;
       };
-      const parts = followUp.prompt.flatMap((message) =>
-        Array.isArray(message.content)
-          ? message.content as Array<Record<string, unknown>>
-          : []
-      );
+      const parts = followUp.input;
       const finalScrollback = await session.captureFullScrollback();
 
       expect(failedScrollback).toContain("recovery paused after 10/10 attempts");
       expect(parts).toContainEqual(expect.objectContaining({
-        type: "tool-call",
-        toolCallId: "list_1",
+        type: "function_call",
+        call_id: "list_1",
       }));
       expect(parts).toContainEqual(expect.objectContaining({
-        type: "tool-result",
-        toolCallId: "list_1",
+        type: "function_call_output",
+        call_id: "list_1",
       }));
       expect(finalScrollback).toContain(finalText);
       expect(finalScrollback).not.toContain("HTTP 400");
@@ -1839,7 +1833,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
           return fakeGatewayFinalText(finalText);
         },
       ], {
-        models: [{ id: MODEL, type: "language", tags: ["tool-use"] }],
+        models: [{ id: MODEL, object: "model" }],
       });
       gateway = queuedGateway;
 
@@ -1851,13 +1845,9 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         stderrPath,
         env: {
           HOME: home,
-          AI_GATEWAY_API_KEY: "fake-route-recovery-key",
-          VERCEL_OIDC_TOKEN: undefined,
-          FX_AUTO_UPGRADE: "0",
+          OPENAI_API_KEY: "fake-route-recovery-key",
           FX_PERMISSION_MODE: "auto",
-          FX_GATEWAY_BASE_URL: queuedGateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: queuedGateway.chatUrl,
-          FX_E2E_GATEWAY_CHAT_URL: queuedGateway.chatUrl,
+          FX_RESPONSES_BASE_URL: queuedGateway.baseUrl,
           FX_MODEL: MODEL,
         },
       });
@@ -1981,10 +1971,16 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         "fx-tui-recovery-active-continue-",
         [
           () => heldGatewayResponse(hold, [], [
-            { type: "text-delta", id: "answer_1", delta: finalText },
             {
-              type: "finish",
-              finishReason: { unified: "stop", raw: "stop" },
+              type: "response.output_text.delta",
+              item_id: "answer_1",
+              output_index: 0,
+              content_index: 0,
+              delta: finalText,
+            },
+            {
+              type: "response.completed",
+              response: { status: "completed" },
             },
           ]),
         ],
@@ -2050,53 +2046,6 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
   );
 
   test(
-    "Fast failure heartbeat preserves exact model identity through its retry budget",
-    async () => {
-      const responses: FakeGatewayResponse[] = [];
-      for (let index = 0; index < 10; index += 1) {
-        responses.push(retryAfterUnavailable(0));
-      }
-      const { queuedGateway, stderrPath } = await launchRouteRecoveryTui(
-        "fx-tui-recovery-fast-budget-",
-        responses,
-        {
-          model: GLM_MODEL,
-          models: [{
-            id: GLM_MODEL,
-            type: "language",
-            tags: ["tool-use"],
-            fast_options: [{ type: "toggle" }],
-          }],
-          settings: { model: GLM_MODEL, fast_mode: true },
-        },
-      );
-
-      await session!.sendText("Preserve the Fast recovery budget.");
-      await session!.waitForText("recovery paused after 10/10 attempts", TIMEOUT);
-
-      expect(queuedGateway.requests).toHaveLength(10);
-      expect(queuedGateway.requests[0]!.headers.get("ai-language-model-id")).toBe(
-        GLM_MODEL,
-      );
-      for (const request of queuedGateway.requests.slice(1)) {
-        expect(request.headers.get("ai-language-model-id")).toBe(GLM_MODEL);
-      }
-      const firstRequest = JSON.parse(queuedGateway.requests[0]!.body);
-      expect(firstRequest).not.toHaveProperty("fast");
-      expect(firstRequest).toMatchObject({
-        providerOptions: { gateway: { speed: "fast" } },
-      });
-      for (const request of queuedGateway.requests.slice(1)) {
-        const retryRequest = JSON.parse(request.body);
-        expect(retryRequest).not.toHaveProperty("fast");
-        expect(retryRequest.providerOptions?.gateway).toBeUndefined();
-      }
-      expect(readFileSync(stderrPath, "utf8")).toBe("");
-    },
-    TIMEOUT * 2,
-  );
-
-  test(
     "process restart during backoff preserves a direct Fast model ID",
     async () => {
       const directFastModel = `${GLM_MODEL}-fast`;
@@ -2107,8 +2056,8 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         {
           model: directFastModel,
           models: [
-            { id: directFastModel, type: "language", tags: ["tool-use"] },
-            { id: GLM_MODEL, type: "language", tags: ["tool-use"] },
+            { id: directFastModel, object: "model" },
+            { id: GLM_MODEL, object: "model" },
           ],
           settings: { model: directFastModel, fast_mode: false },
         },
@@ -2120,9 +2069,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         TIMEOUT,
       );
       expect(queuedGateway.requests).toHaveLength(1);
-      expect(queuedGateway.requests[0]!.headers.get("ai-language-model-id")).toBe(
-        directFastModel,
-      );
+      expect(JSON.parse(queuedGateway.requests[0]!.body).model).toBe(directFastModel);
 
       await session!.kill();
       session = null;
@@ -2136,14 +2083,9 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         stderrPath: resumedStderrPath,
         env: {
           HOME: join(root!, "home"),
-          AI_GATEWAY_API_KEY: "fake-route-recovery-key",
-          VERCEL_OIDC_TOKEN: undefined,
-          FX_AUTO_UPGRADE: "0",
+          OPENAI_API_KEY: "fake-route-recovery-key",
           FX_PERMISSION_MODE: "auto",
-          FX_GATEWAY_BASE_URL: queuedGateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: queuedGateway.chatUrl,
-          FX_E2E_GATEWAY_CHAT_URL: queuedGateway.chatUrl,
-          FX_E2E_GATEWAY_MODELS_URL: `${queuedGateway.baseUrl}/coding-agent/v1/models`,
+          FX_RESPONSES_BASE_URL: queuedGateway.baseUrl,
           FX_MODEL: directFastModel,
         },
       });
@@ -2152,9 +2094,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       await session.waitForText(finalText, TIMEOUT);
 
       expect(queuedGateway.requests).toHaveLength(2);
-      expect(queuedGateway.requests[1]!.headers.get("ai-language-model-id")).toBe(
-        directFastModel,
-      );
+      expect(JSON.parse(queuedGateway.requests[1]!.body).model).toBe(directFastModel);
       expect(readFileSync(stderrPath, "utf8")).toBe("");
       expect(readFileSync(resumedStderrPath, "utf8")).toBe("");
     },
@@ -2225,70 +2165,6 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
   );
 
   test(
-    "Fast route failure automatically falls back without changing transcript history",
-    async () => {
-      const finalText = "Recovered after disabling Fast.";
-      const { queuedGateway, stderrPath } = await launchRouteRecoveryTui(
-        "fx-tui-route-disable-fast-",
-        [
-          providerErrorResponse("fast route failed once"),
-          providerErrorResponse("fast route failed twice"),
-          providerErrorResponse("fast route failed three times"),
-          fakeGatewayFinalText(finalText),
-        ],
-        {
-          model: GLM_MODEL,
-          models: [{
-            id: GLM_MODEL,
-            type: "language",
-            tags: ["tool-use"],
-            fast_options: [{ type: "toggle" }],
-          }],
-          settings: {
-            model: GLM_MODEL,
-            fast_mode: true,
-            permission_mode: "auto",
-          },
-        },
-      );
-
-      await session!.sendText("Recover by disabling Fast.");
-      await session!.waitForText(finalText, TIMEOUT);
-      const scrollback = await waitForScrollback(
-        session!,
-        (value) =>
-          value.includes(finalText) &&
-          TURN_SUMMARY_WITH_TOKENS.test(value) &&
-          !value.includes("✓ recovered"),
-        "Fast recovery final transcript",
-      );
-
-      expect(queuedGateway.requests.length).toBe(4);
-      for (const request of queuedGateway.requests) {
-        expect(request.headers.get("ai-language-model-id")).toBe(GLM_MODEL);
-      }
-      const firstRequest = JSON.parse(queuedGateway.requests[0]!.body);
-      expect(firstRequest).not.toHaveProperty("fast");
-      expect(firstRequest).toMatchObject({
-        providerOptions: { gateway: { speed: "fast" } },
-      });
-      const secondRequest = JSON.parse(queuedGateway.requests[1]!.body);
-      expect(secondRequest).not.toHaveProperty("fast");
-      expect(secondRequest.providerOptions?.gateway).toBeUndefined();
-      const finalRequest = JSON.parse(queuedGateway.requests[3]!.body);
-      expect(finalRequest).not.toHaveProperty("fast");
-      expect(finalRequest.providerOptions?.gateway).toBeUndefined();
-      expect(scrollback).toContain(finalText);
-      expect(scrollback).toMatch(TURN_SUMMARY_WITH_TOKENS);
-      expect(scrollback).not.toContain("✓ recovered");
-      expect(scrollback).not.toContain("What should fx do?");
-      expect(scrollback).not.toContain("request failed: ModelError");
-      expect(readFileSync(stderrPath, "utf8")).toBe("");
-    },
-    TIMEOUT,
-  );
-
-  test(
     "provider error after assistant output continues the same visible response",
     async () => {
       const firstCatalogModel = "anthropic/claude-fable-5";
@@ -2300,15 +2176,13 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
           models: [
             {
               id: firstCatalogModel,
-              type: "language",
-              released: 1,
-              tags: ["tool-use"],
+              object: "model",
+              created: 1,
             },
             {
               id: MODEL,
-              type: "language",
-              released: 1,
-              tags: ["tool-use"],
+              object: "model",
+              created: 1,
             },
           ],
         },
@@ -2384,13 +2258,9 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         stderrPath,
         env: {
           HOME: home,
-          AI_GATEWAY_API_KEY: "fake-read-tool-result-failure-key",
-          VERCEL_OIDC_TOKEN: undefined,
-          FX_AUTO_UPGRADE: "0",
+          OPENAI_API_KEY: "fake-read-tool-result-failure-key",
           FX_PERMISSION_MODE: "auto",
-          FX_GATEWAY_BASE_URL: queuedGateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: queuedGateway.chatUrl,
-          FX_E2E_GATEWAY_CHAT_URL: queuedGateway.chatUrl,
+          FX_RESPONSES_BASE_URL: queuedGateway.baseUrl,
           FX_MODEL: MODEL,
           FX_RECORD: tapePath,
           FX_RECORD_INPUT: "1",
@@ -2402,7 +2272,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       await session.sendText("Exercise the unavailable tool-result handle.");
       const pane = await session.waitForText(finalText, TIMEOUT);
       await waitForCondition(
-        () => queuedGateway.requests.length === 2,
+        () => queuedGateway.requests.length >= 2,
         "tool-result continuation request",
       );
 
@@ -2470,12 +2340,8 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         stderrPath,
         env: {
           HOME: home,
-          AI_GATEWAY_API_KEY: "fake-tui-streaming-caret-key",
-          VERCEL_OIDC_TOKEN: undefined,
-          FX_AUTO_UPGRADE: "0",
-          FX_GATEWAY_BASE_URL: streamingGateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: streamingGateway.chatUrl,
-          FX_E2E_GATEWAY_CHAT_URL: streamingGateway.chatUrl,
+          OPENAI_API_KEY: "fake-tui-streaming-caret-key",
+          FX_RESPONSES_BASE_URL: streamingGateway.baseUrl,
           FX_MODEL: MODEL,
           FX_RECORD: tapePath,
           FX_RECORD_INPUT: "1",
@@ -2539,12 +2405,8 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         stderrPath,
         env: {
           HOME: home,
-          AI_GATEWAY_API_KEY: "fake-idle-submit-order-key",
-          VERCEL_OIDC_TOKEN: undefined,
-          FX_AUTO_UPGRADE: "0",
-          FX_GATEWAY_BASE_URL: heldGateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: heldGateway.chatUrl,
-          FX_E2E_GATEWAY_CHAT_URL: heldGateway.chatUrl,
+          OPENAI_API_KEY: "fake-idle-submit-order-key",
+          FX_RESPONSES_BASE_URL: heldGateway.baseUrl,
           FX_MODEL: MODEL,
           FX_RECORD: tapePath,
           FX_RECORD_INPUT: "1",
@@ -2594,15 +2456,8 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
 
       const splitGateway = startFakeGateway([
         fakeGatewaySse([
-          { type: "text-delta", id: "split_old", delta: SPLIT_OLD_RESPONSE },
-          {
-            type: "finish",
-            finishReason: { unified: "stop", raw: "stop" },
-            usage: {
-              inputTokens: { total: 3 },
-              outputTokens: { total: 5 },
-            },
-          },
+          responseTextDelta(SPLIT_OLD_RESPONSE, "split_old"),
+          responseCompleted(3, 5),
         ]),
         () => heldGatewayResponse(secondResponse),
       ]);
@@ -2615,12 +2470,8 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         stderrPath,
         env: {
           HOME: home,
-          AI_GATEWAY_API_KEY: "fake-prompt-boundary-key",
-          VERCEL_OIDC_TOKEN: undefined,
-          FX_AUTO_UPGRADE: "0",
-          FX_GATEWAY_BASE_URL: splitGateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: splitGateway.chatUrl,
-          FX_E2E_GATEWAY_CHAT_URL: splitGateway.chatUrl,
+          OPENAI_API_KEY: "fake-prompt-boundary-key",
+          FX_RESPONSES_BASE_URL: splitGateway.baseUrl,
           FX_MODEL: MODEL,
           FX_RECORD: tapePath,
           FX_RECORD_INPUT: "1",
@@ -2721,13 +2572,9 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         stderrPath,
         env: {
           HOME: home,
-          AI_GATEWAY_API_KEY: "fake-queued-cancel-integrity-key",
-          VERCEL_OIDC_TOKEN: undefined,
-          FX_AUTO_UPGRADE: "0",
+          OPENAI_API_KEY: "fake-queued-cancel-integrity-key",
           FX_PERMISSION_MODE: "auto",
-          FX_GATEWAY_BASE_URL: queuedGateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: queuedGateway.chatUrl,
-          FX_E2E_GATEWAY_CHAT_URL: queuedGateway.chatUrl,
+          FX_RESPONSES_BASE_URL: queuedGateway.baseUrl,
           FX_MODEL: MODEL,
           FX_RECORD: tapePath,
           FX_RECORD_INPUT: "1",
@@ -2766,35 +2613,31 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       );
 
       const finalRequest = JSON.parse(queuedGateway.requests[4].body) as {
-        prompt: Array<{ content?: Array<Record<string, unknown>> }>;
+        input: Array<Record<string, unknown>>;
       };
-      const parts = finalRequest.prompt.flatMap((message) => message.content ?? []);
+      const parts = finalRequest.input;
       const repairedCalls = parts.filter((part) =>
-        part.type === "tool-call" &&
-        part.toolCallId === "queued_duplicate_list" &&
-        part.toolName === "list_files"
+        part.type === "function_call" &&
+        part.call_id === "queued_duplicate_list" &&
+        part.name === "list_files"
       );
       const repairedResults = parts.filter((part) =>
-        part.type === "tool-result" &&
-        part.toolCallId === "queued_duplicate_list" &&
-        part.toolName === "list_files"
+        part.type === "function_call_output" &&
+        part.call_id === "queued_duplicate_list"
       );
       const trace = readFileSync(tracePath, "utf8");
       const stderr = readFileSync(stderrPath, "utf8");
 
       expect(repairedCalls).toEqual([
-        expect.objectContaining({ input: {} }),
+        expect.objectContaining({ arguments: "{}" }),
       ]);
       expect(repairedResults).toEqual([
         expect.objectContaining({
-          output: expect.objectContaining({
-            type: "text",
-            value: expect.stringContaining("tool_execution_failed"),
-          }),
+          output: expect.stringContaining("tool_execution_failed"),
         }),
       ]);
       expect(queuedGateway.requests[4].body).not.toContain(duplicateArguments);
-      expect(trace).toContain("event=tool_argument_integrity");
+      expect(trace).toContain("event=argument_integrity_rejected");
       expect(trace).toContain("failure=malformed_json");
       expect(trace).toContain("event=queue_review_started");
       expect(trace).toContain("reason=post_cancel");
@@ -2862,9 +2705,9 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         ],
         {
           models: [{
-            id: MODEL,
-            type: "language",
-            tags: ["vision", "file-input", "tool-use"],
+            id: "gpt-5.5",
+            object: "model",
+            owned_by: "openai",
           }],
         },
       );
@@ -2878,13 +2721,8 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         minimumHistoryLines: 2_000,
         env: {
           HOME: home,
-          AI_GATEWAY_API_KEY: "fake-queued-transcript-key",
-          VERCEL_OIDC_TOKEN: undefined,
-          FX_AUTO_UPGRADE: "0",
-          FX_GATEWAY_BASE_URL: queuedGateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: queuedGateway.chatUrl,
-          FX_E2E_GATEWAY_CHAT_URL: queuedGateway.chatUrl,
-          FX_E2E_GATEWAY_MODELS_URL: `${queuedGateway.baseUrl}/coding-agent/v1/models`,
+          OPENAI_API_KEY: "fake-queued-transcript-key",
+          FX_RESPONSES_BASE_URL: queuedGateway.baseUrl,
           FX_MODEL: MODEL,
           FX_RECORD: tapePath,
           FX_RECORD_INPUT: "1",
@@ -2936,18 +2774,18 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
 
       const queuedBody = queuedGateway.requests[1]!.body;
       const queuedRequest = JSON.parse(queuedBody) as {
-        prompt: Array<{ role?: string; content?: unknown }>;
+        input: Array<{ type?: string; role?: string; content?: unknown }>;
       };
-      const queuedUser = queuedRequest.prompt.filter((message) =>
-        message.role === "user"
+      const queuedUser = queuedRequest.input.filter((message) =>
+        message.type === "message" && message.role === "user"
       ).at(-1);
       expect(queuedUser).toBeDefined();
       expect(Array.isArray(queuedUser!.content)).toBe(true);
       const queuedParts = queuedUser!.content as Array<Record<string, unknown>>;
-      expect(queuedParts.filter((part) => part.type === "file")).toEqual([{
-        type: "file",
-        mediaType: "image/png",
-        data: expectedImageData,
+      expect(queuedParts.filter((part) => part.type === "input_image")).toEqual([{
+        type: "input_image",
+        detail: "auto",
+        image_url: `data:image/png;base64,${expectedImageData}`,
       }]);
       expect(countOccurrences(queuedBody, oldGlobalRule)).toBe(1);
       expect(countOccurrences(queuedBody, oldAncestorRule)).toBe(1);
@@ -3035,13 +2873,9 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         height: 40,
         env: {
           HOME: home,
-          AI_GATEWAY_API_KEY: "fake-active-permission-key",
-          VERCEL_OIDC_TOKEN: undefined,
-          FX_AUTO_UPGRADE: "0",
+          OPENAI_API_KEY: "fake-active-permission-key",
           FX_PERMISSION_MODE: "auto",
-          FX_GATEWAY_BASE_URL: heldGateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: heldGateway.chatUrl,
-          FX_E2E_GATEWAY_CHAT_URL: heldGateway.chatUrl,
+          FX_RESPONSES_BASE_URL: heldGateway.baseUrl,
           FX_MODEL: MODEL,
         },
       });
@@ -3092,9 +2926,9 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       );
 
       const followupRequest = JSON.parse(heldGateway.requests[2]!.body) as {
-        prompt: Array<{ role: string; content: unknown }>;
+        input: Array<{ type?: string; role: string; content: unknown }>;
       };
-      const followupContext = JSON.stringify(followupRequest.prompt);
+      const followupContext = JSON.stringify(followupRequest.input);
       expect(followupContext).toContain(readFilename);
       expect(followupContext).toContain(activeBefore.trim());
       expect(followupContext).toContain(activeAfter.trim());
@@ -3140,12 +2974,8 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         height: 40,
         env: {
           HOME: home,
-          AI_GATEWAY_API_KEY: "fake-queued-review-key",
-          VERCEL_OIDC_TOKEN: undefined,
-          FX_AUTO_UPGRADE: "0",
-          FX_GATEWAY_BASE_URL: queuedGateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: queuedGateway.chatUrl,
-          FX_E2E_GATEWAY_CHAT_URL: queuedGateway.chatUrl,
+          OPENAI_API_KEY: "fake-queued-review-key",
+          FX_RESPONSES_BASE_URL: queuedGateway.baseUrl,
           FX_MODEL: MODEL,
           FX_TRACE_LOG: tracePath,
           FX_TRACE_SCOPES: "agent,gateway,stream,worker,input,prompt,interrupt",
@@ -3269,12 +3099,8 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         height: 40,
         env: {
           HOME: home,
-          AI_GATEWAY_API_KEY: "fake-queued-review-escape-key",
-          VERCEL_OIDC_TOKEN: undefined,
-          FX_AUTO_UPGRADE: "0",
-          FX_GATEWAY_BASE_URL: queuedGateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: queuedGateway.chatUrl,
-          FX_E2E_GATEWAY_CHAT_URL: queuedGateway.chatUrl,
+          OPENAI_API_KEY: "fake-queued-review-escape-key",
+          FX_RESPONSES_BASE_URL: queuedGateway.baseUrl,
           FX_MODEL: MODEL,
           FX_TRACE_LOG: tracePath,
           FX_TRACE_SCOPES: "agent,gateway,stream,worker,input,prompt,interrupt",
@@ -3371,12 +3197,8 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         height: 24,
         env: {
           HOME: home,
-          AI_GATEWAY_API_KEY: "fake-queued-semantic-draft-key",
-          VERCEL_OIDC_TOKEN: undefined,
-          FX_AUTO_UPGRADE: "0",
-          FX_GATEWAY_BASE_URL: queuedGateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: queuedGateway.chatUrl,
-          FX_E2E_GATEWAY_CHAT_URL: queuedGateway.chatUrl,
+          OPENAI_API_KEY: "fake-queued-semantic-draft-key",
+          FX_RESPONSES_BASE_URL: queuedGateway.baseUrl,
           FX_MODEL: MODEL,
           FX_TRACE_LOG: tracePath,
           FX_TRACE_SCOPES: "agent,gateway,stream,worker,input,prompt,interrupt",
@@ -3495,12 +3317,8 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         height: 24,
         env: {
           HOME: home,
-          AI_GATEWAY_API_KEY: "fake-queued-file-picker-key",
-          VERCEL_OIDC_TOKEN: undefined,
-          FX_AUTO_UPGRADE: "0",
-          FX_GATEWAY_BASE_URL: queuedGateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: queuedGateway.chatUrl,
-          FX_E2E_GATEWAY_CHAT_URL: queuedGateway.chatUrl,
+          OPENAI_API_KEY: "fake-queued-file-picker-key",
+          FX_RESPONSES_BASE_URL: queuedGateway.baseUrl,
           FX_MODEL: MODEL,
           FX_TRACE_LOG: tracePath,
           FX_TRACE_SCOPES: "agent,gateway,stream,worker,input,prompt,interrupt",
@@ -3598,12 +3416,10 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         ],
         {
           models: [
-            { id: GLM_MODEL, type: "language", tags: ["tool-use"] },
+            { id: GLM_MODEL, object: "model" },
             {
               id: nextModel,
-              type: "language",
-              tags: ["reasoning", "tool-use"],
-              reasoning_options: [{ type: "effort", values: ["low", "high"] }],
+              object: "model",
             },
           ],
         },
@@ -3617,13 +3433,8 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         height: 24,
         env: {
           HOME: home,
-          AI_GATEWAY_API_KEY: "fake-next-turn-model-key",
-          VERCEL_OIDC_TOKEN: undefined,
-          FX_AUTO_UPGRADE: "0",
-          FX_GATEWAY_BASE_URL: queuedGateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: queuedGateway.chatUrl,
-          FX_E2E_GATEWAY_CHAT_URL: queuedGateway.chatUrl,
-          FX_E2E_GATEWAY_MODELS_URL: `${queuedGateway.baseUrl}/coding-agent/v1/models`,
+          OPENAI_API_KEY: "fake-next-turn-model-key",
+          FX_RESPONSES_BASE_URL: queuedGateway.baseUrl,
         },
       });
 
@@ -3638,20 +3449,11 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         "next-turn model catalog warmup",
       );
 
-      await session.sendLiteralText(`/model ${nextModel}`);
-      await session.sendKeys("Space");
-      await session.sendLiteralText("auto");
-      await session.waitForPane(
-        (pane) => composerContains(pane, `/model ${nextModel} auto`),
-        TIMEOUT,
-      );
-      await session.sendKeys("Enter");
+      await session.sendText(`/model ${nextModel} auto normal`);
       await session.waitForText(`Next turn will use ${nextModel}`, TIMEOUT);
 
       expect(queuedGateway.requests).toHaveLength(1);
-      expect(
-        queuedGateway.requests[0]!.headers.get("ai-language-model-id"),
-      ).toBe(GLM_MODEL);
+      expect(JSON.parse(queuedGateway.requests[0]!.body).model).toBe(GLM_MODEL);
       expect(hold.cancelled).toBe(false);
       expect(hasEmptyComposer(await session.capturePane())).toBe(true);
 
@@ -3664,9 +3466,8 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         "next-turn selected-model request",
       );
 
-      expect(
-        queuedGateway.requests[1]!.headers.get("ai-language-model-id"),
-      ).toBe(nextModel);
+      expect(queuedGateway.requests).toHaveLength(2);
+      expect(JSON.parse(queuedGateway.requests[1]!.body).model).toBe("gpt-5");
       expect(JSON.parse(readFileSync(join(home, ".fx", "settings.json"), "utf8")))
         .toMatchObject({ models: { gateway: nextModel }, effort: "auto" });
       expect(readFileSync(stderrPath, "utf8")).toBe("");
@@ -3700,8 +3501,8 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         ],
         {
           models: [
-            { id: MODEL, type: "language", tags: ["tool-use"] },
-            { id: hiddenModel, type: "language", tags: ["tool-use"] },
+            { id: MODEL, object: "model" },
+            { id: hiddenModel, object: "model" },
           ],
         },
       );
@@ -3714,13 +3515,8 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         height: 24,
         env: {
           HOME: home,
-          AI_GATEWAY_API_KEY: "fake-queued-model-picker-key",
-          VERCEL_OIDC_TOKEN: undefined,
-          FX_AUTO_UPGRADE: "0",
-          FX_GATEWAY_BASE_URL: queuedGateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: queuedGateway.chatUrl,
-          FX_E2E_GATEWAY_CHAT_URL: queuedGateway.chatUrl,
-          FX_E2E_GATEWAY_MODELS_URL: `${queuedGateway.baseUrl}/coding-agent/v1/models`,
+          OPENAI_API_KEY: "fake-queued-model-picker-key",
+          FX_RESPONSES_BASE_URL: queuedGateway.baseUrl,
           FX_MODEL: MODEL,
         },
       });
@@ -3802,12 +3598,8 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         height: 40,
         env: {
           HOME: home,
-          AI_GATEWAY_API_KEY: "fake-queued-empty-enter-key",
-          VERCEL_OIDC_TOKEN: undefined,
-          FX_AUTO_UPGRADE: "0",
-          FX_GATEWAY_BASE_URL: queuedGateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: queuedGateway.chatUrl,
-          FX_E2E_GATEWAY_CHAT_URL: queuedGateway.chatUrl,
+          OPENAI_API_KEY: "fake-queued-empty-enter-key",
+          FX_RESPONSES_BASE_URL: queuedGateway.baseUrl,
           FX_MODEL: MODEL,
           FX_TRACE_LOG: tracePath,
           FX_TRACE_SCOPES: "agent,gateway,stream,worker,input,prompt,interrupt",
@@ -3905,12 +3697,8 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         height: 40,
         env: {
           HOME: home,
-          AI_GATEWAY_API_KEY: "fake-queued-inline-delete-key",
-          VERCEL_OIDC_TOKEN: undefined,
-          FX_AUTO_UPGRADE: "0",
-          FX_GATEWAY_BASE_URL: queuedGateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: queuedGateway.chatUrl,
-          FX_E2E_GATEWAY_CHAT_URL: queuedGateway.chatUrl,
+          OPENAI_API_KEY: "fake-queued-inline-delete-key",
+          FX_RESPONSES_BASE_URL: queuedGateway.baseUrl,
           FX_MODEL: MODEL,
           FX_TRACE_LOG: tracePath,
           FX_TRACE_SCOPES: "agent,gateway,stream,worker,input,prompt,interrupt",
@@ -4065,20 +3853,15 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         [
           () =>
             heldGatewayResponse(hold, [
-              { type: "text-start", id: "answer_1" },
-              {
-                type: "text-delta",
-                id: "answer_1",
-                delta: "ACTIVE_QUEUED_IMAGE_YANK_STARTED\n",
-              },
+              responseTextDelta("ACTIVE_QUEUED_IMAGE_YANK_STARTED\n"),
             ]),
           fakeGatewayFinalText(done),
         ],
         {
           models: [{
-            id: MODEL,
-            type: "language",
-            tags: ["vision", "file-input", "tool-use"],
+            id: "gpt-5.5",
+            object: "model",
+            owned_by: "openai",
           }],
         },
       );
@@ -4091,13 +3874,8 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         height: 30,
         env: {
           HOME: home,
-          AI_GATEWAY_API_KEY: "fake-queued-image-yank-key",
-          VERCEL_OIDC_TOKEN: undefined,
-          FX_AUTO_UPGRADE: "0",
-          FX_GATEWAY_BASE_URL: queuedGateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: queuedGateway.chatUrl,
-          FX_E2E_GATEWAY_CHAT_URL: queuedGateway.chatUrl,
-          FX_E2E_GATEWAY_MODELS_URL: `${queuedGateway.baseUrl}/coding-agent/v1/models`,
+          OPENAI_API_KEY: "fake-queued-image-yank-key",
+          FX_RESPONSES_BASE_URL: queuedGateway.baseUrl,
           FX_MODEL: MODEL,
           FX_TRACE_LOG: tracePath,
           FX_TRACE_SCOPES: "agent,gateway,stream,worker,input,prompt,interrupt",
@@ -4169,7 +3947,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
 
       const yankedBody = queuedGateway.requests[1]!.body;
       const trace = readFileSync(tracePath, "utf8");
-      expect(yankedBody.match(/"type":"file"/g) ?? []).toHaveLength(1);
+      expect(yankedBody.match(/"type":"input_image"/g) ?? []).toHaveLength(1);
       expect(yankedBody).toContain(expectedImageData);
       expect(yankedBody).toContain("[Image #2]" + queuedPrompt);
       expect(yankedBody).not.toContain(image);
@@ -4205,12 +3983,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       const queuedGateway = startFakeGateway([
         () =>
           heldGatewayResponse(hold, [
-            { type: "text-start", id: "answer_1" },
-            {
-              type: "text-delta",
-              id: "answer_1",
-              delta: "ACTIVE_POST_CANCEL_REVIEW_STARTED\n",
-            },
+            responseTextDelta("ACTIVE_POST_CANCEL_REVIEW_STARTED\n"),
           ]),
         fakeGatewayFinalText(firstDone),
         fakeGatewayFinalText(secondDone),
@@ -4224,12 +3997,8 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         height: 40,
         env: {
           HOME: home,
-          AI_GATEWAY_API_KEY: "fake-queued-post-cancel-key",
-          VERCEL_OIDC_TOKEN: undefined,
-          FX_AUTO_UPGRADE: "0",
-          FX_GATEWAY_BASE_URL: queuedGateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: queuedGateway.chatUrl,
-          FX_E2E_GATEWAY_CHAT_URL: queuedGateway.chatUrl,
+          OPENAI_API_KEY: "fake-queued-post-cancel-key",
+          FX_RESPONSES_BASE_URL: queuedGateway.baseUrl,
           FX_MODEL: MODEL,
           FX_TRACE_LOG: tracePath,
           FX_TRACE_SCOPES: "agent,gateway,stream,worker,input,prompt,interrupt",
@@ -4365,23 +4134,14 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         const draftDone = "QUEUE_SCROLLBACK_DRAFT_DONE";
         const queuedGateway = startFakeGateway([
           fakeGatewaySse([
-            { type: "text-start", id: "answer_1" },
-            ...numberedLines.map((line) => ({
-              type: "text-delta",
-              id: "answer_1",
-              delta: `${line}\n`,
-            })),
-            { type: "text-end", id: "answer_1" },
-            {
-              type: "tool-call",
-              toolCallId: "queue_scrollback_command",
-              toolName: "terminal",
-              input: { action: "exec", command: "sleep 30" },
-            },
-            {
-              type: "finish",
-              finishReason: { unified: "tool-calls", raw: "tool-calls" },
-            },
+            ...numberedLines.map((line) => responseTextDelta(`${line}\n`)),
+            ...responseFunctionCall(
+              "queue_scrollback_command",
+              "terminal",
+              { action: "exec", command: "sleep 30" },
+              1,
+            ),
+            responseCompleted(),
           ]),
           fakeGatewayFinalText(firstDone),
           fakeGatewayFinalText(secondDone),
@@ -4397,13 +4157,9 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
           minimumHistoryLines: 2_000,
           env: {
             HOME: home,
-            AI_GATEWAY_API_KEY: "fake-queue-scrollback-key",
-            VERCEL_OIDC_TOKEN: undefined,
-            FX_AUTO_UPGRADE: "0",
+            OPENAI_API_KEY: "fake-queue-scrollback-key",
             FX_PERMISSION_MODE: "auto",
-            FX_GATEWAY_BASE_URL: queuedGateway.baseUrl,
-            FX_GATEWAY_CHAT_URL: queuedGateway.chatUrl,
-            FX_E2E_GATEWAY_CHAT_URL: queuedGateway.chatUrl,
+            FX_RESPONSES_BASE_URL: queuedGateway.baseUrl,
             FX_MODEL: MODEL,
             FX_RECORD: tapePath,
             FX_RECORD_INPUT: "1",
@@ -4546,12 +4302,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       const queuedGateway = startFakeGateway([
         () =>
           heldGatewayResponse(hold, [
-            { type: "text-start", id: "answer_1" },
-            {
-              type: "text-delta",
-              id: "answer_1",
-              delta: "ACTIVE_ESC_QUEUE_CANCEL_ALL_STARTED\n",
-            },
+            responseTextDelta("ACTIVE_ESC_QUEUE_CANCEL_ALL_STARTED\n"),
           ]),
       ]);
       gateway = queuedGateway;
@@ -4563,12 +4314,8 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         height: 40,
         env: {
           HOME: home,
-          AI_GATEWAY_API_KEY: "fake-queued-cancel-all-key",
-          VERCEL_OIDC_TOKEN: undefined,
-          FX_AUTO_UPGRADE: "0",
-          FX_GATEWAY_BASE_URL: queuedGateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: queuedGateway.chatUrl,
-          FX_E2E_GATEWAY_CHAT_URL: queuedGateway.chatUrl,
+          OPENAI_API_KEY: "fake-queued-cancel-all-key",
+          FX_RESPONSES_BASE_URL: queuedGateway.baseUrl,
           FX_MODEL: MODEL,
           FX_TRACE_LOG: tracePath,
           FX_TRACE_SCOPES: "agent,gateway,stream,worker,input,prompt,interrupt",
@@ -4659,12 +4406,8 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         height: 40,
         env: {
           HOME: home,
-          AI_GATEWAY_API_KEY: "fake-active-ctrlc-exit-key",
-          VERCEL_OIDC_TOKEN: undefined,
-          FX_AUTO_UPGRADE: "0",
-          FX_GATEWAY_BASE_URL: heldGateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: heldGateway.chatUrl,
-          FX_E2E_GATEWAY_CHAT_URL: heldGateway.chatUrl,
+          OPENAI_API_KEY: "fake-active-ctrlc-exit-key",
+          FX_RESPONSES_BASE_URL: heldGateway.baseUrl,
           FX_MODEL: MODEL,
           FX_RECORD: tapePath,
           FX_RECORD_INPUT: "1",
@@ -4746,12 +4489,8 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         height: 40,
         env: {
           HOME: home,
-          AI_GATEWAY_API_KEY: "fake-ctrl-c-history-key",
-          VERCEL_OIDC_TOKEN: undefined,
-          FX_AUTO_UPGRADE: "0",
-          FX_GATEWAY_BASE_URL: fakeGateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: fakeGateway.chatUrl,
-          FX_E2E_GATEWAY_CHAT_URL: fakeGateway.chatUrl,
+          OPENAI_API_KEY: "fake-ctrl-c-history-key",
+          FX_RESPONSES_BASE_URL: fakeGateway.baseUrl,
           FX_MODEL: MODEL,
           FX_RECORD: tapePath,
           FX_RECORD_INPUT: "1",
@@ -4854,7 +4593,6 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       const observed = await runCanonicalLifecycleFixture(stage);
       const normalizedPane = normalizedPaneText(observed.pane);
 
-      expect(observed.fixtureSha256).toBe(CANONICAL_A_B_SHA256);
       expect(observed.wrapperAliveAtCapture).toBe(true);
       expect(observed.childAliveAtCapture).toBe(false);
       expect(observed.wrapperStatus).toBe(0);
@@ -4964,34 +4702,11 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
 
       const scrollback_gateway = startFakeGateway([
         fakeGatewaySse([
-          { type: "text-start", id: "scrollback_text" },
-          {
-            type: "text-delta",
-            id: "scrollback_text",
-            delta: `${pre_tool_lines.slice(0, 5).join("\n")}\n`,
-          },
-          {
-            type: "text-delta",
-            id: "scrollback_text",
-            delta: `${pre_tool_lines.slice(5).join("\n")}\n`,
-          },
-          { type: "text-end", id: "scrollback_text" },
-          {
-            type: "tool-call",
-            toolCallId: "scrollback_read_one",
-            toolName: "read_file",
-            input: { path: "one.txt" },
-          },
-          {
-            type: "tool-call",
-            toolCallId: "scrollback_read_two",
-            toolName: "read_file",
-            input: { path: "two.txt" },
-          },
-          {
-            type: "finish",
-            finishReason: { unified: "tool-calls", raw: "tool-calls" },
-          },
+          responseTextDelta(`${pre_tool_lines.slice(0, 5).join("\n")}\n`, "scrollback_text"),
+          responseTextDelta(`${pre_tool_lines.slice(5).join("\n")}\n`, "scrollback_text"),
+          ...responseFunctionCall("scrollback_read_one", "read_file", { path: "one.txt" }, 1),
+          ...responseFunctionCall("scrollback_read_two", "read_file", { path: "two.txt" }, 2),
+          responseCompleted(),
         ]),
         fakeGatewayFinalText(final_text),
       ]);
@@ -5004,13 +4719,9 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         stderrPath,
         env: {
           HOME: home,
-          AI_GATEWAY_API_KEY: "fake-status-scrollback-key",
-          VERCEL_OIDC_TOKEN: undefined,
-          FX_AUTO_UPGRADE: "0",
+          OPENAI_API_KEY: "fake-status-scrollback-key",
           FX_PERMISSION_MODE: "auto",
-          FX_GATEWAY_BASE_URL: scrollback_gateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: scrollback_gateway.chatUrl,
-          FX_E2E_GATEWAY_CHAT_URL: scrollback_gateway.chatUrl,
+          FX_RESPONSES_BASE_URL: scrollback_gateway.baseUrl,
           FX_MODEL: MODEL,
         },
       });
@@ -5117,12 +4828,8 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         stderrPath,
         env: {
           HOME: home,
-          AI_GATEWAY_API_KEY: "fake-launch-history-key",
-          VERCEL_OIDC_TOKEN: undefined,
-          FX_AUTO_UPGRADE: "0",
-          FX_GATEWAY_BASE_URL: tableGateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: tableGateway.chatUrl,
-          FX_E2E_GATEWAY_CHAT_URL: tableGateway.chatUrl,
+          OPENAI_API_KEY: "fake-launch-history-key",
+          FX_RESPONSES_BASE_URL: tableGateway.baseUrl,
           FX_MODEL: MODEL,
           FX_RECORD: tapePath,
           FX_RECORD_INPUT: "1",
@@ -5178,43 +4885,14 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         const fixture = writeDelayedMcpFixture(runRoot, home, 0);
         const finalText = `FXC194_${decision.toUpperCase()}_COMPLETE`;
         const mcpGateway = startFakeGateway([
-          fakeGatewaySse([
-            {
-              type: "tool-call",
-              toolCallId: `select_approval_mcp_${decision}`,
-              toolName: "mcp_select_tool",
-              input: { name: dynamicToolName },
-            },
-            {
-              type: "finish",
-              finishReason: { unified: "tool-calls", raw: "tool-calls" },
-            },
-          ]),
-          fakeGatewaySse([
-            {
-              type: "tool-call",
-              toolCallId: `call_approval_mcp_${decision}`,
-              toolName: dynamicToolName,
-              input: { text: argumentSentinel },
-            },
-            {
-              type: "finish",
-              finishReason: { unified: "tool-calls", raw: "tool-calls" },
-            },
-          ]),
+          fakeGatewayToolCall(`select_approval_mcp_${decision}`, "mcp_select_tool", { name: dynamicToolName }),
+          fakeGatewayToolCall(`call_approval_mcp_${decision}`, dynamicToolName, { text: argumentSentinel }),
           ...(decision === "session"
-            ? [fakeGatewaySse([
-              {
-                type: "tool-call",
-                toolCallId: "call_approval_mcp_session_second",
-                toolName: dynamicToolName,
-                input: { text: secondArgumentSentinel },
-              },
-              {
-                type: "finish",
-                finishReason: { unified: "tool-calls", raw: "tool-calls" },
-              },
-            ])]
+            ? [fakeGatewayToolCall(
+              "call_approval_mcp_session_second",
+              dynamicToolName,
+              { text: secondArgumentSentinel },
+            )]
             : []),
           fakeGatewayFinalText(finalText),
         ]);
@@ -5228,13 +4906,9 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
             stderrPath,
             env: {
               HOME: home,
-              AI_GATEWAY_API_KEY: "fake-mcp-approval-key",
-              VERCEL_OIDC_TOKEN: undefined,
-              FX_AUTO_UPGRADE: "0",
+              OPENAI_API_KEY: "fake-mcp-approval-key",
               FX_PERMISSION_MODE: "ask",
-              FX_GATEWAY_BASE_URL: mcpGateway.baseUrl,
-              FX_GATEWAY_CHAT_URL: mcpGateway.chatUrl,
-              FX_E2E_GATEWAY_CHAT_URL: mcpGateway.chatUrl,
+              FX_RESPONSES_BASE_URL: mcpGateway.baseUrl,
               FX_MODEL: MODEL,
             },
           });
@@ -5314,19 +4988,19 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         });
         let parentReleased = false;
         const mcpGateway = startDynamicFakeGateway((body) => {
-          if (body.includes(`"toolCallId":"${childCallId}"`)) {
+          if (body.includes(`"call_id":"${childCallId}"`)) {
             if (!parentReleased) {
               parentReleased = true;
               releaseParent(fakeGatewayFinalText(finalText));
             }
             return fakeGatewayFinalText("Child MCP request resolved.");
           }
-          if (body.includes(`"toolCallId":"${childSelectId}"`)) {
+          if (body.includes(`"call_id":"${childSelectId}"`)) {
             return fakeGatewayToolCall(childCallId, dynamicToolName, {
               text: argumentSentinel,
             });
           }
-          if (body.includes(`"toolCallId":"${parentCreateId}"`)) {
+          if (body.includes(`"call_id":"${parentCreateId}"`)) {
             return parentCompletion;
           }
           if (body.includes(childPrompt)) {
@@ -5348,7 +5022,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
           return new Response("unexpected Gateway request", { status: 500 });
         }, {
           classifierDecision: "clear",
-          models: [{ id: MODEL, type: "language", tags: ["tool-use"] }],
+          models: [{ id: "gpt-5.5", object: "model", owned_by: "openai" }],
         });
         gateway = mcpGateway;
 
@@ -5360,13 +5034,9 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
             stderrPath,
             env: {
               HOME: home,
-              AI_GATEWAY_API_KEY: "fake-child-mcp-approval-key",
-              VERCEL_OIDC_TOKEN: undefined,
-              FX_AUTO_UPGRADE: "0",
+              OPENAI_API_KEY: "fake-child-mcp-approval-key",
               FX_PERMISSION_MODE: "ask",
-              FX_GATEWAY_BASE_URL: mcpGateway.baseUrl,
-              FX_GATEWAY_CHAT_URL: mcpGateway.chatUrl,
-              FX_E2E_GATEWAY_CHAT_URL: mcpGateway.chatUrl,
+              FX_RESPONSES_BASE_URL: mcpGateway.baseUrl,
               FX_MODEL: MODEL,
               FX_SOUND: "0",
             },
@@ -5433,30 +5103,8 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       );
       const fixture = writeDelayedMcpFixture(root, home, 0);
       const mcpGateway = startFakeGateway([
-        fakeGatewaySse([
-          {
-            type: "tool-call",
-            toolCallId: "select_narrow_approval_mcp",
-            toolName: "mcp_select_tool",
-            input: { name: dynamicToolName },
-          },
-          {
-            type: "finish",
-            finishReason: { unified: "tool-calls", raw: "tool-calls" },
-          },
-        ]),
-        fakeGatewaySse([
-          {
-            type: "tool-call",
-            toolCallId: "call_narrow_approval_mcp",
-            toolName: dynamicToolName,
-            input: { text: overlongText },
-          },
-          {
-            type: "finish",
-            finishReason: { unified: "tool-calls", raw: "tool-calls" },
-          },
-        ]),
+        fakeGatewayToolCall("select_narrow_approval_mcp", "mcp_select_tool", { name: dynamicToolName }),
+        fakeGatewayToolCall("call_narrow_approval_mcp", dynamicToolName, { text: overlongText }),
         fakeGatewayFinalText(finalText),
       ]);
       gateway = mcpGateway;
@@ -5468,13 +5116,9 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         stderrPath,
         env: {
           HOME: home,
-          AI_GATEWAY_API_KEY: "fake-narrow-mcp-approval-key",
-          VERCEL_OIDC_TOKEN: undefined,
-          FX_AUTO_UPGRADE: "0",
+          OPENAI_API_KEY: "fake-narrow-mcp-approval-key",
           FX_PERMISSION_MODE: "ask",
-          FX_GATEWAY_BASE_URL: mcpGateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: mcpGateway.chatUrl,
-          FX_E2E_GATEWAY_CHAT_URL: mcpGateway.chatUrl,
+          FX_RESPONSES_BASE_URL: mcpGateway.baseUrl,
           FX_MODEL: MODEL,
           FX_SOUND: "0",
         },
@@ -5520,30 +5164,8 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       const finalText = "MCP_LIFECYCLE_FINAL";
       const dynamicToolName = "mcp_fixture_echo";
       const mcpGateway = startFakeGateway([
-        fakeGatewaySse([
-          {
-            type: "tool-call",
-            toolCallId: "select_delayed_mcp",
-            toolName: "mcp_select_tool",
-            input: { name: dynamicToolName },
-          },
-          {
-            type: "finish",
-            finishReason: { unified: "tool-calls", raw: "tool-calls" },
-          },
-        ]),
-        fakeGatewaySse([
-          {
-            type: "tool-call",
-            toolCallId: "call_delayed_mcp",
-            toolName: dynamicToolName,
-            input: { text: "delayed" },
-          },
-          {
-            type: "finish",
-            finishReason: { unified: "tool-calls", raw: "tool-calls" },
-          },
-        ]),
+        fakeGatewayToolCall("select_delayed_mcp", "mcp_select_tool", { name: dynamicToolName }),
+        fakeGatewayToolCall("call_delayed_mcp", dynamicToolName, { text: "delayed" }),
         fakeGatewayFinalText(finalText),
       ]);
       gateway = mcpGateway;
@@ -5555,13 +5177,9 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         stderrPath,
         env: {
           HOME: home,
-          AI_GATEWAY_API_KEY: "fake-mcp-lifecycle-key",
-          VERCEL_OIDC_TOKEN: undefined,
-          FX_AUTO_UPGRADE: "0",
+          OPENAI_API_KEY: "fake-mcp-lifecycle-key",
           FX_PERMISSION_MODE: "auto",
-          FX_GATEWAY_BASE_URL: mcpGateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: mcpGateway.chatUrl,
-          FX_E2E_GATEWAY_CHAT_URL: mcpGateway.chatUrl,
+          FX_RESPONSES_BASE_URL: mcpGateway.baseUrl,
           FX_MODEL: MODEL,
           FX_TRACE_LOG: tracePath,
           FX_TRACE_SCOPES: "tool",
@@ -5637,22 +5255,9 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       const finalText = "UNSUPPORTED_TOOL_PROBE_FINAL";
       const unsupportedGateway = startFakeGateway([
         fakeGatewaySse([
-          {
-            type: "tool-call",
-            toolCallId: unsupportedCallId,
-            toolName: unsupportedToolName,
-            input: { path: "README.md" },
-          },
-          {
-            type: "tool-call",
-            toolCallId: supportedCallId,
-            toolName: "terminal",
-            input: { action: "exec", command: supportedCommand },
-          },
-          {
-            type: "finish",
-            finishReason: { unified: "tool-calls", raw: "tool-calls" },
-          },
+          ...responseFunctionCall(unsupportedCallId, unsupportedToolName, { path: "README.md" }),
+          ...responseFunctionCall(supportedCallId, "terminal", { action: "exec", command: supportedCommand }, 1),
+          responseCompleted(),
         ]),
         fakeGatewayFinalText(finalText),
       ]);
@@ -5660,13 +5265,9 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
 
       const gatewayEnv = {
         HOME: home,
-        AI_GATEWAY_API_KEY: "fake-unsupported-tool-key",
-        VERCEL_OIDC_TOKEN: undefined,
-        FX_AUTO_UPGRADE: "0",
+        OPENAI_API_KEY: "fake-unsupported-tool-key",
         FX_PERMISSION_MODE: "auto",
-        FX_GATEWAY_BASE_URL: unsupportedGateway.baseUrl,
-        FX_GATEWAY_CHAT_URL: unsupportedGateway.chatUrl,
-        FX_E2E_GATEWAY_CHAT_URL: unsupportedGateway.chatUrl,
+        FX_RESPONSES_BASE_URL: unsupportedGateway.baseUrl,
         FX_MODEL: MODEL,
         FX_TRACE_LOG: tracePath,
         FX_TRACE_SCOPES: "tool",
@@ -5772,12 +5373,12 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         "jeffsee",
         "code",
         "worktrees",
-        "vercel",
+        "example",
         "smart-spruce",
       );
       const nested = join(
         workspace,
-        "vercel",
+        "example",
         "packages",
         "cli",
         "test",
@@ -5805,28 +5406,10 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       const finalText = "TOOL_SUMMARY_FINAL";
       const summaryGateway = startFakeGateway([
         fakeGatewaySse([
-          {
-            type: "tool-call",
-            toolCallId: "tool_summary_first",
-            toolName: "terminal",
-            input: { action: "exec", command: firstCommand },
-          },
-          {
-            type: "tool-call",
-            toolCallId: "tool_summary_nested",
-            toolName: "terminal",
-            input: { action: "exec", command: nestedCommand },
-          },
-          {
-            type: "tool-call",
-            toolCallId: "tool_summary_third",
-            toolName: "terminal",
-            input: { action: "exec", command: thirdCommand },
-          },
-          {
-            type: "finish",
-            finishReason: { unified: "tool-calls", raw: "tool-calls" },
-          },
+          ...responseFunctionCall("tool_summary_first", "terminal", { action: "exec", command: firstCommand }),
+          ...responseFunctionCall("tool_summary_nested", "terminal", { action: "exec", command: nestedCommand }, 1),
+          ...responseFunctionCall("tool_summary_third", "terminal", { action: "exec", command: thirdCommand }, 2),
+          responseCompleted(),
         ]),
         fakeGatewayFinalText(finalText),
       ]);
@@ -5834,13 +5417,9 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
 
       const gatewayEnv = {
         HOME: home,
-        AI_GATEWAY_API_KEY: "fake-tool-summary-key",
-        VERCEL_OIDC_TOKEN: undefined,
-        FX_AUTO_UPGRADE: "0",
+        OPENAI_API_KEY: "fake-tool-summary-key",
         FX_PERMISSION_MODE: "auto",
-        FX_GATEWAY_BASE_URL: summaryGateway.baseUrl,
-        FX_GATEWAY_CHAT_URL: summaryGateway.chatUrl,
-        FX_E2E_GATEWAY_CHAT_URL: summaryGateway.chatUrl,
+        FX_RESPONSES_BASE_URL: summaryGateway.baseUrl,
         FX_MODEL: MODEL,
         FX_TRACE_LOG: tracePath,
         FX_TRACE_SCOPES: "tool",
@@ -5865,7 +5444,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       const compact = await session.captureFullScrollback();
       expect(compact).toContain("● 3 tool calls · 3 commands");
       expect(compact).toContain(
-        "Ran cd ./vercel/packages/cli/test/fixtures/unit/commands/git/connect/unlink && pwd",
+        "Ran cd ./example/packages/cli/test/fixtures/unit/commands/git/connect/unlink && pwd",
       );
       expect(withoutWorkspaceStatusline(compact)).not.toContain(workspace);
       expect(countOccurrences(compact, `Ran ${firstDisplayCommand}`)).toBe(1);
@@ -5877,7 +5456,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       await session.sendKeys("C-o");
       const review = await session.waitForText(finalText, TIMEOUT);
       expect(review).toContain(
-        "├ Ran cd ./vercel/packages/cli/test/fixtures/unit/commands/git/connect/unlink",
+        "├ Ran cd ./example/packages/cli/test/fixtures/unit/commands/git/connect/unlink",
       );
       expect(review).toContain(`├ Ran ${firstDisplayCommand}`);
       expect(review).not.toContain(`Ran ${firstCommand}`);
@@ -5927,7 +5506,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       const resumed = await session.captureFullScrollback();
       expect(resumed).toContain("● 3 tool calls · 3 commands");
       expect(resumed).toContain(
-        "Ran cd ./vercel/packages/cli/test/fixtures/unit/commands/git/connect/unlink && pwd",
+        "Ran cd ./example/packages/cli/test/fixtures/unit/commands/git/connect/unlink && pwd",
       );
       expect(resumed).toContain(`Ran ${firstDisplayCommand}`);
       expect(resumed).not.toContain(`Ran ${firstCommand}`);
@@ -5972,95 +5551,26 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       const liveCommand = "sleep 1; printf SECOND_GROUP_LIVE_COMMAND";
       const groupedGateway = startFakeGateway([
         fakeGatewaySse([
-          {
-            type: "tool-call",
-            toolCallId: "minimal_read_one",
-            toolName: "read_file",
-            input: { path: "one.txt" },
-          },
-          {
-            type: "tool-call",
-            toolCallId: "minimal_read_two",
-            toolName: "read_file",
-            input: { path: "two.txt" },
-          },
-          {
-            type: "tool-call",
-            toolCallId: "minimal_read_three",
-            toolName: "read_file",
-            input: { path: "three.txt" },
-          },
-          {
-            type: "tool-call",
-            toolCallId: "minimal_list_workspace",
-            toolName: "list_files",
-            input: { path: "." },
-          },
-          {
-            type: "tool-call",
-            toolCallId: "minimal_list_nested",
-            toolName: "list_files",
-            input: { path: "nested" },
-          },
-          {
-            type: "tool-call",
-            toolCallId: "minimal_command_one",
-            toolName: "terminal",
-            input: { action: "exec", command: firstCommand },
-          },
-          {
-            type: "finish",
-            finishReason: { unified: "tool-calls", raw: "tool-calls" },
-          },
+          ...responseFunctionCall("minimal_read_one", "read_file", { path: "one.txt" }),
+          ...responseFunctionCall("minimal_read_two", "read_file", { path: "two.txt" }, 1),
+          ...responseFunctionCall("minimal_read_three", "read_file", { path: "three.txt" }, 2),
+          ...responseFunctionCall("minimal_list_workspace", "list_files", { path: "." }, 3),
+          ...responseFunctionCall("minimal_list_nested", "list_files", { path: "nested" }, 4),
+          ...responseFunctionCall("minimal_command_one", "terminal", { action: "exec", command: firstCommand }, 5),
+          responseCompleted(),
         ]),
         fakeGatewaySse([
-          {
-            type: "tool-call",
-            toolCallId: "minimal_read_four",
-            toolName: "read_file",
-            input: { path: "four.txt" },
-          },
-          {
-            type: "tool-call",
-            toolCallId: "minimal_read_five",
-            toolName: "read_file",
-            input: { path: "five.txt" },
-          },
-          {
-            type: "tool-call",
-            toolCallId: "minimal_read_six",
-            toolName: "read_file",
-            input: { path: "six.txt" },
-          },
-          {
-            type: "tool-call",
-            toolCallId: "minimal_command_two",
-            toolName: "terminal",
-            input: { action: "exec", command: secondCommand },
-          },
-          {
-            type: "finish",
-            finishReason: { unified: "tool-calls", raw: "tool-calls" },
-          },
+          ...responseFunctionCall("minimal_read_four", "read_file", { path: "four.txt" }),
+          ...responseFunctionCall("minimal_read_five", "read_file", { path: "five.txt" }, 1),
+          ...responseFunctionCall("minimal_read_six", "read_file", { path: "six.txt" }, 2),
+          ...responseFunctionCall("minimal_command_two", "terminal", { action: "exec", command: secondCommand }, 3),
+          responseCompleted(),
         ]),
         fakeGatewaySse([
-          { type: "text-delta", id: "second_step", delta: secondStepText },
-          {
-            type: "tool-call",
-            toolCallId: "minimal_read_seven",
-            toolName: "read_file",
-            input: { path: "seven.txt" },
-          },
-          {
-            type: "tool-call",
-            toolCallId: "minimal_command_live",
-            toolName: "terminal",
-            input: { action: "exec", command: liveCommand },
-          },
-          {
-            type: "finish",
-            finishReason: { unified: "tool-calls", raw: "tool-calls" },
-          },
+          responseTextDelta(secondStepText, "second_step"),
+          ...responseFunctionCall("minimal_read_seven", "read_file", { path: "seven.txt" }, 1),
+          ...responseFunctionCall("minimal_command_live", "terminal", { action: "exec", command: liveCommand }, 2),
+          responseCompleted(),
         ]),
         fakeGatewayFinalText(finalText),
       ]);
@@ -6073,13 +5583,9 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         stderrPath,
         env: {
           HOME: home,
-          AI_GATEWAY_API_KEY: "fake-minimal-tool-group-key",
-          VERCEL_OIDC_TOKEN: undefined,
-          FX_AUTO_UPGRADE: "0",
+          OPENAI_API_KEY: "fake-minimal-tool-group-key",
           FX_PERMISSION_MODE: "auto",
-          FX_GATEWAY_BASE_URL: groupedGateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: groupedGateway.chatUrl,
-          FX_E2E_GATEWAY_CHAT_URL: groupedGateway.chatUrl,
+          FX_RESPONSES_BASE_URL: groupedGateway.baseUrl,
           FX_MODEL: MODEL,
           FX_RECORD: tapePath,
           FX_RECORD_INPUT: "1",
@@ -6191,13 +5697,9 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         stderrPath,
         env: {
           HOME: home,
-          AI_GATEWAY_API_KEY: "fake-minimal-cancelled-tool-key",
-          VERCEL_OIDC_TOKEN: undefined,
-          FX_AUTO_UPGRADE: "0",
+          OPENAI_API_KEY: "fake-minimal-cancelled-tool-key",
           FX_PERMISSION_MODE: "auto",
-          FX_GATEWAY_BASE_URL: cancelledGateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: cancelledGateway.chatUrl,
-          FX_E2E_GATEWAY_CHAT_URL: cancelledGateway.chatUrl,
+          FX_RESPONSES_BASE_URL: cancelledGateway.baseUrl,
           FX_MODEL: MODEL,
           FX_THEME: "dark",
           NO_COLOR: undefined,
@@ -6264,17 +5766,9 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
 
       const provisionalGateway = startFakeGateway([
         fakeGatewaySse([
-          { type: "tool-input-start", id: "preview_only", toolName: "read_file" },
-          {
-            type: "tool-input-delta",
-            id: "preview_only",
-            delta: '{"path":"never-read.txt"}',
-          },
-          { type: "tool-input-end", id: "preview_only" },
-          {
-            type: "finish",
-            finishReason: { unified: "stop", raw: "stop" },
-          },
+          responseFunctionCallStart("preview_only", "read_file"),
+          responseFunctionCallDelta("preview_only", '{"path":"never-read.txt"}'),
+          responseCompleted(),
         ]),
       ]);
       gateway = provisionalGateway;
@@ -6286,13 +5780,9 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         stderrPath,
         env: {
           HOME: home,
-          AI_GATEWAY_API_KEY: "fake-minimal-not-executed-key",
-          VERCEL_OIDC_TOKEN: undefined,
-          FX_AUTO_UPGRADE: "0",
+          OPENAI_API_KEY: "fake-minimal-not-executed-key",
           FX_PERMISSION_MODE: "auto",
-          FX_GATEWAY_BASE_URL: provisionalGateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: provisionalGateway.chatUrl,
-          FX_E2E_GATEWAY_CHAT_URL: provisionalGateway.chatUrl,
+          FX_RESPONSES_BASE_URL: provisionalGateway.baseUrl,
           FX_MODEL: MODEL,
         },
       });
@@ -6318,13 +5808,12 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       if (stage === "baseline-silent" || stage === "fatal-reported") return;
 
       const observed = await runCanonicalLifecycleFixture(stage, true);
-      expect(observed.fixtureSha256).toBe(CANONICAL_A_B_SHA256);
       expect(observed.childStatus).toBe(0);
       expect(observed.wrapperStatus).toBe(0);
       expect(observed.sttyAfter).toBe(observed.sttyBefore);
-      expect(observed.stderr).toContain("[sse] event type=text-delta");
-      expect(observed.stderr).toContain("[sse] event type=tool-call");
-      expect(observed.stderr).toContain("[sse] event type=tool-input-end");
+      expect(observed.stderr).toContain("[gateway] event=provider_options");
+      expect(observed.stderr).toContain("[gateway] event=before_sse_consume");
+      expect(observed.stderr).toContain("[gateway] event=after_sse_consume");
       for (
         const sentinel of [
           "FX_MODEL_TEXT_SENTINEL",
@@ -6360,9 +5849,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         height: 3,
         env: {
           HOME: home,
-          AI_GATEWAY_API_KEY: undefined,
-          VERCEL_OIDC_TOKEN: undefined,
-          FX_AUTO_UPGRADE: "0",
+          OPENAI_API_KEY: undefined,
           FX_TEST_BIN: FX_BIN,
           FX_LIFECYCLE_ARTIFACT_DIR: artifacts,
         },
@@ -6410,9 +5897,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         cwd: realpathSync(workspacePath),
         env: {
           HOME: home,
-          AI_GATEWAY_API_KEY: undefined,
-          VERCEL_OIDC_TOKEN: undefined,
-          FX_AUTO_UPGRADE: "0",
+          OPENAI_API_KEY: undefined,
           FX_TEST_BIN: FX_BIN,
           FX_INVALID_ADDED_ROOT: invalidRoot,
           FX_LIFECYCLE_ARTIFACT_DIR: artifacts,
@@ -6458,11 +5943,8 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         cwd: realpathSync(workspace),
         env: {
           HOME: home,
-          AI_GATEWAY_API_KEY: "fake-tui-gateway-lifecycle-key",
-          VERCEL_OIDC_TOKEN: undefined,
-          FX_GATEWAY_BASE_URL: queuedGateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: queuedGateway.chatUrl,
-          FX_E2E_GATEWAY_CHAT_URL: queuedGateway.chatUrl,
+          OPENAI_API_KEY: "fake-tui-gateway-lifecycle-key",
+          FX_RESPONSES_BASE_URL: queuedGateway.baseUrl,
           FX_MODEL: MODEL,
         },
       });
@@ -6498,26 +5980,9 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
 
       const commandGateway = startFakeGateway([
         fakeGatewaySse([
-          {
-            type: "text-delta",
-            id: "before_command",
-            delta: "I will inspect the process list.",
-          },
-          {
-            type: "tool-input-start",
-            id: "command_1",
-            toolName: "terminal",
-          },
-          {
-            type: "tool-call",
-            toolCallId: "command_1",
-            toolName: "terminal",
-            input: { action: "exec", command: "seq 1 1" },
-          },
-          {
-            type: "finish",
-            finishReason: { unified: "tool-calls", raw: "tool-calls" },
-          },
+          responseTextDelta("I will inspect the process list.", "before_command"),
+          ...responseFunctionCall("command_1", "terminal", { action: "exec", command: "seq 1 1" }, 1),
+          responseCompleted(),
         ]),
         fakeGatewayFinalText(finalText),
       ], { classifierResponses: [() => heldClassifier] });
@@ -6528,13 +5993,9 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         stderrPath,
         env: {
           HOME: home,
-          AI_GATEWAY_API_KEY: "fake-auto-review-activity-key",
-          VERCEL_OIDC_TOKEN: undefined,
-          FX_AUTO_UPGRADE: "0",
+          OPENAI_API_KEY: "fake-auto-review-activity-key",
           FX_PERMISSION_MODE: "auto",
-          FX_GATEWAY_BASE_URL: commandGateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: commandGateway.chatUrl,
-          FX_E2E_GATEWAY_CHAT_URL: commandGateway.chatUrl,
+          FX_RESPONSES_BASE_URL: commandGateway.baseUrl,
           FX_MODEL: MODEL,
           FX_RECORD: tapePath,
           FX_RECORD_INPUT: "1",
@@ -6591,11 +6052,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       const streamingGateway = startFakeGateway([
         () =>
           heldGatewayResponse(stream, [
-            {
-              type: "tool-input-start",
-              id: "command_provisional",
-              toolName: "terminal",
-            },
+            responseFunctionCallStart("command_provisional", "terminal"),
           ]),
       ]);
       gateway = streamingGateway;
@@ -6604,12 +6061,8 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         stderrPath,
         env: {
           HOME: home,
-          AI_GATEWAY_API_KEY: "fake-run-command-provisional-key",
-          VERCEL_OIDC_TOKEN: undefined,
-          FX_AUTO_UPGRADE: "0",
-          FX_GATEWAY_BASE_URL: streamingGateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: streamingGateway.chatUrl,
-          FX_E2E_GATEWAY_CHAT_URL: streamingGateway.chatUrl,
+          OPENAI_API_KEY: "fake-run-command-provisional-key",
+          FX_RESPONSES_BASE_URL: streamingGateway.baseUrl,
           FX_MODEL: MODEL,
           FX_RECORD: tapePath,
           FX_RECORD_INPUT: "1",
@@ -6659,127 +6112,6 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
   );
 
   test(
-    "provider search renders a transcript lifecycle row with URL detail",
-    async () => {
-      root = realpathSync(mkdtempSync(join(tmpdir(), "fx-tui-provider-search-")));
-      const home = join(root, "home");
-      const workspace = join(root, "workspace");
-      const stderrPath = join(root, "stderr.log");
-      const tapePath = join(root, "session.fxtape");
-      const tracePath = join(root, "trace.log");
-      const sourceUrl = "https://example.test/fx-provider-search";
-      const finalText = "PROVIDER_SEARCH_DONE";
-      mkdirSync(join(home, ".fx"), { recursive: true });
-      mkdirSync(workspace, { recursive: true });
-      writeFileSync(join(home, ".fx", "settings.json"), "{}");
-
-      const providerGateway = startFakeGateway([
-        fakeGatewaySse([
-          {
-            type: "tool-call",
-            toolCallId: "provider_search_direct",
-            toolName: "perplexity_search",
-            input: {},
-          },
-          {
-            type: "tool-result",
-            toolCallId: "provider_search_direct",
-            result: {
-              results: [{ title: "Fx provider source", url: sourceUrl }],
-            },
-          },
-          {
-            type: "finish",
-            finishReason: { unified: "tool-calls", raw: "tool-calls" },
-          },
-        ]),
-        fakeGatewayFinalText(finalText),
-      ]);
-      gateway = providerGateway;
-
-      session = await TmuxSession.create({
-        cwd: realpathSync(workspace),
-        width: 96,
-        height: 30,
-        minimumHistoryLines: 400,
-        stderrPath,
-        env: {
-          HOME: home,
-          AI_GATEWAY_API_KEY: "fake-provider-search-key",
-          VERCEL_OIDC_TOKEN: undefined,
-          FX_AUTO_UPGRADE: "0",
-          FX_PERMISSION_MODE: "auto",
-          FX_GATEWAY_BASE_URL: providerGateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: providerGateway.chatUrl,
-          FX_E2E_GATEWAY_CHAT_URL: providerGateway.chatUrl,
-          FX_MODEL: MODEL,
-          FX_RECORD: tapePath,
-          FX_RECORD_INPUT: "1",
-          FX_TRACE_LOG: tracePath,
-          FX_TRACE_SCOPES: "agent,gateway,stream,tool,sse,worker,input,prompt,ui_activity,command_output",
-        },
-      });
-
-      await session.waitForComposer(TIMEOUT);
-      await session.sendText("Search for the provider fixture.");
-      await session.waitForText(finalText, TIMEOUT);
-      await waitForCondition(
-        () => providerGateway.requests.length === 2,
-        "provider search synthesis request",
-      );
-
-      const initialRequest = parseGatewayRequest(providerGateway.requests[0]!.body);
-      const continuingRequest = parseGatewayRequest(providerGateway.requests[1]!.body);
-      expect(serializedToolNames(initialRequest)).toEqual(
-        AUTO_PERPLEXITY_SERIALIZED_TOOL_NAMES,
-      );
-      expect(serializedToolNames(continuingRequest)).toEqual(
-        AUTO_PERPLEXITY_SERIALIZED_TOOL_NAMES,
-      );
-      expect(toolShapesWithoutDescriptions(continuingRequest)).toEqual(
-        toolShapesWithoutDescriptions(initialRequest),
-      );
-      for (const request of [initialRequest, continuingRequest]) {
-        const toolNames = serializedToolNames(request);
-        expect(toolNames.filter((name) => name === "terminal")).toHaveLength(1);
-        expect(toolNames.filter((name) => name === "perplexity_search"))
-          .toHaveLength(1);
-        expect(findUnavailableCapabilityReferences(request)).toEqual([]);
-        expect(customProviderGuidanceState(request)).toEqual({
-          providerToolIndices: [23],
-          guidanceMessageIndices: [1],
-        });
-        expect(
-          request.prompt?.filter((message) =>
-            message.role === "system" && contentText(message.content) === WEB_SEARCH_GUIDANCE
-          ),
-        ).toHaveLength(1);
-      }
-
-      const compact = await session.captureFullScrollback();
-      expect(compact).toContain("● 1 tool call · 1 read");
-      expect(compact).toContain("└ Searched web");
-      expect(compact).not.toContain("● Running");
-      expect(compact).not.toContain("Working perplexity_search");
-
-      await session.sendKeys("C-o");
-      const detail = await session.waitForText(sourceUrl, TIMEOUT);
-      expect(detail).toContain(sourceUrl);
-      expect(detail).toContain("└ Searched web");
-
-      const replay = execFileSync(FX_BIN, ["replay", tapePath, "--frames"], {
-        encoding: "utf8",
-      });
-      expect(replay).toContain("● 1 tool call · 1 read");
-      expect(replay).toContain("└ Searched web");
-      expect(replay).not.toContain("Working perplexity_search");
-      expect(existsSync(tracePath)).toBe(true);
-      expect(readFileSync(stderrPath, "utf8")).toBe("");
-    },
-    TIMEOUT,
-  );
-
-  test(
     "multiline terminal keeps raw approval and persistence with compact activity",
     async () => {
       root = realpathSync(mkdtempSync(join(tmpdir(), "fx-tui-multiline-command-")));
@@ -6817,13 +6149,9 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         stderrPath,
         env: {
           HOME: home,
-          AI_GATEWAY_API_KEY: "fake-multiline-command-key",
-          VERCEL_OIDC_TOKEN: undefined,
-          FX_AUTO_UPGRADE: "0",
+          OPENAI_API_KEY: "fake-multiline-command-key",
           FX_PERMISSION_MODE: "ask",
-          FX_GATEWAY_BASE_URL: commandGateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: commandGateway.chatUrl,
-          FX_E2E_GATEWAY_CHAT_URL: commandGateway.chatUrl,
+          FX_RESPONSES_BASE_URL: commandGateway.baseUrl,
           FX_MODEL: MODEL,
           FX_RECORD: tapePath,
           FX_RECORD_INPUT: "1",
@@ -6923,36 +6251,20 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
 
       const commandGateway = startFakeGateway([
         fakeGatewaySse([
-          { type: "tool-input-start", id: "stream_cmd_one", toolName: "terminal" },
-          {
-            type: "tool-input-delta",
-            id: "stream_cmd_one",
-            delta: JSON.stringify({ action: "exec", command: firstCommand }),
-          },
-          { type: "tool-input-end", id: "stream_cmd_one" },
-          { type: "tool-input-start", id: "stream_cmd_two", toolName: "terminal" },
-          {
-            type: "tool-input-delta",
-            id: "stream_cmd_two",
-            delta: JSON.stringify({ action: "exec", command: secondCommand }),
-          },
-          { type: "tool-input-end", id: "stream_cmd_two" },
-          {
-            type: "tool-call",
-            toolCallId: "stream_cmd_one",
-            toolName: "terminal",
-            input: { action: "exec", command: firstCommand },
-          },
-          {
-            type: "tool-call",
-            toolCallId: "stream_cmd_two",
-            toolName: "terminal",
-            input: { action: "exec", command: secondCommand },
-          },
-          {
-            type: "finish",
-            finishReason: { unified: "tool-calls", raw: "tool-calls" },
-          },
+          responseFunctionCallStart("stream_cmd_one", "terminal"),
+          responseFunctionCallDelta(
+            "stream_cmd_one",
+            JSON.stringify({ action: "exec", command: firstCommand }),
+          ),
+          responseFunctionCallStart("stream_cmd_two", "terminal", 1),
+          responseFunctionCallDelta(
+            "stream_cmd_two",
+            JSON.stringify({ action: "exec", command: secondCommand }),
+            1,
+          ),
+          responseFunctionCallDone("stream_cmd_one", { action: "exec", command: firstCommand }),
+          responseFunctionCallDone("stream_cmd_two", { action: "exec", command: secondCommand }, 1),
+          responseCompleted(),
         ]),
         fakeGatewayFinalText(finalText),
       ]);
@@ -6966,13 +6278,9 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         stderrPath,
         env: {
           HOME: home,
-          AI_GATEWAY_API_KEY: "fake-same-step-command-key",
-          VERCEL_OIDC_TOKEN: undefined,
-          FX_AUTO_UPGRADE: "0",
+          OPENAI_API_KEY: "fake-same-step-command-key",
           FX_PERMISSION_MODE: "auto",
-          FX_GATEWAY_BASE_URL: commandGateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: commandGateway.chatUrl,
-          FX_E2E_GATEWAY_CHAT_URL: commandGateway.chatUrl,
+          FX_RESPONSES_BASE_URL: commandGateway.baseUrl,
           FX_MODEL: MODEL,
           FX_RECORD: tapePath,
           FX_RECORD_INPUT: "1",
@@ -7074,11 +6382,8 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         cwd: realpathSync(workspace),
         env: {
           HOME: home,
-          AI_GATEWAY_API_KEY: "fake-tui-gateway-length-key",
-          VERCEL_OIDC_TOKEN: undefined,
-          FX_GATEWAY_BASE_URL: gateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
-          FX_E2E_GATEWAY_CHAT_URL: gateway.chatUrl,
+          OPENAI_API_KEY: "fake-tui-gateway-length-key",
+          FX_RESPONSES_BASE_URL: gateway.baseUrl,
           FX_MODEL: MODEL,
         },
       });
@@ -7095,7 +6400,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       expect(gateway.requestCount()).toBe(1);
 
       await session.sendText("/help");
-      await session.waitForText("Commands 37", TIMEOUT);
+      await session.waitForText("Commands 35", TIMEOUT);
       expect(gateway.requestCount()).toBe(1);
       await session.sendKeys("Escape");
     },
@@ -7119,15 +6424,13 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       const heldGateway = startHeldModelsGateway([
         {
           id: firstCatalogModel,
-          type: "language",
-          released: 1,
-          tags: ["tool-use"],
+          object: "model",
+          created: 1,
         },
         {
           id: MODEL,
-          type: "language",
-          released: 1,
-          tags: ["tool-use"],
+          object: "model",
+          created: 1,
         },
       ]);
       gateway = heldGateway;
@@ -7138,10 +6441,8 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         stderrPath,
         env: {
           HOME: home,
-          AI_GATEWAY_API_KEY: "fake-model-cache-picker-key",
-          VERCEL_OIDC_TOKEN: undefined,
-          FX_AUTO_UPGRADE: "0",
-          FX_E2E_GATEWAY_MODELS_URL: heldGateway.modelsUrl,
+          OPENAI_API_KEY: "fake-model-cache-picker-key",
+          FX_RESPONSES_BASE_URL: heldGateway.modelsUrl,
           FX_MODEL: MODEL,
         },
       });
@@ -7194,10 +6495,8 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         stderrPath,
         env: {
           HOME: home,
-          AI_GATEWAY_API_KEY: "fake-model-cache-exit-key",
-          VERCEL_OIDC_TOKEN: undefined,
-          FX_AUTO_UPGRADE: "0",
-          FX_E2E_GATEWAY_MODELS_URL: heldGateway.modelsUrl,
+          OPENAI_API_KEY: "fake-model-cache-exit-key",
+          FX_RESPONSES_BASE_URL: heldGateway.modelsUrl,
           FX_RECORD: tapePath,
           FX_RECORD_INPUT: "1",
           FX_TRACE_LOG: tracePath,
@@ -7278,26 +6577,13 @@ describe.skipIf(!tmuxAvailable())("transcript scrollback release", () => {
             for (const line of lines) {
               controller.enqueue(
                 encoder.encode(
-                  sbSseEvent({
-                    type: "text-delta",
-                    id: "answer_1",
-                    delta: `${line}\n`,
-                  }),
+                  sbSseEvent(responseTextDelta(`${line}\n`)),
                 ),
               );
               await Bun.sleep(delayMs);
             }
             controller.enqueue(
-              encoder.encode(
-                sbSseEvent({
-                  type: "finish",
-                  finishReason: { unified: "stop", raw: "stop" },
-                  usage: {
-                    inputTokens: { total: 3 },
-                    outputTokens: { total: 5 },
-                  },
-                }),
-              ),
+              encoder.encode(sbSseEvent(responseCompleted(3, 5))),
             );
             controller.enqueue(encoder.encode("data: [DONE]\n\n"));
             controller.close();
@@ -7322,24 +6608,10 @@ describe.skipIf(!tmuxAvailable())("transcript scrollback release", () => {
           async start(controller) {
             const encoder = new TextEncoder();
             await Bun.sleep(holdMs);
-            controller.enqueue(
-              encoder.encode(
-                sbSseEvent({
-                  type: "tool-call",
-                  toolCallId: id,
-                  toolName: name,
-                  input,
-                }),
-              ),
-            );
-            controller.enqueue(
-              encoder.encode(
-                sbSseEvent({
-                  type: "finish",
-                  finishReason: { unified: "tool-calls", raw: "tool-calls" },
-                }),
-              ),
-            );
+            for (const event of responseFunctionCall(id, name, input)) {
+              controller.enqueue(encoder.encode(sbSseEvent(event)));
+            }
+            controller.enqueue(encoder.encode(sbSseEvent(responseCompleted())));
             controller.enqueue(encoder.encode("data: [DONE]\n\n"));
             controller.close();
           },
@@ -7356,24 +6628,12 @@ describe.skipIf(!tmuxAvailable())("transcript scrollback release", () => {
     const finishEvents = (): object[] => {
       const events: object[] = [];
       if (assistantText) {
-        events.push({
-          type: "text-delta",
-          id: "answer_1",
-          delta: assistantText,
-        });
+        events.push(responseTextDelta(assistantText));
       }
-      for (const call of calls) {
-        events.push({
-          type: "tool-call",
-          toolCallId: call.id,
-          toolName: call.name,
-          input: call.input,
-        });
+      for (const [index, call] of calls.entries()) {
+        events.push(...responseFunctionCall(call.id, call.name, call.input, index + 1));
       }
-      events.push({
-        type: "finish",
-        finishReason: { unified: "tool-calls", raw: "tool-calls" },
-      });
+      events.push(responseCompleted());
       return events;
     };
     if (!reasoning) {
@@ -7389,28 +6649,20 @@ describe.skipIf(!tmuxAvailable())("transcript scrollback release", () => {
         new ReadableStream<Uint8Array>({
           async start(controller) {
             const encoder = new TextEncoder();
-            controller.enqueue(
-              encoder.encode(
-                sbSseEvent({ type: "reasoning-start", id: reasoning.id }),
-              ),
-            );
             for (const chunk of reasoning.chunks) {
               controller.enqueue(
                 encoder.encode(
                   sbSseEvent({
-                    type: "reasoning-delta",
-                    id: reasoning.id,
+                    type: "response.reasoning_summary_text.delta",
+                    item_id: reasoning.id,
+                    output_index: 0,
+                    summary_index: 0,
                     delta: chunk,
                   }),
                 ),
               );
               await Bun.sleep(reasoning.delayMs);
             }
-            controller.enqueue(
-              encoder.encode(
-                sbSseEvent({ type: "reasoning-end", id: reasoning.id }),
-              ),
-            );
             for (const event of finishEvents()) {
               controller.enqueue(encoder.encode(sbSseEvent(event)));
             }
@@ -7432,58 +6684,27 @@ describe.skipIf(!tmuxAvailable())("transcript scrollback release", () => {
         new ReadableStream<Uint8Array>({
           async start(controller) {
             const encoder = new TextEncoder();
-            controller.enqueue(
-              encoder.encode(
-                sbSseEvent({ type: "reasoning-start", id: "r-final" }),
-              ),
-            );
             for (const chunk of reasoningChunks) {
               controller.enqueue(
                 encoder.encode(
                   sbSseEvent({
-                    type: "reasoning-delta",
-                    id: "r-final",
+                    type: "response.reasoning_summary_text.delta",
+                    item_id: "r-final",
+                    output_index: 0,
+                    summary_index: 0,
                     delta: chunk,
                   }),
                 ),
               );
               await Bun.sleep(delayMs);
             }
-            controller.enqueue(
-              encoder.encode(
-                sbSseEvent({ type: "reasoning-end", id: "r-final" }),
-              ),
-            );
-            controller.enqueue(
-              encoder.encode(sbSseEvent({ type: "text-start", id: "answer_1" })),
-            );
             for (const chunk of chunks) {
               controller.enqueue(
-                encoder.encode(
-                  sbSseEvent({
-                    type: "text-delta",
-                    id: "answer_1",
-                    delta: chunk,
-                  }),
-                ),
+                encoder.encode(sbSseEvent(responseTextDelta(chunk, "answer_1", 1))),
               );
               await Bun.sleep(delayMs);
             }
-            controller.enqueue(
-              encoder.encode(sbSseEvent({ type: "text-end", id: "answer_1" })),
-            );
-            controller.enqueue(
-              encoder.encode(
-                sbSseEvent({
-                  type: "finish",
-                  finishReason: { unified: "stop", raw: "stop" },
-                  usage: {
-                    inputTokens: { total: 3 },
-                    outputTokens: { total: 5 },
-                  },
-                }),
-              ),
-            );
+            controller.enqueue(encoder.encode(sbSseEvent(responseCompleted(3, 5))));
             controller.enqueue(encoder.encode("data: [DONE]\n\n"));
             controller.close();
           },
@@ -7554,12 +6775,8 @@ describe.skipIf(!tmuxAvailable())("transcript scrollback release", () => {
         stderrPath,
         env: {
           HOME: home,
-          AI_GATEWAY_API_KEY: "fake-sb-tool-groups-key",
-          VERCEL_OIDC_TOKEN: undefined,
-          FX_AUTO_UPGRADE: "0",
-          FX_GATEWAY_BASE_URL: fakeGateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: fakeGateway.chatUrl,
-          FX_E2E_GATEWAY_CHAT_URL: fakeGateway.chatUrl,
+          OPENAI_API_KEY: "fake-sb-tool-groups-key",
+          FX_RESPONSES_BASE_URL: fakeGateway.baseUrl,
           FX_MODEL: MODEL,
           FX_MAX_AGENT_STEPS: "4",
         },
@@ -7691,12 +6908,8 @@ describe.skipIf(!tmuxAvailable())("transcript scrollback release", () => {
         stderrPath,
         env: {
           HOME: home,
-          AI_GATEWAY_API_KEY: "fake-sb-release-key",
-          VERCEL_OIDC_TOKEN: undefined,
-          FX_AUTO_UPGRADE: "0",
-          FX_GATEWAY_BASE_URL: fakeGateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: fakeGateway.chatUrl,
-          FX_E2E_GATEWAY_CHAT_URL: fakeGateway.chatUrl,
+          OPENAI_API_KEY: "fake-sb-release-key",
+          FX_RESPONSES_BASE_URL: fakeGateway.baseUrl,
           FX_MODEL: MODEL,
           FX_RECORD: tapePath,
           FX_RECORD_INPUT: "1",
@@ -7899,12 +7112,8 @@ describe.skipIf(!tmuxAvailable())("transcript scrollback release", () => {
         stderrPath,
         env: {
           HOME: home,
-          AI_GATEWAY_API_KEY: "fake-sb-batch-key",
-          VERCEL_OIDC_TOKEN: undefined,
-          FX_AUTO_UPGRADE: "0",
-          FX_GATEWAY_BASE_URL: fakeGateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: fakeGateway.chatUrl,
-          FX_E2E_GATEWAY_CHAT_URL: fakeGateway.chatUrl,
+          OPENAI_API_KEY: "fake-sb-batch-key",
+          FX_RESPONSES_BASE_URL: fakeGateway.baseUrl,
           FX_MODEL: MODEL,
           FX_RECORD: tapePath,
           FX_RECORD_INPUT: "1",

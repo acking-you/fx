@@ -30,7 +30,7 @@ fn fetchCliModelCatalog(
     alloc: std.mem.Allocator,
     input: gateway_provider.CliModelCatalogInput,
 ) gateway_provider.CliModelCatalogResult {
-    return switch (model_catalog.fetchWithPublicFallback(model_catalog_provider, alloc, .{
+    return switch (model_catalog.fetchCatalog(model_catalog_provider, alloc, .{
         .access = input.access,
         .endpoint = input.endpoint,
         .cancel_flag = input.cancel_flag,
@@ -41,7 +41,6 @@ fn fetchCliModelCatalog(
             defer model_catalog.freeModelCatalog(alloc, &catalog);
             const ids = model_catalog.projectModelIds(alloc, catalog.items) catch return .{ .failure = .{
                 .access = loaded.provenance.access,
-                .anonymous_fallback_used = false,
                 .failure = .{ .category = .resource_exhausted },
             } };
             break :blk .{ .loaded = .{
@@ -174,7 +173,7 @@ const FetchOperation = struct {
 
 fn modelsUrl(alloc: std.mem.Allocator) ![]u8 {
     const base = io_mod.getenv(e2e_models_endpoint_env) orelse default_models_endpoint;
-    if (io_mod.getenv(e2e_models_endpoint_env) != null and !gateway_client.isLoopbackHttpUrl(base)) {
+    if (io_mod.getenv(e2e_models_endpoint_env) != null and !gateway_client.isLoopbackUrl(base)) {
         return error.InvalidE2ECodexModelsEndpoint;
     }
     const separator: u8 = if (std.mem.findScalar(u8, base, '?') == null) '?' else '&';

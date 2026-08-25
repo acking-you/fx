@@ -153,9 +153,7 @@ try {
       env: {
         ...process.env,
         HOME: home,
-        AI_GATEWAY_API_KEY: "mcp-conformance-placeholder",
-        VERCEL_OIDC_TOKEN: "",
-        FX_AUTO_UPGRADE: "0",
+        OPENAI_API_KEY: "mcp-conformance-placeholder",
         FX_DISABLE_KEYCHAIN: "1",
         FX_E2E_MCP_AUTH_AUTOMATE: "1",
         ...(scenarioContext.client_secret
@@ -164,8 +162,7 @@ try {
                 scenarioContext.client_secret,
             }
           : {}),
-        FX_GATEWAY_BASE_URL: gateway.baseUrl,
-        FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+                FX_RESPONSES_BASE_URL: gateway.baseUrl,
         FX_MODEL: FAKE_GATEWAY_MODEL,
         FX_SKIP_ONBOARDING: "1",
         FX_SOUND: "0",

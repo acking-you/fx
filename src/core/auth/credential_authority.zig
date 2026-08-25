@@ -11,7 +11,7 @@ pub const Identity = struct {
     }
 };
 
-/// Derives a persistable, non-secret identity. Gateway sources use the selected
+/// Derives a persistable, non-secret identity. API keys use the selected
 /// credential slot; provider subscriptions require a stable account ID.
 pub fn derive(
     source: types.CredentialSource,
@@ -21,10 +21,7 @@ pub fn derive(
     hash.update("fx-credential-authority-v1\x00");
     hash.update(@tagName(source));
     switch (source) {
-        .vercel_oidc_token,
-        .ai_gateway_api_key,
         .openai_api_key,
-        .stored_key,
         => hash.update("\x00slot\x00"),
         .chatgpt_subscription,
         .grok_subscription,
@@ -52,11 +49,8 @@ test "credential authority uses account identity for provider subscriptions" {
     _ = types.CredentialSource;
 }
 
-test "credential authority uses non-secret Gateway credential slots" {
-    const api_key = derive(.ai_gateway_api_key, null).?;
-    const same_slot = derive(.ai_gateway_api_key, "ignored-account").?;
-    const stored_key = derive(.stored_key, null).?;
+test "credential authority uses a non-secret API-key slot" {
+    const api_key = derive(.openai_api_key, null).?;
+    const same_slot = derive(.openai_api_key, "ignored-account").?;
     try std.testing.expect(api_key.eql(same_slot));
-    try std.testing.expect(!api_key.eql(stored_key));
-    try std.testing.expect(derive(.vercel_oidc_token, null) != null);
 }

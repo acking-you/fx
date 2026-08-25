@@ -411,7 +411,7 @@ class PgsoQualificationTests(unittest.TestCase):
                 os.environ,
                 {
                     "FX_DISABLE_KEYCHAIN": "0",
-                    "AI_GATEWAY_API_KEY": "must-not-leak",
+                    "OPENAI_API_KEY": "must-not-leak",
                     "FX_E2E_REAL_API": "1",
                 },
             ),
@@ -432,7 +432,7 @@ class PgsoQualificationTests(unittest.TestCase):
             all(environment["FX_DISABLE_KEYCHAIN"] == "1" for environment in environments)
         )
         self.assertTrue(
-            all("AI_GATEWAY_API_KEY" not in environment for environment in environments)
+            all("OPENAI_API_KEY" not in environment for environment in environments)
         )
         self.assertTrue(
             all("FX_E2E_REAL_API" not in environment for environment in environments)

@@ -26,8 +26,6 @@ permissions:
   contents: read
 
 env:
-  AI_GATEWAY_API_KEY: ""
-  VERCEL_OIDC_TOKEN: ""
   FX_SOUND: "0"
 
 jobs:

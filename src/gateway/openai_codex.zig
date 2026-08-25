@@ -114,7 +114,7 @@ fn buildBoundProviderIdentity(
 ) !types.ResponsesCompactionProviderBinding {
     var options = responses_compaction_binding.BuildOptions.fromEnvironment();
     if (io_mod.getenv(e2e_endpoint_env)) |override| {
-        if (!gateway_client.isLoopbackHttpUrl(override)) {
+        if (!gateway_client.isLoopbackUrl(override)) {
             return error.InvalidE2EOpenAICodexEndpoint;
         }
         options.endpoint_overrides.codex_base_url = override;
@@ -229,7 +229,7 @@ fn streamPreparedWithBinding(
     result.completion = .{};
     return .{ .completed = .{
         .completion = completion,
-        .usage = .{ .immediate = null },
+        .usage = .immediate,
         .ownership = .owned,
     } };
 }
@@ -382,7 +382,7 @@ test "OpenAI Codex rejects a wrong-origin credential before network I/O" {
     try std.testing.expectError(
         error.CodexSubscriptionCredentialRequired,
         agent_stream_provider.stream(std.testing.allocator, .{
-            .credential = .{ .secret = "gateway-key", .source = .ai_gateway_api_key },
+            .credential = .{ .secret = "gateway-key", .source = .openai_api_key },
             .model = "gpt-5.6-sol",
             .retry_count = 1,
             .messages = &.{},

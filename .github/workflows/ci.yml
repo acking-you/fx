@@ -2,8 +2,6 @@ name: CI
 
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
   pull_request:
 
 concurrency:
@@ -225,18 +223,11 @@ jobs:
         run: bun test auto-mode-reliability.test.ts
         working-directory: tests/e2e
         env:
-          AI_GATEWAY_API_KEY: ""
-          VERCEL_OIDC_TOKEN: ""
           FX_REQUIRE_TMUX: "1"
 
-      - name: Run Vision route and headless SIGINT regressions
-        run: |
-          bun test vision-route-fake-gateway.test.ts
-          bun test ./tui-command-permissions.test.ts --test-name-pattern "fx ask SIGINT during classifier wait terminates before decision or execution"
+      - name: Run headless SIGINT regression
+        run: bun test ./tui-command-permissions.test.ts --test-name-pattern "fx ask SIGINT during classifier wait terminates before decision or execution"
         working-directory: tests/e2e
-        env:
-          AI_GATEWAY_API_KEY: ""
-          VERCEL_OIDC_TOKEN: ""
 
       - name: Run TUI input line deletion regression
         run: |
@@ -244,8 +235,6 @@ jobs:
           bun test tui-input-line-delete.test.ts
         working-directory: tests/e2e
         env:
-          AI_GATEWAY_API_KEY: ""
-          VERCEL_OIDC_TOKEN: ""
           FX_REQUIRE_TMUX: "1"
 
       - name: Run multiline input navigation TUI tests
@@ -254,8 +243,6 @@ jobs:
           bun test tui-input-navigation.test.ts
         working-directory: tests/e2e
         env:
-          AI_GATEWAY_API_KEY: ""
-          VERCEL_OIDC_TOKEN: ""
           FX_REQUIRE_TMUX: "1"
 
       - name: Run valid question recovery TUI regression
@@ -264,8 +251,6 @@ jobs:
           bun test ./tui-decision-prompts.test.ts --test-name-pattern "valid serialized ask control with matching identity opens the question and continues"
         working-directory: tests/e2e
         env:
-          AI_GATEWAY_API_KEY: ""
-          VERCEL_OIDC_TOKEN: ""
           FX_REQUIRE_TMUX: "1"
 
       - name: Run streamed lifecycle, direct-write, and command scrollback regressions
@@ -275,8 +260,6 @@ jobs:
           bun test ./tui-command-permissions.test.ts --test-name-pattern "TUI preserves completed transcript when a later auto-approved command starts|TUI isolates approved foreground commands from terminal ownership"
         working-directory: tests/e2e
         env:
-          AI_GATEWAY_API_KEY: ""
-          VERCEL_OIDC_TOKEN: ""
           FX_REQUIRE_TMUX: "1"
 
   e2e:
@@ -338,49 +321,3 @@ jobs:
           )
           bash -n "${scripts[@]}"
           shellcheck "${scripts[@]}"
-
-  e2e_acp_full_mode:
-    name: E2E ACP (full, ${{ matrix.optimize }})
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    strategy:
-      fail-fast: false
-      matrix:
-        optimize: [ReleaseSafe]
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: "0.16.0"
-          cache-key: ci-acp-full-${{ matrix.optimize }}
-
-      - name: Build
-        run: zig build -Doptimize=${{ matrix.optimize }}
-
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: "1.3.14"
-
-      - name: Install e2e deps
-        run: bun install
-        working-directory: tests/e2e
-
-      - name: Run full ACP tests
-        run: bun test acp.test.ts
-        working-directory: tests/e2e
-        env:
-          AI_GATEWAY_API_KEY: ${{ secrets.AI_GATEWAY_API_KEY }}
-
-  e2e-acp-full:
-    name: E2E ACP (full)
-    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-    needs: e2e_acp_full_mode
-    runs-on: ubuntu-latest
-    steps:
-      - name: Require ReleaseSafe
-        env:
-          MATRIX_RESULT: ${{ needs.e2e_acp_full_mode.result }}
-        run: test "$MATRIX_RESULT" = success

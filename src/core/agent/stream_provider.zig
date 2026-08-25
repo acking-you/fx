@@ -5,8 +5,6 @@ const debug_trace = @import("../shared/debug_trace.zig");
 const types = @import("../shared/types.zig");
 const tool_dispatch = @import("../tooling/tool_dispatch.zig");
 const model_tool_schema = @import("../tooling/model_tool_schema.zig");
-const model_provider = @import("../config/model_provider.zig");
-const credential_authority = @import("../auth/credential_authority.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -157,7 +155,6 @@ pub const CredentialLease = struct {
     secret: []const u8,
     source: ?types.CredentialSource = null,
     account_id: ?[]const u8 = null,
-    tenant: ?[]const u8 = null,
 };
 
 /// Pure provider input used by request serializers and permission reviewers.
@@ -243,24 +240,13 @@ pub const FailureDiagnostics = struct {
     request_shape: ?[]u8 = null,
 };
 
-pub const DeferredUsageReference = struct {
-    provider: model_provider.ProviderId,
-    generation_id: []const u8,
-    scope: []const u8,
-    tenant: ?[]const u8 = null,
-    account_id: ?[]const u8 = null,
-    credential_source: types.CredentialSource,
-    credential_identity: ?credential_authority.Identity,
-};
-
 pub const UsageUnavailable = enum {
     unbilled,
     possibly_billed,
 };
 
 pub const UsageOutcome = union(enum) {
-    immediate: ?DeferredUsageReference,
-    deferred: DeferredUsageReference,
+    immediate,
     unavailable: UsageUnavailable,
 };
 
@@ -349,7 +335,7 @@ test "stream provider accepts one typed request and emits ordered neutral events
             request.events.emit(.{ .reasoning_delta = "second" });
             return .{ .completed = .{
                 .completion = .{ .content = "done" },
-                .usage = .{ .immediate = null },
+                .usage = .immediate,
             } };
         }
     };

@@ -525,7 +525,7 @@ test "context overflow recognizes 413 and OpenAI 400 details" {
 test "automatic compaction supports OAuth and Responses BYOK only" {
     try std.testing.expect(supportsAutomaticCompaction(.chatgpt_subscription));
     try std.testing.expect(supportsAutomaticCompaction(.openai_api_key));
-    try std.testing.expect(!supportsAutomaticCompaction(.ai_gateway_api_key));
+    try std.testing.expect(!supportsAutomaticCompaction(.grok_subscription));
     try std.testing.expect(!supportsAutomaticCompaction(null));
 }
 

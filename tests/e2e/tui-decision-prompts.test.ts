@@ -22,6 +22,12 @@ import {
   fakeGatewayFinalText,
   fakeGatewayPermissionDecision,
   fakeGatewaySerializedToolCall,
+  responseCompleted,
+  responseFunctionCall,
+  responseFunctionCallDelta,
+  responseFunctionCallDone,
+  responseFunctionCallStart,
+  responseTextDelta,
   TmuxSession,
   tmuxAvailable,
 } from "./tmux-helpers";
@@ -148,16 +154,10 @@ function sse(events: object[], done = true) {
 function outerToolCalls(calls: Array<{ id: string; name: string; input: object }>) {
   return sse(
     [
-      ...calls.map((call) => ({
-        type: "tool-call",
-        toolCallId: call.id,
-        toolName: call.name,
-        input: call.input,
-      })),
-      {
-        type: "finish",
-        finishReason: { unified: "tool-calls", raw: "tool-calls" },
-      },
+      ...calls.flatMap((call, index) =>
+        responseFunctionCall(call.id, call.name, call.input, index)
+      ),
+      responseCompleted(),
     ],
   );
 }
@@ -306,15 +306,8 @@ function outerLongQuestionAnswerCall() {
 
 function outerText(text: string) {
   return sse([
-    { type: "text-delta", id: "answer_1", delta: text },
-    {
-      type: "finish",
-      finishReason: { unified: "stop", raw: "stop" },
-      usage: {
-        inputTokens: { total: 3 },
-        outputTokens: { total: 5 },
-      },
-    },
+    responseTextDelta(text),
+    responseCompleted(3, 5),
   ]);
 }
 
@@ -344,12 +337,14 @@ function startFakeGateway(
     port: 0,
     async fetch(req) {
       const url = new URL(req.url);
-      if (url.pathname === "/coding-agent/v1/models") {
+      if (url.pathname === "/v1/models") {
         return Response.json({
-          data: [{ id: OUTER_MODEL, type: "language", tags: ["tool-use"] }],
+          data: [{ id: OUTER_MODEL, object: "model" }],
         });
       }
-      if (req.method !== "POST") return new Response("not found", { status: 404 });
+      if (req.method !== "POST" || url.pathname !== "/v1/responses") {
+        return new Response("not found", { status: 404 });
+      }
       const body = await req.text();
       if (body.includes('"permission_decision"')) {
         classifierRequests.push({ body, headers: req.headers });
@@ -363,8 +358,7 @@ function startFakeGateway(
   });
 
   return {
-    chatUrl: `http://127.0.0.1:${server.port}/v3/ai/language-model`,
-    baseUrl: `http://127.0.0.1:${server.port}`,
+    baseUrl: `http://127.0.0.1:${server.port}/v1`,
     requests,
     classifierRequests,
     stop() {
@@ -403,11 +397,9 @@ function fakeGatewayEnv(
 ) {
   return {
     HOME: root.home,
-    AI_GATEWAY_API_KEY: "fake-e2e-key",
-    FX_GATEWAY_BASE_URL: gateway.baseUrl,
-    FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+    OPENAI_API_KEY: "fake-e2e-key",
+        FX_RESPONSES_BASE_URL: gateway.baseUrl,
     FX_MODEL: OUTER_MODEL,
-    FX_AUTO_UPGRADE: "0",
     NO_COLOR: "1",
     ...extra,
   };
@@ -429,7 +421,7 @@ async function launchScenario(
   writeFileSync(stderrPath, "");
 
   session = await TmuxSession.create({
-    cmd: `env -u VERCEL_OIDC_TOKEN ${FX_BIN} 2>${stderrPath}`,
+    cmd: `env ${FX_BIN} 2>${stderrPath}`,
     cwd: root.workspace,
     env: definedStringEnv(fakeGatewayEnv(root, gateway, {
       FX_TRACE_LOG: tracePath,
@@ -892,8 +884,8 @@ describe.skipIf(SKIP)("tui: decision prompt input isolation", () => {
       expect(finalPane).not.toContain("Request failed");
       expect(ctx.gateway.requests).toHaveLength(2);
       const followup = ctx.gateway.requests[1].body;
-      expect(followup).toContain(`"toolCallId":"${ARGUMENT_RECOVERY_CALL_ID}"`);
-      expect(followup).toContain(`"toolName":"${ARGUMENT_RECOVERY_TOOL_NAME}"`);
+      expect(followup).toContain(`"call_id":"${ARGUMENT_RECOVERY_CALL_ID}"`);
+      expect(followup).toContain(`"name":"${ARGUMENT_RECOVERY_TOOL_NAME}"`);
       expect(followup).toContain("Run tests");
       expect(followup).not.toContain("tool_execution_failed");
       await assertProcessAliveAndClean(ctx);
@@ -930,9 +922,9 @@ describe.skipIf(SKIP)("tui: decision prompt input isolation", () => {
       expect(pane).not.toContain("Request failed");
       expect(ctx.gateway.requests).toHaveLength(2);
       expect(ctx.gateway.requests[1].body).toContain(
-        `"toolCallId":"${ARGUMENT_RECOVERY_CALL_ID}"`,
+        `"call_id":"${ARGUMENT_RECOVERY_CALL_ID}"`,
       );
-      expect(ctx.gateway.requests[1].body).toContain('"input":{}');
+      expect(ctx.gateway.requests[1].body).toContain('"arguments":"{}"');
       expect(ctx.gateway.requests[1].body).toContain("tool_execution_failed");
       expect(ctx.gateway.requests[1].body).not.toContain(MALFORMED_ARGUMENTS);
       await assertProcessAliveAndClean(ctx);
@@ -956,27 +948,14 @@ describe.skipIf(SKIP)("tui: decision prompt input isolation", () => {
       const ctx = await launchScenario(
         [
           sse([
-            {
-              type: "text-delta",
-              id: "text_before",
-              delta: "I need to inspect one file before continuing.",
-            },
-            {
-              type: "tool-input-start",
-              id: malformedCallId,
-              toolName: "read_file",
-            },
-            {
-              type: "tool-input-delta",
-              id: malformedCallId,
-              delta: MALFORMED_STREAMED_ARGUMENTS,
-            },
-            { type: "tool-input-end", id: malformedCallId },
-            { type: "tool-call", toolCallId: malformedCallId },
-            {
-              type: "finish",
-              finishReason: { unified: "tool-calls", raw: "tool-calls" },
-            },
+            responseTextDelta(
+              "I need to inspect one file before continuing.",
+              "text_before",
+            ),
+            responseFunctionCallStart(malformedCallId, "read_file", 1),
+            responseFunctionCallDelta(malformedCallId, MALFORMED_STREAMED_ARGUMENTS, 1),
+            responseFunctionCallDone(malformedCallId, MALFORMED_STREAMED_ARGUMENTS, 1),
+            responseCompleted(),
           ]),
           fakeGatewayFinalText("Malformed streamed read recovered."),
         ],
@@ -997,9 +976,9 @@ describe.skipIf(SKIP)("tui: decision prompt input isolation", () => {
       expect(pane).not.toContain("Request failed");
       expect(ctx.gateway.requests).toHaveLength(2);
       expect(ctx.gateway.requests[1].body).toContain(
-        `"toolCallId":"${malformedCallId}"`,
+        `"call_id":"${malformedCallId}"`,
       );
-      expect(ctx.gateway.requests[1].body).toContain('"input":{}');
+      expect(ctx.gateway.requests[1].body).toContain('"arguments":"{}"');
       expect(ctx.gateway.requests[1].body).toContain("tool_execution_failed");
       expect(ctx.gateway.requests[1].body).not.toContain(
         MALFORMED_STREAMED_ARGUMENTS,
@@ -1051,16 +1030,11 @@ describe.skipIf(SKIP)("tui: decision prompt input isolation", () => {
       const ctx = await launchScenario(
         [
           sse([
-            {
-              type: "text-delta",
-              id: "answer_1",
-              delta: markdown,
-            },
-            {
-              type: "tool-call",
-              toolCallId: "pacer_gate_question",
-              toolName: "ask_user_question",
-              input: {
+            responseTextDelta(markdown),
+            ...responseFunctionCall(
+              "pacer_gate_question",
+              "ask_user_question",
+              {
                 questions: [
                   {
                     question: QUESTION_PROMPT,
@@ -1077,11 +1051,9 @@ describe.skipIf(SKIP)("tui: decision prompt input isolation", () => {
                   },
                 ],
               },
-            },
-            {
-              type: "finish",
-              finishReason: { unified: "tool-calls", raw: "tool-calls" },
-            },
+              1,
+            ),
+            responseCompleted(),
           ]),
           outerText(postAnswer),
         ],

@@ -4910,27 +4910,13 @@ test "usage sidecar restores exact optional metrics after read-only and writable
 
     var usage = session_usage.Usage.initFresh();
     defer usage.deinit(alloc);
-    const sequence = try usage.reserveInvocation();
-    try usage.finishObservedInvocation(
+    const observation = try session_usage.InvocationObservation.begin(&usage);
+    try observation.completeDirect(
         alloc,
-        sequence,
-        7,
-        .observed_generation,
-        "gen_01ARZ3NDEKTSV4RRFFQ69G5FAV",
-        "https://ai-gateway.vercel.sh",
-        null,
+        "provider/model",
+        .{ .input_tokens = 20, .output_tokens = 5, .cached_input_tokens = 4, .cache_write_input_tokens = 1, .reasoning_output_tokens = 3 },
+        .{ .http_ok = true, .terminal_finish_reason = .stop },
     );
-    try usage.applyGeneration(alloc, .{
-        .id = "gen_01ARZ3NDEKTSV4RRFFQ69G5FAV",
-        .model = "provider/model",
-        .total_cost = 0.02,
-        .input_tokens = 20,
-        .output_tokens = 5,
-        .cache_read_tokens = 4,
-        .cache_write_tokens = 1,
-        .reasoning_tokens = 3,
-        .billable_web_search_calls = 0,
-    });
     var snapshot = try usage.snapshot(alloc);
     defer snapshot.deinit(alloc);
     _ = try loaded.appendEvent(
@@ -5088,27 +5074,13 @@ test "indeterminate canonical usage retry repairs the rich sidecar" {
 
     var usage = session_usage.Usage.initFresh();
     defer usage.deinit(alloc);
-    const sequence = try usage.reserveInvocation();
-    try usage.finishObservedInvocation(
+    const observation = try session_usage.InvocationObservation.begin(&usage);
+    try observation.completeDirect(
         alloc,
-        sequence,
-        7,
-        .observed_generation,
-        "gen_01ARZ3NDEKTSV4RRFFQ69G5FAV",
-        "https://ai-gateway.vercel.sh",
-        null,
+        "provider/model",
+        .{ .input_tokens = 20, .output_tokens = 5, .cached_input_tokens = 4, .cache_write_input_tokens = 1, .reasoning_output_tokens = 3 },
+        .{ .http_ok = true, .terminal_finish_reason = .stop },
     );
-    try usage.applyGeneration(alloc, .{
-        .id = "gen_01ARZ3NDEKTSV4RRFFQ69G5FAV",
-        .model = "provider/model",
-        .total_cost = 0.02,
-        .input_tokens = 20,
-        .output_tokens = 5,
-        .cache_read_tokens = 4,
-        .cache_write_tokens = 1,
-        .reasoning_tokens = 3,
-        .billable_web_search_calls = 0,
-    });
     var snapshot = try usage.snapshot(alloc);
     defer snapshot.deinit(alloc);
     var current = try loaded.state.dupe(alloc);
@@ -5160,27 +5132,13 @@ test "unwritable usage sidecar keeps canonical usage resumable and incomplete" {
 
     var usage = session_usage.Usage.initFresh();
     defer usage.deinit(alloc);
-    const sequence = try usage.reserveInvocation();
-    try usage.finishObservedInvocation(
+    const observation = try session_usage.InvocationObservation.begin(&usage);
+    try observation.completeDirect(
         alloc,
-        sequence,
-        7,
-        .observed_generation,
-        "gen_01ARZ3NDEKTSV4RRFFQ69G5FAV",
-        "https://ai-gateway.vercel.sh",
-        null,
+        "provider/model",
+        .{ .input_tokens = 20, .output_tokens = 5, .cached_input_tokens = 4, .cache_write_input_tokens = 1, .reasoning_output_tokens = 3 },
+        .{ .http_ok = true, .terminal_finish_reason = .stop },
     );
-    try usage.applyGeneration(alloc, .{
-        .id = "gen_01ARZ3NDEKTSV4RRFFQ69G5FAV",
-        .model = "provider/model",
-        .total_cost = 0.02,
-        .input_tokens = 20,
-        .output_tokens = 5,
-        .cache_read_tokens = 4,
-        .cache_write_tokens = 1,
-        .reasoning_tokens = 3,
-        .billable_web_search_calls = 0,
-    });
     var snapshot = try usage.snapshot(alloc);
     defer snapshot.deinit(alloc);
     _ = try loaded.appendEvent(
@@ -5195,7 +5153,7 @@ test "unwritable usage sidecar keeps canonical usage resumable and incomplete" {
     var resumed = try temp.root.resumeForWrite(alloc, initial.id, .{});
     defer resumed.deinit(alloc);
     try std.testing.expectApproxEqAbs(
-        @as(f64, 0.02),
+        @as(f64, 0),
         resumed.state.usage.?.total_cost,
         1e-12,
     );

@@ -3,7 +3,12 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runFx } from "../evals/eval-helpers";
-import { startFakeGateway } from "./tmux-helpers";
+import {
+  responseCompleted,
+  responseFunctionCall,
+  responseTextDelta,
+  startFakeGateway,
+} from "./tmux-helpers";
 
 const TIMEOUT = 20_000;
 const MODEL = "openai/gpt-5";
@@ -34,36 +39,59 @@ function gatewayEnv(
 ): Record<string, string | undefined> {
   return {
     HOME: home,
-    AI_GATEWAY_API_KEY: "fake-reasoning-replay-key",
-    VERCEL_OIDC_TOKEN: undefined,
+    OPENAI_API_KEY: "fake-reasoning-replay-key",
     FX_DISABLE_KEYCHAIN: "1",
-    FX_SKIP_ONBOARDING: "1",
     FX_MODEL: MODEL,
     FX_PERMISSION_MODE: "auto",
-    FX_GATEWAY_BASE_URL: gateway.baseUrl,
-    FX_GATEWAY_CHAT_URL: gateway.chatUrl,
-    FX_E2E_GATEWAY_MODELS_URL: `${gateway.baseUrl}/coding-agent/v1/models`,
+    FX_RESPONSES_BASE_URL: gateway.baseUrl,
   };
 }
 
-/** Assistant reasoning parts in the order the request serialized them. */
-function reasoningParts(body: string): Array<Record<string, unknown>> {
+/** Responses reasoning items in the order the request serialized them. */
+function reasoningItems(body: string): Array<Record<string, unknown>> {
   const request = JSON.parse(body) as {
-    prompt: Array<{ role: string; content?: unknown }>;
+    input?: Array<Record<string, unknown>>;
   };
-  const parts: Array<Record<string, unknown>> = [];
-  for (const message of request.prompt) {
-    if (message.role !== "assistant" || !Array.isArray(message.content)) continue;
-    for (const part of message.content as Array<Record<string, unknown>>) {
-      if (part.type === "reasoning") parts.push(part);
-    }
-  }
-  return parts;
+  return (request.input ?? []).filter((item) => item.type === "reasoning");
+}
+
+function reasoningToolResponse(
+  reasoning: string,
+  encryptedContent: string,
+  assistantText?: string,
+) {
+  return sse([
+    {
+      type: "response.reasoning_summary_text.delta",
+      item_id: "rs_1",
+      output_index: 0,
+      summary_index: 0,
+      delta: reasoning,
+    },
+    {
+      type: "response.output_item.done",
+      output_index: 0,
+      item: {
+        type: "reasoning",
+        id: "rs_1",
+        summary: [{ type: "summary_text", text: reasoning }],
+        encrypted_content: encryptedContent,
+      },
+    },
+    ...(assistantText ? [responseTextDelta(assistantText, "answer_1", 1)] : []),
+    ...responseFunctionCall(
+      "call_1",
+      "terminal",
+      { action: "exec", command: "printf hello" },
+      assistantText ? 2 : 1,
+    ),
+    responseCompleted(5, 6),
+  ]);
 }
 
 describe("reasoning context replay", () => {
   test(
-    "a tool step replays the full reasoning body and signature to the provider",
+    "a tool step replays the full reasoning item to the provider",
     async () => {
       const { home, workspace } = createRoot();
       // Longer than any display window, so a body clipped for the transcript
@@ -73,41 +101,11 @@ describe("reasoning context replay", () => {
         (_, index) => `reasoning line ${index + 1}`,
       );
       const reasoning = reasoningLines.join("\n");
-      const signature = "FX_REASONING_SIGNATURE";
+      const encryptedContent = "FX_ENCRYPTED_REASONING_STATE";
 
       const gateway = startFakeGateway([
-        () =>
-          sse([
-            { type: "reasoning-start", id: "r1" },
-            {
-              type: "reasoning-delta",
-              id: "r1",
-              delta: reasoning,
-              providerMetadata: { anthropic: { signature } },
-            },
-            { type: "reasoning-end", id: "r1" },
-            {
-              type: "tool-call",
-              toolCallId: "call_1",
-              toolName: "run_command",
-              input: { command: "printf hello" },
-            },
-            {
-              type: "finish",
-              finishReason: { unified: "tool-calls", raw: "tool_calls" },
-              usage: { inputTokens: { total: 5 }, outputTokens: { total: 6 } },
-            },
-          ]),
-        () =>
-          sse([
-            { type: "text-start", id: "a1" },
-            { type: "text-delta", id: "a1", delta: "done" },
-            {
-              type: "finish",
-              finishReason: { unified: "stop", raw: "stop" },
-              usage: { inputTokens: { total: 7 }, outputTokens: { total: 2 } },
-            },
-          ]),
+        () => reasoningToolResponse(reasoning, encryptedContent),
+        () => sse([responseTextDelta("done"), responseCompleted(7, 2)]),
       ]);
 
       try {
@@ -121,16 +119,17 @@ describe("reasoning context replay", () => {
         expect(gateway.requests.length).toBeGreaterThanOrEqual(2);
 
         // The first request precedes any reasoning, so it must carry none.
-        expect(reasoningParts(gateway.requests[0]!.body)).toHaveLength(0);
+        expect(reasoningItems(gateway.requests[0]!.body)).toHaveLength(0);
 
         // The follow-up request replays the reasoning that produced the tool
-        // call, verbatim and untruncated, with its provider signature.
-        const replayed = reasoningParts(gateway.requests[1]!.body);
+        // call, verbatim and untruncated, with its opaque provider state.
+        const replayed = reasoningItems(gateway.requests[1]!.body);
         expect(replayed).toHaveLength(1);
-        expect(replayed[0]!.text).toBe(reasoning);
-        expect(replayed[0]!.providerOptions).toEqual({
-          anthropic: { signature },
-        });
+        expect(replayed[0]!.id).toBe("rs_1");
+        expect(replayed[0]!.summary).toEqual([
+          { type: "summary_text", text: reasoning },
+        ]);
+        expect(replayed[0]!.encrypted_content).toBe(encryptedContent);
       } finally {
         gateway.stop();
       }
@@ -143,48 +142,15 @@ describe("reasoning context replay", () => {
     async () => {
       const { home, workspace } = createRoot();
       const reasoning = "weighing the options";
-      const signature = "FX_SIG";
+      const encryptedContent = "FX_ENCRYPTED_STATE";
 
       // Reasoning, assistant text, and a tool call in one step. A missing
       // separator between the reasoning and text parts made the request body
       // invalid, which failed the turn with error.SyntaxError before the
       // request was sent, so the follow-up step never ran.
       const gateway = startFakeGateway([
-        () =>
-          sse([
-            { type: "reasoning-start", id: "r1" },
-            {
-              type: "reasoning-delta",
-              id: "r1",
-              delta: reasoning,
-              providerMetadata: { anthropic: { signature } },
-            },
-            { type: "reasoning-end", id: "r1" },
-            { type: "text-start", id: "a1" },
-            { type: "text-delta", id: "a1", delta: "Let me run that." },
-            { type: "text-end", id: "a1" },
-            {
-              type: "tool-call",
-              toolCallId: "call_1",
-              toolName: "run_command",
-              input: { command: "printf hello" },
-            },
-            {
-              type: "finish",
-              finishReason: { unified: "tool-calls", raw: "tool_calls" },
-              usage: { inputTokens: { total: 5 }, outputTokens: { total: 6 } },
-            },
-          ]),
-        () =>
-          sse([
-            { type: "text-start", id: "a2" },
-            { type: "text-delta", id: "a2", delta: "done" },
-            {
-              type: "finish",
-              finishReason: { unified: "stop", raw: "stop" },
-              usage: { inputTokens: { total: 7 }, outputTokens: { total: 2 } },
-            },
-          ]),
+        () => reasoningToolResponse(reasoning, encryptedContent, "Let me run that."),
+        () => sse([responseTextDelta("done"), responseCompleted(7, 2)]),
       ]);
 
       try {
@@ -202,9 +168,9 @@ describe("reasoning context replay", () => {
         const body = gateway.requests[1]!.body;
         // Every message must be parseable, not just the reasoning part.
         expect(() => JSON.parse(body)).not.toThrow();
-        const replayed = reasoningParts(body);
+        const replayed = reasoningItems(body);
         expect(replayed).toHaveLength(1);
-        expect(replayed[0]!.text).toBe(reasoning);
+        expect(replayed[0]!.encrypted_content).toBe(encryptedContent);
       } finally {
         gateway.stop();
       }
@@ -217,16 +183,7 @@ describe("reasoning context replay", () => {
     async () => {
       const { home, workspace } = createRoot();
       const gateway = startFakeGateway([
-        () =>
-          sse([
-            { type: "text-start", id: "a1" },
-            { type: "text-delta", id: "a1", delta: "plain answer" },
-            {
-              type: "finish",
-              finishReason: { unified: "stop", raw: "stop" },
-              usage: { inputTokens: { total: 3 }, outputTokens: { total: 2 } },
-            },
-          ]),
+        () => sse([responseTextDelta("plain answer"), responseCompleted(3, 2)]),
       ]);
 
       try {
@@ -238,7 +195,7 @@ describe("reasoning context replay", () => {
 
         expect(result.code).toBe(0);
         for (const request of gateway.requests) {
-          expect(reasoningParts(request.body)).toHaveLength(0);
+          expect(reasoningItems(request.body)).toHaveLength(0);
           expect(request.body).not.toContain("\"type\":\"reasoning\"");
         }
       } finally {

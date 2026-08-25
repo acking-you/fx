@@ -33,9 +33,8 @@ const session_store = @import("../session/session_store.zig");
 const usage_report = @import("../session/usage_report.zig");
 const skill_contract = @import("../skills/skill_contract.zig");
 const types = @import("../shared/types.zig");
-const update_target = @import("../upgrade/update_target.zig");
 const test_builtin_gateway = if (builtin.is_test)
-    @import("../../builtins/gateway.zig")
+    @import("../../builtins/responses.zig")
 else
     struct {};
 const context_contract = @import("../workspace/context_contract.zig");
@@ -69,9 +68,7 @@ pub const Command = union(enum) {
     session: []const [:0]const u8,
     sessions: []const [:0]const u8,
     resume_session: ResumeInvocation,
-    credits: []const [:0]const u8,
     usage: []const [:0]const u8,
-    upgrade: []const [:0]const u8,
     replay: []const [:0]const u8,
     workspace: []const [:0]const u8,
     unknown: []const u8,
@@ -83,7 +80,6 @@ const ResumeInvocation = struct {
 };
 
 const resume_id_alias_prefix = "--resume-";
-pub const upgrade_relaunch_arg = "--upgrade-relaunch";
 
 // The one resume alias that asks which session to open. Every other spelling
 // names its target, so it resumes without a prompt.
@@ -122,7 +118,6 @@ pub const LaunchModifiers = struct {
 
 pub const InteractiveLaunch = struct {
     requested_resume: ?ResumeTarget = null,
-    upgrade_relaunch: bool = false,
     record_requested: bool = false,
     modifiers: LaunchModifiers = .{},
 
@@ -164,7 +159,6 @@ pub fn recordRequested(args: []const [:0]const u8) error{RecordModifierRequiresI
 pub const Config = struct {
     version: []const u8 = "",
     revision: []const u8 = "",
-    build_channel: update_target.Channel = .stable,
     command_catalog: CommandCatalog,
     default_model: []const u8,
     default_agent_step_limit: usize,
@@ -217,11 +211,6 @@ fn selectCatalogModel(
     }
     return if (entries.len > 0) entries[0].id else null;
 }
-
-const UpgradeOptions = struct {
-    format: output_contracts.OutputFormat = .text,
-    channel: ?update_target.Channel = null,
-};
 
 const SessionListOptions = struct {
     format: output_contracts.OutputFormat = .text,
@@ -449,11 +438,8 @@ pub fn parse(command_catalog: CommandCatalog, args: []const [:0]const u8) Comman
         },
         'b' => {
             if (command_specs.matchesTopLevel(command_catalog, command, .background)) return .{ .background = args[1..] };
-            if (command_specs.matchesTopLevel(command_catalog, command, .credits)) return .{ .credits = args[1..] };
         },
-        'c' => {
-            if (command_specs.matchesTopLevel(command_catalog, command, .credits)) return .{ .credits = args[1..] };
-        },
+        'c' => {},
         'd' => {
             if (command_specs.matchesTopLevel(command_catalog, command, .doctor)) return .{ .doctor = args[1..] };
         },
@@ -486,10 +472,7 @@ pub fn parse(command_catalog: CommandCatalog, args: []const [:0]const u8) Comman
                 return .{ .session = args[1..] };
             }
         },
-        'u' => {
-            if (command_specs.matchesTopLevel(command_catalog, command, .usage)) return .{ .usage = args[1..] };
-            if (command_specs.matchesTopLevel(command_catalog, command, .upgrade)) return .{ .upgrade = args[1..] };
-        },
+        'u' => if (command_specs.matchesTopLevel(command_catalog, command, .usage)) return .{ .usage = args[1..] },
         'w' => {
             if (command_specs.matchesTopLevel(command_catalog, command, .workspace)) return .{ .workspace = args[1..] };
         },
@@ -555,22 +538,14 @@ pub fn parseInteractiveLaunch(
                 invocation.args[0 .. invocation.args.len - 1]
             else
                 invocation.args;
-            const upgrade_relaunch = !invocation.top_level_alias and
-                resume_args.len == 2 and
-                std.mem.eql(u8, resume_args[1], upgrade_relaunch_arg);
-            const target_args = if (upgrade_relaunch)
-                resume_args[0..1]
-            else
-                resume_args;
             const target = try parseResumeArgs(
                 alloc,
                 command_catalog,
-                target_args,
+                resume_args,
                 invocation.top_level_alias,
             );
             return .{ .interactive = .{
                 .requested_resume = target,
-                .upgrade_relaunch = upgrade_relaunch,
                 .record_requested = record_requested,
                 .modifiers = global_args.takeModifiers(),
             } };
@@ -733,7 +708,7 @@ fn activateProviderSelection(
         });
         return false;
     };
-    const fetch_result = model_catalog.fetchWithPublicFallback(catalog_provider, alloc, .{
+    const fetch_result = model_catalog.fetchCatalog(catalog_provider, alloc, .{
         .access = credentials.catalogAccessAt(credential.*, io_mod.milliTimestamp()),
         .endpoint = cfg.models_path,
         .view = .picker,
@@ -1020,11 +995,7 @@ fn runNonInteractiveWithDeps(
             try writeConfigDiagnostics(alloc, deps, startup.config_diagnostics);
             const mcp_config_diagnostic = try cfg.inspect_mcp_profile_config(alloc);
 
-            const snapshot = statusSnapshotFromStartupWithBuild(startup, .{
-                .channel = cfg.build_channel,
-                .version = cfg.version,
-                .revision = cfg.revision,
-            }, mcp_config_diagnostic);
+            const snapshot = statusSnapshotFromStartup(startup, mcp_config_diagnostic);
             if (opts.format == .json) {
                 try writeStatusJsonLine(alloc, deps, snapshot);
                 return .handled_success;
@@ -1469,42 +1440,6 @@ fn runNonInteractiveWithDeps(
                 },
             }
         },
-        .credits => |rest| {
-            const opts = parseLocalSurfaceArgs(rest) catch |err| {
-                try writeUsageOrJsonError(alloc, cfg.command_catalog, deps, .credits, "credits", err, rest);
-                return .handled_failure;
-            };
-            var startup = try deps.load_startup_state(
-                alloc,
-                cfg.gateway_provider.oauth_transport,
-                cfg.secret_store,
-                cfg.default_model,
-                cfg.default_agent_step_limit,
-            );
-            defer startup.deinit(alloc);
-            try writeConfigDiagnostics(alloc, deps, startup.config_diagnostics);
-
-            const credits = cfg.provider_set.select(startup.provider).credits orelse
-                gateway_provider.unavailable_credits_provider;
-            var snapshot = credits.fetch(alloc, .{
-                .credential = startup.apiKey(),
-                .credential_source = if (startup.credential) |credential| credential.source else null,
-                .tenant = startup.gatewayTeam(),
-            });
-            defer snapshot.deinit(alloc);
-            const text = try snapshot.render(alloc, opts.format);
-            defer alloc.free(text);
-            if (snapshot.err_message != null) {
-                if (opts.format == .json) {
-                    try writeFormattedOutput(deps, text, opts.format);
-                } else {
-                    try writeStderr(deps, text);
-                }
-                return .handled_failure;
-            }
-            try writeFormattedOutput(deps, text, opts.format);
-            return .handled_success;
-        },
         .usage => |rest| {
             const opts = parseUsageArgs(rest) catch |err| {
                 try writeUsageOrJsonError(alloc, cfg.command_catalog, deps, .usage, "usage", err, rest);
@@ -1573,62 +1508,6 @@ fn runNonInteractiveWithDeps(
             defer alloc.free(text);
             try writeFormattedOutput(deps, text, opts.format);
             return .handled_success;
-        },
-        .upgrade => |rest| {
-            const upgrade_runtime = @import("../upgrade/upgrade_runtime.zig");
-            const opts = parseUpgradeArgs(rest) catch |err| {
-                try writeUsageOrJsonError(alloc, cfg.command_catalog, deps, .upgrade, "upgrade", err, rest);
-                return .handled_failure;
-            };
-
-            var startup = deps.load_startup_state_without_credentials(
-                alloc,
-                cfg.default_model,
-                cfg.default_agent_step_limit,
-            ) catch |err| {
-                if (opts.format == .json) {
-                    try writeJsonCommandFailure(alloc, deps, "upgrade", err, "failed to load update settings");
-                } else {
-                    try writeStderr(deps, "fx upgrade: failed to load update settings\n");
-                }
-                return .handled_failure;
-            };
-            defer startup.deinit(alloc);
-            try writeConfigDiagnostics(alloc, deps, startup.config_diagnostics);
-
-            const channel = opts.channel orelse startup.update_channel;
-            if (opts.channel) |selected| {
-                var outcome = config_runtime.setUserPreferences(alloc, .{ .update_channel = selected }) catch |err| {
-                    if (opts.format == .json) {
-                        try writeJsonCommandFailure(alloc, deps, "upgrade", err, "failed to save update channel");
-                    } else {
-                        try writeStderr(deps, "fx upgrade: failed to save update channel\n");
-                    }
-                    return .handled_failure;
-                };
-                defer outcome.deinit(alloc);
-            }
-
-            var result = upgrade_runtime.run(alloc, .{
-                .channel = cfg.build_channel,
-                .version = cfg.version,
-                .revision = cfg.revision,
-            }, channel, switch (opts.format) {
-                .text => .text,
-                .json => .json,
-            });
-            defer result.deinit(alloc);
-            const text = result.snapshot.render(alloc, switch (opts.format) {
-                .text => .text,
-                .json => .json,
-            }) catch {
-                try writeStderr(deps, "fx upgrade: render failed\n");
-                return .handled_failure;
-            };
-            defer alloc.free(text);
-            try writeStdout(deps, text);
-            if (opts.format == .json) try writeStdout(deps, "\n");
-            return if (result.snapshot.status == .failed) .handled_failure else .handled_success;
         },
         .replay => |rest| {
             const exit_code = try cli_replay.run(alloc, rest);
@@ -1806,17 +1685,8 @@ fn writeStatusJsonLine(alloc: Allocator, deps: RunDeps, snapshot: output_contrac
     try writeRenderedJsonLine(alloc, deps, buf[0..], .{ .status = snapshot });
 }
 
-fn statusSnapshotFromStartup(startup: app_lifecycle.StartupStatus) output_contracts.StatusSnapshot {
-    return statusSnapshotFromStartupWithBuild(startup, .{
-        .channel = .stable,
-        .version = "",
-        .revision = "",
-    }, .clear);
-}
-
-fn statusSnapshotFromStartupWithBuild(
+fn statusSnapshotFromStartup(
     startup: app_lifecycle.StartupStatus,
-    build: update_target.CurrentBuild,
     mcp_config_diagnostic: mcp_contract.ProfileConfigDiagnostic,
 ) output_contracts.StatusSnapshot {
     return .{
@@ -1829,9 +1699,6 @@ fn statusSnapshotFromStartupWithBuild(
         .history_turns = 0,
         .session_permission_grants = 0,
         .agent_step_limit = startup.agent_step_limit,
-        .update_channel = startup.update_channel.label(),
-        .build_channel = build.channel.label(),
-        .build_revision = build.revision,
         .mcp_config_error = switch (mcp_config_diagnostic) {
             .clear => null,
             .failed => |err| @errorName(err),
@@ -2869,39 +2736,6 @@ fn parseLocalSurfaceArgs(args: []const [:0]const u8) !LocalSurfaceOptions {
     return options;
 }
 
-fn parseUpgradeArgs(args: []const [:0]const u8) !UpgradeOptions {
-    var options = UpgradeOptions{};
-    var format_seen = false;
-    var channel_seen = false;
-    var index: usize = 0;
-    while (index < args.len) : (index += 1) {
-        const arg = args[index];
-        if (std.mem.eql(u8, arg, "--json")) {
-            if (format_seen) return error.InvalidUpgradeArgs;
-            format_seen = true;
-            options.format = .json;
-            continue;
-        }
-        if (std.mem.eql(u8, arg, "--channel")) {
-            if (channel_seen or index + 1 >= args.len) return error.InvalidUpgradeArgs;
-            channel_seen = true;
-            index += 1;
-            options.channel = update_target.Channel.parse(args[index]) orelse
-                return error.InvalidUpgradeArgs;
-            continue;
-        }
-        if (std.mem.startsWith(u8, arg, "--channel=")) {
-            if (channel_seen) return error.InvalidUpgradeArgs;
-            channel_seen = true;
-            options.channel = update_target.Channel.parse(arg["--channel=".len..]) orelse
-                return error.InvalidUpgradeArgs;
-            continue;
-        }
-        return error.InvalidUpgradeArgs;
-    }
-    return options;
-}
-
 fn parseSessionListArgs(args: []const [:0]const u8) !SessionListOptions {
     var options = SessionListOptions{};
     var format_seen = false;
@@ -3327,16 +3161,8 @@ test "parse recognizes every top-level command and preserves unknown commands" {
         .resume_session => |invocation| try std.testing.expectEqual(@as(usize, 1), invocation.args.len),
         else => return error.TestExpectedEqual,
     }
-    switch (parse(command_catalog, &.{ @constCast("credits"), @constCast("--json") })) {
-        .credits => |rest| try std.testing.expectEqual(@as(usize, 1), rest.len),
-        else => return error.TestExpectedEqual,
-    }
     switch (parse(command_catalog, &.{ @constCast("usage"), @constCast("--period"), @constCast("24h") })) {
         .usage => |rest| try std.testing.expectEqual(@as(usize, 2), rest.len),
-        else => return error.TestExpectedEqual,
-    }
-    switch (parse(command_catalog, &.{@constCast("upgrade")})) {
-        .upgrade => |rest| try std.testing.expectEqual(@as(usize, 0), rest.len),
         else => return error.TestExpectedEqual,
     }
     switch (parse(command_catalog, &.{ @constCast("replay"), @constCast("tape") })) {
@@ -3586,32 +3412,6 @@ test "parse local surface args accepts only json" {
     try std.testing.expectEqual(output_contracts.OutputFormat.json, opts.format);
 
     try std.testing.expectError(error.InvalidLocalSurfaceArgs, parseLocalSurfaceArgs(&.{@constCast("--wat")}));
-}
-
-test "parse upgrade args accepts a remembered release channel" {
-    const defaults = try parseUpgradeArgs(&.{});
-    try std.testing.expectEqual(output_contracts.OutputFormat.text, defaults.format);
-    try std.testing.expect(defaults.channel == null);
-
-    const selected = try parseUpgradeArgs(&.{
-        @constCast("--channel"),
-        @constCast("dev"),
-        @constCast("--json"),
-    });
-    try std.testing.expectEqual(output_contracts.OutputFormat.json, selected.format);
-    try std.testing.expectEqual(update_target.Channel.dev, selected.channel.?);
-
-    const stable = try parseUpgradeArgs(&.{@constCast("--channel=stable")});
-    try std.testing.expectEqual(update_target.Channel.stable, stable.channel.?);
-
-    try std.testing.expectError(
-        error.InvalidUpgradeArgs,
-        parseUpgradeArgs(&.{ @constCast("--channel"), @constCast("nightly") }),
-    );
-    try std.testing.expectError(
-        error.InvalidUpgradeArgs,
-        parseUpgradeArgs(&.{ @constCast("--channel=dev"), @constCast("--channel=stable") }),
-    );
 }
 
 test "parse session list args supports bounded canonical pagination" {
@@ -4623,70 +4423,6 @@ test "runIfRequested models passes startup team to fetch seam" {
     );
 }
 
-test "runIfRequested credits renders through the configured provider" {
-    var capture = CaptureOutput.init(std.testing.allocator);
-    defer capture.deinit();
-    var probe = CreditsProviderProbe{ .outcome = .success };
-    var cfg = testConfig();
-    cfg.provider_set.gateway.credits = probe.provider();
-
-    var deps = capture.deps();
-    deps.load_startup_state = stubLoadStartupState;
-
-    const result = try runIfRequestedWithDeps(std.testing.allocator, &.{ @constCast("credits"), @constCast("--json") }, cfg, deps);
-    try std.testing.expectEqual(RunResult.handled_success, result);
-    try std.testing.expectEqual(@as(usize, 1), probe.calls);
-    try std.testing.expect(probe.saw_expected_input);
-    try std.testing.expectEqualStrings(
-        "{\"kind\":\"credits\",\"balance\":\"10\",\"used\":\"2\",\"plan\":\"pro\"}\n",
-        capture.stdout.written(),
-    );
-}
-
-test "runIfRequested credits failures use nonzero text and json contracts" {
-    var text_capture = CaptureOutput.init(std.testing.allocator);
-    defer text_capture.deinit();
-    var text_probe = CreditsProviderProbe{ .outcome = .failure };
-    var text_cfg = testConfig();
-    text_cfg.provider_set.gateway.credits = text_probe.provider();
-    var text_deps = text_capture.deps();
-    text_deps.load_startup_state = stubLoadStartupState;
-
-    const text_result = try runIfRequestedWithDeps(
-        std.testing.allocator,
-        &.{@constCast("credits")},
-        text_cfg,
-        text_deps,
-    );
-    try std.testing.expectEqual(RunResult.handled_failure, text_result);
-    try std.testing.expectEqualStrings("", text_capture.stdout.written());
-    try std.testing.expectEqualStrings(
-        "[credits] error: gateway unavailable\n",
-        text_capture.stderr.written(),
-    );
-
-    var json_capture = CaptureOutput.init(std.testing.allocator);
-    defer json_capture.deinit();
-    var json_probe = CreditsProviderProbe{ .outcome = .failure };
-    var json_cfg = testConfig();
-    json_cfg.provider_set.gateway.credits = json_probe.provider();
-    var json_deps = json_capture.deps();
-    json_deps.load_startup_state = stubLoadStartupState;
-
-    const json_result = try runIfRequestedWithDeps(
-        std.testing.allocator,
-        &.{ @constCast("credits"), @constCast("--json") },
-        json_cfg,
-        json_deps,
-    );
-    try std.testing.expectEqual(RunResult.handled_failure, json_result);
-    try std.testing.expectEqualStrings(
-        "{\"kind\":\"credits\",\"error\":\"gateway unavailable\"}\n",
-        json_capture.stdout.written(),
-    );
-    try std.testing.expectEqualStrings("", json_capture.stderr.written());
-}
-
 test "runIfRequested local json success appends exactly one newline" {
     var capture = CaptureOutput.init(std.testing.allocator);
     defer capture.deinit();
@@ -4697,7 +4433,7 @@ test "runIfRequested local json success appends exactly one newline" {
     const result = try runIfRequestedWithDeps(std.testing.allocator, &.{ @constCast("status"), @constCast("--json") }, testConfig(), deps);
     try std.testing.expectEqual(RunResult.handled_success, result);
     try std.testing.expectEqualStrings(
-        "{\"kind\":\"status\",\"model\":\"test-model\",\"update_channel\":\"stable\",\"build_channel\":\"stable\",\"build_revision\":\"\",\"auth\":\"missing\",\"auth_refreshable\":false,\"auth_help\":\"Fx needs a model credential. Set OPENAI_API_KEY for a Responses API, use fx login codex for ChatGPT Codex, use fx login grok for Grok, or set AI_GATEWAY_API_KEY for Vercel AI Gateway.\",\"permission_mode\":\"auto\",\"workspace\":\"/tmp/fx\",\"history_turns\":0,\"session_permission_grants\":0,\"agent_step_limit\":42}\n",
+        "{\"kind\":\"status\",\"model\":\"test-model\",\"auth\":\"missing\",\"auth_refreshable\":false,\"auth_help\":\"Fx needs a model credential. Set OPENAI_API_KEY for a Responses API, use fx login codex for ChatGPT Codex, or use fx login grok for Grok.\",\"permission_mode\":\"auto\",\"workspace\":\"/tmp/fx\",\"history_turns\":0,\"session_permission_grants\":0,\"agent_step_limit\":42}\n",
         capture.stdout.written(),
     );
     try std.testing.expect(!std.mem.endsWith(u8, capture.stdout.written(), "\n\n"));
@@ -4786,11 +4522,11 @@ test "writeRenderedJsonLine falls back to heap and appends exactly one newline" 
         std.testing.allocator,
         capture.deps(),
         tiny_buf[0..],
-        .{ .status = statusSnapshotFromStartup(startup) },
+        .{ .status = statusSnapshotFromStartup(startup, .clear) },
     );
 
     try std.testing.expectEqualStrings(
-        "{\"kind\":\"status\",\"model\":\"test-model\",\"update_channel\":\"stable\",\"build_channel\":\"stable\",\"build_revision\":\"\",\"auth\":\"missing\",\"auth_refreshable\":false,\"auth_help\":\"Fx needs a model credential. Set OPENAI_API_KEY for a Responses API, use fx login codex for ChatGPT Codex, use fx login grok for Grok, or set AI_GATEWAY_API_KEY for Vercel AI Gateway.\",\"permission_mode\":\"ask\",\"workspace\":\"/tmp/fx\",\"history_turns\":0,\"session_permission_grants\":0,\"agent_step_limit\":42}\n",
+        "{\"kind\":\"status\",\"model\":\"test-model\",\"auth\":\"missing\",\"auth_refreshable\":false,\"auth_help\":\"Fx needs a model credential. Set OPENAI_API_KEY for a Responses API, use fx login codex for ChatGPT Codex, or use fx login grok for Grok.\",\"permission_mode\":\"ask\",\"workspace\":\"/tmp/fx\",\"history_turns\":0,\"session_permission_grants\":0,\"agent_step_limit\":42}\n",
         capture.stdout.written(),
     );
 }
@@ -4800,13 +4536,13 @@ test "writeRenderedJsonLine renders doctor json through output contract" {
     defer capture.deinit();
 
     var checks = [_]doctor_runtime.Check{
-        .{ .name = "auth", .status = .ok, .detail = "AI_GATEWAY_API_KEY is configured" },
+        .{ .name = "auth", .status = .ok, .detail = "OPENAI_API_KEY is configured" },
         .{ .name = "gh", .status = .warn, .detail = "GitHub CLI not found in PATH" },
     };
     const snapshot = doctor_runtime.Snapshot{
         .workspace_root = @constCast("/tmp/fx"),
         .model = "test-model",
-        .auth = .{ .active_source = .ai_gateway_api_key },
+        .auth = .{ .active_source = .openai_api_key },
         .permission_mode = .auto,
         .agent_step_limit = 42,
         .checks = checks[0..],
@@ -4821,7 +4557,7 @@ test "writeRenderedJsonLine renders doctor json through output contract" {
     );
 
     try std.testing.expectEqualStrings(
-        "{\"kind\":\"doctor\",\"ok_count\":1,\"warn_count\":1,\"fail_count\":0,\"workspace\":\"/tmp/fx\",\"model\":\"test-model\",\"auth\":\"AI_GATEWAY_API_KEY\",\"auth_refreshable\":false,\"permission_mode\":\"auto\",\"agent_step_limit\":42,\"checks\":[{\"name\":\"auth\",\"status\":\"ok\",\"detail\":\"AI_GATEWAY_API_KEY is configured\"},{\"name\":\"gh\",\"status\":\"warn\",\"detail\":\"GitHub CLI not found in PATH\"}]}\n",
+        "{\"kind\":\"doctor\",\"ok_count\":1,\"warn_count\":1,\"fail_count\":0,\"workspace\":\"/tmp/fx\",\"model\":\"test-model\",\"auth\":\"OPENAI_API_KEY\",\"auth_refreshable\":false,\"permission_mode\":\"auto\",\"agent_step_limit\":42,\"checks\":[{\"name\":\"auth\",\"status\":\"ok\",\"detail\":\"OPENAI_API_KEY is configured\"},{\"name\":\"gh\",\"status\":\"warn\",\"detail\":\"GitHub CLI not found in PATH\"}]}\n",
         capture.stdout.written(),
     );
 }
@@ -4971,9 +4707,8 @@ fn stubLoadStartupState(
     state.selected_model = try alloc.dupe(u8, default_model);
     state.credential = .{
         .token = try alloc.dupe(u8, "test-key"),
-        .source = .ai_gateway_api_key,
+        .source = .openai_api_key,
     };
-    state.credential.?.team_id = try alloc.dupe(u8, "team_123");
     return state;
 }
 
@@ -5038,7 +4773,6 @@ const ModelFetchProbe = struct {
     ) gateway_provider.CliModelCatalogResult {
         return .{ .failure = .{
             .access = .init(input.access),
-            .anonymous_fallback_used = false,
             .failure = .{ .category = category },
         } };
     }
@@ -5051,8 +4785,7 @@ const ModelFetchProbe = struct {
         const self: *ModelFetchProbe = @ptrCast(@alignCast(raw.?));
         self.called = true;
         if (!std.mem.eql(u8, input.access.authorizationCredential() orelse "", "test-key") or
-            !std.mem.eql(u8, input.access.teamContext() orelse "", "team_123") or
-            input.access.credentialSource() != .ai_gateway_api_key or
+            input.access.credentialSource() != .openai_api_key or
             !std.mem.eql(u8, input.endpoint, "/v1/models") or
             input.cancel_flag != null)
         {
@@ -5096,47 +4829,3 @@ const ChatUrlProbe = struct {
         return "http://127.0.0.1:43123/chat";
     }
 };
-
-const CreditsProviderProbe = struct {
-    outcome: enum { success, failure },
-    calls: usize = 0,
-    saw_expected_input: bool = false,
-
-    fn provider(self: *CreditsProviderProbe) gateway_provider.CreditsProvider {
-        return .{
-            .context = self,
-            .fetch_fn = fetch,
-        };
-    }
-
-    fn fetch(
-        raw: ?*anyopaque,
-        alloc: Allocator,
-        input: gateway_provider.CreditsLookupInput,
-    ) output_contracts.CreditsSnapshot {
-        const self: *CreditsProviderProbe = @ptrCast(@alignCast(raw.?));
-        self.calls += 1;
-        self.saw_expected_input =
-            std.mem.eql(u8, input.credential orelse "", "test-key") and
-            std.mem.eql(u8, input.tenant orelse "", "team_123");
-        if (self.outcome == .failure) {
-            return ownedCreditsErrorSnapshot(alloc, "gateway unavailable");
-        }
-
-        var snapshot = output_contracts.CreditsSnapshot{};
-        snapshot.balance = alloc.dupe(u8, "10") catch return ownedCreditsErrorSnapshot(alloc, "invalid JSON response from gateway");
-        snapshot.used = alloc.dupe(u8, "2") catch {
-            snapshot.deinit(alloc);
-            return ownedCreditsErrorSnapshot(alloc, "invalid JSON response from gateway");
-        };
-        snapshot.plan = alloc.dupe(u8, "pro") catch {
-            snapshot.deinit(alloc);
-            return ownedCreditsErrorSnapshot(alloc, "invalid JSON response from gateway");
-        };
-        return snapshot;
-    }
-};
-
-fn ownedCreditsErrorSnapshot(alloc: Allocator, message: []const u8) output_contracts.CreditsSnapshot {
-    return .{ .err_message = alloc.dupe(u8, message) catch null };
-}

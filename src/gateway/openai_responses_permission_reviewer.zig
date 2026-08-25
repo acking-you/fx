@@ -5,6 +5,7 @@ const provider_route = @import("../core/gateway/provider_route.zig");
 const stream_provider = @import("../core/agent/stream_provider.zig");
 const responses_reviewer = @import("responses_permission_reviewer.zig");
 const openai_responses = @import("openai_responses.zig");
+const debug_trace = @import("../core/shared/debug_trace.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -18,7 +19,14 @@ fn reviewOpenAI(
     input: permission_auto_classifier.ProviderInput,
     request: permission_auto_classifier.ReviewRequest,
 ) !permission_auto_classifier.ParseOutcome {
-    if (input.model.len == 0) return .invalid;
+    if (input.model.len == 0) {
+        debug_trace.logf(
+            "permission",
+            "event=responses_reviewer_rejected reason=missing_model",
+            .{},
+        );
+        return .invalid;
+    }
     return responses_reviewer.review(alloc, input, request, .{
         .source = .openai_api_key,
         .model = provider_route.wireModel(.openai_responses_byok, input.model),
@@ -33,6 +41,14 @@ fn validateCredential(
     input: permission_auto_classifier.ProviderInput,
 ) !void {
     if (input.credential_source != .openai_api_key or input.credential.len == 0) {
+        debug_trace.logf(
+            "permission",
+            "event=responses_reviewer_rejected credential_source={s} credential_present={s}",
+            .{
+                if (input.credential_source) |source| @tagName(source) else "none",
+                if (input.credential.len > 0) "true" else "false",
+            },
+        );
         return error.OpenAIResponsesApiKeyRequired;
     }
 }

@@ -33,11 +33,6 @@ pub const RunCommandActivity = struct {
     compatibility_tool: ?*const tool_dispatch.Tool,
 };
 
-pub fn isProviderSearchAlias(name: []const u8) bool {
-    return std.mem.eql(u8, name, "perplexity_search") or
-        std.mem.eql(u8, name, "parallel_search");
-}
-
 fn projectRunCommandActivitySource(
     command: []const u8,
     workspace_root_input: []const u8,
@@ -308,12 +303,6 @@ pub fn formatPlainAction(alloc: Allocator, input: ToolActionInput) ![]const u8 {
     const scratch = scratch_state.allocator();
 
     const spec = input.tool_registry.lookup(call.name) orelse {
-        if (isProviderSearchAlias(call.name)) {
-            const args = tool_args.parseToolArgsObject(scratch, call.arguments_json) catch {
-                return std.fmt.allocPrint(alloc, "Searching web", .{});
-            };
-            return std.fmt.allocPrint(alloc, "Searching {s}", .{try formatWebSearchActionDetail(scratch, args)});
-        }
         if (input.is_available_dynamic_mcp_tool) return std.fmt.allocPrint(alloc, "MCP: {s}", .{call.name});
         return std.fmt.allocPrint(alloc, "Working: {s}", .{call.name});
     };
@@ -633,7 +622,7 @@ test "run command presentation resolves registered compatibility" {
     const call = ToolCall{
         .id = "install",
         .name = "run_command",
-        .arguments_json = "{\"command\":\"npx skills add vercel-labs/agent-skills -g -y\"}",
+        .arguments_json = "{\"command\":\"npx skills add example/agent-skills -g -y\"}",
     };
     const activity = (try formatRunCommandActivity(alloc, test_tool_registry, "", call)) orelse
         return error.TestExpectedEqual;
@@ -644,11 +633,11 @@ test "run command presentation resolves registered compatibility" {
 
     const action = try formatPlainAction(alloc, .{ .tool_registry = test_tool_registry, .call = call });
     defer alloc.free(action);
-    try std.testing.expectEqualStrings("Installing skill npx skills add vercel-labs/agent-skills -g -y", action);
+    try std.testing.expectEqualStrings("Installing skill npx skills add example/agent-skills -g -y", action);
 
     const permission = try formatPermissionLabel(alloc, test_tool_registry, call);
     defer alloc.free(permission);
-    try std.testing.expectEqualStrings("install_skill npx skills add vercel-labs/agent-skills -g -y", permission);
+    try std.testing.expectEqualStrings("install_skill npx skills add example/agent-skills -g -y", permission);
 }
 
 test "run command activity projects line boundaries without changing other bytes" {
@@ -856,7 +845,7 @@ test "tool presentation preserves plain action fallbacks" {
         .{ .call = .{ .id = "ask", .name = "ask_user_question", .arguments_json = "{}" }, .expected = "Asking " },
         .{ .call = .{ .id = "memory", .name = "memory", .arguments_json = "{\"action\":\"save\"}" }, .expected = "Remembering save" },
         .{ .call = .{ .id = "skill", .name = "skill", .arguments_json = "{\"name\":\"workflow\"}" }, .expected = "Loading skill workflow" },
-        .{ .call = .{ .id = "install", .name = "install_skill", .arguments_json = "{\"source\":\"vercel-labs/agent-skills\",\"skill\":\"workflow\"}" }, .expected = "Installing skill vercel-labs/agent-skills" },
+        .{ .call = .{ .id = "install", .name = "install_skill", .arguments_json = "{\"source\":\"example/agent-skills\",\"skill\":\"workflow\"}" }, .expected = "Installing skill example/agent-skills" },
         .{ .call = .{ .id = "copy", .name = "copy_file", .arguments_json = "{\"source\":\"src/a.zig\",\"destination\":\"src/b.zig\"}" }, .expected = "Copying src/a.zig -> src/b.zig" },
         .{ .call = .{ .id = "rename", .name = "rename_file", .arguments_json = "{\"old_path\":\"src/a.zig\",\"new_path\":\"src/b.zig\"}" }, .expected = "Renaming src/a.zig -> src/b.zig" },
         .{ .call = .{ .id = "unknown", .name = "unknown_tool", .arguments_json = "{}" }, .expected = "Working: unknown_tool" },
@@ -952,13 +941,13 @@ test "tool presentation frees all formatted output with a normal allocator" {
         .tool_registry = test_tool_registry,
         .call = .{
             .id = "provider_search",
-            .name = "perplexity_search",
+            .name = "provider_search",
             .arguments_json = "{}",
             .provenance = .provider_executed,
         },
     });
     defer alloc.free(provider_search);
-    try std.testing.expectEqualStrings("Searching web", provider_search);
+    try std.testing.expectEqualStrings("Working: provider_search", provider_search);
 
     const copy = try formatPlainAction(alloc, .{
         .tool_registry = test_tool_registry,

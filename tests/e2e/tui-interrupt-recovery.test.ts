@@ -17,6 +17,8 @@ import {
   FAKE_GATEWAY_MODEL,
   fakeGatewayFinalText,
   fakeGatewayToolCall,
+  responseCompleted,
+  responseTextDelta,
   startFakeGateway,
   TmuxSession,
   tmuxAvailable,
@@ -91,12 +93,8 @@ describe.skipIf(SKIP)("tui: interrupt recovery", () => {
         height: 40,
         env: {
           HOME: home,
-          AI_GATEWAY_API_KEY: "fake-text-queues-key",
-          VERCEL_OIDC_TOKEN: undefined,
-          FX_AUTO_UPGRADE: "0",
-          FX_GATEWAY_BASE_URL: gateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
-          FX_E2E_GATEWAY_CHAT_URL: gateway.chatUrl,
+          OPENAI_API_KEY: "fake-text-queues-key",
+          FX_RESPONSES_BASE_URL: gateway.baseUrl,
           FX_MODEL: FAKE_GATEWAY_MODEL,
           FX_TRACE_SCOPES: TRACE_SCOPES,
           FX_TRACE_LOG: tracePath,
@@ -125,10 +123,10 @@ describe.skipIf(SKIP)("tui: interrupt recovery", () => {
       expect(held.cancelCount).toBe(0);
       expect(gateway.requests).toHaveLength(2);
       const queuedRequest = JSON.parse(gateway.requests[1]!.body) as {
-        prompt: unknown;
+        input: unknown;
         tools: unknown[];
       };
-      const queuedPrompt = JSON.stringify(queuedRequest.prompt);
+      const queuedPrompt = JSON.stringify(queuedRequest.input);
       expect(queuedPrompt).toContain(queuedText);
       expect(queuedRequest.tools.length).toBeGreaterThan(0);
       expect(gateway.requests[1]!.body).not.toContain(
@@ -181,8 +179,8 @@ describe.skipIf(SKIP)("tui: interrupt recovery", () => {
         () => providerPortableResponse(FOLLOW_UP_RESPONSE),
       ], {
         models: [
-          { id: FAKE_GATEWAY_MODEL, type: "language", tags: ["tool-use"] },
-          { id: FOLLOW_UP_MODEL, type: "language", tags: ["tool-use"] },
+          { id: FAKE_GATEWAY_MODEL, object: "model" },
+          { id: FOLLOW_UP_MODEL, object: "model" },
         ],
       });
       session = await TmuxSession.create({
@@ -192,13 +190,8 @@ describe.skipIf(SKIP)("tui: interrupt recovery", () => {
         height: 40,
         env: {
           HOME: home,
-          AI_GATEWAY_API_KEY: "fake-interrupt-recovery-key",
-          VERCEL_OIDC_TOKEN: undefined,
-          FX_AUTO_UPGRADE: "0",
-          FX_GATEWAY_BASE_URL: gateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
-          FX_E2E_GATEWAY_CHAT_URL: gateway.chatUrl,
-          FX_E2E_GATEWAY_MODELS_URL: `${gateway.baseUrl}/coding-agent/v1/models`,
+          OPENAI_API_KEY: "fake-interrupt-recovery-key",
+          FX_RESPONSES_BASE_URL: gateway.baseUrl,
           FX_TRACE_SCOPES: TRACE_SCOPES,
           FX_TRACE_LOG: tracePath,
         },
@@ -240,19 +233,16 @@ describe.skipIf(SKIP)("tui: interrupt recovery", () => {
       expect(held.cancelCount).toBe(1);
       expect(countOccurrences(readTrace(tracePath), "event=interrupt_persisted")).toBe(1);
       const followUpRequest = JSON.parse(gateway.requests[1]!.body) as {
-        prompt: Array<{ role: string }>;
+        input: Array<{ role?: string }>;
         tools: unknown[];
+        model: string;
       };
-      const followUpPrompt = JSON.stringify(followUpRequest.prompt);
-      expect(gateway.requests[0]!.headers.get("ai-language-model-id")).toBe(
-        FAKE_GATEWAY_MODEL,
-      );
-      expect(gateway.requests[1]!.headers.get("ai-language-model-id")).toBe(
-        FOLLOW_UP_MODEL,
-      );
+      const followUpPrompt = JSON.stringify(followUpRequest.input);
+      expect(JSON.parse(gateway.requests[0]!.body).model).toBe("gpt-5");
+      expect(followUpRequest.model).toBe(FOLLOW_UP_MODEL);
       expect(
-        followUpRequest.prompt
-          .filter((entry) => entry.role !== "system")
+        followUpRequest.input
+          .filter((entry) => entry.role !== undefined)
           .map((entry) => entry.role),
       ).toEqual([
         "user",
@@ -352,12 +342,8 @@ while :; do sleep 1; done
         height: 40,
         env: {
           HOME: home,
-          AI_GATEWAY_API_KEY: "fake-workspace-cancel-unwind-key",
-          VERCEL_OIDC_TOKEN: undefined,
-          FX_AUTO_UPGRADE: "0",
-          FX_GATEWAY_BASE_URL: gateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
-          FX_E2E_GATEWAY_CHAT_URL: gateway.chatUrl,
+          OPENAI_API_KEY: "fake-workspace-cancel-unwind-key",
+          FX_RESPONSES_BASE_URL: gateway.baseUrl,
           FX_MODEL: FAKE_GATEWAY_MODEL,
           FX_TRACE_SCOPES: `${TRACE_SCOPES},core`,
           FX_TRACE_LOG: tracePath,
@@ -440,7 +426,13 @@ function heldPartialResponse(state: HoldState): Response {
         state.started = true;
         for (const delta of PARTIAL_CHUNKS) {
           controller.enqueue(encoder.encode(
-            `data: ${JSON.stringify({ type: "text-delta", id: "partial", delta })}\n\n`,
+            `data: ${JSON.stringify({
+              type: "response.output_text.delta",
+              item_id: "partial",
+              output_index: 0,
+              content_index: 0,
+              delta,
+            })}\n\n`,
           ));
         }
         timer = setInterval(() => {
@@ -461,18 +453,14 @@ function heldPartialResponse(state: HoldState): Response {
 function providerPortableResponse(text: string): Response {
   const request = gateway?.requests.at(-1);
   if (!request) return new Response("missing captured request", { status: 500 });
-  const payload = JSON.parse(request.body) as { prompt: Array<{ role: string }> };
-  let sawNonSystem = false;
-  for (const entry of payload.prompt) {
-    if (entry.role === "system") {
-      if (sawNonSystem) {
-        return new Response("system role must remain in the leading prefix", {
-          status: 400,
-        });
-      }
-    } else {
-      sawNonSystem = true;
-    }
+  const payload = JSON.parse(request.body) as {
+    instructions?: string;
+    input: Array<{ role?: string }>;
+  };
+  if (!payload.instructions || payload.input.some((entry) => entry.role === "system")) {
+    return new Response("system context must use Responses instructions", {
+      status: 400,
+    });
   }
   return fakeGatewayFinalText(text);
 }
@@ -486,7 +474,7 @@ function heldUntilReleasedResponse(state: HoldState): Response {
       start(controller) {
         state.started = true;
         controller.enqueue(encoder.encode(
-          'data: {"type":"text-delta","id":"held","delta":"ACTIVE_RESPONSE_HELD\\n"}\n\n',
+          `data: ${JSON.stringify(responseTextDelta("ACTIVE_RESPONSE_HELD\n", "held"))}\n\n`,
         ));
         timer = setInterval(() => {
           if (!closed) controller.enqueue(encoder.encode(": held-response\n\n"));
@@ -497,7 +485,7 @@ function heldUntilReleasedResponse(state: HoldState): Response {
           state.released = true;
           if (timer) clearInterval(timer);
           controller.enqueue(encoder.encode(
-            'data: {"type":"finish","finishReason":{"unified":"stop","raw":"stop"}}\n\n' +
+            `data: ${JSON.stringify(responseCompleted())}\n\n` +
               "data: [DONE]\n\n",
           ));
           controller.close();

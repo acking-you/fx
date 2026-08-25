@@ -20,8 +20,8 @@ const mockFetch = async () => {
   fetchCalls += 1;
   return new Response(new ReadableStream({
     start(controller) {
-      controller.enqueue(encoded.encode('data: {"type":"text-delta","id":"answer","delta":"ZXQJ"}\n\n'));
-      controller.enqueue(encoded.encode('data: {"type":"finish","finishReason":{"unified":"stop","raw":"stop"},"usage":{"inputTokens":{"total":1},"outputTokens":{"total":1}}}\n\n'));
+      controller.enqueue(encoded.encode('data: {"type":"response.output_text.delta","item_id":"answer","output_index":0,"content_index":0,"delta":"ZXQJ"}\n\n'));
+      controller.enqueue(encoded.encode('data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n'));
       controller.enqueue(encoded.encode("data: [DONE]\n\n"));
       controller.close();
     },
@@ -95,7 +95,7 @@ async function start(args = []) {
     wasm,
     args,
     terminal: capture.terminal,
-    env: { AI_GATEWAY_API_KEY: "term-session-test-key", FX_THEME: "dark" },
+    env: { OPENAI_API_KEY: "term-session-test-key", FX_THEME: "dark" },
     fetch: mockFetch,
     sessionStore,
   });

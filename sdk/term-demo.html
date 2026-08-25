@@ -124,7 +124,7 @@
       const runtime = await createFxTerminal({
         wasm: globalThis.__fxWasmModule,
         terminal: xtermAdapter(terminal),
-        env: { AI_GATEWAY_API_KEY: localStorage.getItem("FX_API_KEY") || "" },
+        env: { OPENAI_API_KEY: localStorage.getItem("FX_API_KEY") || "" },
         configStore,
         promptHistoryStore,
       });

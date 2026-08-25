@@ -16,7 +16,7 @@ This checkout is `acking-you/fx`, a fork of the upstream `vercel-labs/fx`. It is
 
 3. **Improve the agent harness.** Better default agent behavior even where upstream keeps it optional or absent, such as always showing streamed model reasoning and replaying it as reasoning context.
 
-Local experiments that upstream would not want also belong here. Note that goals 1 and 2 are only partly implemented: `FX_GATEWAY_BASE_URL` is still honored for a loopback address only, since the base URL carries the bearer token. Do not describe either goal as finished in user-facing text, and read the code before assuming an endpoint or credential source already works.
+Local experiments that upstream would not want also belong here. The Vercel product route has been removed; generic gateway contracts remain only where they serve the direct BYOK, Codex, or Grok transports. Goal 2 is still incomplete, so read the code before assuming an endpoint, protocol, catalog, or credential source already works.
 
 Keep `byok` changes as small and as close to upstream structure as possible. Every unnecessary divergence is a future merge conflict, and a change shaped like upstream's own code is one that can still be offered back.
 
@@ -71,7 +71,7 @@ If you cannot run the binary in your environment, say so explicitly and ask the 
 
 When running fx for verification, **always use the freshly-built binary at** **`./zig-out/bin/fx`** from this checkout. Never run `fx` from `PATH`, never rely on whatever is at `~/.fx/bin/fx`, and never assume an installed copy reflects your change.
 
-* The user may have an older `fx` on their PATH (e.g. installed via `fx upgrade` or the CDN install script). Running that one will not exercise your edits.
+* The user may have an older `fx` on their PATH. Running that one will not exercise your edits.
 
 * `zig build` writes to `zig-out/bin/fx`. That is the only binary that contains your latest change.
 
@@ -189,7 +189,7 @@ Config precedence (highest wins):
 4. `<workspace>/.fx.json` (committed project defaults)
 5. Built-in defaults
 
-Project `.fx.json` accepts only repo-safe defaults: `sandbox`, `max_agent_steps`, `max_tool_result_bytes`, and `context`. Profile-owned keys such as `model`, `effort`, `fast_mode`, `slash_menu_categories`, `startup_scrollback`, `prompt_history`, `statusLine`, `skill_match_fuzzy`, `first_call_tool_choice`, `auto_upgrade`, `permission_mode`, `credential_source`, and `permission` are ignored from project config before their values are parsed.
+Project `.fx.json` accepts only repo-safe defaults: `sandbox`, `max_agent_steps`, `max_tool_result_bytes`, and `context`. Profile-owned keys such as `model`, `effort`, `fast_mode`, `slash_menu_categories`, `startup_scrollback`, `prompt_history`, `statusLine`, `skill_match_fuzzy`, `first_call_tool_choice`, `permission_mode`, `credential_source`, and `permission` are ignored from project config before their values are parsed.
 
 Runtime state lives under `~/.fx/sessions/<session-id>/` (`session.json`, `background/`, `subagent/`, `logs/`). Sessions are global and portable across workspaces — each session tracks its `workspace_root` which updates when resumed in a different workspace. A subagent child is an ordinary session with its own directory; `subagent/` holds create-operation identities on a parent and the control record on a child.
 
@@ -321,17 +321,6 @@ If the change streams into the TUI, run `./zig-out/bin/fx` and drive that stream
 
 ## Testing (TypeScript)
 
-Two test suites live under `tests/`, both using Bun:
-
-### `tests/evals/` — LLM Evals
-
-Eval scenarios that exercise the agent through `fx ask --json`. Require `AI_GATEWAY_API_KEY`.
-
-```bash
-cd tests/evals && bun install && bun test           # run all evals
-cd tests/evals && bun run eval:matrix               # cross-model matrix run
-```
-
 ### `tests/e2e/` — End-to-End Tests
 
 Deterministic runtime tests (CLI commands, ACP protocol, TUI via tmux). No API key needed for most.
@@ -365,7 +354,7 @@ Every pull request must have exactly one `type:` label, chosen by its primary in
 
 Assign the label when the PR is opened and keep it accurate when the PR changes. If the authenticated contributor cannot manage labels, state the required label and keep the PR in draft until a maintainer or repository agent applies it. For a mixed PR, choose the label that describes the primary reason the PR exists. If that is ambiguous, ask before applying or changing the label.
 
-Keep PR titles as clean imperative sentences, such as `Restore feedback report file clipboard`. Do not add bracketed prefixes such as `[bug]`, `[feature]`, or `[improvement]`. Type belongs in the label, not the title.
+Keep PR titles as clean imperative sentences, such as `Restore diagnostic trace clipboard`. Do not add bracketed prefixes such as `[bug]`, `[feature]`, or `[improvement]`. Type belongs in the label, not the title.
 
 ## Full CI on Feature Branches
 
@@ -427,7 +416,7 @@ Startup latency benchmarks live in `benchmarks/` and run in CI via `.github/work
 ./benchmarks/startup.sh --quick    # quick run (20 iterations)
 ```
 
-The CI workflow builds a ReleaseSafe binary, measures six CLI paths with hyperfine, and enforces per-command latency budgets. PRs that exceed a budget fail the check. On `main`, results are uploaded to Vercel Blob for historical tracking.
+The CI workflow builds a ReleaseSafe binary, measures six CLI paths with hyperfine, and enforces per-command latency budgets. PRs that exceed a budget fail the check.
 
 The startup benchmark uses `FX_BENCH=1`, an environment variable that runs through arg parsing and CLI dispatch, then exits before TTY initialization. This lives in `src/core/app/app_entry_runtime.zig`.
 
@@ -470,19 +459,7 @@ Do not document intended behavior as if it already exists.
 
 ## Releasing
 
-Releases use a two-workflow pipeline. The maintainer controls the changelog voice and format.
-
-### Automated flow (preferred)
-
-1. Go to **Actions > Prepare Release** on GitHub
-2. Select the bump type (`patch`, `minor`, or `major`) and run the workflow
-3. The workflow bumps the version, feeds the actual `git diff` to an LLM to draft the changelog, and opens a PR
-4. Review the PR — edit the AI-drafted changelog if needed — then merge
-5. The existing `release.yml` detects the version change and handles build, publish, tagging, and the GitHub Release
-
-The `prepare-release.yml` workflow uses the Vercel AI Gateway (`AI_GATEWAY_API_KEY` secret) to generate the changelog from the real code diff, not from commit messages or PR descriptions.
-
-### Manual flow
+Releases use the GitHub Release workflow. The maintainer controls the changelog voice and format.
 
 To prepare a release by hand:
 
@@ -492,7 +469,7 @@ To prepare a release by hand:
 4. Update `README.md` install example version
 5. Open a PR and merge to `main`
 
-When the PR merges, CI compares the version tag to what exists in git. If the tag is missing, it cross-compiles all platform binaries, creates the git tag, and publishes a GitHub Release with the binaries attached. The release body is extracted from the content between the `<!-- release:start -->` and `<!-- release:end -->` markers in `CHANGELOG.md`.
+When the PR merges, the release workflow compares the version tag to what exists in git. If the tag is missing, it cross-compiles all platform binaries, creates the git tag, and publishes a GitHub Release with the binaries attached. The release body is extracted from the content between the `<!-- release:start -->` and `<!-- release:end -->` markers in `CHANGELOG.md`.
 
 ### Writing the changelog
 

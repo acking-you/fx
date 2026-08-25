@@ -3021,15 +3021,12 @@ test "durable state round trips live history while discarding legacy authority" 
     };
     var usage_runtime = session_usage.Usage.initFresh();
     defer usage_runtime.deinit(alloc);
-    const usage_sequence = try usage_runtime.reserveInvocation();
-    try usage_runtime.finishObservedInvocation(
+    const usage_observation = try session_usage.InvocationObservation.begin(&usage_runtime);
+    try usage_observation.completeDirect(
         alloc,
-        usage_sequence,
-        25,
-        .observed_generation,
-        "gen_01ARZ3NDEKTSV4RRFFQ69G5FAV",
-        "https://ai-gateway.vercel.sh",
-        null,
+        "provider/model",
+        .{ .input_tokens = 1, .output_tokens = 1 },
+        .{ .http_ok = true, .terminal_finish_reason = .stop },
     );
     var usage = try usage_runtime.snapshot(alloc);
     defer usage.deinit(alloc);
@@ -3072,7 +3069,7 @@ test "durable state round trips live history while discarding legacy authority" 
 }
 
 test "durable state repairs duplicate-key execution and interrupted tool arguments" {
-    const gateway_json = @import("../../gateway/vercel_protocol.zig");
+    const message_history = @import("../gateway/message_history.zig");
     const alloc = std.testing.allocator;
     const duplicate_arguments = "{\"depth\":1,\"depth\":2}";
 
@@ -3152,7 +3149,7 @@ test "durable state repairs duplicate-key execution and interrupted tool argumen
     const arena = arena_state.allocator();
     var messages: std.ArrayList(types.ChatMessage) = .empty;
     try session.appendHistoryChatMessages(arena, &messages, decoded.history);
-    try gateway_json.validateToolMessageHistory(arena, messages.items);
+    try message_history.validateToolMessageHistory(arena, messages.items);
 }
 
 test "current history decode rejects ambiguous malformed tool result pairings" {
@@ -4408,9 +4405,9 @@ test "recovery checkpoint rejects an outstanding attempt beyond its budget" {
             .authority = .{
                 .provider = .gateway,
                 .model = @constCast("openai/gpt-test"),
-                .credential_source = .ai_gateway_api_key,
+                .credential_source = .openai_api_key,
                 .credential_identity = credential_authority.derive(
-                    .ai_gateway_api_key,
+                    .openai_api_key,
                     null,
                 ),
             },
