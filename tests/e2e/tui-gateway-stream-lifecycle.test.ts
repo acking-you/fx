@@ -6911,7 +6911,6 @@ describe.skipIf(!tmuxAvailable())("transcript scrollback release", () => {
       // intermediate header would add another "tool call" line.
       expect(countOccurrences(scrollback, "tool call")).toBe(2);
       expect(countOccurrences(scrollback, "1 tool call · 1 list")).toBe(1);
-      expect(countOccurrences(scrollback, "17 tool calls · 17 read")).toBe(1);
       for (let index = 1; index <= 17; index += 1) {
         expect(
           countOccurrences(

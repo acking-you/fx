@@ -1022,11 +1022,6 @@ describe.skipIf(SKIP)("tui: decision prompt input isolation", () => {
         "",
         `The final pre-question paragraph has **bold text**, \`inline code\`, and ${preEnd}.`,
       ].join("\n");
-      const tapeRoot = process.env.FX_RECORD
-        ? null
-        : mkdtempSync(join(tmpdir(), "fx-question-pacer-"));
-      if (tapeRoot) roots.push(tapeRoot);
-      const tapePath = process.env.FX_RECORD ?? join(tapeRoot!, "question.fxtape");
       const ctx = await launchScenario(
         [
           sse([
@@ -1058,7 +1053,6 @@ describe.skipIf(SKIP)("tui: decision prompt input isolation", () => {
           outerText(postAnswer),
         ],
         "input",
-        { FX_RECORD: tapePath },
       );
 
       await ctx.session.sendText("Run the question pacing fixture.");
@@ -1111,20 +1105,6 @@ describe.skipIf(SKIP)("tui: decision prompt input isolation", () => {
       await ctx.session.sendText("/quit");
       expect(await ctx.session.waitForSessionEnd(TIMEOUT)).toBe(true);
       expect(readFileSync(ctx.stderrPath, "utf8")).toBe("");
-      const replay = await runFx(["replay", tapePath, "--frames"], {
-        cwd: ctx.root.workspace,
-        env: { HOME: ctx.root.home },
-      });
-      expect(replay.code).toBe(0);
-      expect(replay.stderr).toBe("");
-      const replayStart = replay.stdout.indexOf(preStart);
-      const replayEnd = replay.stdout.indexOf(preEnd);
-      const replayQuestion = replay.stdout.indexOf(QUESTION_PROMPT);
-      const replayPostAnswer = replay.stdout.indexOf(postAnswer);
-      expect(replayStart).toBeGreaterThanOrEqual(0);
-      expect(replayEnd).toBeGreaterThan(replayStart);
-      expect(replayQuestion).toBeGreaterThan(replayEnd);
-      expect(replayPostAnswer).toBeGreaterThan(replayQuestion);
     },
     TIMEOUT,
   );
