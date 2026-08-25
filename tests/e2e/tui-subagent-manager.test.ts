@@ -1683,7 +1683,16 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         expect(externalApproval).toContain("Permission needed");
         expect(externalApproval).toContain("EXTERNAL");
         expect(existsSync(externalMarker)).toBe(false);
-        await active.sendLiteralText("3");
+        await active.sendKeys("Down");
+        await active.sendKeys("Down");
+        await active.waitForPane(
+          (pane) => pane.split("\n").some((line) =>
+            line.includes("❯") &&
+            line.includes("3  Don't apply")
+          ),
+          TIMEOUT,
+        );
+        await active.sendKeys("Enter");
         await active.waitForPane(
           (pane) =>
             pane.includes("ALWAYS_WRITE_EXTERNAL_DONE") &&
