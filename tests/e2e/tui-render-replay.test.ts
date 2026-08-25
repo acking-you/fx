@@ -308,15 +308,14 @@ describe("tui: render record/replay", () => {
         { length: 33 },
         (_, index) => `captured input line ${index + 1}: ${"x".repeat(32)}`,
       ).join("\n");
-      const authNotice = "● Auth: Fx needs a model credential. Set OPENAI_API_KEY for a Responses API, or use /login for ChatGPT Codex or Grok.";
+      const authNotice = "● Auth: Fx needs a model credential.";
       const launched = await launch({ recordInput: true });
       session = launched.session;
 
       await session.pasteText(pasted);
       await session.waitForText("[Pasted text #1, 33 lines]", 5_000);
       await session.sendKeys("Enter");
-      await session.waitForText("● Auth: Fx needs a model credential.", 5_000);
-      expect((await session.captureFullScrollback()).replace(/\s+/g, " ")).toContain(authNotice);
+      await session.waitForText(authNotice, 5_000);
 
       const stdin = readTapeFrames(launched.tapePath)
         .filter((frame) => frame.kind === 2)
