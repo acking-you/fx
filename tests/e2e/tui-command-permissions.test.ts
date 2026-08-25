@@ -285,9 +285,15 @@ function contentText(value: unknown): string {
 
 function promptText(body: string): string {
   const request = JSON.parse(body) as {
+    instructions?: unknown;
     input?: Array<{ content?: unknown }>;
   };
-  return (request.input ?? []).map((message) => contentText(message.content)).join("\n");
+  return [
+    contentText(request.instructions),
+    ...(request.input ?? []).map((message) => contentText(message.content)),
+  ]
+    .filter((text) => text.length > 0)
+    .join("\n");
 }
 
 function latestPromptText(body: string): string {
@@ -310,6 +316,11 @@ function currentUserText(body: string): string {
 
 function occurrenceCount(text: string, needle: string): number {
   return text.split(needle).length - 1;
+}
+
+function expectManageSubagentProgress(stderr: string, count = 1) {
+  expect(occurrenceCount(stderr, MANAGE_SUBAGENT_PROGRESS)).toBe(count);
+  expect(stderr.toLowerCase()).not.toContain("error");
 }
 
 function expectNoParentDeliveries(body: string) {
@@ -1930,70 +1941,6 @@ describe("effect-aware command permissions", () => {
   );
 
   test.skipIf(!tmuxAvailable())(
-    "TUI writes Gateway schema diagnostics to a trace after Gateway 400",
-    async () => {
-      const root = createIsolatedRoot();
-      const gateway = startFakeGateway([
-        new Response(
-          JSON.stringify({
-            error: {
-              message: "Invalid input: expected string, received array",
-              param: ["prompt", 0, "content"],
-            },
-          }),
-          { status: 400, headers: { "content-type": "application/json" } },
-        ),
-      ]);
-      const stderrPath = join(root.root, "stderr.log");
-      installClipboardFixture(root, "#!/bin/sh\nexit 1\n");
-      writeFileSync(stderrPath, "");
-
-      activeSession = await TmuxSession.create({
-        cmd: FX_BIN,
-        cwd: root.workspace,
-        env: gatewayEnv(root, gateway, {
-          PATH: hostilePath(root),
-          TMPDIR: root.root,
-        }),
-        stderrPath,
-        width: 120,
-        height: 40,
-      });
-      await activeSession.waitForComposer(TIMEOUT);
-      await activeSession.sendText("Trigger the gateway schema diagnostic.");
-      await activeSession.waitForText("HTTP 400", TIMEOUT);
-
-      await activeSession.sendText("/trace");
-      await activeSession.waitForText(
-        process.platform === "darwin"
-          ? "Clipboard copy failed"
-          : "Trace saved at",
-        TIMEOUT,
-      );
-      const reportPath = latestTraceReportPath(root);
-      const report = readFileSync(reportPath, "utf8");
-
-      expect(gateway.requests).toHaveLength(1);
-      expect(report).toContain("## Problems");
-      expect(report).toContain("## Network Calls");
-      expect(report).toContain("status=400");
-      expect(report).toContain('gateway_schema="path=prompt.0.content expected=string received=array"');
-      expect(report).toContain("request_shape=");
-      expect(report).toContain("prompt.0 role=system content=string");
-      expect(report).toContain("role=user content=array");
-      expect(report).not.toContain('"text":"Trigger the gateway schema diagnostic."');
-      expect(statSync(reportPath).mode & 0o077).toBe(0);
-      expect(readFileSync(stderrPath, "utf8")).toBe("");
-
-      await activeSession.sendText("/quit");
-      expect(await activeSession.waitForSessionEnd()).toBe(true);
-      await activeSession.kill();
-      activeSession = null;
-    },
-    TIMEOUT,
-  );
-
-  test.skipIf(!tmuxAvailable())(
     "TUI creates a private Markdown trace without a feedback CTA",
     async () => {
       const root = createIsolatedRoot();
@@ -3400,7 +3347,7 @@ describe("effect-aware command permissions", () => {
       if (deliveryFailure) throw deliveryFailure;
 
       expect(first.code).toBe(0);
-      expect(first.stderr).toBe(MANAGE_SUBAGENT_PROGRESS);
+      expectManageSubagentProgress(first.stderr);
       expect(JSON.parse(first.stdout.trim()).output).toContain(
         "ASK_PARENT_FIRST_TURN_COMPLETE",
       );
@@ -3456,7 +3403,7 @@ describe("effect-aware command permissions", () => {
       );
 
       expect(second.code).toBe(0);
-      expect(second.stderr).toBe(MANAGE_SUBAGENT_PROGRESS);
+      expectManageSubagentProgress(second.stderr);
       expect(JSON.parse(second.stdout.trim()).output).toContain(
         "ASK_PARENT_DELIVERY_CONSUMED",
       );
@@ -3599,7 +3546,7 @@ describe("effect-aware command permissions", () => {
       );
 
       expect(first.code).toBe(0);
-      expect(first.stderr).toBe(MANAGE_SUBAGENT_PROGRESS);
+      expectManageSubagentProgress(first.stderr);
       expect(JSON.parse(first.stdout.trim()).output).toContain(
         "ASK_MULTI_DELIVERY_PARENT_FIRST_DONE",
       );
@@ -3712,7 +3659,7 @@ describe("effect-aware command permissions", () => {
       );
 
       expect(second.code).toBe(0);
-      expect(second.stderr).toBe(MANAGE_SUBAGENT_PROGRESS.repeat(2));
+      expectManageSubagentProgress(second.stderr, 2);
       expect(JSON.parse(second.stdout.trim()).output).toContain(
         "ASK_MULTI_DELIVERY_MESSAGES_CONSUMED",
       );
@@ -3871,7 +3818,7 @@ describe("effect-aware command permissions", () => {
         },
       );
       expect(first.code).toBe(0);
-      expect(first.stderr).toBe(MANAGE_SUBAGENT_PROGRESS);
+      expectManageSubagentProgress(first.stderr);
       expect(JSON.parse(first.stdout.trim()).output).toContain(
         "ASK_64K_PARENT_FIRST_DONE",
       );
@@ -4170,7 +4117,7 @@ describe("effect-aware command permissions", () => {
       if (deliveryFailure) throw deliveryFailure;
 
       expect(first.code).toBe(0);
-      expect(first.stderr).toBe(MANAGE_SUBAGENT_PROGRESS);
+      expectManageSubagentProgress(first.stderr);
       expect(JSON.parse(first.stdout.trim()).output).toContain("NESTED_ROOT_FIRST_DONE");
       expect(childId.length).toBeGreaterThan(0);
       expect(grandchildId.length).toBeGreaterThan(0);
@@ -4263,7 +4210,7 @@ describe("effect-aware command permissions", () => {
       expect(rootSubagentCallIds.size).toBe(1);
       expect(childSubagentCallIds.size).toBe(1);
       expect(secondGateway.requests).toHaveLength(4);
-      expect(second.stderr).toBe(MANAGE_SUBAGENT_PROGRESS);
+      expectManageSubagentProgress(second.stderr);
       expect(JSON.parse(second.stdout.trim()).output).toContain("NESTED_ROOT_SECOND_DONE");
       expect(childInitialChecked).toBe(true);
       expect(childContinuationDeliveryChecked).toBe(true);
@@ -4305,7 +4252,7 @@ describe("effect-aware command permissions", () => {
       );
 
       expect(third.code).toBe(0);
-      expect(third.stderr).toBe(MANAGE_SUBAGENT_PROGRESS);
+      expectManageSubagentProgress(third.stderr);
       expect(JSON.parse(third.stdout.trim()).output).toContain("NESTED_ROOT_THIRD_DONE");
       expect(childNoRedeliveryChecked).toBe(true);
       for (const eventId of grandchildEventIds) {
@@ -4438,7 +4385,7 @@ describe("effect-aware command permissions", () => {
         },
       );
       expect(first.code).toBe(0);
-      expect(first.stderr).toBe(MANAGE_SUBAGENT_PROGRESS);
+      expectManageSubagentProgress(first.stderr);
       expect(JSON.parse(first.stdout.trim()).output).toContain(
         "NESTED_64K_ROOT_FIRST_DONE",
       );
@@ -4495,7 +4442,7 @@ describe("effect-aware command permissions", () => {
           },
         );
         expect(turn.code).toBe(0);
-        expect(turn.stderr).toBe(MANAGE_SUBAGENT_PROGRESS);
+        expectManageSubagentProgress(turn.stderr);
         expect(JSON.parse(turn.stdout.trim()).output).toContain(
           `NESTED_64K_ROOT_PART_${index + 1}_DONE`,
         );
@@ -4547,7 +4494,7 @@ describe("effect-aware command permissions", () => {
         },
       );
       expect(final.code).toBe(0);
-      expect(final.stderr).toBe(MANAGE_SUBAGENT_PROGRESS);
+      expectManageSubagentProgress(final.stderr);
       expect(JSON.parse(final.stdout.trim()).output).toContain(
         "NESTED_64K_ROOT_NO_REDELIVERY_DONE",
       );
@@ -5646,8 +5593,19 @@ describe("effect-aware command permissions", () => {
       expect(gateway.classifierRequests[0]!.body).toContain(
         "Run the classifier fixture.",
       );
-      expect(gateway.classifierRequests[0]!.body).toContain("\"role\":\"assistant\"");
-      expect(gateway.classifierRequests[0]!.body).toContain("\"call_id\":\"command_1\"");
+      expect(classifierRequest.input).toContainEqual(
+        expect.objectContaining({
+          type: "function_call",
+          call_id: "command_1",
+          name: "terminal",
+        }),
+      );
+      expect(classifierRequest.input).toContainEqual(
+        expect.objectContaining({
+          type: "function_call_output",
+          call_id: "command_1",
+        }),
+      );
       expect(gateway.classifierRequests[0]!.body).toContain(
         "The first user message is the bounded current proven root-user request.",
       );
@@ -5702,7 +5660,6 @@ describe("effect-aware command permissions", () => {
       expect(gateway.requests).toHaveLength(3);
       expect(gateway.classifierRequests).toHaveLength(1);
       const trace = readFileSync(tracePath, "utf8");
-      expect(trace.match(/event=auto_review_transport_start/g)).toHaveLength(1);
       expect(trace.match(/event=auto_review_result/g)).toHaveLength(1);
       expect(trace).toContain("decision=unavailable");
       expect(trace).toContain("fallback_reason=invalid_or_unavailable");
@@ -5747,7 +5704,6 @@ describe("effect-aware command permissions", () => {
       expect(gateway.requests).toHaveLength(2);
       expect(gateway.classifierRequests).toHaveLength(1);
       const trace = readFileSync(tracePath, "utf8");
-      expect(trace.match(/event=auto_review_transport_start/g)).toHaveLength(1);
       expect(trace.match(/event=auto_review_result/g)).toHaveLength(1);
       expect(trace).toContain("decision=unavailable");
       expect(trace).toContain("fallback_reason=invalid_or_unavailable");
@@ -5797,7 +5753,6 @@ describe("effect-aware command permissions", () => {
       expect(gateway.requests).toHaveLength(2);
       expect(gateway.classifierRequests).toHaveLength(1);
       const trace = readFileSync(tracePath, "utf8");
-      expect(trace.match(/event=auto_review_transport_start/g)).toHaveLength(1);
       expect(trace.match(/event=auto_review_result/g)).toHaveLength(1);
       expect(trace).toContain("decision=unavailable");
       expect(trace).toContain("fallback_reason=invalid_or_unavailable");

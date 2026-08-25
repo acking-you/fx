@@ -14,7 +14,6 @@ const runtime_deps = @import("../deps.zig");
 const runtime_tool_contracts = @import("../tool_contracts.zig");
 const context_limits = @import("../../../config/context_limits.zig");
 const vision_executor = @import("../vision_executor.zig");
-const diagnostics = @import("../../../workspace/diagnostics.zig");
 const lifecycle_hooks = @import("../../../hooks/hooks.zig");
 const tool_dispatch = @import("../../../tooling/tool_dispatch.zig");
 const model_tool_schema = @import("../../../tooling/model_tool_schema.zig");
@@ -5602,44 +5601,6 @@ test "processQueuedPrompt non-ok gateway response trims and clips HTTP detail" {
     try std.testing.expectEqual(std.http.Status.bad_request, hooks.http_status.?);
     try std.testing.expectEqual(@as(usize, 4096), hooks.http_detail.?.len);
     try std.testing.expect(hooks.http_detail.?[0] == 'x');
-}
-
-test "processQueuedPrompt non-ok gateway response records schema diagnostics" {
-    const alloc = std.testing.allocator;
-    diagnostics.resetForTest();
-    defer diagnostics.resetForTest();
-
-    const detail =
-        \\{"error":{"message":"Invalid input: expected string, received array","param":["prompt",0,"content"]}}
-    ;
-    const completions = [_]FakeCompletion{.{
-        .status = .bad_request,
-        .err_body = detail,
-        .failure_schema = "path=prompt.0.content expected=string received=array",
-        .failure_request_shape = "prompt.0 role=system content=string prompt.1 role=user content=array",
-    }};
-    var gateway = FakeGateway.init(alloc, &completions);
-    defer gateway.deinit();
-    var hooks = FakeAgentRuntimeDeps.init(alloc);
-    defer hooks.deinit();
-    var fixture = PromptFixture{};
-
-    try runFakePrompt(&gateway, &hooks, fixture.config(), fixture.job());
-
-    var calls: [diagnostics.network_ring_capacity]diagnostics.NetworkCall = undefined;
-    const count = diagnostics.snapshotNetworkCalls(&calls);
-    try std.testing.expect(count > 0);
-    const call = calls[count - 1];
-    try std.testing.expectEqual(@as(u16, 400), call.status);
-    try std.testing.expectEqualStrings("anthropic/claude-opus-4.6", call.model());
-    try std.testing.expect(call.turn_id != 0);
-    try std.testing.expect(call.step_id != 0);
-    try std.testing.expectEqualStrings(
-        "path=prompt.0.content expected=string received=array",
-        call.gatewaySchemaDiagnostic(),
-    );
-    try std.testing.expect(std.mem.find(u8, call.gatewayRequestShape(), "prompt.0 role=system content=string") != null);
-    try std.testing.expect(std.mem.find(u8, call.gatewayRequestShape(), "prompt.1 role=user content=array") != null);
 }
 
 test "processQueuedPrompt refreshes Codex OAuth credential before Responses request" {

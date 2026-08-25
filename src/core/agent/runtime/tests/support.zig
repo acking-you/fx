@@ -200,8 +200,6 @@ fn testExecutionAuthority(call: ToolCall) command_admission.ToolExecutionAuthori
 pub const FakeCompletion = struct {
     status: std.http.Status = .ok,
     err_body: ?[]const u8 = null,
-    failure_schema: ?[]const u8 = null,
-    failure_request_shape: ?[]const u8 = null,
     retry_after_seconds: ?u64 = null,
     pre_send_error: ?anyerror = null,
     stream_error: ?anyerror = null,
@@ -328,17 +326,10 @@ pub const FakeGateway = struct {
         if (completion.status != .ok) {
             const err_body = if (completion.err_body) |body| try alloc.dupe(u8, body) else null;
             errdefer if (err_body) |value| alloc.free(value);
-            const failure_schema = if (completion.failure_schema) |value| try alloc.dupe(u8, value) else null;
-            errdefer if (failure_schema) |value| alloc.free(value);
-            const failure_request_shape = if (completion.failure_request_shape) |value| try alloc.dupe(u8, value) else null;
             return .{ .failed = .{
                 .kind = failureKind(completion.status),
                 .detail = err_body,
                 .retry_after_seconds = completion.retry_after_seconds,
-                .diagnostics = .{
-                    .schema = failure_schema,
-                    .request_shape = failure_request_shape,
-                },
                 .ownership = .owned,
             } };
         }

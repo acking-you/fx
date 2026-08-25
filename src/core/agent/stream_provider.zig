@@ -235,11 +235,6 @@ pub const FailureKind = enum {
     provider_error,
 };
 
-pub const FailureDiagnostics = struct {
-    schema: ?[]u8 = null,
-    request_shape: ?[]u8 = null,
-};
-
 pub const UsageUnavailable = enum {
     unbilled,
     possibly_billed,
@@ -259,7 +254,6 @@ pub const Completed = struct {
 pub const Failure = struct {
     kind: FailureKind,
     detail: ?[]u8 = null,
-    diagnostics: FailureDiagnostics = .{},
     retry_after_seconds: ?u64 = null,
     ownership: ResultOwnership = .borrowed,
 };
@@ -289,8 +283,6 @@ pub const Result = union(enum) {
             },
             .failed => |failure| if (failure.ownership == .owned) {
                 if (failure.detail) |detail| alloc.free(detail);
-                if (failure.diagnostics.schema) |schema| alloc.free(schema);
-                if (failure.diagnostics.request_shape) |shape| alloc.free(shape);
             },
         }
         self.* = undefined;

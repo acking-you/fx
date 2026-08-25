@@ -125,7 +125,7 @@ fn recordProviderResultMetric(
     const output_tokens = clampTokenCount(completion.usage.output_tokens);
     const terminal_stop_reason = if (completion.finish_reason) |reason| reason.label() else "";
 
-    runtime_telemetry.recordGatewayCallMetricWithDiagnostics(
+    runtime_telemetry.recordGatewayCallMetric(
         model,
         started_at_ms,
         if (failure) |value| failureMetricCode(value.kind) else 200,
@@ -137,10 +137,6 @@ fn recordProviderResultMetric(
         trace_ctx.subagent_id,
         "",
         terminal_stop_reason,
-        .{
-            .schema = if (failure) |value| value.diagnostics.schema orelse "" else "",
-            .request_shape = if (failure) |value| value.diagnostics.request_shape orelse "" else "",
-        },
     );
 }
 

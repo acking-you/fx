@@ -2305,8 +2305,6 @@ fn writeNetworkCallCompact(writer: *std.Io.Writer, call: diagnostics.NetworkCall
     if (call.terminalStopReason().len > 0) try writer.print(" stop_reason={s}", .{call.terminalStopReason()});
     if (call.turn_id != 0) try writer.print(" turn={d}", .{call.turn_id});
     if (call.step_id != 0) try writer.print(" step={d}", .{call.step_id});
-    if (call.gatewaySchemaDiagnostic().len > 0) try writer.print(" gateway_schema=\"{s}\"", .{call.gatewaySchemaDiagnostic()});
-    if (call.gatewayRequestShape().len > 0) try writer.print(" request_shape=\"{s}\"", .{call.gatewayRequestShape()});
     try writer.writeByte('\n');
 }
 
@@ -3821,37 +3819,6 @@ test "trace renders web search request count without content" {
     try std.testing.expect(std.mem.find(u8, text, "web_search_requests=2") != null);
     try std.testing.expect(std.mem.find(u8, text, "stop_reason=max_tokens") != null);
     try std.testing.expect(std.mem.find(u8, text, "raw result content") == null);
-}
-
-test "trace renders gateway schema diagnostics without raw payload content" {
-    const alloc = std.testing.allocator;
-    diagnostics.resetForTest();
-    defer diagnostics.resetForTest();
-
-    var call: diagnostics.NetworkCall = .{
-        .started_at_ms = 5000,
-        .duration_ms = 17,
-        .status = 400,
-        .response_bytes = 91,
-        .turn_id = 12,
-        .step_id = 34,
-    };
-    call.setModel("zai/glm-5.2-fast");
-    call.setGatewaySchemaDiagnostic("path=input.0.content expected=array received=string");
-    call.setGatewayRequestShape("bytes=123 input_count=1 input.0 role=user content=array tools=array tools_count=0 tool_choice=auto");
-    diagnostics.recordNetworkCall(call);
-
-    var out: std.Io.Writer.Allocating = .init(alloc);
-    defer out.deinit();
-    try writeNetworkCallsSummary(&out.writer);
-    const text = out.written();
-
-    try std.testing.expect(std.mem.find(u8, text, "status=400") != null);
-    try std.testing.expect(std.mem.find(u8, text, "turn=12") != null);
-    try std.testing.expect(std.mem.find(u8, text, "step=34") != null);
-    try std.testing.expect(std.mem.find(u8, text, "gateway_schema=\"path=input.0.content expected=array received=string\"") != null);
-    try std.testing.expect(std.mem.find(u8, text, "request_shape=\"bytes=123 input_count=1 input.0 role=user content=array") != null);
-    try std.testing.expect(std.mem.find(u8, text, "SECRET_RAW_PROMPT") == null);
 }
 
 test "app_commands exposes active handler API surface" {
