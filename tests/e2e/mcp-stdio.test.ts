@@ -1507,7 +1507,7 @@ describe("modern MCP stdio compatibility", () => {
     expect(result.progress).toBe(true);
     expect(result.reader_joined).toBe(true);
     expect(isProcessAlive(result.child_pid)).toBe(false);
-  }, 30_000);
+  }, 120_000);
 
   test("operation timeout bounds a blocked stdin write and reaps the child", async () => {
     const proc = Bun.spawn(

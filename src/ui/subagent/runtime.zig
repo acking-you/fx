@@ -1379,8 +1379,7 @@ pub const Runtime = struct {
 
     pub fn visibleChildAcknowledgementSequence(self: Runtime) ?u64 {
         if (self.childRouteId() == null) return null;
-        const node = self.routedNode() orelse return null;
-        if (node.unread_count == 0 or self.child.presented_through_sequence == 0) return null;
+        if (self.child.presented_through_sequence == 0) return null;
         return self.child.presented_through_sequence;
     }
 
@@ -2756,14 +2755,7 @@ pub const Runtime = struct {
                 var result: Command = .redraw;
                 switch (route) {
                     .child => |child_id| {
-                        const node = if (self.snapshot) |snapshot|
-                            findNodeIn(snapshot.nodes, child_id)
-                        else
-                            null;
-                        const acknowledge_visible = if (node) |value|
-                            value.unread_count > 0 and self.child.presented_through_sequence > 0
-                        else
-                            false;
+                        const acknowledge_visible = self.child.presented_through_sequence > 0;
                         if (acknowledge_visible) {
                             try self.setPendingChildAcknowledgement(
                                 alloc,
@@ -7876,7 +7868,10 @@ test "leaving a selected child acknowledges activity that arrived while visible"
 
     var update = try testSnapshot(alloc, 2, &.{"child"});
     update.nodes[0].through_sequence = 7;
-    update.nodes[0].unread_count = 1;
+    // The child view can present a delivery before the list projection has
+    // refreshed its unread count. Leaving the view must still acknowledge the
+    // sequence that was actually shown.
+    update.nodes[0].unread_count = 0;
     try std.testing.expect(try runtime.replaceSnapshot(alloc, update));
     try std.testing.expect(runtime.visibleChildAcknowledgementSequence() == null);
     runtime.commitChildPresentationViewport(20, 10, 4);

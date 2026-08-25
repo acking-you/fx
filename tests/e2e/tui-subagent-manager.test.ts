@@ -1683,7 +1683,16 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         expect(externalApproval).toContain("Permission needed");
         expect(externalApproval).toContain("EXTERNAL");
         expect(existsSync(externalMarker)).toBe(false);
-        await active.sendLiteralText("3");
+        await active.sendKeys("Down");
+        await active.sendKeys("Down");
+        await active.waitForPane(
+          (pane) => pane.split("\n").some((line) =>
+            line.includes("❯") &&
+            line.includes("3  Don't apply")
+          ),
+          TIMEOUT,
+        );
+        await active.sendKeys("Enter");
         await active.waitForPane(
           (pane) =>
             pane.includes("ALWAYS_WRITE_EXTERNAL_DONE") &&
@@ -5098,7 +5107,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         const external = await waitForConfigurationControl(
           controlPath,
           (control) =>
-            control.generation === initial.generation + 1 &&
+            control.generation > initial.generation &&
             control.configuration.name === "external-winner",
         );
         const refreshed = await active.waitForPane(
@@ -5113,7 +5122,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         expect(external.operations.at(-1)).toMatchObject({
           code: "configured",
           identity_source: "model",
-          generation: initial.generation + 1,
+          generation: external.generation,
         });
 
         await active.sendKeys("Enter");

@@ -124,6 +124,11 @@ class PgsoQualificationTests(unittest.TestCase):
             tuple(plan.profile_module for plan in BENCHMARK_PLANS),
         )
         self.assertTrue(all(plan.function_prefixes for plan in BENCHMARK_PLANS))
+        ui_activity = next(
+            plan for plan in BENCHMARK_PLANS if plan.selector == "ui_activity"
+        )
+        self.assertEqual(((),), ui_activity.training_argvs)
+        self.assertEqual(("qualify",), ui_activity.workloads[0].argv)
 
     def test_startup_selection_returns_only_the_assigned_command(self) -> None:
         selected = select_startup_commands(("doctor",))

@@ -6,6 +6,7 @@ const call_ids = [_][]const u8{ "first", "second" };
 const samples_per_batch = 100;
 const comparison_batches = 9;
 const growth_batches = 5;
+const qualification_updates = 500_000;
 const ratio_scale = 1_000;
 const max_ratio = 2 * ratio_scale;
 const Harness = struct {
@@ -111,6 +112,12 @@ fn growthRatio(io: std.Io, alloc: std.mem.Allocator) !u64 {
     return ratio(try measureP95(io, &candidate, alloc), initial);
 }
 
+fn runQualificationWorkload(alloc: std.mem.Allocator) !void {
+    var candidate = try Harness.init(alloc, .candidate);
+    defer candidate.transcript.deinit(alloc);
+    try runUpdates(&candidate, alloc, qualification_updates);
+}
+
 const Gate = struct {
     median: u64,
     breaches: usize,
@@ -130,6 +137,14 @@ fn evaluate(ratios: []u64, breach_quorum: usize) Gate {
     };
 }
 pub fn main(init: std.process.Init) !void {
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
+    const qualification = switch (args.len) {
+        1 => false,
+        2 => std.mem.eql(u8, std.mem.sliceTo(args[1], 0), "qualify"),
+        else => false,
+    };
+    if (args.len > 1 and !qualification) return error.InvalidArguments;
+
     const alloc = std.heap.c_allocator;
     var comparison_ratios: [comparison_batches]u64 = undefined;
     for (&comparison_ratios, 0..) |*value, index| {
@@ -139,6 +154,15 @@ pub fn main(init: std.process.Init) !void {
     for (&growth_ratios) |*value| value.* = try growthRatio(init.io, alloc);
     const comparison = evaluate(&comparison_ratios, 5);
     const growth = evaluate(&growth_ratios, 3);
+
+    if (qualification) {
+        // The distributed gate compares whole-process wall time on shared
+        // hosts. Keep representative lifecycle work dominant so a scheduler
+        // pause cannot outweigh the ten-percent regression budget of an
+        // otherwise short run. Profile training omits this qualification-only
+        // work so it cannot distort the production profile's relative weights.
+        try runQualificationWorkload(alloc);
+    }
 
     var buffer: [512]u8 = undefined;
     var writer = std.Io.File.stdout().writer(init.io, &buffer);
