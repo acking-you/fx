@@ -4420,7 +4420,10 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         await active.sendKeys("Tab");
         await pasteVisibleText(active, "POINTER_CHILD_INITIAL");
         await active.sendKeys("Enter");
-        await active.waitForText("CHILD_POINTER_READY", TIMEOUT);
+        await active.waitForPane(
+          (pane) => pane.includes("CHILD_POINTER_READY") && pane.includes("status: idle"),
+          TIMEOUT,
+        );
 
         await active.sendLiteralText("abcdef");
         const pane = await active.waitForText("abcdef", TIMEOUT);
