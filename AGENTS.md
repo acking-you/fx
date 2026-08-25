@@ -371,7 +371,7 @@ Keep PR titles as clean imperative sentences, such as `Restore feedback report f
 
 Do not run the complete deterministic test suite locally as the default development loop. Run the focused test for the changed path, build the binary, and exercise that path with `./zig-out/bin/fx`.
 
-After the focused checks pass, create a clean checkpoint commit, push the non-`main` feature branch, and open a draft PR immediately. `.github/workflows/full-ci.yml` runs the following on all four supported native runner architectures:
+After the focused checks pass, create a clean checkpoint commit, push the non-`main` feature branch, and open a draft PR immediately. `.github/workflows/full-ci.yml` runs on feature-branch pushes and manual dispatches, but not on pushes to `main` or `byok`; a squash merge into `byok` must not repeat the Full CI already proven for the exact feature commit. It runs the following on all four supported native runner architectures:
 
 * `ubuntu-24.04` (x86_64)
 * `ubuntu-24.04-arm` (aarch64)
