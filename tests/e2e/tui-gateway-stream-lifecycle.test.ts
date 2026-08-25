@@ -3463,6 +3463,12 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
 
       hold.release?.();
       await session.waitForText("ACTIVE_ORIGINAL_MODEL_FINISHED", TIMEOUT);
+      await session.waitForPane(
+        (pane) =>
+          pane.includes("ACTIVE_ORIGINAL_MODEL_FINISHED") &&
+          !pane.includes("Thinking"),
+        TIMEOUT,
+      );
       await session.sendText("Use the selected model now.");
       await session.waitForText(nextTurnDone, TIMEOUT);
       await waitForCondition(
