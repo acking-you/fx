@@ -137,6 +137,14 @@ fn evaluate(ratios: []u64, breach_quorum: usize) Gate {
     };
 }
 pub fn main(init: std.process.Init) !void {
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
+    const qualification = switch (args.len) {
+        1 => false,
+        2 => std.mem.eql(u8, std.mem.sliceTo(args[1], 0), "qualify"),
+        else => false,
+    };
+    if (args.len > 1 and !qualification) return error.InvalidArguments;
+
     const alloc = std.heap.c_allocator;
     var comparison_ratios: [comparison_batches]u64 = undefined;
     for (&comparison_ratios, 0..) |*value, index| {
@@ -147,10 +155,14 @@ pub fn main(init: std.process.Init) !void {
     const comparison = evaluate(&comparison_ratios, 5);
     const growth = evaluate(&growth_ratios, 3);
 
-    // The distributed gate compares whole-process wall time on shared hosts.
-    // Keep representative lifecycle work dominant so a scheduler pause cannot
-    // outweigh the ten-percent regression budget of an otherwise short run.
-    try runQualificationWorkload(alloc);
+    if (qualification) {
+        // The distributed gate compares whole-process wall time on shared
+        // hosts. Keep representative lifecycle work dominant so a scheduler
+        // pause cannot outweigh the ten-percent regression budget of an
+        // otherwise short run. Profile training omits this qualification-only
+        // work so it cannot distort the production profile's relative weights.
+        try runQualificationWorkload(alloc);
+    }
 
     var buffer: [512]u8 = undefined;
     var writer = std.Io.File.stdout().writer(init.io, &buffer);

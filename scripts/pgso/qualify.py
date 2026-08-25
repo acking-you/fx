@@ -114,7 +114,7 @@ BENCHMARK_PLANS = (
             "ui.render_engine.",
         ),
         training_argvs=((),),
-        workloads=(Workload("ui-activity", ()),),
+        workloads=(Workload("ui-activity", ("qualify",)),),
     ),
     BenchmarkPlan(
         selector="approval_review",
