@@ -2594,7 +2594,9 @@ describe.skipIf(SKIP)("tui: resize", () => {
           surfaceCase.height,
           gateway
             ? {
+                OPENAI_API_KEY: "fake-footer-model-key",
                 FX_RESPONSES_BASE_URL: gateway.baseUrl,
+                FX_MODEL: "provider/model-a",
               }
             : {},
         );

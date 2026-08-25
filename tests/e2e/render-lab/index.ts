@@ -1666,7 +1666,6 @@ async function launchFx(
   await session.sendText(
     `${environmentPrefix}FX_RECORD=${shQuote(context.manifest.tapePath)} FX_RECORD_INPUT=1 ${shQuote(FX_BIN)}${stderrRedirect}`,
   );
-  await capture(context, session, `${label}-fx-launch-requested`);
   await session.waitForPane((pane) => pane.includes("Run /help for commands"), 25_000);
   await capture(context, session, `${label}-fx-prompt-visible`);
 }
@@ -2063,7 +2062,6 @@ class RenderLabTmux {
       "env",
       "-u",
       "OPENAI_API_KEY",
-      "-u",
       "FX_DISABLE_KEYCHAIN=1",
       "FX_SKIP_ONBOARDING=1",
       `HOME=${shQuote(opts.fixture.home)}`,

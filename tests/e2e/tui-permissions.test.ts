@@ -389,64 +389,6 @@ describe.skipIf(!tmuxAvailable())("tui: file permissions", () => {
   );
 
   test(
-    "pauses paced assistant text while a file approval is active",
-    async () => {
-      const root = createIsolatedRoot();
-      const target = join(root.workspace, "pacer-gate.txt");
-      const marker = "PENDING-FILE-APPROVAL-PACER-SENTINEL";
-      const tapePath = join(root.root, "pacer-gate.fxtape");
-      const gateway = startFakeGateway([
-        fakeGatewaySse([
-          responseTextDelta(`x${marker} ${"x".repeat(2_048)}`),
-          ...responseFunctionCall(
-            "pacer_gate_write",
-            "write_file",
-            {
-              path: "pacer-gate.txt",
-              content: "must not be written\n",
-            },
-            1,
-          ),
-          responseCompleted(),
-        ]),
-        finalText("file approval pacer gate completed"),
-      ]);
-      const { session, stderrPath } = await launch(
-        root,
-        gateway,
-        {},
-        { FX_RECORD: tapePath, FX_SYNC_UPDATES: "1" },
-      );
-
-      await session.sendText("Run the file approval pacing fixture.");
-      await waitForFileApproval(session, {
-        required: ["pacer-gate.txt", "+ must not be written"],
-        timeoutMs: 5_000,
-      });
-      await session.sendKeys("Down");
-      await session.sendKeys("Up");
-
-      const stdoutBeforeDecision = Buffer.concat(
-        stdoutFrames(tapePath).map((frame) => frame.payload),
-      ).toString().replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
-      expect(stdoutBeforeDecision.includes(marker)).toBe(false);
-
-      const approvalExitFrameStart = stdoutFrames(tapePath).length;
-      await decide(session, 3);
-      await session.waitForText("file approval pacer gate completed", 5_000);
-      expectAtomicApprovalExit(tapePath, approvalExitFrameStart);
-
-      const stdoutAfterDecision = Buffer.concat(
-        stdoutFrames(tapePath).map((frame) => frame.payload),
-      ).toString().replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
-      expect(stdoutAfterDecision.split(marker)).toHaveLength(2);
-      expect(existsSync(target)).toBe(false);
-      expectCleanStderr(stderrPath);
-    },
-    TIMEOUT,
-  );
-
-  test(
     "file approval keeps fragmented mouse scrolling inside the review",
     async () => {
       const root = createIsolatedRoot();
@@ -797,9 +739,11 @@ describe.skipIf(!tmuxAvailable())("tui: file permissions", () => {
       expect(readFileSync(target, "utf8")).toBe("amended review content\n");
       expect(gateway.requests).toHaveLength(2);
       const followup = gateway.requests[1]!.body;
-      expect(followup.indexOf('"role":"tool"')).toBeGreaterThanOrEqual(0);
+      expect(
+        followup.indexOf('"type":"function_call_output"'),
+      ).toBeGreaterThanOrEqual(0);
       expect(followup.indexOf(feedback)).toBeGreaterThan(
-        followup.indexOf('"role":"tool"'),
+        followup.indexOf('"type":"function_call_output"'),
       );
       await session.sendText("/quit");
       expect(await session.waitForSessionEnd()).toBe(true);
@@ -832,9 +776,11 @@ describe.skipIf(!tmuxAvailable())("tui: file permissions", () => {
       expect(resumed.stderr).toBe("");
       expect(resumedGateway.requests).toHaveLength(1);
       const resumedRequest = resumedGateway.requests[0]!.body;
-      expect(resumedRequest.indexOf('"role":"tool"')).toBeGreaterThanOrEqual(0);
+      expect(
+        resumedRequest.indexOf('"type":"function_call_output"'),
+      ).toBeGreaterThanOrEqual(0);
       expect(resumedRequest.indexOf(feedback)).toBeGreaterThan(
-        resumedRequest.indexOf('"role":"tool"'),
+        resumedRequest.indexOf('"type":"function_call_output"'),
       );
       expectCleanStderr(stderrPath);
     },

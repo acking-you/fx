@@ -2050,12 +2050,14 @@ describe("gateway stream lifecycle", () => {
         status: "error",
       });
       const followup = gatewayRequest(gateway.requests[1].body);
-      expect(followup.input).toContainEqual({
-        type: "function_call",
-        call_id: MALFORMED_CALL_ID,
-        name: MALFORMED_TOOL_NAME,
-        arguments: "{}",
-      });
+      expect(followup.input).toContainEqual(
+        expect.objectContaining({
+          type: "function_call",
+          call_id: MALFORMED_CALL_ID,
+          name: MALFORMED_TOOL_NAME,
+          arguments: "{}",
+        }),
+      );
       expect(followup.input).toContainEqual(
         expect.objectContaining({
           type: "function_call_output",

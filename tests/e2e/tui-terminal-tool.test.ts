@@ -2606,12 +2606,17 @@ test.skipIf(!tmuxAvailable())(
       expect(pane).toContain(label);
     }
     expect(gateway.requests).toHaveLength(9);
-    expect(gateway.requests[2]!.body).toContain(
-      '"kind":"output_contains"',
-    );
-    expect(gateway.requests[2]!.body).toContain(
-      '"check_interval_ms":1',
-    );
+    expect(toolCallInput(gateway.requests[2]!.body, callIds[1]!)).toMatchObject({
+      request: {
+        action: "monitor",
+        monitor: {
+          definition: {
+            condition: { kind: "output_contains" },
+            check_interval_ms: 1,
+          },
+        },
+      },
+    });
     for (const [index, callId] of callIds.entries()) {
       const result = toolResultText(gateway.requests[index + 1]!.body, callId);
       expect(result).not.toContain("owner_authority");
