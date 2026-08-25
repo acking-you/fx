@@ -1411,13 +1411,15 @@ pub fn Runtime(comptime App: type) type {
                 },
                 ' ' => {
                     dismissMentionSkillsMenuForSpace(app);
+                    var advanced_model_picker = false;
                     if (app.input_runtime.edit_state.selectionRange() == null and
                         !commandSkillsMenuActive(app) and
                         completion_rt.hasModelQuery(app))
                     {
-                        if (try completion_rt.advanceModelPickerOnSpace(app)) {
-                            app.shell.render_requests.request(.footer);
-                        }
+                        advanced_model_picker = try completion_rt.advanceModelPickerOnSpace(app);
+                    }
+                    if (advanced_model_picker) {
+                        app.shell.render_requests.request(.footer);
                     } else {
                         switch (try insertComposerSliceBounded(app, " ", max_input_len, false)) {
                             .inserted => {
@@ -5593,6 +5595,36 @@ test "model picker spaces do not commit before enter" {
     try std.testing.expectEqualStrings(
         "/model anthropic/claude-sonnet-4.6 auto",
         app.input_runtime.edit_state.input.items,
+    );
+}
+
+test "typing a no-control model selection keeps trailing arguments local until enter" {
+    const alloc = std.testing.allocator;
+    const model = "openai/gpt-5";
+    const command = "/model " ++ model ++ " auto normal";
+    const completions = [_][]const u8{model};
+    var app = try RoutingFakeApp.init(alloc);
+    defer app.deinit();
+    app.model_completion_values = &completions;
+    app.stream.active = true;
+
+    for (command) |byte| {
+        try Runtime(RoutingFakeApp).handleByte(&app, byte, 4096, 100);
+    }
+
+    try std.testing.expectEqualStrings(command, app.input_runtime.edit_state.input.items);
+    try std.testing.expectEqual(@as(usize, 0), app.preference_commit_count);
+    try std.testing.expectEqual(@as(usize, 0), app.submitted_prompt_count);
+
+    try Runtime(RoutingFakeApp).handleByte(&app, '\r', 4096, 100);
+
+    try std.testing.expectEqualStrings("", app.input_runtime.edit_state.input.items);
+    try std.testing.expectEqual(@as(usize, 1), app.preference_commit_count);
+    try std.testing.expectEqual(@as(usize, 0), app.submitted_prompt_count);
+    try std.testing.expectEqualStrings(model, app.selected_model.items);
+    try std.testing.expectEqualStrings(
+        "Next turn will use " ++ model,
+        app.notice_body.items,
     );
 }
 

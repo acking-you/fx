@@ -3476,8 +3476,30 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         "next-turn selected-model request",
       );
 
-      expect(queuedGateway.requests).toHaveLength(2);
-      expect(JSON.parse(queuedGateway.requests[1]!.body).model).toBe("gpt-5");
+      const requestSummaries = queuedGateway.requests.map(({ body }) => {
+        const request = JSON.parse(body) as {
+          model?: unknown;
+          input?: Array<{
+            type?: unknown;
+            role?: unknown;
+            content?: unknown;
+          }>;
+        };
+        const userMessage = request.input?.findLast(
+          (item) => item.type === "message" && item.role === "user",
+        );
+        const userText = Array.isArray(userMessage?.content)
+          ? userMessage.content
+            .filter((part) => part?.type === "input_text")
+            .map((part) => part.text)
+            .join("")
+          : userMessage?.content;
+        return { model: request.model, user: userText };
+      });
+      expect(requestSummaries).toEqual([
+        { model: GLM_MODEL, user: "Hold the original model turn open." },
+        { model: "gpt-5", user: "Use the selected model now." },
+      ]);
       expect(JSON.parse(readFileSync(join(home, ".fx", "settings.json"), "utf8")))
         .toMatchObject({ models: { gateway: nextModel }, effort: "auto" });
       expect(readFileSync(stderrPath, "utf8")).toBe("");
