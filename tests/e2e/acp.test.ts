@@ -496,29 +496,6 @@ function expectAcpParentHistoryClean(
   }
 }
 
-function writeSeededFxAuth(home: string, teamId?: string): void {
-  const fxDir = join(home, ".fx");
-  mkdirSync(fxDir, { recursive: true, mode: 0o700 });
-  chmodSync(fxDir, 0o700);
-  const authPath = join(fxDir, "auth.json");
-  const auth: Record<string, string | number> = {
-    version: 1,
-    issuer: "https://vercel.com",
-    client_id: "test-client",
-    access_token: SEEDED_GATEWAY_TOKEN,
-    refresh_token: "seeded-refresh-token",
-    expires_at_ms: Date.now() + 60 * 60 * 1000,
-    scope: "openid",
-    token_type: "Bearer",
-  };
-  if (teamId) {
-    auth.team_id = teamId;
-    auth.team_slug = "vercel-labs";
-  }
-  writeFileSync(authPath, JSON.stringify(auth) + "\n", { mode: 0o600 });
-  chmodSync(authPath, 0o600);
-}
-
 function acpChatGptAccessToken(
   accountId = "acct_acp_e2e",
   signature = "signature",
@@ -4660,12 +4637,11 @@ describe("acp: model-independent", () => {
           finalText("ACP external write accepted"),
         ]);
         try {
-          writeSeededFxAuth(acceptedRoot.home, "team_123");
           client = await AcpClient.create({
             cwd: acceptedRoot.workspace,
             env: {
               ...fakeGatewayEnv(acceptedRoot, acceptedGateway),
-              AI_GATEWAY_API_KEY: undefined,
+              AI_GATEWAY_API_KEY: SEEDED_GATEWAY_TOKEN,
               VERCEL_OIDC_TOKEN: undefined,
               FX_DISABLE_KEYCHAIN: "1",
             },
@@ -4683,7 +4659,7 @@ describe("acp: model-independent", () => {
           );
           expect(
             acceptedGateway.classifierRequests[0]!.headers.get("x-vercel-ai-gateway-team"),
-          ).toBe("team_123");
+          ).toBeNull();
           expect(acceptedGateway.classifierRequests[0]!.body).toContain(
             acceptedPrompt,
           );
@@ -7631,7 +7607,7 @@ describe("acp: model-independent", () => {
   );
 });
 
-describe("acp: model catalog authentication", () => {
+describe("acp: model catalog credentials", () => {
   let client: AcpClient;
 
   afterEach(async () => {
@@ -7640,45 +7616,34 @@ describe("acp: model catalog authentication", () => {
 
   for (const scenario of [
     {
-      name: "includes team-private model options for seeded team auth",
-      teamId: "team_123",
+      name: "includes private model options for an AI Gateway API key",
+      apiKey: SEEDED_GATEWAY_TOKEN,
       expectedAuthorization: `Bearer ${SEEDED_GATEWAY_TOKEN}`,
-      expectedTeamId: "team_123",
       expectPrivate: true,
-    },
-    {
-      name: "uses public model options for seeded login without a selected team",
-      teamId: undefined,
-      expectedAuthorization: null,
-      expectedTeamId: null,
-      expectPrivate: false,
     },
   ]) {
     test(
       `session/new ${scenario.name}`,
       async () => {
-        const root = createIsolatedRoot("fx-acp-team-model-options-");
+        const root = createIsolatedRoot("fx-acp-gateway-model-options-");
         const gateway = startFakeGateway([], {
           models(request) {
-            const url = new URL(request.url);
             const seededAuth = request.headers.get("authorization") ===
               `Bearer ${SEEDED_GATEWAY_TOKEN}`;
-            const hasTeam = url.searchParams.get("teamId") === "team_123";
             return [
               { id: FAKE_GATEWAY_MODEL, type: "language", tags: ["tool-use"] },
-              ...(seededAuth && hasTeam
+              ...(seededAuth
                 ? [{ id: "private/blue-hornbill", type: "language", tags: ["tool-use"] }]
                 : []),
             ];
           },
         });
         try {
-          writeSeededFxAuth(root.home, scenario.teamId);
           client = await AcpClient.create({
             cwd: root.workspace,
             env: {
               ...fakeGatewayEnv(root, gateway),
-              AI_GATEWAY_API_KEY: undefined,
+              AI_GATEWAY_API_KEY: scenario.apiKey,
               VERCEL_OIDC_TOKEN: undefined,
               FX_DISABLE_KEYCHAIN: "1",
             },
@@ -7690,9 +7655,7 @@ describe("acp: model catalog authentication", () => {
           expect(modelRequest.headers.get("authorization")).toBe(
             scenario.expectedAuthorization,
           );
-          expect(new URL(modelRequest.url).searchParams.get("teamId")).toBe(
-            scenario.expectedTeamId,
-          );
+          expect(new URL(modelRequest.url).searchParams.get("teamId")).toBeNull();
           expect(modelRequest.headers.get("x-vercel-ai-gateway-team")).toBeNull();
 
           const modelOpt = resp.result.configOptions.find((o: any) => o.id === "model");

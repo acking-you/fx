@@ -92,7 +92,13 @@ await waitFor(() => grid().includes("Full detail"), "full transcript detail");
 runtime.write("\x0f");
 await waitFor(() => terminal.buffer.active.type === "normal", "full transcript close");
 
-await command("/login", "Vercel sign-in failed. The current credential is unchanged.");
+runtime.write("/login\r");
+await waitFor(() => grid().includes("Accounts") && grid().includes("Switch credential"), "credential hub");
+if (grid().includes("Vercel sign-in") || grid().includes("Change team")) {
+  throw new Error(`removed Vercel account actions remain in the credential hub:\n${grid()}`);
+}
+runtime.write("\x1b");
+await waitFor(() => !grid().includes("Switch credential"), "credential hub close");
 await command("/resume", "Session resume is owned by the embedding SDK");
 await command("/mcp list", "No MCP servers configured");
 await command("/skills list", "Skills are unavailable in this host");

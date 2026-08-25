@@ -384,7 +384,7 @@ describe.skipIf(SKIP_TMUX)("tui: credential onboarding", () => {
       session = await TmuxSession.create({ env });
 
       const initial = await session.waitForText("Welcome to fx", TIMEOUT);
-      expect(initial).toContain("Sign in with Vercel");
+      expect(initial).toContain("Sign in with Codex");
       expect(initial).toContain("Sign in with Grok");
       expect(initial).toContain("Esc to sign in later");
       expect(initial).not.toContain("Change team");
@@ -393,7 +393,7 @@ describe.skipIf(SKIP_TMUX)("tui: credential onboarding", () => {
 
       await session.sendKeys("Escape");
       const skipped = await session.waitForPane(
-        (pane) => !pane.includes("Welcome to fx") && !pane.includes("Sign in with Vercel"),
+        (pane) => !pane.includes("Welcome to fx") && !pane.includes("Sign in with Codex"),
         TIMEOUT,
       );
       expect(skipped).not.toContain("Sign in with Grok");
@@ -401,7 +401,7 @@ describe.skipIf(SKIP_TMUX)("tui: credential onboarding", () => {
       await session.kill();
       session = await TmuxSession.create({ env });
       const restarted = await session.waitForText("Welcome to fx", TIMEOUT);
-      expect(restarted).toContain("Sign in with Vercel");
+      expect(restarted).toContain("Sign in with Codex");
       expect(restarted).toContain("Sign in with Grok");
     },
     60_000,

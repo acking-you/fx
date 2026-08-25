@@ -18,7 +18,7 @@ pub const entries = [_]Entry{
         .aliases = &.{ "gateway", "ai-gateway" },
         .name = "Vercel AI Gateway",
         .route_name = "Vercel AI Gateway",
-        .description = "Vercel account or AI Gateway billing",
+        .description = "Vercel AI Gateway credentials and billing",
         .subscription = false,
     },
     .{

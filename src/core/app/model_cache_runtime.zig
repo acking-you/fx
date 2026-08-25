@@ -1067,12 +1067,12 @@ test "model cache refetches effective access across auth and team changes" {
     const public_access: credentials.CatalogAccess = .{ .public_only = .no_credential };
     const team_a_access = authenticatedCatalogAccess("team-key", "team_a");
     const team_b_access = authenticatedCatalogAccess("team-key", "team_b");
-    const fx_login_access = credentials.catalogAccessForCredential(.fx_login, "login-token", "ignored-team");
+    const openai_access = credentials.catalogAccessForCredential(.openai_api_key, "openai-token", null);
     const cases = [_]struct { access: credentials.CatalogAccess, model_id: []const u8 }{
         .{ .access = public_access, .model_id = "public/original" },
         .{ .access = team_a_access, .model_id = "private/team-a" },
         .{ .access = team_b_access, .model_id = "private/team-b" },
-        .{ .access = fx_login_access, .model_id = "public/login" },
+        .{ .access = openai_access, .model_id = "openai/direct" },
     };
 
     var provider = AuthChangeCatalog{};
@@ -1097,55 +1097,45 @@ test "model cache refetches effective access across auth and team changes" {
     try std.testing.expectEqual(@as(usize, cases.len), provider.calls);
 }
 
-test "model cache reloads a ready authenticated catalog after Fx login access downgrades" {
-    const cases = [_]struct {
-        access: credentials.CatalogAccess,
-        reason: credentials.CatalogPublicOnlyReason,
-    }{
-        .{
-            .access = .{ .public_only = .fx_login_refresh_required },
-            .reason = .fx_login_refresh_required,
-        },
-        .{
-            .access = credentials.catalogAccessAfterRefreshFailure(.fx_login),
-            .reason = .credential_refresh_failed,
-        },
-    };
+test "model cache reloads a ready authenticated catalog after credential refresh failure" {
+    var runtime = Runtime.init(std.testing.allocator, "/v1/models");
+    defer runtime.deinit();
+    var private_provider = AuthChangeCatalog{ .model_id = "private/team-model" };
+    runtime.startWarmup(
+        private_provider.provider(),
+        credentials.catalogAccessForCredential(.ai_gateway_api_key, "gateway-key", "team_123"),
+    );
+    try waitForWarmup(&runtime);
 
-    for (cases) |case| {
-        var runtime = Runtime.init(std.testing.allocator, "/v1/models");
-        defer runtime.deinit();
-        var private_provider = AuthChangeCatalog{ .model_id = "private/team-model" };
-        runtime.startWarmup(
-            private_provider.provider(),
-            credentials.catalogAccessForCredential(.fx_login, "login-token", "team_123"),
-        );
-        try waitForWarmup(&runtime);
+    var public_provider = AuthChangeCatalog{ .model_id = "public/base-model" };
+    runtime.startWarmup(
+        public_provider.provider(),
+        credentials.catalogAccessAfterRefreshFailure(.chatgpt_subscription),
+    );
+    try waitForWarmup(&runtime);
 
-        var public_provider = AuthChangeCatalog{ .model_id = "public/base-model" };
-        runtime.startWarmup(public_provider.provider(), case.access);
-        try waitForWarmup(&runtime);
-
-        try std.testing.expectEqual(@as(usize, 1), public_provider.calls);
-        try std.testing.expect(!public_provider.credential_present);
-        try std.testing.expectEqual(@as(usize, 0), public_provider.team_len);
-        try std.testing.expectEqual(case.reason, runtime.outcome.loaded.?.access.public_only_reason.?);
-        try std.testing.expect(runtime.catalogModelCompletion("private/team-model") == null);
-        try std.testing.expectEqualStrings("public/base-model", runtime.catalogModelCompletion("public/base-model").?);
-    }
+    try std.testing.expectEqual(@as(usize, 1), public_provider.calls);
+    try std.testing.expect(!public_provider.credential_present);
+    try std.testing.expectEqual(@as(usize, 0), public_provider.team_len);
+    try std.testing.expectEqual(
+        credentials.CatalogPublicOnlyReason.credential_refresh_failed,
+        runtime.outcome.loaded.?.access.public_only_reason.?,
+    );
+    try std.testing.expect(runtime.catalogModelCompletion("private/team-model") == null);
+    try std.testing.expectEqualStrings("public/base-model", runtime.catalogModelCompletion("public/base-model").?);
 }
 
 test "model cache reuses a ready public catalog when only its public reason changes" {
     var runtime = Runtime.init(std.testing.allocator, "/v1/models");
     defer runtime.deinit();
     var initial_provider = AuthChangeCatalog{ .model_id = "public/base-model" };
-    runtime.startWarmup(initial_provider.provider(), .{ .public_only = .fx_login_refresh_required });
+    runtime.startWarmup(initial_provider.provider(), .{ .public_only = .no_credential });
     try waitForWarmup(&runtime);
 
     var unused_provider = AuthChangeCatalog{ .model_id = "public/redundant-model" };
     runtime.startWarmup(
         unused_provider.provider(),
-        credentials.catalogAccessAfterRefreshFailure(.fx_login),
+        credentials.catalogAccessAfterRefreshFailure(.chatgpt_subscription),
     );
 
     try std.testing.expectEqual(@as(usize, 0), unused_provider.calls);

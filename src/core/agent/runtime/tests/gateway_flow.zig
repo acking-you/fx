@@ -3830,7 +3830,7 @@ test "processQueuedPrompt preserves a confirmed provider tool result across reco
     var config = fixture.config();
     config.max_provider_attempts = 2;
     var initial_job = fixture.job();
-    initial_job.credential_source = .fx_login;
+    initial_job.credential_source = .ai_gateway_api_key;
     initial_job.account_id = @constCast("acct_1");
 
     try runFakePrompt(&gateway, &hooks, config, initial_job);
@@ -3876,7 +3876,7 @@ test "processQueuedPrompt preserves a confirmed provider tool result across reco
     var restored_hooks = FakeAgentRuntimeDeps.init(alloc);
     defer restored_hooks.deinit();
     var restored_job = fixture.job();
-    restored_job.credential_source = .fx_login;
+    restored_job.credential_source = .ai_gateway_api_key;
     restored_job.account_id = @constCast("acct_1");
     restored_job.recovery_checkpoint = restored_checkpoint;
 
@@ -4530,9 +4530,9 @@ test "processQueuedPrompt preserves fallback route and budget until selection ch
         .authority = .{
             .provider = .gateway,
             .model = @constCast("zai/glm-5.2"),
-            .credential_source = .fx_login,
+            .credential_source = .ai_gateway_api_key,
             .credential_identity = @import("../../../auth/credential_authority.zig").derive(
-                .fx_login,
+                .ai_gateway_api_key,
                 "acct_1",
             ),
         },
@@ -4554,7 +4554,7 @@ test "processQueuedPrompt preserves fallback route and budget until selection ch
         config.max_provider_attempts = 4;
         var job = fixture.job();
         job.model = @constCast("zai/glm-5.2");
-        job.credential_source = .fx_login;
+        job.credential_source = .ai_gateway_api_key;
         job.account_id = @constCast("acct_1");
         job.recovery_checkpoint = checkpoint;
 
@@ -4580,7 +4580,7 @@ test "processQueuedPrompt preserves fallback route and budget until selection ch
         config.max_provider_attempts = 4;
         var job = fixture.job();
         job.model = @constCast("zai/glm-5.2");
-        job.credential_source = .fx_login;
+        job.credential_source = .ai_gateway_api_key;
         job.account_id = @constCast("acct_1");
         job.recovery_checkpoint = checkpoint;
 
@@ -4649,7 +4649,7 @@ test "processQueuedPrompt counts only failed provider attempts across tool follo
     var config = fixture.config();
     config.max_provider_attempts = 2;
     var initial_job = fixture.job();
-    initial_job.credential_source = .fx_login;
+    initial_job.credential_source = .ai_gateway_api_key;
     initial_job.account_id = @constCast("acct_1");
 
     try runFakePrompt(&gateway, &hooks, config, initial_job);
@@ -4673,7 +4673,7 @@ test "processQueuedPrompt counts only failed provider attempts across tool follo
     continued_hooks.enable_recovery_checkpoint = true;
     defer continued_hooks.deinit();
     var continued_job = fixture.job();
-    continued_job.credential_source = .fx_login;
+    continued_job.credential_source = .ai_gateway_api_key;
     continued_job.account_id = @constCast("acct_1");
     continued_job.recovery_checkpoint = continued_checkpoint;
 
@@ -4701,7 +4701,7 @@ test "processQueuedPrompt explicit checkpoint continuation starts a fresh exhaus
     var first_config = fixture.config();
     first_config.max_provider_attempts = 1;
     var first_job = fixture.job();
-    first_job.credential_source = .fx_login;
+    first_job.credential_source = .ai_gateway_api_key;
     first_job.account_id = @constCast("acct_1");
 
     try runFakePrompt(&first_gateway, &first_hooks, first_config, first_job);
@@ -4720,7 +4720,7 @@ test "processQueuedPrompt explicit checkpoint continuation starts a fresh exhaus
     second_hooks.enable_recovery_checkpoint = true;
     defer second_hooks.deinit();
     var continued_job = fixture.job();
-    continued_job.credential_source = .fx_login;
+    continued_job.credential_source = .ai_gateway_api_key;
     continued_job.account_id = @constCast("acct_1");
     continued_job.recovery_checkpoint = checkpoint;
     var continued_config = fixture.config();
@@ -5713,26 +5713,6 @@ test "processQueuedPrompt non-ok gateway response records schema diagnostics" {
     try std.testing.expect(std.mem.find(u8, call.gatewayRequestShape(), "prompt.1 role=user content=array") != null);
 }
 
-test "processQueuedPrompt refreshes fx login credential before gateway request" {
-    const alloc = std.testing.allocator;
-    const completions = [_]FakeCompletion{.{ .content = "Done." }};
-    var gateway = FakeGateway.init(alloc, &completions);
-    defer gateway.deinit();
-    var hooks = FakeAgentRuntimeDeps.init(alloc);
-    hooks.credential_refresh_tokens = &.{"fresh-key"};
-    defer hooks.deinit();
-    var fixture = PromptFixture{};
-    var job = fixture.job();
-    job.credential_source = .fx_login;
-
-    try runFakePrompt(&gateway, &hooks, fixture.config(), job);
-
-    try std.testing.expectEqual(@as(usize, 1), gateway.request_api_keys.items.len);
-    try std.testing.expectEqualStrings("fresh-key", gateway.request_api_keys.items[0]);
-    try std.testing.expectEqual(@as(usize, 1), hooks.credential_refresh_modes.items.len);
-    try std.testing.expectEqual(runtime_deps.CredentialRefreshMode.if_needed, hooks.credential_refresh_modes.items[0]);
-}
-
 test "processQueuedPrompt refreshes Codex OAuth credential before Responses request" {
     const alloc = std.testing.allocator;
     const completions = [_]FakeCompletion{.{ .content = "Done." }};
@@ -5865,35 +5845,6 @@ test "processQueuedPrompt retries a Codex pre-send credential change only once" 
     try std.testing.expectEqual(@as(usize, 2), hooks.credential_refresh_modes.items.len);
 }
 
-test "processQueuedPrompt refreshes and retries once after fx login 401" {
-    const alloc = std.testing.allocator;
-    const completions = [_]FakeCompletion{
-        .{
-            .status = .unauthorized,
-            .err_body = "{\"error\":{\"message\":\"expired\"}}",
-        },
-        .{ .content = "Done." },
-    };
-    var gateway = FakeGateway.init(alloc, &completions);
-    defer gateway.deinit();
-    var hooks = FakeAgentRuntimeDeps.init(alloc);
-    hooks.credential_refresh_tokens = &.{ "still-stale", "fresh-after-401" };
-    defer hooks.deinit();
-    var fixture = PromptFixture{};
-    var job = fixture.job();
-    job.credential_source = .fx_login;
-
-    try runFakePrompt(&gateway, &hooks, fixture.config(), job);
-
-    try std.testing.expectEqual(@as(usize, 2), gateway.request_api_keys.items.len);
-    try std.testing.expectEqualStrings("still-stale", gateway.request_api_keys.items[0]);
-    try std.testing.expectEqualStrings("fresh-after-401", gateway.request_api_keys.items[1]);
-    try std.testing.expectEqual(@as(usize, 2), hooks.credential_refresh_modes.items.len);
-    try std.testing.expectEqual(runtime_deps.CredentialRefreshMode.if_needed, hooks.credential_refresh_modes.items[0]);
-    try std.testing.expectEqual(runtime_deps.CredentialRefreshMode.force, hooks.credential_refresh_modes.items[1]);
-    try std.testing.expectEqual(types.TurnPresentationOutcome.completed, hooks.finalized_outcome.?);
-}
-
 test "processQueuedPrompt force refreshes Codex OAuth once after Responses 401" {
     const alloc = std.testing.allocator;
     const completions = [_]FakeCompletion{
@@ -5923,38 +5874,6 @@ test "processQueuedPrompt force refreshes Codex OAuth once after Responses 401" 
     try std.testing.expectEqual(runtime_deps.CredentialRefreshMode.if_needed, hooks.credential_refresh_modes.items[0]);
     try std.testing.expectEqual(runtime_deps.CredentialRefreshMode.force, hooks.credential_refresh_modes.items[1]);
     try std.testing.expectEqual(types.TurnPresentationOutcome.completed, hooks.finalized_outcome.?);
-}
-
-test "processQueuedPrompt does not retry a second fx login 401" {
-    const alloc = std.testing.allocator;
-    const completions = [_]FakeCompletion{
-        .{
-            .status = .unauthorized,
-            .err_body = "{\"error\":{\"message\":\"expired\"}}",
-        },
-        .{
-            .status = .unauthorized,
-            .err_body = "{\"error\":{\"message\":\"still unauthorized\"}}",
-        },
-        .{ .content = "must not be requested" },
-    };
-    var gateway = FakeGateway.init(alloc, &completions);
-    defer gateway.deinit();
-    var hooks = FakeAgentRuntimeDeps.init(alloc);
-    hooks.credential_refresh_tokens = &.{ "still-stale", "fresh-after-401", "must-not-use" };
-    defer hooks.deinit();
-    var fixture = PromptFixture{};
-    var job = fixture.job();
-    job.credential_source = .fx_login;
-
-    try runFakePrompt(&gateway, &hooks, fixture.config(), job);
-
-    try std.testing.expectEqual(@as(usize, 2), gateway.request_api_keys.items.len);
-    try std.testing.expectEqualStrings("still-stale", gateway.request_api_keys.items[0]);
-    try std.testing.expectEqualStrings("fresh-after-401", gateway.request_api_keys.items[1]);
-    try std.testing.expectEqual(@as(usize, 2), hooks.credential_refresh_modes.items.len);
-    try std.testing.expectEqual(std.http.Status.unauthorized, hooks.http_status.?);
-    try std.testing.expectEqual(types.TurnPresentationOutcome.failed, hooks.finalized_outcome.?);
 }
 
 test "Codex 401 replay keeps payload and semantic recovery unchanged for the captured account" {
@@ -6010,65 +5929,6 @@ test "Codex 401 account change makes no second provider request" {
     try std.testing.expectEqualStrings("acct-a", hooks.last_credential_refresh_expected_account.?);
     try std.testing.expectEqual(@as(usize, 0), hooks.route_recovery_count);
     try std.testing.expectEqual(std.http.Status.unauthorized, hooks.http_status.?);
-    try std.testing.expectEqual(types.TurnPresentationOutcome.failed, hooks.finalized_outcome.?);
-}
-
-test "processQueuedPrompt keeps the selected fx login credential when forced refresh is unavailable" {
-    const alloc = std.testing.allocator;
-    const completions = [_]FakeCompletion{
-        .{
-            .status = .unauthorized,
-            .err_body = "{\"error\":{\"message\":\"expired\"}}",
-        },
-        .{ .content = "must not be requested" },
-    };
-    var gateway = FakeGateway.init(alloc, &completions);
-    defer gateway.deinit();
-    var hooks = FakeAgentRuntimeDeps.init(alloc);
-    hooks.credential_refresh_tokens = &.{"selected-login-token"};
-    defer hooks.deinit();
-    var fixture = PromptFixture{};
-    var job = fixture.job();
-    job.credential_source = .fx_login;
-
-    try runFakePrompt(&gateway, &hooks, fixture.config(), job);
-
-    try std.testing.expectEqual(@as(usize, 1), gateway.request_api_keys.items.len);
-    try std.testing.expectEqualStrings("selected-login-token", gateway.request_api_keys.items[0]);
-    try std.testing.expectEqual(@as(usize, 2), hooks.credential_refresh_modes.items.len);
-    try std.testing.expectEqual(runtime_deps.CredentialRefreshMode.force, hooks.credential_refresh_modes.items[1]);
-    try std.testing.expectEqual(std.http.Status.unauthorized, hooks.http_status.?);
-    try std.testing.expectEqual(types.CredentialSource.fx_login, hooks.http_credential_source.?);
-    try std.testing.expectEqual(types.TurnPresentationOutcome.failed, hooks.finalized_outcome.?);
-}
-
-test "processQueuedPrompt reports the selected login after refresh failure without fallback" {
-    const alloc = std.testing.allocator;
-    const completions = [_]FakeCompletion{
-        .{
-            .status = .unauthorized,
-            .err_body = "{\"error\":{\"message\":\"expired\"}}",
-        },
-        .{ .content = "must not be requested" },
-    };
-    var gateway = FakeGateway.init(alloc, &completions);
-    defer gateway.deinit();
-    var hooks = FakeAgentRuntimeDeps.init(alloc);
-    hooks.credential_refresh_error = error.OAuthRequestFailed;
-    defer hooks.deinit();
-    var fixture = PromptFixture{};
-    var job = fixture.job();
-    job.credential_source = .fx_login;
-
-    try runFakePrompt(&gateway, &hooks, fixture.config(), job);
-
-    try std.testing.expectEqual(@as(usize, 1), gateway.request_api_keys.items.len);
-    try std.testing.expectEqualStrings("key", gateway.request_api_keys.items[0]);
-    try std.testing.expectEqual(@as(usize, 2), hooks.credential_refresh_modes.items.len);
-    try std.testing.expectEqual(runtime_deps.CredentialRefreshMode.if_needed, hooks.credential_refresh_modes.items[0]);
-    try std.testing.expectEqual(runtime_deps.CredentialRefreshMode.force, hooks.credential_refresh_modes.items[1]);
-    try std.testing.expectEqual(std.http.Status.unauthorized, hooks.http_status.?);
-    try std.testing.expectEqual(types.CredentialSource.fx_login, hooks.http_credential_source.?);
     try std.testing.expectEqual(types.TurnPresentationOutcome.failed, hooks.finalized_outcome.?);
 }
 

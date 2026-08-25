@@ -3,7 +3,6 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 pub const root_dir_name = ".fx";
-pub const auth_file_name = "auth.json";
 pub const chatgpt_auth_file_name = "chatgpt-auth.json";
 pub const grok_auth_file_name = "grok-auth.json";
 pub const api_key_file_name = "api-key";
@@ -50,10 +49,6 @@ pub fn mcpCredentialsPath(alloc: Allocator, home: []const u8) ![]u8 {
 
 pub fn managedSkillsDir(alloc: Allocator, home: []const u8) ![]u8 {
     return std.fs.path.join(alloc, &.{ home, root_dir_name, managed_skills_dir_name });
-}
-
-pub fn authPath(alloc: Allocator, home: []const u8) ![]u8 {
-    return std.fs.path.join(alloc, &.{ home, root_dir_name, auth_file_name });
 }
 
 pub fn chatgptAuthPath(alloc: Allocator, home: []const u8) ![]u8 {
@@ -128,10 +123,6 @@ test "profile path helpers preserve current default locations" {
     const skills = try managedSkillsDir(alloc, "/tmp/fake-home");
     defer alloc.free(skills);
     try std.testing.expectEqualStrings("/tmp/fake-home/.fx/skills", skills);
-
-    const auth = try authPath(alloc, "/tmp/fake-home");
-    defer alloc.free(auth);
-    try std.testing.expectEqualStrings("/tmp/fake-home/.fx/auth.json", auth);
 
     const chatgpt_auth = try chatgptAuthPath(alloc, "/tmp/fake-home");
     defer alloc.free(chatgpt_auth);

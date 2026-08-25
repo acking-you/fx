@@ -16,7 +16,7 @@ The SDK has two WebAssembly surfaces and one shared JavaScript host layer:
 | Native and WebAssembly capability policy | `src/core/hosts/runtime_profile.zig` |
 | Host-backed terminal session persistence | `src/core/app/app_session_runtime.zig` and `sdk/fx-sdk.js` |
 | Browser workspace contract and `terminal.exec` bridge | `src/core/hosts/js_host_workspace.zig` and `src/tools/terminal/browser_terminal.zig` |
-| Browser device login, OAuth session persistence, and URL opening | `src/core/auth/js_host_auth.zig`, `src/core/auth/oauth_session.zig`, and `src/core/hosts/js_host_url_opener.zig` |
+| Browser OAuth transport and URL opening | `src/core/auth/js_host_auth.zig` and `src/core/hosts/js_host_url_opener.zig` |
 | WASI target, optimization mode, threading, and artifact names | `build.zig` |
 | Core browser fixture and its automation contract | `sdk/index.html` and `sdk/tests/test-core-browser.mjs` |
 | Terminal fixture and static packaging contract | `sdk/term-demo.html` and `sdk/scripts/package-term-demo.mjs` |
@@ -29,7 +29,7 @@ Do not treat the demos or this file as the implementation contract. When prose a
 - Keep `sdk/fx-sdk.js` a dependency-free ECMAScript module. A bundler, framework, or runtime package must not become necessary to load the SDK.
 - Keep the core and terminal surfaces distinct. `fx-core.wasm` starts the headless ACP server; `fx-term.wasm` starts the interactive terminal. Shared loader changes must be validated against both.
 - Detect JavaScript Promise Integration (JSPI) by capability through `supportsJspi()`. Do not replace feature detection with browser or version sniffing. Keep loader errors, demo fallback states, and the compatibility statement in `sdk/README.md` consistent.
-- Treat JavaScript host stores as durable contracts. Session and OAuth snapshots are opaque bytes with optimistic revisions. Preserve `FX_SESSION_REVISION_CONFLICT` and `FX_OAUTH_SESSION_REVISION_CONFLICT`. Persist configuration only after fx accepts it, and do not collapse prompt-history outcomes into generic success.
+- Treat JavaScript host stores as durable contracts. Session snapshots are opaque bytes with optimistic revisions. Preserve `FX_SESSION_REVISION_CONFLICT`. Persist configuration only after fx accepts it, and do not collapse prompt-history outcomes into generic success.
 - Preserve cancellation and lifecycle behavior. Fetch cancellation must reach the host `AbortSignal`; terminal subscriptions must be released exactly once; `abort()` must settle `exited` and must not leave input or resize listeners attached.
 - The WebAssembly runtime is not the native runtime. Keep native tools disabled. The optional workspace host may expose only foreground `terminal.exec` through its typed boundary and permission policy. Its schema is exactly `{ action: "exec", command }`; native profiles and durable terminal actions are unavailable. Any additional capability requires its own typed host boundary, permission review where applicable, and coverage on the affected surface.
 - Keep workspace version 1 constrained to an ephemeral, non-git workspace whose normalized `cwd` equals `root`. Preserve command and output limits, the 30-second maximum deadline, and Ctrl+C cancellation through the shared host-effect abort path.
@@ -44,7 +44,7 @@ Do not treat the demos or this file as the implementation contract. When prose a
 | `createFxAgent()`, ACP translation, core session persistence, streaming, or cancellation | Core build, core Node tests, and the browser test when browser behavior is involved |
 | Live Gateway request or model-catalog translation | Core tests plus the opt-in live smoke test when a credential is available |
 | Terminal adapter, input encoding, resize, cleanup, config, or prompt history | Terminal build and the headless terminal suite |
-| Terminal session persistence or browser device login | Terminal build plus `sdk/tests/test-term-session-resume.mjs` or `sdk/tests/test-term-login.mjs` |
+| Terminal session persistence | Terminal build plus `sdk/tests/test-term-session-resume.mjs` |
 | Browser workspace metadata, permissions, execution, limits, or cancellation | Terminal build plus `sdk/node/test-term-workspace.mjs` |
 | `encodeXtermKeyEvent()` or `xtermAdapter()` only | `sdk/node/test-xterm-adapter.mjs` |
 | Core debugger query behavior or automation state | `sdk/tests/test-core-browser.mjs` |
@@ -72,7 +72,6 @@ zig build -Dwasm-surface=term
 npm ci --prefix sdk/node
 npm run --prefix sdk/node test:term
 node --experimental-wasm-jspi sdk/tests/test-term-session-resume.mjs
-node --experimental-wasm-jspi sdk/tests/test-term-login.mjs
 ```
 
 For a live Gateway transport change, `AI_GATEWAY_API_KEY` must already be present in the environment before running the opt-in smoke test:
@@ -96,6 +95,6 @@ Do not commit `zig-out/`, `sdk/dist/`, or other generated artifacts. Run `git di
 
 - Flag a public contract change that lacks a focused regression test. Require a README update only when supported public behavior or setup changed.
 - Flag code that makes one surface silently depend on the other surface's composition or capability profile.
-- Flag user-agent checks for JSPI, swallowed session or OAuth revision conflicts, premature config writes, lost prompt-history outcomes, or terminal listener leaks.
+- Flag user-agent checks for JSPI, swallowed session revision conflicts, premature config writes, lost prompt-history outcomes, or terminal listener leaks.
 - Flag workspace adapters that bypass typed metadata validation, permission admission, resource limits, or the shared cancellation path.
 - Flag deployment changes that give mutable HTML the same long-lived cache policy as content-addressed JavaScript or WebAssembly assets.

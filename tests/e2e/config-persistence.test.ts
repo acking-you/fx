@@ -839,32 +839,16 @@ describe.skipIf(!tmuxAvailable())("config persistence", () => {
           model: "anthropic/claude-opus-4.8",
           effort: "high",
           fast_mode: false,
-          credential_source: "fx_login",
+          credential_source: "ai_gateway_api_key",
         }) + "\n";
         writeFileSync(
           settingsPath,
           initialSettings,
           { mode: 0o600 },
         );
-        writeFileSync(
-          join(home, ".fx", "auth.json"),
-          JSON.stringify({
-            version: 1,
-            issuer: "https://vercel.com",
-            client_id: "test-client",
-            access_token: "fake-fx-login-token",
-            refresh_token: "fake-fx-login-refresh-token",
-            expires_at_ms: Date.now() + 60 * 60 * 1000,
-            scope: "openid",
-            token_type: "Bearer",
-            team_id: "team_fast_test",
-            team_slug: "fast-test-team",
-          }) + "\n",
-          { mode: 0o600 },
-        );
         const gatewayEnv = {
           ...NO_AUTH,
-          AI_GATEWAY_API_KEY: undefined,
+          AI_GATEWAY_API_KEY: "fake-gateway-key",
           VERCEL_OIDC_TOKEN: undefined,
           FX_DISABLE_KEYCHAIN: "1",
           HOME: home,
@@ -911,11 +895,9 @@ describe.skipIf(!tmuxAvailable())("config persistence", () => {
           "anthropic/claude-opus-4.8",
         );
         expect(gateway.requests[0]!.headers.get("authorization")).toBe(
-          "Bearer fake-fx-login-token",
+          "Bearer fake-gateway-key",
         );
-        expect(gateway.requests[0]!.headers.get("x-vercel-ai-gateway-team")).toBe(
-          "team_fast_test",
-        );
+        expect(gateway.requests[0]!.headers.get("x-vercel-ai-gateway-team")).toBeNull();
         expect(JSON.parse(gateway.requests[0]!.body)).not.toHaveProperty("fast");
         expect(JSON.parse(gateway.requests[0]!.body)).toMatchObject({
           providerOptions: { gateway: { speed: "fast" } },

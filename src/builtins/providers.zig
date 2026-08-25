@@ -87,7 +87,6 @@ test "gateway bundle dispatches only OpenAI API keys to Responses" {
     inline for (.{
         @import("../core/shared/types.zig").CredentialSource.ai_gateway_api_key,
         .vercel_oidc_token,
-        .fx_login,
         .stored_key,
     }) |source| {
         try @import("std").testing.expect(

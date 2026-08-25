@@ -88,7 +88,7 @@ pub fn startSignIn(
             .oauth_transport = transport,
             .poll = .{
                 .ctx = browser.context,
-                .poll_device_token = pollBrowserToken,
+                .poll_token = pollBrowserToken,
             },
             .complete = completeSignIn,
             .save = saveSignIn,
@@ -137,36 +137,12 @@ fn prepareBrowserSignIn(alloc: Allocator) !PreparedBrowserLogin {
     };
     listener_owned = false;
 
-    const owned_issuer = try alloc.dupe(u8, configured_issuer);
-    errdefer alloc.free(owned_issuer);
-    const authorization_endpoint = try std.fmt.allocPrint(
-        alloc,
-        "{s}/oauth/authorize",
-        .{std.mem.trimEnd(u8, configured_issuer, "/")},
-    );
-    errdefer alloc.free(authorization_endpoint);
-    const device_code = try alloc.dupe(u8, "");
-    errdefer secret.zeroAndFree(alloc, device_code);
-    const user_code = try alloc.dupe(u8, "");
-    errdefer alloc.free(user_code);
-    const owned_client_id = try alloc.dupe(u8, client_id);
-    errdefer alloc.free(owned_client_id);
-
     return .{
         .prepared = .{
-            .metadata = .{
-                .issuer = owned_issuer,
-                .device_authorization_endpoint = authorization_endpoint,
-                .token_endpoint = configured_token_endpoint,
-            },
-            .device = .{
-                .device_code = device_code,
-                .user_code = user_code,
-                .verification_uri = authorization_url,
-                .expires_in = browser_login_timeout_seconds,
-                .interval = 1,
-            },
-            .client_id = owned_client_id,
+            .token_endpoint = configured_token_endpoint,
+            .authorization_url = authorization_url,
+            .expires_in_seconds = browser_login_timeout_seconds,
+            .poll_interval_seconds = 1,
         },
         .context = context,
     };
@@ -215,9 +191,7 @@ fn pollBrowserToken(
     raw: ?*anyopaque,
     alloc: Allocator,
     transport: oauth_transport.Provider,
-    metadata: oauth.Metadata,
-    _: []const u8,
-    _: []const u8,
+    token_endpoint: []const u8,
     cancel_flag: *std.atomic.Value(bool),
     deadline: std.Io.Clock.Timestamp,
 ) !oauth.PollResult {
@@ -240,7 +214,7 @@ fn pollBrowserToken(
     var token = exchangeAuthorizationCodeForRedirectWithBounds(
         alloc,
         transport,
-        metadata.token_endpoint,
+        token_endpoint,
         callback.code,
         context.code_verifier,
         context.redirect_uri,
@@ -342,8 +316,6 @@ fn setBrowserSocketTimeouts(socket: std.posix.socket_t) void {
 fn completeSignIn(
     _: ?*anyopaque,
     alloc: Allocator,
-    _: []const u8,
-    _: []const u8,
     token: *oauth.TokenSet,
 ) !login_flow.SignInCompletion {
     const refresh_token = token.refresh_token orelse return error.ChatGptRefreshTokenMissing;
@@ -367,7 +339,7 @@ fn completeSignIn(
 fn saveSignIn(_: ?*anyopaque, alloc: Allocator, completion: login_flow.SignInCompletion) !void {
     const session = switch (completion) {
         .chatgpt => |session| session,
-        .vercel, .grok => return error.InvalidSignInCompletion,
+        .none, .grok => return error.InvalidSignInCompletion,
     };
     try chatgpt_session.saveNewSession(alloc, session);
 }

@@ -179,7 +179,7 @@ pub const ProviderRoute = enum {
 /// compile until its provider route is assigned here.
 pub fn fromCredentialSource(source: types.CredentialSource) ?ProviderRoute {
     return switch (source) {
-        .vercel_oidc_token, .ai_gateway_api_key, .fx_login, .stored_key => .vercel_gateway,
+        .vercel_oidc_token, .ai_gateway_api_key, .stored_key => .vercel_gateway,
         .openai_api_key => .openai_responses_byok,
         .chatgpt_subscription => .codex_responses_oauth,
         .grok_subscription => null,
@@ -479,7 +479,7 @@ test "credential sources map to one typed provider route" {
         }
         const route = fromCredentialSource(source) orelse return error.UnmappedCredentialSource;
         const expected: ProviderRoute = switch (source) {
-            .vercel_oidc_token, .ai_gateway_api_key, .fx_login, .stored_key => .vercel_gateway,
+            .vercel_oidc_token, .ai_gateway_api_key, .stored_key => .vercel_gateway,
             .openai_api_key => .openai_responses_byok,
             .chatgpt_subscription => .codex_responses_oauth,
             .grok_subscription => unreachable,

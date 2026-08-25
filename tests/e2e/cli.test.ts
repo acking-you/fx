@@ -40,7 +40,7 @@ const NO_GATEWAY_AUTH = {
   FX_CODEX_AUTH_FILE: undefined,
 };
 const MISSING_AUTH_MESSAGE =
-  "Fx needs a model credential. Use fx login for Vercel, fx login codex for ChatGPT Codex, fx login grok for Grok, set OPENAI_API_KEY for a Responses API, or set AI_GATEWAY_API_KEY for Vercel AI Gateway.";
+  "Fx needs a model credential. Set OPENAI_API_KEY for a Responses API, use fx login codex for ChatGPT Codex, use fx login grok for Grok, or set AI_GATEWAY_API_KEY for Vercel AI Gateway.";
 
 const KEYCHAIN_SERVICE = "FX_AI_GATEWAY_API_KEY";
 
@@ -66,133 +66,6 @@ function doctorSessionDiagnosticsLimit(): number {
 }
 
 const SEEDED_GATEWAY_TOKEN = "seeded-access-token";
-
-function writeSeededFxAuth(
-  home: string,
-  teamId?: string,
-  issuer = "https://vercel.com",
-  expiresAtMs = Date.now() + 60 * 60 * 1000,
-): void {
-  const fxDir = join(home, ".fx");
-  mkdirSync(fxDir, { recursive: true, mode: 0o700 });
-  chmodSync(fxDir, 0o700);
-  const authPath = join(fxDir, "auth.json");
-  const auth: Record<string, string | number> = {
-    version: 1,
-    issuer,
-    client_id: "test-client",
-    access_token: SEEDED_GATEWAY_TOKEN,
-    refresh_token: "seeded-refresh-token",
-    expires_at_ms: expiresAtMs,
-    scope: "openid",
-    token_type: "Bearer",
-  };
-  if (teamId) {
-    auth.team_id = teamId;
-    auth.team_slug = "vercel-labs";
-  }
-  writeFileSync(authPath, JSON.stringify(auth) + "\n", { mode: 0o600 });
-  chmodSync(authPath, 0o600);
-}
-
-function startRequestCatcher() {
-  const requests: Array<{ method: string; path: string }> = [];
-  const server = Bun.serve({
-    hostname: "0.0.0.0",
-    port: 0,
-    fetch(request) {
-      const url = new URL(request.url);
-      requests.push({ method: request.method, path: url.pathname });
-      return Response.json({ revoked: true });
-    },
-  });
-  return {
-    issuerUrl: `http://127.0.0.1:${server.port}`,
-    endpoint: `http://localhost.:${server.port}/oauth/revoke`,
-    requests,
-    stop() {
-      server.stop(true);
-    },
-  };
-}
-
-function startLogoutIssuer(
-  revokeStatuses: number[],
-  authPath?: string,
-  revocationEndpoint?: string | null,
-) {
-  const providerDetail = `provider rejected ${SEEDED_GATEWAY_TOKEN} and seeded-refresh-token`;
-  const requests: Array<{
-    method: string;
-    path: string;
-    tokenTypeHint?: string;
-    validForm?: boolean;
-    localSessionPresent?: boolean;
-  }> = [];
-  let revokeAttempt = 0;
-  const server = Bun.serve({
-    hostname: "127.0.0.1",
-    port: 0,
-    async fetch(request) {
-      const url = new URL(request.url);
-      const issuerUrl = `http://127.0.0.1:${server.port}`;
-      if (url.pathname === "/.well-known/openid-configuration") {
-        requests.push({ method: request.method, path: url.pathname });
-        return Response.json({
-          issuer: issuerUrl,
-          device_authorization_endpoint: `${issuerUrl}/oauth/device`,
-          token_endpoint: `${issuerUrl}/oauth/token`,
-          ...(revocationEndpoint === null
-            ? {}
-            : {
-                revocation_endpoint:
-                  revocationEndpoint ?? `${issuerUrl}/oauth/revoke`,
-              }),
-        });
-      }
-      if (url.pathname === "/oauth/revoke") {
-        const form = await request.formData();
-        const tokenTypeHint = form.get("token_type_hint");
-        const expectedToken =
-          tokenTypeHint === "refresh_token"
-            ? "seeded-refresh-token"
-            : tokenTypeHint === "access_token"
-              ? SEEDED_GATEWAY_TOKEN
-              : null;
-        const validForm =
-          form.get("client_id") === "test-client" &&
-          expectedToken !== null &&
-          form.get("token") === expectedToken;
-        requests.push({
-          method: request.method,
-          path: url.pathname,
-          tokenTypeHint:
-            typeof tokenTypeHint === "string" ? tokenTypeHint : "missing",
-          validForm,
-          ...(authPath
-            ? { localSessionPresent: existsSync(authPath) }
-            : {}),
-        });
-        const configuredStatus = revokeStatuses[revokeAttempt] ?? 200;
-        revokeAttempt += 1;
-        const revokeStatus = validForm ? configuredStatus : 400;
-        return Response.json(
-          revokeStatus >= 400 ? { error: providerDetail } : { revoked: true },
-          { status: revokeStatus },
-        );
-      }
-      return new Response("not found", { status: 404 });
-    },
-  });
-  return {
-    issuerUrl: `http://127.0.0.1:${server.port}`,
-    providerDetail,
-    requests,
-    stop() {
-      server.stop(true);
-    },
-  };
-}
 
 function snapshotTree(root: string): string[] {
   const entries: string[] = [];
@@ -590,110 +463,10 @@ describe("cli: status", () => {
   );
 
   test(
-    "status and doctor share fx login source, team, and refreshability",
-    async () => {
-      const root = mkdtempSync(join(tmpdir(), "fx-e2e-status-auth-"));
-      try {
-        const home = join(root, "home");
-        const workspace = join(root, "workspace");
-        mkdirSync(home);
-        mkdirSync(workspace);
-        writeSeededFxAuth(home, "team_123");
-        const env = {
-          ...NO_GATEWAY_AUTH,
-          HOME: realpathSync(home),
-          FX_DISABLE_KEYCHAIN: "1",
-        };
-        const cwd = realpathSync(workspace);
-
-        const statusText = await runFx(["status"], { cwd, env });
-        const statusJsonResult = await runFx(["status", "--json"], { cwd, env });
-        const doctorText = await runFx(["doctor"], { cwd, env });
-        const doctorJsonResult = await runFx(["doctor", "--json"], { cwd, env });
-
-        expect(statusText.code).toBe(0);
-        expect(statusJsonResult.code).toBe(0);
-        expect(doctorText.code).toBe(0);
-        expect(doctorJsonResult.code).toBe(0);
-        const expectedAuth = {
-          auth: "fx login",
-          auth_refreshable: true,
-          team: "vercel-labs",
-        };
-        expect(JSON.parse(statusJsonResult.stdout.trim())).toMatchObject(expectedAuth);
-        expect(JSON.parse(doctorJsonResult.stdout.trim())).toMatchObject(expectedAuth);
-        for (const output of [statusText.stdout, doctorText.stdout]) {
-          expect(output).toContain("auth=fx login");
-          expect(output).toContain("auth_refreshable=true");
-          expect(output).toContain("team=vercel-labs");
-        }
-        for (const output of [
-          statusText.stdout,
-          statusJsonResult.stdout,
-          doctorText.stdout,
-          doctorJsonResult.stdout,
-        ]) {
-          expect(output).not.toContain(SEEDED_GATEWAY_TOKEN);
-          expect(output).not.toContain("seeded-refresh-token");
-        }
-      } finally {
-        rmSync(root, { recursive: true, force: true });
-      }
-    },
-    TIMEOUT,
-  );
-
-  test(
-    "status and doctor inspect an expired login without refreshing it",
-    async () => {
-      const root = mkdtempSync(join(tmpdir(), "fx-e2e-status-expired-auth-"));
-      const requestCatcher = startRequestCatcher();
-      try {
-        const home = join(root, "home");
-        const workspace = join(root, "workspace");
-        mkdirSync(home);
-        mkdirSync(workspace);
-        writeSeededFxAuth(
-          home,
-          "team_123",
-          requestCatcher.issuerUrl,
-          Date.now() - 60_000,
-        );
-        const env = {
-          ...NO_GATEWAY_AUTH,
-          HOME: realpathSync(home),
-          FX_DISABLE_KEYCHAIN: "1",
-          FX_E2E_OAUTH_ISSUER_URL: requestCatcher.issuerUrl,
-        };
-        const cwd = realpathSync(workspace);
-
-        const status = await runFx(["status", "--json"], { cwd, env });
-        const doctor = await runFx(["doctor", "--json"], { cwd, env });
-
-        expect(status.code).toBe(0);
-        expect(doctor.code).toBe(0);
-        const expectedAuth = {
-          auth: "fx login",
-          auth_refreshable: true,
-          team: "vercel-labs",
-        };
-        expect(JSON.parse(status.stdout.trim())).toMatchObject(expectedAuth);
-        expect(JSON.parse(doctor.stdout.trim())).toMatchObject(expectedAuth);
-        expect(requestCatcher.requests).toEqual([]);
-      } finally {
-        requestCatcher.stop();
-        rmSync(root, { recursive: true, force: true });
-      }
-    },
-    TIMEOUT,
-  );
-
-  test(
     "a new status process keeps normal credential precedence",
     async () => {
       const root = mkdtempSync(join(tmpdir(), "fx-e2e-status-precedence-"));
       try {
-        writeSeededFxAuth(root, "team_123");
         const envToken = "preferred-environment-token";
         const env = {
           HOME: realpathSync(root),
@@ -1488,383 +1261,6 @@ describe("cli: doctor", () => {
   );
 });
 
-describe("cli: logout", () => {
-  test(
-    "fx logout revokes refresh and access tokens after local deletion",
-    async () => {
-      const home = mkdtempSync(join(tmpdir(), "fx-e2e-logout-revocation-"));
-      const authPath = join(home, ".fx", "auth.json");
-      const issuer = startLogoutIssuer([200, 200], authPath);
-      try {
-        writeSeededFxAuth(home, undefined, issuer.issuerUrl);
-
-        const logout = await runFx(["logout"], {
-          env: {
-            ...NO_GATEWAY_AUTH,
-            HOME: realpathSync(home),
-            FX_DISABLE_KEYCHAIN: "1",
-          },
-        });
-
-        expect(logout.code).toBe(0);
-        expect(logout.stdout).toBe("Signed out of fx.\n");
-        expect(logout.stderr).toBe("");
-        expect(existsSync(authPath)).toBe(false);
-        expect(issuer.requests).toEqual([
-          { method: "GET", path: "/.well-known/openid-configuration" },
-          {
-            method: "POST",
-            path: "/oauth/revoke",
-            tokenTypeHint: "refresh_token",
-            validForm: true,
-            localSessionPresent: false,
-          },
-          {
-            method: "POST",
-            path: "/oauth/revoke",
-            tokenTypeHint: "access_token",
-            validForm: true,
-            localSessionPresent: false,
-          },
-        ]);
-        for (const secret of [
-          SEEDED_GATEWAY_TOKEN,
-          "seeded-refresh-token",
-          issuer.providerDetail,
-        ]) {
-          expect(logout.stdout).not.toContain(secret);
-          expect(logout.stderr).not.toContain(secret);
-        }
-      } finally {
-        issuer.stop();
-        rmSync(home, { recursive: true, force: true });
-      }
-    },
-    TIMEOUT,
-  );
-
-  test(
-    "fx logout warns once and sends no tokens without a revocation endpoint",
-    async () => {
-      const home = mkdtempSync(join(tmpdir(), "fx-e2e-logout-no-revocation-"));
-      const authPath = join(home, ".fx", "auth.json");
-      const issuer = startLogoutIssuer([], authPath, null);
-      try {
-        writeSeededFxAuth(home, undefined, issuer.issuerUrl);
-
-        const logout = await runFx(["logout"], {
-          env: {
-            ...NO_GATEWAY_AUTH,
-            HOME: realpathSync(home),
-            FX_DISABLE_KEYCHAIN: "1",
-          },
-        });
-
-        expect(logout.code).toBe(0);
-        expect(logout.stdout).toBe("Signed out of fx.\n");
-        expect(logout.stderr).toBe(
-          "Warning: signed out locally, but the remote session could not be revoked.\n",
-        );
-        expect(existsSync(authPath)).toBe(false);
-        expect(issuer.requests).toEqual([
-          { method: "GET", path: "/.well-known/openid-configuration" },
-        ]);
-      } finally {
-        issuer.stop();
-        rmSync(home, { recursive: true, force: true });
-      }
-    },
-    TIMEOUT,
-  );
-
-  test(
-    "fx logout warns once and sends no tokens to an invalid revocation endpoint",
-    async () => {
-      const home = mkdtempSync(join(tmpdir(), "fx-e2e-logout-invalid-revocation-"));
-      const authPath = join(home, ".fx", "auth.json");
-      const catcher = startRequestCatcher();
-      const issuer = startLogoutIssuer([], authPath, catcher.endpoint);
-      try {
-        writeSeededFxAuth(home, undefined, issuer.issuerUrl);
-
-        const logout = await runFx(["logout"], {
-          env: {
-            ...NO_GATEWAY_AUTH,
-            HOME: realpathSync(home),
-            FX_DISABLE_KEYCHAIN: "1",
-          },
-        });
-
-        expect(logout.code).toBe(0);
-        expect(logout.stdout).toBe("Signed out of fx.\n");
-        expect(catcher.requests).toEqual([]);
-        expect(logout.stderr).toBe(
-          "Warning: signed out locally, but the remote session could not be revoked.\n",
-        );
-        expect(existsSync(authPath)).toBe(false);
-        expect(issuer.requests).toEqual([
-          { method: "GET", path: "/.well-known/openid-configuration" },
-        ]);
-      } finally {
-        issuer.stop();
-        catcher.stop();
-        rmSync(home, { recursive: true, force: true });
-      }
-    },
-    TIMEOUT,
-  );
-
-  test(
-    "fx logout removes a saved login rejected for unsafe permissions",
-    async () => {
-      const home = mkdtempSync(join(tmpdir(), "fx-e2e-logout-rejected-login-"));
-      const issuer = startLogoutIssuer([200, 200]);
-      const authPath = join(home, ".fx", "auth.json");
-      try {
-        writeSeededFxAuth(home, undefined, issuer.issuerUrl);
-        chmodSync(authPath, 0o644);
-
-        const logout = await runFx(["logout"], {
-          env: {
-            ...NO_GATEWAY_AUTH,
-            HOME: realpathSync(home),
-            FX_DISABLE_KEYCHAIN: "1",
-          },
-        });
-
-        expect(logout.code).toBe(0);
-        expect(logout.stdout).toBe("Signed out of fx.\n");
-        expect(logout.stderr).toBe("");
-        expect(existsSync(authPath)).toBe(false);
-        expect(issuer.requests).toEqual([]);
-        for (const secret of [
-          SEEDED_GATEWAY_TOKEN,
-          "seeded-refresh-token",
-          issuer.providerDetail,
-        ]) {
-          expect(logout.stdout).not.toContain(secret);
-          expect(logout.stderr).not.toContain(secret);
-        }
-      } finally {
-        issuer.stop();
-        rmSync(home, { recursive: true, force: true });
-      }
-    },
-    TIMEOUT,
-  );
-
-  test(
-    "fx logout fails when the saved login cannot be deleted",
-    async () => {
-      const home = mkdtempSync(join(tmpdir(), "fx-e2e-logout-delete-failure-"));
-      const issuer = startLogoutIssuer([200, 200]);
-      const fxDir = join(home, ".fx");
-      const authPath = join(fxDir, "auth.json");
-      try {
-        writeSeededFxAuth(home, undefined, issuer.issuerUrl);
-        chmodSync(fxDir, 0o500);
-
-        const env = {
-          ...NO_GATEWAY_AUTH,
-          HOME: realpathSync(home),
-          FX_DISABLE_KEYCHAIN: "1",
-        };
-        const logout = await runFx(["logout"], { env });
-        const status = await runFx(["status", "--json"], { env });
-
-        expect(logout.code).toBe(1);
-        expect(logout.stdout).toBe("");
-        expect(logout.stderr).toBe(
-          "fx logout: failed to durably remove saved Fx login\n",
-        );
-        expect(existsSync(authPath)).toBe(true);
-        expect(JSON.parse(status.stdout).auth).toBe("fx login");
-        expect(issuer.requests).toEqual([]);
-      } finally {
-        chmodSync(fxDir, 0o700);
-        issuer.stop();
-        rmSync(home, { recursive: true, force: true });
-      }
-    },
-    TIMEOUT,
-  );
-
-  test(
-    "fx logout deletes only the saved login and keeps environment credentials available",
-    async () => {
-      const home = mkdtempSync(join(tmpdir(), "fx-e2e-logout-env-"));
-      const authPath = join(home, ".fx", "auth.json");
-      const issuer = startLogoutIssuer([500, 200], authPath);
-      const oidcToken = "logout-oidc-token";
-      const apiToken = "logout-api-key-token";
-      try {
-        writeSeededFxAuth(home, undefined, issuer.issuerUrl);
-        const env = {
-          HOME: realpathSync(home),
-          VERCEL_OIDC_TOKEN: oidcToken,
-          AI_GATEWAY_API_KEY: apiToken,
-          FX_DISABLE_KEYCHAIN: "1",
-        };
-
-        const logout = await runFx(["logout"], { env });
-        expect(logout.code).toBe(0);
-        expect(logout.stdout).toBe("Signed out of fx.\n");
-        expect(logout.stderr).toBe(
-          "Warning: signed out locally, but the remote session could not be revoked.\n",
-        );
-        expect(existsSync(join(home, ".fx", "auth.json"))).toBe(false);
-        expect(issuer.requests).toEqual([
-          { method: "GET", path: "/.well-known/openid-configuration" },
-          {
-            method: "POST",
-            path: "/oauth/revoke",
-            tokenTypeHint: "refresh_token",
-            validForm: true,
-            localSessionPresent: false,
-          },
-          {
-            method: "POST",
-            path: "/oauth/revoke",
-            tokenTypeHint: "access_token",
-            validForm: true,
-            localSessionPresent: false,
-          },
-        ]);
-
-        const oidcStatus = await runFx(["status", "--json"], { env });
-        const apiEnv = { ...env, VERCEL_OIDC_TOKEN: undefined };
-        const apiStatus = await runFx(["status", "--json"], { env: apiEnv });
-        const doctor = await runFx(["doctor", "--json"], { env: apiEnv });
-        expect(JSON.parse(oidcStatus.stdout)).toMatchObject({
-          auth: "VERCEL_OIDC_TOKEN",
-          auth_refreshable: false,
-        });
-        expect(JSON.parse(apiStatus.stdout)).toMatchObject({
-          auth: "AI_GATEWAY_API_KEY",
-          auth_refreshable: false,
-        });
-        expect(JSON.parse(doctor.stdout)).toMatchObject({
-          auth: "AI_GATEWAY_API_KEY",
-          auth_refreshable: false,
-        });
-
-        for (const output of [
-          logout.stdout,
-          logout.stderr,
-          oidcStatus.stdout,
-          apiStatus.stdout,
-          doctor.stdout,
-        ]) {
-          for (const secret of [
-            SEEDED_GATEWAY_TOKEN,
-            "seeded-refresh-token",
-            oidcToken,
-            apiToken,
-            issuer.providerDetail,
-          ]) {
-            expect(output).not.toContain(secret);
-          }
-        }
-      } finally {
-        issuer.stop();
-        rmSync(home, { recursive: true, force: true });
-      }
-    },
-    TIMEOUT,
-  );
-
-  test(
-    "fx logout leaves an active API key unchanged when no login exists",
-    async () => {
-      const home = mkdtempSync(join(tmpdir(), "fx-e2e-logout-no-login-"));
-      const apiToken = "logout-existing-api-key";
-      try {
-        const env = {
-          HOME: realpathSync(home),
-          VERCEL_OIDC_TOKEN: undefined,
-          AI_GATEWAY_API_KEY: apiToken,
-          FX_DISABLE_KEYCHAIN: "1",
-        };
-        const logout = await runFx(["logout"], { env });
-        const status = await runFx(["status", "--json"], { env });
-
-        expect(logout.code).toBe(0);
-        expect(logout.stdout).toBe("No fx login session found.\n");
-        expect(logout.stderr).toBe("");
-        expect(JSON.parse(status.stdout)).toMatchObject({
-          auth: "AI_GATEWAY_API_KEY",
-          auth_refreshable: false,
-        });
-        expect(logout.stdout).not.toContain(apiToken);
-        expect(status.stdout).not.toContain(apiToken);
-      } finally {
-        rmSync(home, { recursive: true, force: true });
-      }
-    },
-    TIMEOUT,
-  );
-
-  test.skipIf(platform() !== "darwin")(
-    "fx logout leaves the macOS Keychain API key untouched",
-    async () => {
-      const runId = `${process.pid}-${Date.now()}`;
-      const account = `fx-e2e-logout-${runId}`;
-      const keychainToken = `vca_fake_logout_key_${runId}`;
-      const root = mkdtempSync(join(tmpdir(), "fx-e2e-logout-keychain-"));
-      const home = join(root, "home");
-      mkdirSync(join(home, "Library"), { recursive: true });
-      symlinkSync(
-        join(homedir(), "Library", "Keychains"),
-        join(home, "Library", "Keychains"),
-        "dir",
-      );
-      const issuer = startLogoutIssuer([200, 200]);
-
-      try {
-        const store = spawnSync(
-          "/usr/bin/security",
-          ["add-generic-password", "-a", account, "-s", KEYCHAIN_SERVICE, "-U", "-w", keychainToken],
-          { encoding: "utf8" },
-        );
-        expect(store.status, store.stderr).toBe(0);
-        writeSeededFxAuth(home, undefined, issuer.issuerUrl);
-
-        const env = {
-          ...NO_GATEWAY_AUTH,
-          HOME: realpathSync(home),
-          USER: account,
-        };
-        const logout = await runFx(["logout"], { env });
-        const status = await runFx(["status", "--json"], { env });
-        const stored = spawnSync(
-          "/usr/bin/security",
-          ["find-generic-password", "-a", account, "-s", KEYCHAIN_SERVICE, "-w"],
-          { encoding: "utf8", env: { ...process.env, ...env } },
-        );
-
-        expect(logout.code).toBe(0);
-        expect(logout.stderr).toBe("");
-        expect(existsSync(join(home, ".fx", "auth.json"))).toBe(false);
-        expect(stored.status).toBe(0);
-        expect(stored.stdout.trim()).toBe(keychainToken);
-        expect(JSON.parse(status.stdout).auth).not.toBe("fx login");
-        expect(logout.stdout).not.toContain(keychainToken);
-        expect(status.stdout).not.toContain(keychainToken);
-      } finally {
-        issuer.stop();
-        spawnSync(
-          "/usr/bin/security",
-          ["delete-generic-password", "-a", account, "-s", KEYCHAIN_SERVICE],
-          { encoding: "utf8" },
-        );
-        rmSync(root, { recursive: true, force: true });
-      }
-    },
-    TIMEOUT,
-  );
-});
-
-// The file backend is only selected off macOS, so these run on Linux CI.
 describe("cli: stored key file backend", () => {
   test.skipIf(platform() === "darwin")(
     "a 0600 key file resolves, and a loosened one is refused rather than reported absent",
@@ -3124,7 +2520,7 @@ describe("cli: models", () => {
       name: "an ordinary public empty catalog",
       authenticated: false,
       expected:
-        "[models] no models returned by gateway\n[models] Using the public model catalog; sign in with Vercel or use an AI Gateway API key for team-private models.\n",
+        "[models] no models returned by gateway\n[models] Using the public model catalog; set AI_GATEWAY_API_KEY for private Gateway models.\n",
     },
     {
       name: "a rejected credential empty fallback catalog",
@@ -3423,12 +2819,10 @@ describe("cli: models", () => {
     TIMEOUT,
   );
 
-  // Mirror the gateway's credential handling for private model catalogs.
+  // Mirror the Gateway credential handling for private model catalogs.
   for (const scenario of [
     {
       name: "uses the anonymous public catalog without a credential",
-      seedFxLogin: false,
-      expiredFxLogin: false,
       authEnv: {},
       expectAuthHeader: false,
       expectPrivate: false,
@@ -3436,30 +2830,7 @@ describe("cli: models", () => {
         "requested_access=public_only credential_source=none effective_access=public_only public_only_reason=no_credential anonymous_fallback=false outcome=loaded failure_category=none http_status=none retryable=none",
     },
     {
-      name: "uses the selected fx login team catalog",
-      seedFxLogin: true,
-      expiredFxLogin: false,
-      authEnv: {},
-      expectAuthHeader: true,
-      expectPrivate: true,
-      expectedTeamQuery: "team_123",
-      expectedTrace:
-        "requested_access=authenticated credential_source=fx_login effective_access=authenticated public_only_reason=none anonymous_fallback=false outcome=loaded failure_category=none http_status=none retryable=none",
-    },
-    {
-      name: "uses public access for an expired fx login without refreshing it",
-      seedFxLogin: true,
-      expiredFxLogin: true,
-      authEnv: {},
-      expectAuthHeader: false,
-      expectPrivate: false,
-      expectedTrace:
-        "requested_access=public_only credential_source=fx_login effective_access=public_only public_only_reason=fx_login_refresh_required anonymous_fallback=false outcome=loaded failure_category=none http_status=none retryable=none",
-    },
-    {
       name: "sends an API key so the catalog includes team-private models",
-      seedFxLogin: false,
-      expiredFxLogin: false,
       authEnv: { AI_GATEWAY_API_KEY: SEEDED_GATEWAY_TOKEN },
       expectAuthHeader: true,
       expectPrivate: true,
@@ -3468,8 +2839,6 @@ describe("cli: models", () => {
     },
     {
       name: "sends deployment OIDC so the catalog includes team-private models",
-      seedFxLogin: false,
-      expiredFxLogin: false,
       authEnv: { VERCEL_OIDC_TOKEN: SEEDED_GATEWAY_TOKEN },
       expectAuthHeader: true,
       expectPrivate: true,
@@ -3490,8 +2859,7 @@ describe("cli: models", () => {
             const url = new URL(request.url);
             requests.push({ headers, teamId: url.searchParams.get("teamId") });
             const seededAuth =
-              headers.get("authorization") === `Bearer ${SEEDED_GATEWAY_TOKEN}` &&
-              (!scenario.seedFxLogin || url.searchParams.get("teamId") === "team_123");
+              headers.get("authorization") === `Bearer ${SEEDED_GATEWAY_TOKEN}`;
             return Response.json({
               data: [
                 { id: "public/sentinel", type: "language", tags: ["tool-use"] },
@@ -3509,17 +2877,6 @@ describe("cli: models", () => {
           const tracePath = join(root, "catalog-trace.log");
           mkdirSync(home);
           mkdirSync(workspace);
-          if (scenario.seedFxLogin) {
-            writeSeededFxAuth(
-              home,
-              "team_123",
-              `http://127.0.0.1:${server.port}`,
-              scenario.expiredFxLogin
-                ? Date.now() - 60_000
-                : Date.now() + 60 * 60 * 1000,
-            );
-          }
-
           const r = await runFx(["models", "--json"], {
             cwd: realpathSync(workspace),
             env: {
@@ -3554,10 +2911,7 @@ describe("cli: models", () => {
             expect(requests[0]!.headers.get("authorization")).toBeNull();
             expect(requests[0]!.headers.get("x-vercel-ai-gateway-team")).toBeNull();
           }
-          expect(requests[0]!.teamId).toBe(scenario.expectedTeamQuery ?? null);
-          if (scenario.seedFxLogin && !scenario.expiredFxLogin) {
-            expect(requests[0]!.headers.get("x-vercel-ai-gateway-team")).toBeNull();
-          }
+          expect(requests[0]!.teamId).toBeNull();
 
           const trace = readFileSync(tracePath, "utf8");
           const events = catalogTraceEvents(trace);

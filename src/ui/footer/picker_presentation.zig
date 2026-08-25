@@ -13,47 +13,9 @@ const input_presentation = @import("input_presentation.zig");
 const row_text = @import("row_text.zig");
 
 const Allocator = std.mem.Allocator;
-const team_query_prefix = "   Choose a Vercel team · Search: ";
-const compact_team_query_prefix = "Search: ";
-
-const TeamQueryProjection = struct {
-    prefix: []const u8,
-    query: []const u8,
-
-    fn cursorColumn(self: TeamQueryProjection, width: u16) u16 {
-        const content_end = display_width.visibleWidth(self.prefix) +
-            display_width.visibleWidth(self.query) + 1;
-        return @intCast(@min(content_end, width));
-    }
-};
-
-pub fn authPickerQueryCursorColumn(view: auth_runtime.PickerView, width: u16) ?u16 {
-    if (view.stage != .change_team or width == 0) return null;
-    return teamQueryProjection(view.team_query, width).cursorColumn(width);
-}
-
-fn teamQueryProjection(query: []const u8, width: u16) TeamQueryProjection {
-    const available: usize = width;
-    if (query.len == 0) return .{
-        .prefix = display_width.prefixByWidth(team_query_prefix, available),
-        .query = "",
-    };
-
-    const prefix = if (display_width.visibleWidth(team_query_prefix) < available)
-        team_query_prefix
-    else if (display_width.visibleWidth(compact_team_query_prefix) < available)
-        compact_team_query_prefix
-    else
-        "";
-    const query_width = available - display_width.visibleWidth(prefix);
-    return .{
-        .prefix = prefix,
-        .query = display_width.suffixByWidth(query, query_width),
-    };
-}
 
 pub fn authPickerRowCount(view: auth_runtime.PickerView) u16 {
-    if (view.stage == .sign_in) return 7;
+    if (view.stage == .sign_in) return 6;
     if (view.stage == .root and view.include_skip) return 17;
     return @intCast(1 + @max(view.choiceCount(), 1));
 }
@@ -75,22 +37,13 @@ pub noinline fn composeAuthPickerRow(
     var row: std.ArrayList(u8) = .empty;
     if (width == 0) return row;
 
-    const show_header = row_index == 0 and (row_count > 1 or view.stage == .change_team);
+    const show_header = row_index == 0 and row_count > 1;
     if (show_header) {
         try row.appendSlice(alloc, ui_render.dim_style);
-        if (view.stage == .change_team) {
-            const projection = teamQueryProjection(view.team_query, width);
-            try row_text.appendClipped(alloc, &row, projection.prefix, width);
-            const remaining: u16 = width -| @as(u16, @intCast(display_width.visibleWidth(projection.prefix)));
-            try row_text.appendClipped(alloc, &row, projection.query, remaining);
-            try row.appendSlice(alloc, ui_render.reset_style);
-            return row;
-        }
         const header = switch (view.stage) {
             .root => "   Accounts",
             .provider => "   Switch provider",
             .sign_in => unreachable,
-            .change_team => unreachable,
             .switch_credential => "   Use this credential",
         };
         try row_text.appendClipped(alloc, &row, header, width);
@@ -112,10 +65,6 @@ pub noinline fn composeAuthPickerRow(
             .root => "",
             .provider => "     No providers available",
             .sign_in => unreachable,
-            .change_team => if (view.team_query.len == 0)
-                "     No Vercel teams available"
-            else
-                "     No matching Vercel teams",
             .switch_credential => "     No credentials available",
         }, width);
         try row.appendSlice(alloc, ui_render.reset_style);
@@ -235,7 +184,7 @@ fn composeSignInPickerRow(
 
     try row.appendSlice(
         alloc,
-        if (row_index == 2 or row_index == 3)
+        if (row_index == 2)
             ui_render.selected_completion_style
         else
             ui_render.dim_style,
@@ -247,7 +196,7 @@ fn composeSignInPickerRow(
         const remaining = width -| used;
         if (remaining > 0) {
             try row.appendSlice(alloc, "\x1b]8;id=fx-codex-auth;");
-            try row.appendSlice(alloc, snapshot.verification_uri);
+            try row.appendSlice(alloc, snapshot.authorization_url);
             try row.appendSlice(alloc, "\x1b\\\x1b[4m");
             try row_text.appendClipped(alloc, &row, "Authorize with Codex", remaining);
             try row.appendSlice(alloc, "\x1b[24m\x1b]8;;\x1b\\");
@@ -257,39 +206,30 @@ fn composeSignInPickerRow(
     }
     var label_buf: [512]u8 = undefined;
     const label = switch (row_index) {
-        0 => if (source == .chatgpt_subscription)
-            "   Sign in with Codex"
-        else if (source == .grok_subscription)
-            "   Sign in with Grok"
-        else
-            "   Sign in with Vercel",
-        1, 4 => "",
+        0 => switch (source) {
+            .chatgpt_subscription => "   Sign in with Codex",
+            .grok_subscription => "   Sign in with Grok",
+            else => unreachable,
+        },
+        1 => "",
         2 => std.fmt.bufPrint(
             &label_buf,
             "   Open   {s}",
-            .{snapshot.verification_uri},
-        ) catch if (source == .chatgpt_subscription)
-            "   Open the Codex authorization page"
-        else if (source == .grok_subscription)
-            "   Open the Grok authorization page"
-        else
-            "   Open the Vercel device authorization page",
-        3 => if (snapshot.user_code.len == 0)
-            ""
-        else
-            std.fmt.bufPrint(
-                &label_buf,
-                "   Code   {s}",
-                .{snapshot.user_code},
-            ) catch "   Code unavailable",
-        5 => switch (snapshot.state) {
+            .{snapshot.authorization_url},
+        ) catch switch (source) {
+            .chatgpt_subscription => "   Open the Codex authorization page",
+            .grok_subscription => "   Open the Grok authorization page",
+            else => unreachable,
+        },
+        3 => "",
+        4 => switch (snapshot.state) {
             .idle => "   Preparing sign-in…",
             .polling => "   Waiting for authorization…",
             .succeeded => "   Authorization complete",
             .failed => "   Sign-in failed",
             .cancelled => "   Sign-in cancelled",
         },
-        6 => "   Enter reopens browser · Esc cancels",
+        5 => "   Enter reopens browser · Esc cancels",
         else => "",
     };
     try row_text.appendClipped(alloc, &row, label, width);
@@ -1528,7 +1468,7 @@ test "auth onboarding composes the welcome copy and login choices" {
     const view = auth_runtime.PickerView{
         .active = true,
         .available_sources = .empty,
-        .selected_choice = .{ .action = .login },
+        .selected_choice = .{ .action = .chatgpt_login },
         .active_source = null,
         .include_skip = true,
     };
@@ -1548,7 +1488,8 @@ test "auth onboarding composes the welcome copy and login choices" {
     try std.testing.expect(std.mem.find(u8, screen.items, "You can change this anytime with /login.") != null);
     try std.testing.expect(std.mem.find(u8, screen.items, "⚠︎ Note: fx is experimental and defaults to auto mode. \x1b]8;id=fx-onboarding;https://fx.sh/docs/stability\x1b\\\x1b[4mLearn more\x1b[24m\x1b]8;;\x1b\\") != null);
     try std.testing.expect(std.mem.find(u8, screen.items, "Learn more: https://") == null);
-    try std.testing.expect(std.mem.find(u8, screen.items, "Sign in with Vercel") != null);
+    try std.testing.expect(std.mem.find(u8, screen.items, "Sign in with Codex") != null);
+    try std.testing.expect(std.mem.find(u8, screen.items, "Sign in with Grok") != null);
     try std.testing.expect(std.mem.find(u8, screen.items, "Add an API key") == null);
     try std.testing.expect(std.mem.find(u8, screen.items, "Esc to sign in later · Explore all commands with /help") != null);
 
@@ -1562,15 +1503,15 @@ test "auth onboarding composes the welcome copy and login choices" {
 
     var selected_row = try composeAuthPickerRow(alloc, view, 8, authPickerRowCount(view), 100);
     defer selected_row.deinit(alloc);
-    try std.testing.expect(std.mem.find(u8, selected_row.items, "› Sign in with Vercel") != null);
+    try std.testing.expect(std.mem.find(u8, selected_row.items, "› Sign in with Codex") != null);
 
     var chatgpt_row = try composeAuthPickerRow(alloc, view, 9, authPickerRowCount(view), 100);
     defer chatgpt_row.deinit(alloc);
-    try std.testing.expect(std.mem.find(u8, chatgpt_row.items, "Sign in with Codex") != null);
+    try std.testing.expect(std.mem.find(u8, chatgpt_row.items, "Sign in with Grok") != null);
 
     var grok_row = try composeAuthPickerRow(alloc, view, 10, authPickerRowCount(view), 100);
     defer grok_row.deinit(alloc);
-    try std.testing.expect(std.mem.find(u8, grok_row.items, "Sign in with Grok") != null);
+    try std.testing.expectEqual(@as(usize, 0), display_width.visibleWidthIgnoringAnsi(grok_row.items));
 
     var narrow_note = try composeAuthPickerRow(alloc, view, 11, authPickerRowCount(view), 58);
     defer narrow_note.deinit(alloc);
@@ -1584,7 +1525,6 @@ test "auth onboarding composes the welcome copy and login choices" {
         try compact_screen.appendSlice(alloc, row.items);
         try compact_screen.append(alloc, '\n');
     }
-    try std.testing.expect(std.mem.find(u8, compact_screen.items, "Sign in with Vercel") != null);
     try std.testing.expect(std.mem.find(u8, compact_screen.items, "Sign in with Codex") != null);
     try std.testing.expect(std.mem.find(u8, compact_screen.items, "Sign in with Grok") != null);
 }
@@ -1593,40 +1533,31 @@ test "auth picker composes only detected credential sources" {
     const alloc = std.testing.allocator;
     const view = auth_runtime.PickerView{
         .active = true,
-        .available_sources = auth_runtime.SourceSet.initMany(&.{ .ai_gateway_api_key, .fx_login }),
-        .selected_choice = .{ .source = .fx_login },
-        .active_source = .fx_login,
+        .available_sources = auth_runtime.SourceSet.initMany(&.{ .ai_gateway_api_key, .stored_key }),
+        .selected_choice = .{ .action = .chatgpt_login },
+        .active_source = .stored_key,
         .include_skip = false,
     };
     const row_count = authPickerRowCount(view);
-    try std.testing.expectEqual(@as(u16, 7), row_count);
+    try std.testing.expectEqual(@as(u16, 5), row_count);
 
     var header = try composeAuthPickerRow(alloc, view, 0, row_count, 80);
     defer header.deinit(alloc);
     try std.testing.expect(std.mem.find(u8, header.items, "Accounts") != null);
 
-    var sign_in = try composeAuthPickerRow(alloc, view, 1, row_count, 80);
-    defer sign_in.deinit(alloc);
-    try std.testing.expect(std.mem.find(u8, sign_in.items, "Sign in with Vercel") != null);
+    var codex = try composeAuthPickerRow(alloc, view, 1, row_count, 80);
+    defer codex.deinit(alloc);
+    try std.testing.expect(std.mem.find(u8, codex.items, "Sign in with Codex") != null);
 
-    var chatgpt = try composeAuthPickerRow(alloc, view, 2, row_count, 80);
-    defer chatgpt.deinit(alloc);
-    try std.testing.expect(std.mem.find(u8, chatgpt.items, "Sign in with Codex") != null);
-
-    var grok = try composeAuthPickerRow(alloc, view, 3, row_count, 80);
+    var grok = try composeAuthPickerRow(alloc, view, 2, row_count, 80);
     defer grok.deinit(alloc);
     try std.testing.expect(std.mem.find(u8, grok.items, "Sign in with Grok") != null);
 
-    var switch_provider = try composeAuthPickerRow(alloc, view, 4, row_count, 80);
+    var switch_provider = try composeAuthPickerRow(alloc, view, 3, row_count, 80);
     defer switch_provider.deinit(alloc);
     try std.testing.expect(std.mem.find(u8, switch_provider.items, "Switch provider") != null);
 
-    var change_team = try composeAuthPickerRow(alloc, view, 5, row_count, 80);
-    defer change_team.deinit(alloc);
-    try std.testing.expect(std.mem.find(u8, change_team.items, "Change team") != null);
-    try std.testing.expect(std.mem.find(u8, change_team.items, "sign in first") != null);
-
-    var switch_credential = try composeAuthPickerRow(alloc, view, 6, row_count, 80);
+    var switch_credential = try composeAuthPickerRow(alloc, view, 4, row_count, 80);
     defer switch_credential.deinit(alloc);
     try std.testing.expect(std.mem.find(u8, switch_credential.items, "Switch credential") != null);
 }
@@ -1635,7 +1566,7 @@ test "compact auth picker keeps the selected hub action visible" {
     const alloc = std.testing.allocator;
     const view = auth_runtime.PickerView{
         .active = true,
-        .available_sources = auth_runtime.SourceSet.initMany(&.{ .ai_gateway_api_key, .fx_login }),
+        .available_sources = auth_runtime.SourceSet.initMany(&.{ .ai_gateway_api_key, .stored_key }),
         .selected_choice = .{ .action = .switch_credential },
         .active_source = .ai_gateway_api_key,
         .include_skip = false,
@@ -1647,7 +1578,7 @@ test "compact auth picker keeps the selected hub action visible" {
     try std.testing.expect(std.mem.find(u8, row.items, "Switch credential") != null);
 }
 
-test "auth picker renders the staged switch and disabled team screens" {
+test "auth picker renders the staged credential switch" {
     const alloc = std.testing.allocator;
     const switch_view = auth_runtime.PickerView{
         .active = true,
@@ -1670,44 +1601,9 @@ test "auth picker renders the staged switch and disabled team screens" {
         authPickerDescriptionColumn(switch_view) >
             5 + display_width.visibleWidth(credentials.sourceLabel(.stored_key)),
     );
-
-    const team_view = auth_runtime.PickerView{
-        .active = true,
-        .available_sources = .empty,
-        .selected_choice = null,
-        .active_source = .stored_key,
-        .include_skip = false,
-        .stage = .change_team,
-    };
-    var team_header = try composeAuthPickerRow(alloc, team_view, 0, 2, 80);
-    defer team_header.deinit(alloc);
-    try std.testing.expect(std.mem.find(u8, team_header.items, "Choose a Vercel team") != null);
-
-    var no_teams = try composeAuthPickerRow(alloc, team_view, 1, 2, 80);
-    defer no_teams.deinit(alloc);
-    try std.testing.expect(std.mem.find(u8, no_teams.items, "No Vercel teams available") != null);
-
-    var search_view = team_view;
-    search_view.team_query = "play";
-    var search_header = try composeAuthPickerRow(alloc, search_view, 0, 2, 80);
-    defer search_header.deinit(alloc);
-    try std.testing.expect(std.mem.find(u8, search_header.items, "Search: play") != null);
-
-    search_view.team_query = "example-internal-team";
-    var narrow_search_header = try composeAuthPickerRow(alloc, search_view, 0, 2, 20);
-    defer narrow_search_header.deinit(alloc);
-    try std.testing.expect(std.mem.find(u8, narrow_search_header.items, "nternal-team") != null);
-    try std.testing.expectEqual(
-        @as(u16, 20),
-        authPickerQueryCursorColumn(search_view, 20).?,
-    );
-
-    var no_matches = try composeAuthPickerRow(alloc, search_view, 1, 2, 80);
-    defer no_matches.deinit(alloc);
-    try std.testing.expect(std.mem.find(u8, no_matches.items, "No matching Vercel teams") != null);
 }
 
-test "sign-in stage renders the complete device authorization screen" {
+test "Grok sign-in stage renders browser authorization" {
     const alloc = std.testing.allocator;
     const view = auth_runtime.PickerView{
         .active = true,
@@ -1716,14 +1612,14 @@ test "sign-in stage renders the complete device authorization screen" {
         .active_source = null,
         .include_skip = false,
         .stage = .sign_in,
+        .sign_in_source = .grok_subscription,
         .sign_in = .{
             .state = .polling,
-            .verification_uri = "https://vercel.test/verify",
-            .user_code = "TEST-CODE",
+            .authorization_url = "https://grok.test/oauth/authorize",
         },
     };
 
-    try std.testing.expectEqual(@as(u16, 7), authPickerRowCount(view));
+    try std.testing.expectEqual(@as(u16, 6), authPickerRowCount(view));
     var screen: std.ArrayList(u8) = .empty;
     defer screen.deinit(alloc);
     for (0..authPickerRowCount(view)) |row_index| {
@@ -1733,9 +1629,8 @@ test "sign-in stage renders the complete device authorization screen" {
         try screen.append(alloc, '\n');
     }
     for ([_][]const u8{
-        "Sign in with Vercel",
-        "Open   https://vercel.test/verify",
-        "Code   TEST-CODE",
+        "Sign in with Grok",
+        "Open   https://grok.test/oauth/authorize",
         "Waiting for authorization",
         "Enter reopens browser · Esc cancels",
     }) |expected| {
@@ -1756,7 +1651,7 @@ test "Codex sign-in stage renders a bounded clickable authorization action" {
         .sign_in_source = .chatgpt_subscription,
         .sign_in = .{
             .state = .polling,
-            .verification_uri = url,
+            .authorization_url = url,
         },
     };
 
@@ -1775,7 +1670,7 @@ test "partially visible auth picker shows a source window without duplicates" {
     const view = auth_runtime.PickerView{
         .active = true,
         .available_sources = auth_runtime.SourceSet.full,
-        .selected_choice = .{ .source = .fx_login },
+        .selected_choice = .{ .source = .openai_api_key },
         .active_source = .vercel_oidc_token,
         .include_skip = false,
         .stage = .switch_credential,
@@ -1783,18 +1678,18 @@ test "partially visible auth picker shows a source window without duplicates" {
 
     var first_source = try composeAuthPickerRow(alloc, view, 1, 3, 80);
     defer first_source.deinit(alloc);
-    try std.testing.expect(std.mem.find(u8, first_source.items, "OPENAI_API_KEY") != null);
-    try std.testing.expect(std.mem.find(u8, first_source.items, "fx login") == null);
+    try std.testing.expect(std.mem.find(u8, first_source.items, "AI_GATEWAY_API_KEY") != null);
+    try std.testing.expect(std.mem.find(u8, first_source.items, "OPENAI_API_KEY") == null);
 
     var selected_source = try composeAuthPickerRow(alloc, view, 2, 3, 80);
     defer selected_source.deinit(alloc);
-    try std.testing.expect(std.mem.find(u8, selected_source.items, "fx login") != null);
+    try std.testing.expect(std.mem.find(u8, selected_source.items, "OPENAI_API_KEY") != null);
 
     var scrolled_view = view;
     scrolled_view.selected_choice = .{ .source = .stored_key };
     var scrolled_first = try composeAuthPickerRow(alloc, scrolled_view, 1, 3, 80);
     defer scrolled_first.deinit(alloc);
-    try std.testing.expect(std.mem.find(u8, scrolled_first.items, "fx login") != null);
+    try std.testing.expect(std.mem.find(u8, scrolled_first.items, "OPENAI_API_KEY") != null);
 
     var scrolled_selected = try composeAuthPickerRow(alloc, scrolled_view, 2, 3, 80);
     defer scrolled_selected.deinit(alloc);
