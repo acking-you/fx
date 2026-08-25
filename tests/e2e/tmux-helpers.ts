@@ -222,23 +222,8 @@ export function fakeGatewayToolCall(
   input: object,
 ) {
   return fakeGatewaySse([
-    {
-      type: "response.output_item.added",
-      output_index: 0,
-      item: { type: "function_call", call_id: id, name },
-    },
-    {
-      type: "response.function_call_arguments.done",
-      output_index: 0,
-      arguments: JSON.stringify(input),
-    },
-    {
-      type: "response.completed",
-      response: {
-        status: "completed",
-        usage: { input_tokens: 3, output_tokens: 5, total_tokens: 8 },
-      },
-    },
+    ...responseFunctionCall(id, name, input),
+    responseCompleted(3, 5),
   ]);
 }
 
@@ -273,23 +258,8 @@ export function fakeGatewaySerializedToolCall(
     ...(assistantText
       ? [{ type: "response.output_text.delta", item_id: "answer_1", output_index: 0, content_index: 0, delta: assistantText }]
       : []),
-    {
-      type: "response.output_item.added",
-      output_index: 1,
-      item: { type: "function_call", call_id: id, name },
-    },
-    {
-      type: "response.function_call_arguments.done",
-      output_index: 1,
-      arguments: input,
-    },
-    {
-      type: "response.completed",
-      response: {
-        status: "completed",
-        usage: { input_tokens: 3, output_tokens: 5, total_tokens: 8 },
-      },
-    },
+    ...responseFunctionCall(id, name, input, assistantText ? 1 : 0),
+    responseCompleted(3, 5),
   ]);
 }
 

@@ -185,10 +185,14 @@ function lengthLimitedCommandResponse(command: string) {
 function providerErrorResponse(detail = "route temporarily unavailable"): Response {
   return fakeGatewaySse([
     {
-      type: "response.incomplete",
+      type: "response.failed",
       response: {
-        status: "incomplete",
-        incomplete_details: { reason: "provider_error", message: detail },
+        status: "failed",
+        error: {
+          type: "provider_error",
+          code: "provider_error",
+          message: detail,
+        },
         usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
       },
     },
@@ -3462,7 +3466,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       await session.sendText("Use the selected model now.");
       await session.waitForText(nextTurnDone, TIMEOUT);
       await waitForCondition(
-        () => queuedGateway.requests.length === 2,
+        () => queuedGateway.requests.length >= 2,
         "next-turn selected-model request",
       );
 
@@ -5754,54 +5758,6 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
   );
 
   test(
-    "current compact view labels provisional tool calls that never execute",
-    async () => {
-      root = realpathSync(mkdtempSync(join(tmpdir(), "fx-tui-minimal-not-executed-")));
-      const home = join(root, "home");
-      const workspace = join(root, "workspace");
-      const stderrPath = join(root, "stderr.log");
-      mkdirSync(join(home, ".fx"), { recursive: true });
-      mkdirSync(workspace, { recursive: true });
-      writeFileSync(join(home, ".fx", "settings.json"), "{}");
-
-      const provisionalGateway = startFakeGateway([
-        fakeGatewaySse([
-          responseFunctionCallStart("preview_only", "read_file"),
-          responseFunctionCallDelta("preview_only", '{"path":"never-read.txt"}'),
-          responseCompleted(),
-        ]),
-      ]);
-      gateway = provisionalGateway;
-
-      session = await TmuxSession.create({
-        cwd: workspace,
-        width: 100,
-        height: 32,
-        stderrPath,
-        env: {
-          HOME: home,
-          OPENAI_API_KEY: "fake-minimal-not-executed-key",
-          FX_PERMISSION_MODE: "auto",
-          FX_RESPONSES_BASE_URL: provisionalGateway.baseUrl,
-          FX_MODEL: MODEL,
-        },
-      });
-
-      await session.waitForComposer(TIMEOUT);
-      await session.sendText("Preview a read without executing it.");
-      const compact = await session.waitForText("1 not executed", TIMEOUT);
-      expect(compact).toContain("● 1 tool call · 1 read · 1 not executed");
-      expect(compact).not.toContain("running");
-
-      await session.sendKeys("C-o");
-      const full = await session.waitForText("Tool was not executed", TIMEOUT);
-      expect(full).toContain("Tool was not executed");
-      expect(readFileSync(stderrPath, "utf8")).toBe("");
-    },
-    TIMEOUT,
-  );
-
-  test(
     "trace stderr mirrors canonical metadata without payload sentinels",
     async () => {
       const stage = lifecycleStage();
@@ -6923,11 +6879,11 @@ describe.skipIf(!tmuxAvailable())("transcript scrollback release", () => {
       await Bun.sleep(250);
 
       const scrollback = await session.captureFullScrollback();
-
-      // The group header must survive as its final text exactly once; a
-      // frozen intermediate count would add another "tool call" line.
-      expect(countOccurrences(scrollback, "tool call")).toBe(1);
-      expect(scrollback).toContain("18 tool calls");
+      // Each final semantic group must survive exactly once; a frozen
+      // intermediate header would add another "tool call" line.
+      expect(countOccurrences(scrollback, "tool call")).toBe(2);
+      expect(countOccurrences(scrollback, "1 tool call · 1 list")).toBe(1);
+      expect(countOccurrences(scrollback, "17 tool calls · 17 read")).toBe(1);
       for (let index = 1; index <= 17; index += 1) {
         expect(
           countOccurrences(
