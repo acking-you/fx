@@ -149,7 +149,10 @@ const fetch = async (_url, init = {}) => {
   }
   const body = JSON.parse(requestDecoder.decode(init.body));
   if (!checkedBrowserCapabilityContext) {
-    const serializedPrompt = JSON.stringify(body.prompt || []);
+    const serializedPrompt = JSON.stringify([
+      body.instructions || "",
+      ...(body.input || []),
+    ]);
     for (const guidance of [
       "embedded browser version of fx",
       "Public web fetch, web search, and general outbound network access are unavailable",
