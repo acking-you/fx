@@ -1282,16 +1282,28 @@ fn materializeTool(alloc: Allocator, tool: ToolState) !types.ToolCall {
     // deliberately carry arbitrary plaintext. Encoding that plaintext as a
     // JSON string preserves every byte and prevents valid freeform input from
     // being mislabeled as malformed function arguments.
-    const arguments_json = if (tool.input_kind == .custom_freeform)
+    const encoded_arguments = if (tool.input_kind == .custom_freeform)
         try stringifyJsonStringOwned(alloc, input)
     else
         try alloc.dupe(u8, input);
+    defer alloc.free(encoded_arguments);
+    const argument_integrity = try types.ToolArgumentIntegrity.classifySerialized(
+        alloc,
+        encoded_arguments,
+    );
+    // A rejected malformed call still enters paired history so the model can
+    // recover on its next step. Keep the integrity marker, but never persist
+    // invalid JSON into the standard Responses input contract.
+    const arguments_json = try alloc.dupe(
+        u8,
+        if (argument_integrity == .malformed_json) "{}" else encoded_arguments,
+    );
     errdefer alloc.free(arguments_json);
     return .{
         .id = id,
         .name = name,
         .arguments_json = arguments_json,
-        .argument_integrity = try types.ToolArgumentIntegrity.classifySerialized(alloc, arguments_json),
+        .argument_integrity = argument_integrity,
         .responses_item_id = responses_item_id,
         .responses_output_index = try optionalOutputIndex(tool.output_index),
     };
@@ -1438,6 +1450,31 @@ test "Responses stream joins SSE data lines and retains reasoning tool and usage
     try std.testing.expectEqual(types.ProviderFinishReason.tool_calls, completion.finish_reason.?);
     try std.testing.expectEqual(@as(?u64, 2), completion.usage.cached_input_tokens);
     try std.testing.expectEqual(@as(?u64, 1), completion.usage.reasoning_output_tokens);
+}
+
+test "Responses malformed function arguments retain rejection and valid history JSON" {
+    const payload =
+        "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"id\":\"fc_bad\",\"call_id\":\"call_bad\",\"name\":\"read_file\"}}\n\n" ++
+        "data: {\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_bad\",\"call_id\":\"call_bad\",\"output_index\":0,\"arguments\":\"{\\\"path\\\":\\\"a\\\",\\\"path\\\":\\\"b\\\"}\"}\n\n" ++
+        "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n";
+    var reader = std.Io.Reader.fixed(payload);
+    var cancel = std.atomic.Value(bool).init(false);
+    const Noop = struct {
+        fn chunk(_: *anyopaque, _: []const u8) void {}
+    };
+    var context: u8 = 0;
+    var completion = try consume(std.testing.allocator, &reader, .{
+        .context = &context,
+        .on_content_chunk = Noop.chunk,
+    }, &cancel);
+    defer freeCompletion(std.testing.allocator, &completion);
+
+    try std.testing.expectEqual(@as(usize, 1), completion.tool_calls.len);
+    try std.testing.expectEqual(
+        types.ToolArgumentIntegrity.malformed_json,
+        completion.tool_calls[0].argument_integrity,
+    );
+    try std.testing.expectEqualStrings("{}", completion.tool_calls[0].arguments_json);
 }
 
 test "Responses namespace web run maps to the local permissioned web search tool" {

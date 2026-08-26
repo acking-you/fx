@@ -19,6 +19,8 @@ import {
   fakeGatewayPermissionDecision,
   fakeGatewaySse,
   fakeGatewayToolCall,
+  responseCompleted,
+  responseFunctionCall,
   startFakeGateway,
   TmuxSession,
   tmuxAvailable,
@@ -71,13 +73,10 @@ function gatewayEnv(
 ) {
   return {
     HOME: root.home,
-    AI_GATEWAY_API_KEY: "fake-auto-mode-reliability-key",
-    VERCEL_OIDC_TOKEN: undefined,
-    FX_GATEWAY_BASE_URL: gateway.baseUrl,
-    FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+    OPENAI_API_KEY: "fake-auto-mode-reliability-key",
+        FX_RESPONSES_BASE_URL: gateway.baseUrl,
     FX_MODEL: MODEL,
     FX_PERMISSION_MODE: "auto",
-    FX_AUTO_UPGRADE: "0",
     NO_COLOR: "1",
   };
 }
@@ -104,16 +103,15 @@ function cleanCommandCall(command: string, id: string) {
 
 function toolResultText(body: string, toolCallId: string): string {
   const request = JSON.parse(body) as {
-    prompt?: Array<{ content?: Array<Record<string, unknown>> }>;
+    input?: Array<Record<string, unknown>>;
   };
-  const result = (request.prompt ?? [])
-    .flatMap((message) => message.content ?? [])
-    .find((part) => part.type === "tool-result" && part.toolCallId === toolCallId);
+  const result = (request.input ?? [])
+    .find((part) =>
+      part.type === "function_call_output" && part.call_id === toolCallId
+    );
   expect(result).toBeDefined();
-  const output = result!.output as Record<string, unknown>;
-  expect(output.type).toBe("text");
-  expect(typeof output.value).toBe("string");
-  return output.value as string;
+  expect(typeof result!.output).toBe("string");
+  return result!.output as string;
 }
 
 function installRecorder(root: IsolatedRoot, name: string, marker: string) {
@@ -315,36 +313,22 @@ describe("lean auto mode reliability", () => {
       const gateway = startGateway(
         [
           fakeGatewaySse([
-            {
-              type: "tool-call",
-              toolCallId: "clean_direct_pwd",
-              toolName: "terminal",
-              input: { action: "exec", command: "pwd", profile: "clean" },
-            },
-            {
-              type: "tool-call",
-              toolCallId: "clean_direct_git_status",
-              toolName: "terminal",
-              input: {
-                action: "exec",
-                command: "git status --short",
-                profile: "clean",
-              },
-            },
-            {
-              type: "tool-call",
-              toolCallId: "clean_blocked_reset",
-              toolName: "terminal",
-              input: {
-                action: "exec",
-                command: "git reset --hard",
-                profile: "clean",
-              },
-            },
-            {
-              type: "finish",
-              finishReason: { unified: "tool-calls", raw: "tool-calls" },
-            },
+            ...responseFunctionCall("clean_direct_pwd", "terminal", {
+              action: "exec",
+              command: "pwd",
+              profile: "clean",
+            }),
+            ...responseFunctionCall("clean_direct_git_status", "terminal", {
+              action: "exec",
+              command: "git status --short",
+              profile: "clean",
+            }, 1),
+            ...responseFunctionCall("clean_blocked_reset", "terminal", {
+              action: "exec",
+              command: "git reset --hard",
+              profile: "clean",
+            }, 2),
+            responseCompleted(),
           ]),
           (body) => {
             expect(toolResultText(body, "clean_direct_pwd")).toContain("exit_code=0");
@@ -776,15 +760,15 @@ describe("lean auto mode reliability", () => {
       expect(existsSync(blockedMarker)).toBe(false);
       expect(gateway.classifierRequests).toHaveLength(1);
       const reviewerPayload = JSON.parse(gateway.classifierRequests[0]!.body) as {
-        prompt: Array<{
+        input: Array<{
           role: string;
           content: Array<{ type: string; text?: string }>;
         }>;
       };
-      const rootMessage = reviewerPayload.prompt[0];
+      const rootMessage = reviewerPayload.input[0];
       expect(rootMessage?.role).toBe("user");
       const rootContext = (rootMessage?.content ?? [])
-        .filter((part) => part.type === "text")
+        .filter((part) => part.type === "input_text")
         .map((part) => part.text ?? "")
         .join("");
       expect(Buffer.byteLength(rootContext)).toBeLessThanOrEqual(1024);
@@ -1051,7 +1035,6 @@ describe("lean auto mode reliability", () => {
             if (index > 0) expect(body).toContain("review_caution");
             if (index === 3) {
               expect(body).not.toContain('"tools":[]');
-              expect(body).not.toContain('"toolChoice":{"type":"none"}');
             }
             return commandCall(command, `blocked_action_${index + 1}`);
           }),
@@ -1185,26 +1168,18 @@ describe("lean auto mode reliability", () => {
           commandCall(`touch ${JSON.stringify(markers[0]!)}`, "mixed_block_1"),
           commandCall(`touch ${JSON.stringify(markers[1]!)}`, "mixed_block_2"),
           fakeGatewaySse([
-            {
-              type: "tool-call",
-              toolCallId: "mixed_block_3",
-              toolName: "terminal",
-              input: { action: "exec", command: `touch ${JSON.stringify(markers[2]!)}` },
-            },
-            {
-              type: "tool-call",
-              toolCallId: "mixed_safe_pwd",
-              toolName: "terminal",
-              input: { action: "exec", command: "pwd" },
-            },
-            {
-              type: "finish",
-              finishReason: { unified: "tool-calls", raw: "tool-calls" },
-            },
+            ...responseFunctionCall("mixed_block_3", "terminal", {
+              action: "exec",
+              command: `touch ${JSON.stringify(markers[2]!)}`,
+            }),
+            ...responseFunctionCall("mixed_safe_pwd", "terminal", {
+              action: "exec",
+              command: "pwd",
+            }, 1),
+            responseCompleted(),
           ]),
           (body) => {
             expect(body).not.toContain('"tools":[]');
-            expect(body).not.toContain('"toolChoice":{"type":"none"}');
             return fakeGatewayFinalText("Mixed success recovery continued.");
           },
         ],

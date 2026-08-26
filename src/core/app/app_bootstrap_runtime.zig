@@ -21,8 +21,6 @@ const skill_contract = @import("../skills/skill_contract.zig");
 const skill_runtime = @import("../skills/skill_runtime.zig");
 const types = @import("../shared/types.zig");
 const worker_runtime = @import("../agent/worker_runtime.zig");
-const auto_upgrade = @import("../upgrade/auto_upgrade.zig");
-const update_target = @import("../upgrade/update_target.zig");
 const core_input_runtime = @import("../input/runtime.zig");
 const ui_render = @import("../../ui/render.zig");
 const ui_input = @import("../../ui/input/runtime.zig");
@@ -217,7 +215,6 @@ pub fn Runtime(comptime App: type) type {
                 _ = app.auth.adoptCredential(app.alloc, &credential);
             }
             app.auth.recordStartupStatus(
-                startup.stored_key_status,
                 startup.credential_onboarding_skipped,
             );
             if (comptime @hasDecl(@TypeOf(app.auth), "refreshChatGptSourceInventory")) {
@@ -292,8 +289,6 @@ pub fn Runtime(comptime App: type) type {
             app.context_enabled = startup.context_enabled;
             app.fast_mode = startup.fast_mode;
             app.input_runtime.slash_menu_categories = startup.slash_menu_categories;
-            app.auto_upgrade_enabled = startup.auto_upgrade;
-            app.upgrader.configure_channel(startup.update_channel);
             app.effort = startup.effort;
             app.shell.setCommandOutputRenderPolicy(
                 app_render_runtime.Runtime(App).shellStyles(),
@@ -370,17 +365,6 @@ pub fn Runtime(comptime App: type) type {
                 });
                 defer app.alloc.free(skills_summary);
                 try writeCollapsedStartupNotice(app, "skills", skills_summary, skills_body);
-            }
-            if (comptime @hasField(App, "auth")) {
-                const auth_view = app.auth.view();
-                if (auth_view.active_source == null and auth_view.stored_key_status == .unavailable) {
-                    debug_trace.logf("keychain", "interactive read skipped", .{});
-                    try app.writeDomainNotice(.{
-                        .topic = "keychain",
-                        .tone = .warning,
-                        .body = "fx could not access " ++ credentials.stored_key_backend_label ++ ". Continuing without an API key.",
-                    }, true);
-                }
             }
             var recording = try record_tape.captureStatus(app.alloc);
             defer recording.deinit(app.alloc);
@@ -554,8 +538,6 @@ const TestApp = struct {
     terminal_input_runtime: ui_input.Runtime = .{},
     context_enabled: bool = true,
     fast_mode: bool = false,
-    auto_upgrade_enabled: bool = true,
-    upgrader: auto_upgrade.AutoUpgrade = .{},
     effort: types.ReasoningEffort = .auto,
     permission_state: app_permission_runtime.State = .{},
     statusline_context: bool = false,
@@ -691,15 +673,11 @@ fn makeStartupState(alloc: Allocator) !app_lifecycle.StartupState {
     if (active_capture.?.startup_with_credential) {
         const credential_token = try alloc.dupe(u8, "api-key");
         errdefer alloc.free(credential_token);
-        const credential_team = try alloc.dupe(u8, "team_123");
-        errdefer alloc.free(credential_team);
         state.credential = .{
             .token = credential_token,
-            .source = .ai_gateway_api_key,
-            .team_id = credential_team,
+            .source = .openai_api_key,
         };
     }
-    state.stored_key_status = .not_found;
     state.credential_onboarding_skipped = active_capture.?.onboarding_skipped;
     state.selected_model = try alloc.dupe(u8, "model-x");
     errdefer alloc.free(state.selected_model);
@@ -709,8 +687,6 @@ fn makeStartupState(alloc: Allocator) !app_lifecycle.StartupState {
     state.permission_mode = .auto;
     state.context_enabled = false;
     state.fast_mode = true;
-    state.auto_upgrade = false;
-    state.update_channel = .dev;
     state.effort = types.ReasoningEffort.literal("high");
     state.statusline_workspace = true;
     if (active_capture.?.emit_config_diagnostics) {
@@ -897,10 +873,6 @@ test "app_bootstrap_runtime transfers startup state and starts a fresh session" 
         capture.configured_effort,
     );
     try std.testing.expect(capture.configured_fast_mode);
-    try std.testing.expectEqual(
-        update_target.Channel.dev,
-        app.upgrader.channel(),
-    );
     try std.testing.expect(!capture.initialize_required);
     try std.testing.expectEqualStrings("/workspace", capture.load_skills_workspace);
     try std.testing.expectEqual(@as(usize, 1), capture.load_skills_workspace_root_count);
@@ -919,10 +891,8 @@ test "app_bootstrap_runtime transfers startup state and starts a fresh session" 
 
     try std.testing.expectEqualStrings("/workspace", app.workspace_root);
     try std.testing.expectEqualStrings("api-key", app.auth.apiKey().?);
-    try std.testing.expectEqual(types.CredentialSource.ai_gateway_api_key, app.auth.credentialSource().?);
-    try std.testing.expectEqualStrings("team_123", app.auth.gatewayTeam().?);
+    try std.testing.expectEqual(types.CredentialSource.openai_api_key, app.auth.credentialSource().?);
     const auth_view = app.auth.view();
-    try std.testing.expectEqual(credentials.StoredKeyReadStatus.not_found, auth_view.stored_key_status);
     try std.testing.expect(auth_view.onboarding_skipped);
     try std.testing.expectEqualStrings("model-x", app.selected_model.items);
     try std.testing.expectEqual(types.PermissionMode.auto, app.permission_engine.mode);
@@ -933,7 +903,6 @@ test "app_bootstrap_runtime transfers startup state and starts a fresh session" 
     try std.testing.expectEqual(types.ReasoningEffort.literal("high"), app.worker.agent_turn_settings.effort);
     try std.testing.expect(!app.context_enabled);
     try std.testing.expect(app.fast_mode);
-    try std.testing.expect(!app.auto_upgrade_enabled);
     try std.testing.expectEqual(types.ReasoningEffort.literal("high"), app.effort);
     try std.testing.expect(app.workspace_identity.enabled);
     try std.testing.expectEqualStrings("/skills", app.skills.dir);

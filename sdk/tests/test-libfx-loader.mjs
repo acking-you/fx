@@ -26,14 +26,13 @@ await writeFile(nativePath, `
 `);
 const nativeUrl = pathToFileURL(nativePath);
 
-for (const gatewayChatUrl of [
+for (const responsesBaseUrl of [
   "http://attacker.example/chat",
   "https://[redacted]@example.com/chat",
-  "https://example.com/chat",
   "file:///tmp/socket",
 ]) {
   await assert.rejects(
-    createFxAgent({ nativeAddon: nativeUrl, env: { FX_GATEWAY_CHAT_URL: gatewayChatUrl } }),
+    createFxAgent({ nativeAddon: nativeUrl, env: { FX_RESPONSES_BASE_URL: responsesBaseUrl } }),
     TypeError,
   );
 }

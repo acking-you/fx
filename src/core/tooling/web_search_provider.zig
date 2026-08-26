@@ -10,7 +10,6 @@ pub const Inputs = struct {
     api_key: []const u8,
     credential_source: ?types.CredentialSource = null,
     account_id: ?[]const u8 = null,
-    gateway_team: ?[]const u8 = null,
     worker_model: []const u8,
     gateway_retry_count: usize,
     gateway_chat_url: []const u8,

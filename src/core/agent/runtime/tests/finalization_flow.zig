@@ -1414,7 +1414,7 @@ test "common Stop failure excludes a later call without a result" {
     const calls = [_]ToolCall{
         .{
             .id = "call_completed",
-            .name = "perplexity_search",
+            .name = "provider_search",
             .arguments_json = "{}",
             .provider_result = "completed provider result",
             .provenance = .provider_executed,

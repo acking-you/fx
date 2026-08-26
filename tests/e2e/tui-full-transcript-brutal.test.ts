@@ -21,6 +21,9 @@ import {
   fakeGatewayFinalText,
   fakeGatewaySse,
   fakeGatewayToolCall,
+  responseCompleted,
+  responseFunctionCall,
+  responseTextDelta,
   startFakeGateway,
   TmuxSession,
   tmuxAvailable,
@@ -194,12 +197,9 @@ function gatewayEnv(
 ) {
   return {
     HOME: home,
-    AI_GATEWAY_API_KEY: "fake-full-transcript-brutal-key",
-    VERCEL_OIDC_TOKEN: undefined,
-    FX_GATEWAY_BASE_URL: gateway.baseUrl,
-    FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+    OPENAI_API_KEY: "fake-full-transcript-brutal-key",
+        FX_RESPONSES_BASE_URL: gateway.baseUrl,
     FX_MODEL: FAKE_GATEWAY_MODEL,
-    FX_AUTO_UPGRADE: "0",
     NO_COLOR: "1",
   };
 }
@@ -220,21 +220,22 @@ function makeRoot(label: string): StressRoot {
   };
 }
 
-function toolEvent(index: number, fileLines: number): object {
+function toolEvent(index: number, fileLines: number): {
+  id: string;
+  name: string;
+  input: object;
+} {
   const marker = toolMarker(index);
   const path = fixturePath(index);
-  const common = {
-    type: "tool-call",
-    toolCallId: `ctrl-o-brutal-call-${pad(index)}`,
-  };
+  const id = `ctrl-o-brutal-call-${pad(index)}`;
   switch (index % 5) {
     case 0:
     case 1:
-      return { ...common, toolName: "read_file", input: { path, line_count: fileLines } };
+      return { id, name: "read_file", input: { path, line_count: fileLines } };
     case 2:
       return {
-        ...common,
-        toolName: "grep_files",
+        id,
+        name: "grep_files",
         input: {
           pattern: marker,
           path,
@@ -245,14 +246,14 @@ function toolEvent(index: number, fileLines: number): object {
       };
     case 3:
       return {
-        ...common,
-        toolName: "glob_files",
+        id,
+        name: "glob_files",
         input: { pattern: path, mode: "matches" },
       };
     default:
       return {
-        ...common,
-        toolName: "read_file",
+        id,
+        name: "read_file",
         input: { path: `missing-${marker}.txt`, line_count: fileLines },
       };
   }
@@ -313,24 +314,18 @@ function batchResponse(
         `real-world transcript payload ${"wrap-me-".repeat(9)} 界 e\u0301 👩‍💻`,
   ).join("\n");
   const events: object[] = [
-    {
-      type: "text-delta",
-      id: `ctrl-o-brutal-answer-${batch}`,
-      delta: `${chat}\n`,
-    },
+    responseTextDelta(`${chat}\n`, `ctrl-o-brutal-answer-${batch}`),
   ];
   for (let offset = 0; offset < config.toolsPerBatch; offset += 1) {
-    events.push(toolEvent(firstTool + offset, config.fileLines));
+    const tool = toolEvent(firstTool + offset, config.fileLines);
+    events.push(...responseFunctionCall(tool.id, tool.name, tool.input, offset + 1));
   }
-  events.push({
-    type: "text-delta",
-    id: `ctrl-o-brutal-tail-${batch}`,
-    delta: `${TAIL_SENTINEL}_B${pad(batch, 2)}\n`,
-  });
-  events.push({
-    type: "finish",
-    finishReason: { unified: "tool-calls", raw: "tool-calls" },
-  });
+  events.push(responseTextDelta(
+    `${TAIL_SENTINEL}_B${pad(batch, 2)}\n`,
+    `ctrl-o-brutal-tail-${batch}`,
+    config.toolsPerBatch + 1,
+  ));
+  events.push(responseCompleted());
   return fakeGatewaySse(events);
 }
 

@@ -11,7 +11,6 @@ const model_provider = @import("../config/model_provider.zig");
 const debug_trace = @import("../shared/debug_trace.zig");
 const record_tape = @import("../workspace/record_tape.zig");
 const workspace_access = @import("../workspace/workspace_access.zig");
-const update_target = @import("../upgrade/update_target.zig");
 const notification_sound = @import("../notifications/sound.zig");
 const tool_result_limits = @import("../tooling/tool_result_limits.zig");
 const types = @import("../shared/types.zig");
@@ -118,7 +117,6 @@ pub const StartupState = struct {
     workspace_access: workspace_access.WorkspaceAccess = .{},
     credential: ?credentials.Credential = null,
     credential_onboarding_skipped: bool = false,
-    stored_key_status: credentials.StoredKeyReadStatus = .not_attempted,
     provider: model_provider.ProviderId = .gateway,
     selected_model: []u8 = &.{},
     configured_model: []u8 = &.{},
@@ -133,8 +131,6 @@ pub const StartupState = struct {
     fast_mode: bool = false,
     fast_mode_source: config_runtime.ConfigSource = .compiled_default,
     slash_menu_categories: bool = true,
-    auto_upgrade: bool = true,
-    update_channel: update_target.Channel = .stable,
     startup_scrollback: bool = true,
     prompt_history_enabled: bool = true,
     prompt_history_store_allowed: bool = true,
@@ -185,12 +181,6 @@ pub const StartupState = struct {
         return credentials.catalogAccessAt(self.credential, io_mod.milliTimestamp());
     }
 
-    pub fn gatewayTeam(self: *const StartupState) ?[]const u8 {
-        const credential = self.credential orelse return null;
-        if (credential.needsRefreshAt(io_mod.milliTimestamp())) return null;
-        return credential.gatewayTeam();
-    }
-
     pub fn takeCredential(self: *StartupState) ?credentials.Credential {
         const value = self.credential;
         self.credential = null;
@@ -218,7 +208,6 @@ pub const StartupStatus = struct {
     auth: auth_runtime.StatusSnapshot = .{},
     permission_mode: PermissionMode,
     agent_step_limit: usize,
-    update_channel: update_target.Channel = .stable,
     config_diagnostics: []config_runtime.ConfigDiagnostic = &.{},
 
     pub fn deinit(self: *StartupStatus, alloc: Allocator) void {
@@ -334,10 +323,8 @@ pub fn loadStartupStatus(
         .auth = auth_status,
         .permission_mode = loadPermissionMode(settings.permission_mode),
         .agent_step_limit = loadAgentStepLimit(default_agent_step_limit, settings.max_agent_steps),
-        .update_channel = settings.update_channel orelse .stable,
         .config_diagnostics = detailed.diagnostics,
     };
-    auth_status.owned_team = null;
     detailed.diagnostics = &.{};
     return result;
 }
@@ -413,7 +400,6 @@ fn loadStartupStateFromOwnedWorkspace(
             settings.credential_source,
         );
         state.credential = resolution.credential;
-        state.stored_key_status = resolution.stored_key_status;
     }
     state.permission_mode = loadPermissionMode(settings.permission_mode);
     state.yolo_acknowledged = settings.yolo_acknowledged orelse false;
@@ -426,8 +412,6 @@ fn loadStartupStateFromOwnedWorkspace(
         (state.provider == .gateway and state.model_source == .compiled_default);
     state.fast_mode_source = detailed.sources.fast_mode;
     state.slash_menu_categories = settings.slash_menu_categories orelse true;
-    state.auto_upgrade = settings.auto_upgrade orelse true;
-    state.update_channel = settings.update_channel orelse .stable;
     state.startup_scrollback = settings.startup_scrollback orelse true;
     state.effort = settings.effort orelse .auto;
     state.first_call_tool_choice = settings.first_call_tool_choice orelse .auto;
@@ -1989,7 +1973,7 @@ test "startup credential modes select a refresh policy, never a narrower source 
 test "loadStartupState applies core env overrides" {
     var env = try TestEnv.install(std.testing.allocator, &.{
         .{ .key = "FX_MODEL", .value = "  env-model  " },
-        .{ .key = "AI_GATEWAY_API_KEY", .value = "gateway-key" },
+        .{ .key = "OPENAI_API_KEY", .value = "gateway-key" },
         .{ .key = "FX_PERMISSION_MODE", .value = "auto" },
         .{ .key = "FX_MAX_AGENT_STEPS", .value = "37" },
     });
@@ -2010,7 +1994,7 @@ test "loadStartupState applies core env overrides" {
     try std.testing.expectEqual(config_runtime.ModelSource.process_override, state.model_source);
     try std.testing.expect(!state.fast_mode);
     try std.testing.expectEqualStrings("gateway-key", state.apiKey().?);
-    try std.testing.expectEqual(credentials.Source.ai_gateway_api_key, state.credential.?.source);
+    try std.testing.expectEqual(credentials.Source.openai_api_key, state.credential.?.source);
     try std.testing.expectEqual(PermissionMode.auto, state.permission_mode);
     try std.testing.expectEqual(@as(usize, 37), state.agent_step_limit);
 }

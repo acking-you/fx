@@ -1,6 +1,7 @@
 const std = @import("std");
 const activity_status = @import("../../core/output/activity_status.zig");
 const command_specs = @import("../../core/slash_commands/command_specs.zig");
+const credentials = @import("../../core/auth/credentials.zig");
 const debug_trace = @import("../../core/shared/debug_trace.zig");
 const diff_mod = @import("../../core/output/diff.zig");
 const io_mod = @import("../../core/shared/io.zig");
@@ -1288,7 +1289,7 @@ fn footerGeometryForRows(rows: FooterRows, activity: ActivityPlacement) footer_v
 
 const surface_test_slash_specs = [_]command_specs.SlashSpec{
     .{ .kind = .help, .command = "/help", .help_entry = "/help", .completion_description = "show available slash commands", .presentation_category = .general },
-    .{ .kind = .feedback, .command = "/feedback", .help_entry = "/feedback", .completion_description = "open the fx feedback form", .presentation_category = .product },
+    .{ .kind = .trace, .command = "/trace", .help_entry = "/trace", .completion_description = "copy a private diagnostic trace", .presentation_category = .product },
 };
 const surface_test_slash_registry = command_specs.SlashRegistry{ .commands = surface_test_slash_specs[0..] };
 
@@ -1603,12 +1604,11 @@ test "surface footer measurement reserves capped picker rows for active list pic
     const alloc = std.testing.allocator;
     var approval = ApprovalPrompt{};
     defer approval.deinit(alloc);
-
     const expected_rows = input_presentation.max_model_picker_rows;
 
     var slash_input = InputRuntime{};
     defer slash_input.deinit(alloc);
-    try slash_input.edit_state.input.appendSlice(alloc, "/fe");
+    try slash_input.edit_state.input.appendSlice(alloc, "/");
     slash_input.edit_state.cursor = slash_input.edit_state.input.items.len;
     var slash_shell = surfaceTestShell(24, 80);
     defer slash_shell.deinit(alloc);
@@ -1697,9 +1697,9 @@ test "surface footer measurement reserves only the compact auth picker rows" {
     var ctx = surfaceTestContext(&input);
     ctx.auth_picker = auth_runtime.PickerView{
         .active = true,
-        .available_sources = auth_runtime.SourceSet.initMany(&.{ .ai_gateway_api_key, .stored_key }),
-        .selected_choice = .{ .source = .stored_key },
-        .active_source = .stored_key,
+        .available_sources = auth_runtime.SourceSet.initOne(.openai_api_key),
+        .selected_choice = .{ .source = .openai_api_key },
+        .active_source = .openai_api_key,
         .include_skip = false,
     };
 
@@ -1723,9 +1723,9 @@ test "surface footer keeps the selected auth source visible at minimum height" {
     var ctx = surfaceTestContext(&input);
     ctx.auth_picker = auth_runtime.PickerView{
         .active = true,
-        .available_sources = auth_runtime.SourceSet.initMany(&.{ .ai_gateway_api_key, .stored_key }),
-        .selected_choice = .{ .source = .stored_key },
-        .active_source = .ai_gateway_api_key,
+        .available_sources = auth_runtime.SourceSet.initOne(.openai_api_key),
+        .selected_choice = .{ .source = .openai_api_key },
+        .active_source = .openai_api_key,
         .include_skip = false,
     };
 
@@ -1759,8 +1759,9 @@ test "surface footer keeps the selected auth source visible at minimum height" {
     );
     defer frame.deinit(alloc);
 
+    const source_label = credentials.sourceLabel(.openai_api_key);
     for (frame.composed.rows.items) |row| {
-        if (std.mem.find(u8, row.text.items, "stored API key") != null) return;
+        if (std.mem.find(u8, row.text.items, source_label) != null) return;
     }
     return error.SelectedAuthSourceNotVisible;
 }

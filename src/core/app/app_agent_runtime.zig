@@ -41,7 +41,7 @@ const context_contract = @import("../workspace/context_contract.zig");
 const model_catalog = @import("../gateway/model_catalog.zig");
 const provider_set = @import("../gateway/provider_set.zig");
 const test_builtin_gateway = if (@import("builtin").is_test)
-    @import("../../builtins/gateway.zig")
+    @import("../../builtins/responses.zig")
 else
     struct {};
 const test_builtin_tools = if (@import("builtin").is_test)
@@ -197,7 +197,7 @@ pub fn Runtime(comptime App: type) type {
             const provider_capabilities = if (comptime @hasDecl(App, "providerSet"))
                 app.providerSet().select(selected_provider).capabilities
             else if (selected_provider == .gateway)
-                provider_set.Bundle.Capabilities{ .fx_search = true, .vision_fallback = true, .deferred_usage = true }
+                provider_set.Bundle.Capabilities{ .fx_search = true, .vision_fallback = true }
             else
                 provider_set.Bundle.Capabilities{};
             var ctx: tool_runtime.Context = .{
@@ -218,7 +218,6 @@ pub fn Runtime(comptime App: type) type {
                     app.agentStreamProvider()
                 else
                     agent_stream_provider.unavailable_provider,
-                .gateway_team = app.auth.gatewayTeam(),
                 .credential_source = app.auth.credentialSource(),
                 .account_id = app.auth.accountId(),
                 .provider = selected_provider,
@@ -307,7 +306,6 @@ pub fn Runtime(comptime App: type) type {
                         .api_key = app.auth.apiKey() orelse "",
                         .credential_source = app.auth.credentialSource(),
                         .account_id = app.auth.accountId(),
-                        .gateway_team = app.auth.gatewayTeam(),
                         .worker_model = provider_runtime.model(app),
                         .gateway_retry_count = gateway_retry_count,
                         .gateway_chat_url = gateway_chat_url,
@@ -583,6 +581,7 @@ pub fn Runtime(comptime App: type) type {
         ) !command_admission.PermissionOutcome {
             var ctx = tool_runtime.withAdvertisedDynamicToolNames(toolContext(app, ignored_list_entries, max_list_entries, max_read_file_bytes, max_read_file_lines, max_read_file_line_len, max_command_output_bytes, gateway_retry_count, gateway_chat_url), advertised_dynamic_tool_names);
             ctx.permission_review_turn = review_turn;
+            ctx.model = review_turn.model;
             const admission = ctx.admissionInputWithLiveAuthority(live_authority);
             return if (revalidation) |request| switch (request) {
                 .action => |action| tool_admission.revalidateLiveActionPermissionOutcome(
@@ -637,6 +636,7 @@ pub fn Runtime(comptime App: type) type {
                 advertised_dynamic_tool_names,
             );
             ctx.permission_review_turn = review_turn;
+            ctx.model = review_turn.model;
             const admission = ctx.admissionInputWithLiveAuthority(live_authority);
             return tool_admission.requestPreparedFileMutationPermissionOutcome(
                 admission,
@@ -858,7 +858,7 @@ pub fn Runtime(comptime App: type) type {
             provider: model_catalog.Provider,
             catalog_endpoint: []const u8,
         ) !std.ArrayList([]u8) {
-            const result = model_catalog.fetchWithPublicFallback(provider, app.alloc, .{
+            const result = model_catalog.fetchCatalog(provider, app.alloc, .{
                 .access = app.auth.modelCatalogAccess(),
                 .endpoint = catalog_endpoint,
             });
@@ -1106,7 +1106,7 @@ pub fn Runtime(comptime App: type) type {
                 .provider_capabilities = if (comptime @hasDecl(App, "providerSet"))
                     app.providerSet().select(job.provider).capabilities
                 else if (job.provider == .gateway)
-                    .{ .fx_search = true, .vision_fallback = true, .deferred_usage = true }
+                    .{ .fx_search = true, .vision_fallback = true }
                 else
                     .{},
                 .custom_tool_guidance = tool_projection.custom_guidance,
@@ -1152,7 +1152,7 @@ fn formatToolAction(
     state: ToolActionState,
     denied_label: ?[]const u8,
 ) ![]const u8 {
-    if (std.mem.eql(u8, call.name, "web_search") or tool_presentation.isProviderSearchAlias(call.name)) {
+    if (std.mem.eql(u8, call.name, "web_search")) {
         return formatWebSearchAction(arena, call, state, denied_label);
     }
     const spec = ctx.tool_registry.lookup(call.name) orelse {
@@ -1461,9 +1461,7 @@ const FakeApp = struct {
     mcp_result: []const u8 = "{\"ok\":true}",
     diff_blocks: usize = 0,
     web_fetch_runtime: web_fetch_runtime.Runtime = web_fetch_runtime.Runtime.init(.{}),
-    web_search_runtime: web_search_runtime.Runtime = web_search_runtime.Runtime.init(.{
-        .provider = test_builtin_gateway.default_web_search_provider,
-    }),
+    web_search_runtime: web_search_runtime.Runtime = web_search_runtime.Runtime.init(.{}),
     web_search_models_path: []const u8 = "/models",
     lifecycle_runtime: hooks.Runtime,
     lifecycle_view: hooks.RuntimeView,
@@ -1482,7 +1480,7 @@ const FakeApp = struct {
         errdefer app.context_snapshot.deinit(alloc);
         var credential = credentials.Credential{
             .token = try alloc.dupe(u8, "api-key"),
-            .source = .ai_gateway_api_key,
+            .source = .openai_api_key,
         };
         defer credential.deinit(alloc);
         _ = app.auth.adoptCredential(alloc, &credential);
@@ -1713,8 +1711,7 @@ const TestCatalogProvider = struct {
         const self: *TestCatalogProvider = @ptrCast(@alignCast(raw_context.?));
         self.saw_expected_input =
             std.mem.eql(u8, input.access.authorizationCredential() orelse "", "api-key") and
-            input.access.teamContext() == null and
-            input.access.credentialSource() == .ai_gateway_api_key and
+            input.access.credentialSource() == .openai_api_key and
             std.mem.eql(u8, input.endpoint, "/catalog") and
             input.cancel_flag == null and
             input.view == .full;
@@ -1776,13 +1773,11 @@ test "app agent runtime builds tool context from app state and MCP callbacks" {
     try std.testing.expect(ctx.fast_mode);
     try std.testing.expectEqual(types.ReasoningEffort.literal("high"), ctx.effort);
     try std.testing.expect(!ctx.web_search_runtime_ready);
-    try std.testing.expect(ctx.web_search_backend != null);
+    try std.testing.expect(ctx.web_search_backend == null);
     try std.testing.expect(ctx.web_fetch_runtime.? == &app.web_fetch_runtime);
     try std.testing.expect(ctx.web_fetch_progress_ctx != null);
     try std.testing.expect(ctx.on_web_fetch_progress != null);
-    try std.testing.expectEqualStrings("test-model", app.web_search_runtime.worker_model);
-    try std.testing.expectEqual(ctx.gateway_retry_count, app.web_search_runtime.gateway_retry_count);
-    try std.testing.expectEqualStrings(ctx.gateway_chat_url, app.web_search_runtime.gateway_chat_url);
+    try std.testing.expect(app.web_search_runtime.provider == null);
     try std.testing.expectEqualStrings("/models", ctx.gateway_models_path);
     try std.testing.expectEqual(@as(usize, 4096), ctx.max_tool_result_bytes);
     try std.testing.expectEqual(types.ToolChoice.none, ctx.first_call_tool_choice);
@@ -1873,112 +1868,6 @@ test "interactive app prepared file mutation callback applies app permission pol
 
     try std.testing.expectEqual(ToolPermissionDecision.policy_denied, outcome.decision);
     try std.testing.expect(outcome.execution_authority == null);
-}
-
-test "app prompt projection configures web search then blocks native execution" {
-    const alloc = std.testing.allocator;
-    const web_search_contract = @import("../tooling/web_search_contract.zig");
-    const ProviderState = struct {
-        calls: usize = 0,
-    };
-    const FailingWebSearchProvider = struct {
-        fn execute(
-            raw_ctx: ?*anyopaque,
-            _: Allocator,
-            _: web_search_runtime.Inputs,
-            _: web_search_contract.ProviderRequest,
-            _: ?web_search_contract.ProgressFn,
-            _: ?*anyopaque,
-        ) anyerror!web_search_contract.ProviderResponse {
-            const state: *ProviderState = @ptrCast(@alignCast(raw_ctx orelse return error.TestWebSearchProvider));
-            state.calls += 1;
-            return error.TestWebSearchProvider;
-        }
-    };
-    var app = try FakeApp.init(alloc);
-    defer app.deinit();
-    var provider_state = ProviderState{};
-    var provider = app.web_search_runtime.provider orelse return error.TestExpectedEqual;
-    provider.context = @ptrCast(&provider_state);
-    provider.execute_fn = FailingWebSearchProvider.execute;
-    app.web_search_runtime = web_search_runtime.Runtime.init(.{
-        .provider = provider,
-    });
-
-    app.web_search_runtime.configure(.{
-        .api_key = "stale-key",
-        .worker_model = "stale-model",
-        .gateway_retry_count = 99,
-        .gateway_chat_url = "https://stale.invalid/chat",
-    });
-
-    var arena_state = std.heap.ArenaAllocator.init(alloc);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-    var messages: std.ArrayList(ChatMessage) = .empty;
-    defer messages.deinit(arena);
-    try Runtime(FakeApp).appendStaticContextMessage(&app, arena, &messages, &test_ignored_list_entries, 100, 1024, 40, 120, 2048, 2, test_gateway_chat_url);
-    try app.appendRuntimeContextMessage(arena, &messages);
-
-    try std.testing.expectEqualStrings("stale-key", app.web_search_runtime.api_key);
-
-    const validation = try app.validateToolCall(arena, .{
-        .id = "search",
-        .name = "web_search",
-        .arguments_json = "{\"query\":\"x\"}",
-    });
-    try std.testing.expectEqualStrings("web_search field \"query\" must contain at least two characters", validation.failure);
-    try std.testing.expectEqualStrings(app.auth.apiKey().?, app.web_search_runtime.api_key);
-    try std.testing.expectEqualStrings(app.selected_model.items, app.web_search_runtime.worker_model);
-    try std.testing.expectEqual(@as(usize, 2), app.web_search_runtime.gateway_retry_count);
-    try std.testing.expectEqualStrings(test_gateway_chat_url, app.web_search_runtime.gateway_chat_url);
-
-    const execution = try app.executeToolCall(.{
-        .call_allocator = arena,
-        .result_allocator = arena,
-        .call = .{
-            .id = "search-execute",
-            .name = "web_search",
-            .arguments_json = "{\"query\":\"current Zig release\"}",
-        },
-        .authority = .ordinary,
-        .session_grants = &.{},
-        .advertised_dynamic_tool_names = &.{},
-        .max_tool_result_bytes = 2048,
-    });
-    try std.testing.expectEqualStrings(app.auth.apiKey().?, app.web_search_runtime.api_key);
-    try std.testing.expectEqualStrings(app.selected_model.items, app.web_search_runtime.worker_model);
-    try std.testing.expectEqual(@as(usize, 2), app.web_search_runtime.gateway_retry_count);
-    try std.testing.expectEqualStrings(test_gateway_chat_url, app.web_search_runtime.gateway_chat_url);
-    try std.testing.expectEqual(.failure, execution.status);
-    try std.testing.expectEqual(@as(usize, 0), provider_state.calls);
-}
-
-test "app ChatGPT route removes Gateway-backed auxiliary capabilities" {
-    const alloc = std.testing.allocator;
-    var app = try FakeApp.init(alloc);
-    defer app.deinit();
-    var credential = credentials.Credential{
-        .token = try alloc.dupe(u8, "chatgpt-secret"),
-        .source = .chatgpt_subscription,
-    };
-    defer credential.deinit(alloc);
-    _ = app.auth.adoptCredential(alloc, &credential);
-    app.selected_provider = .codex;
-
-    const ctx = Runtime(FakeApp).toolContext(
-        &app,
-        &test_ignored_list_entries,
-        100,
-        1024,
-        40,
-        120,
-        2048,
-        2,
-        test_gateway_chat_url,
-    );
-    try std.testing.expect(ctx.web_search_backend == null);
-    try std.testing.expect(ctx.permission_reviewer_provider == null);
 }
 
 test "app agent runtime tool context combines active settings with live permission mode" {
@@ -2253,30 +2142,6 @@ test "native web_search labels preserve bounded query and domain filters" {
     try std.testing.expect(std.mem.find(u8, completed, "current Zig release") != null);
 }
 
-test "provider search labels use search wording and generic fallback" {
-    const alloc = std.testing.allocator;
-    var arena_state = std.heap.ArenaAllocator.init(alloc);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-
-    var app = try FakeApp.init(alloc);
-    defer app.deinit();
-
-    const call: ToolCall = .{
-        .id = "provider_search",
-        .name = "parallel_search",
-        .arguments_json = "{}",
-        .provenance = .provider_executed,
-    };
-    const active = try app.describeToolAction(arena, call);
-    try std.testing.expect(std.mem.find(u8, active, "Searching") != null);
-    try std.testing.expect(std.mem.find(u8, active, "web") != null);
-
-    const completed = try app.describeToolActionCompleted(arena, call);
-    try std.testing.expect(std.mem.find(u8, completed, "Searched") != null);
-    try std.testing.expect(std.mem.find(u8, completed, "web") != null);
-}
-
 test "tool labels preserve skill name value" {
     const alloc = std.testing.allocator;
     var arena_state = std.heap.ArenaAllocator.init(alloc);
@@ -2302,15 +2167,15 @@ test "tool labels preserve skill name value" {
     const install_call: ToolCall = .{
         .id = "install_skill",
         .name = "install_skill",
-        .arguments_json = "{\"source\":\"vercel-labs/agent-skills\",\"skill\":\"workflow\"}",
+        .arguments_json = "{\"source\":\"example/agent-skills\",\"skill\":\"workflow\"}",
     };
     const install_active = try app.describeToolAction(arena, install_call);
     try std.testing.expect(std.mem.find(u8, install_active, "Installing skill") != null);
-    try std.testing.expect(std.mem.find(u8, install_active, "vercel-labs/agent-skills") != null);
+    try std.testing.expect(std.mem.find(u8, install_active, "example/agent-skills") != null);
 
     const install_completed = try app.describeToolActionCompleted(arena, install_call);
     try std.testing.expect(std.mem.find(u8, install_completed, "Installed skill") != null);
-    try std.testing.expect(std.mem.find(u8, install_completed, "vercel-labs/agent-skills") != null);
+    try std.testing.expect(std.mem.find(u8, install_completed, "example/agent-skills") != null);
 }
 
 test "subagent labels name the action once with the subagent fallback" {

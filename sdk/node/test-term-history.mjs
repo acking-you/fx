@@ -24,9 +24,9 @@ const promptHistoryStore = {
 const encoded = new TextEncoder();
 const fetch = async () => new Response(new ReadableStream({
   start(controller) {
-    controller.enqueue(encoded.encode('data: {"type":"text-delta","delta":"ok"}\n'));
-    controller.enqueue(encoded.encode('data: {"type":"finish","finishReason":{"unified":"stop"}}\n'));
-    controller.enqueue(encoded.encode("data: [DONE]\n"));
+    controller.enqueue(encoded.encode('data: {"type":"response.output_text.delta","item_id":"answer_1","output_index":0,"content_index":0,"delta":"ok"}\n\n'));
+    controller.enqueue(encoded.encode('data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n'));
+    controller.enqueue(encoded.encode("data: [DONE]\n\n"));
     controller.close();
   },
 }), { status: 200, headers: { "content-type": "text/event-stream" } });
@@ -59,7 +59,7 @@ async function start() {
   backend: "wasm",
     wasm,
     terminal: xtermAdapter(terminal),
-    env: { AI_GATEWAY_API_KEY: "term-history-key" },
+    env: { OPENAI_API_KEY: "term-history-key" },
     fetch,
     promptHistoryStore,
     onEvent(event) { events.push(event); },

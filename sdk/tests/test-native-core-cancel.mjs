@@ -5,7 +5,20 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createFxAgent } from "../node.js";
 
-const server = createServer((request) => {
+const server = createServer((request, response) => {
+  if (request.method === "GET" && request.url?.endsWith("/models")) {
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({
+      object: "list",
+      data: [{
+        id: "native/test-model",
+        object: "model",
+        created: 1,
+        owned_by: "test",
+      }],
+    }));
+    return;
+  }
   request.resume();
 });
 await new Promise((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
@@ -23,13 +36,14 @@ try {
     nativeAddon: addon,
     backend: "native",
     fetch(input, init) {
+      if (init.method !== "POST") return fetch(input, init);
       init.signal.addEventListener("abort", () => { aborted = true; }, { once: true });
       fetchStartedResolve();
       return fetch(input, init);
     },
     env: {
-      AI_GATEWAY_API_KEY: "native-core-cancel-key",
-      FX_GATEWAY_CHAT_URL: `http://127.0.0.1:${port}/stall`,
+      OPENAI_API_KEY: "native-core-cancel-key",
+      FX_RESPONSES_BASE_URL: `http://127.0.0.1:${port}/v1`,
       FX_MODEL: "native/test-model",
     },
   });

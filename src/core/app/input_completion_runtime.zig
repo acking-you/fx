@@ -1018,6 +1018,9 @@ pub fn CompletionRuntime(comptime App: type) type {
             switch (query.stage) {
                 .model => {
                     const model = exactModelCompletion(app, query.query) orelse return false;
+                    const capabilities = model_capabilities.resolveForApp(App, app, model);
+                    if (capabilities.reasoning_efforts.len == 0 and
+                        !capabilities.supports_fast_mode) return false;
                     try beginModelPickerOptions(app, model);
                     return true;
                 },

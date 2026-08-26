@@ -8,7 +8,6 @@ const context_limits = @import("context_limits.zig");
 const model_provider = @import("model_provider.zig");
 const workspace_access = @import("../workspace/workspace_access.zig");
 const sort_utils = @import("../shared/sort_utils.zig");
-const update_target = @import("../upgrade/update_target.zig");
 
 const Allocator = std.mem.Allocator;
 const max_settings_bytes: usize = 64 * 1024;
@@ -96,7 +95,6 @@ pub const UserSettingsPatch = struct {
     effort: ?types.ReasoningEffort = null,
     fast_mode: ?bool = null,
     slash_menu_categories: ?bool = null,
-    update_channel: ?update_target.Channel = null,
     startup_scrollback: ?bool = null,
     prompt_history_enabled: ?bool = null,
     statusline_item: ?StatuslineItemPatch = null,
@@ -114,7 +112,6 @@ pub const UserSettingsPatch = struct {
             self.effort == null and
             self.fast_mode == null and
             self.slash_menu_categories == null and
-            self.update_channel == null and
             self.startup_scrollback == null and
             self.prompt_history_enabled == null and
             self.statusline_item == null and
@@ -204,7 +201,6 @@ const UserPreferenceField = enum(u4) {
     effort,
     fast_mode,
     slash_menu_categories,
-    update_channel,
     startup_scrollback,
     prompt_history_enabled,
     statusline_context,
@@ -221,7 +217,6 @@ const UserPreferenceField = enum(u4) {
             .effort => "settings.json.preference-migration.effort.json",
             .fast_mode => "settings.json.preference-migration.fast_mode.json",
             .slash_menu_categories => "settings.json.preference-migration.slash_menu_categories.json",
-            .update_channel => "settings.json.preference-migration.update_channel.json",
             .startup_scrollback => "settings.json.preference-migration.startup_scrollback.json",
             .prompt_history_enabled => "settings.json.preference-migration.prompt_history_enabled.json",
             .statusline_context => "settings.json.preference-migration.statusline_context.json",
@@ -236,7 +231,6 @@ const user_preference_fields = [_]UserPreferenceField{
     .effort,
     .fast_mode,
     .slash_menu_categories,
-    .update_channel,
     .startup_scrollback,
     .prompt_history_enabled,
     .statusline_context,
@@ -941,7 +935,6 @@ fn applyUserPatchToRoot(
     if (patch.effort) |value| application.changed = try putString(arena, &root.object, "effort", value.label()) or application.changed;
     if (patch.fast_mode) |value| application.changed = try putBool(arena, &root.object, "fast_mode", value) or application.changed;
     if (patch.slash_menu_categories) |value| application.changed = try putBool(arena, &root.object, "slash_menu_categories", value) or application.changed;
-    if (patch.update_channel) |value| application.changed = try putString(arena, &root.object, "update_channel", value.label()) or application.changed;
     if (patch.startup_scrollback) |value| application.changed = try putBool(arena, &root.object, "startup_scrollback", value) or application.changed;
 
     if (patch.prompt_history_enabled) |enabled| {
@@ -1064,13 +1057,6 @@ fn cleanupLegacyWorkspacePreferences(
             "slash_menu_categories",
             .slash_menu_categories,
             patch.slash_menu_categories != null,
-            application,
-        );
-        removeLegacyLeaf(
-            &entry.value_ptr.object,
-            "update_channel",
-            .update_channel,
-            patch.update_channel != null,
             application,
         );
         removeLegacyLeaf(
@@ -1689,14 +1675,9 @@ fn validateKnownSettingsObject(
     if (object.get("context_limits")) |value| {
         _ = context_limits.parseJsonObject(value) catch return error.InvalidSettingsFormat;
     }
-    inline for (&.{ "context", "fast_mode", "auto_upgrade", "slash_menu_categories", "startup_scrollback", "yolo_acknowledged" }) |key| {
+    inline for (&.{ "context", "fast_mode", "slash_menu_categories", "startup_scrollback", "yolo_acknowledged" }) |key| {
         if (object.get(key)) |value| {
             if (value != .bool) return error.InvalidSettingsFormat;
-        }
-    }
-    if (object.get("update_channel")) |value| {
-        if (value != .string or update_target.Channel.parse(value.string) == null) {
-            return error.InvalidSettingsFormat;
         }
     }
     if (object.get("effort")) |value| {
@@ -1904,7 +1885,6 @@ test "user patch writes user preferences at top level" {
         .effort = types.ReasoningEffort.literal("high"),
         .fast_mode = true,
         .slash_menu_categories = false,
-        .update_channel = .dev,
         .startup_scrollback = false,
         .prompt_history_enabled = false,
         .statusline_item = .{ .item = .context, .enabled = true },
@@ -1925,7 +1905,6 @@ test "user patch writes user preferences at top level" {
     try std.testing.expect(std.mem.find(u8, bytes, "\"effort\":\"high\"") != null);
     try std.testing.expect(std.mem.find(u8, bytes, "\"fast_mode\":true") != null);
     try std.testing.expect(std.mem.find(u8, bytes, "\"slash_menu_categories\":false") != null);
-    try std.testing.expect(std.mem.find(u8, bytes, "\"update_channel\":\"dev\"") != null);
     try std.testing.expect(std.mem.find(u8, bytes, "\"startup_scrollback\":false") != null);
     try std.testing.expect(std.mem.find(u8, bytes, "\"prompt_history\":{\"enabled\":false}") != null);
     try std.testing.expect(std.mem.find(u8, bytes, "\"statusLine\":{\"context\":true}") != null);
@@ -2120,40 +2099,6 @@ test "user patch snapshots and removes legacy workspace copies" {
     const recovered = try io_mod.readFileToEnd(alloc, &recovery, max_settings_bytes + 1);
     defer alloc.free(recovered);
     try std.testing.expectEqualStrings(original, recovered);
-}
-
-test "update channel patch removes legacy workspace copies" {
-    const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.createDirPath(io_mod.getIo(), "home/.fx");
-    try writeStoreFixture(
-        tmp.dir,
-        "home/.fx/settings.json",
-        "{\"update_channel\":\"stable\",\"workspaces\":{\"/workspace\":{\"update_channel\":\"dev\",\"sandbox\":\"none\"}}}\n",
-    );
-
-    const home = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "home");
-    defer alloc.free(home);
-    var store = try Store.initFromHome(alloc, home, .writable);
-    defer store.deinit(alloc);
-
-    var outcome = try store.applyUserPatch(alloc, .{ .update_channel = .dev });
-    defer outcome.deinit(alloc);
-    try std.testing.expect(outcome == .committed);
-    try std.testing.expectEqual(@as(usize, 1), outcome.committed.cleanup.fields_removed);
-    try std.testing.expectEqual(@as(usize, 1), outcome.committed.cleanup.workspaces_changed);
-    try std.testing.expectEqual(@as(usize, 1), outcome.committed.cleanup.recovery_paths.len);
-
-    const bytes = try store.readPrimaryForTest(alloc);
-    defer alloc.free(bytes);
-    try std.testing.expect(std.mem.find(u8, bytes, "\"update_channel\":\"dev\"") != null);
-    try std.testing.expect(std.mem.find(u8, bytes, "\"sandbox\":\"none\"") != null);
-
-    var parsed = try std.json.parseFromSlice(std.json.Value, alloc, bytes, .{});
-    defer parsed.deinit();
-    const workspace = parsed.value.object.get("workspaces").?.object.get("/workspace").?.object;
-    try std.testing.expect(workspace.get("update_channel") == null);
 }
 
 test "slash menu category patch removes legacy workspace copies" {

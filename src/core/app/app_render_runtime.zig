@@ -382,7 +382,6 @@ pub fn Runtime(comptime App: type) type {
         var file_path_storage_buf: [input_completion_runtime.file_picker_path_storage_cap]u8 = undefined;
         noinline fn footerContext(
             app: *App,
-            upgrade_status_buf: *[64]u8,
             shimmer_pos: i16,
             queued_cards: *const QueuedCardProjection,
         ) render_input.RenderContext {
@@ -463,7 +462,6 @@ pub fn Runtime(comptime App: type) type {
             else
                 app.fast_mode;
 
-            const upgrade_label = app.upgrader.statusLabel(upgrade_status_buf);
             const yolo_warning_active =
                 if (comptime @hasField(App, "permission_state") and
                 @hasField(App, "permission_engine"))
@@ -586,7 +584,6 @@ pub fn Runtime(comptime App: type) type {
                     )
                 else
                     .{},
-                .upgrade_status = upgrade_label,
                 .danger_status = if (yolo_warning_active)
                     app_permission_runtime.yolo_warning_text
                 else
@@ -1110,7 +1107,6 @@ pub fn Runtime(comptime App: type) type {
             ctx.statusline_menu = .{};
             ctx.usage_menu = .{};
             ctx.workspace_menu = .{};
-            ctx.upgrade_status = "";
             ctx.danger_status = "";
             ctx.danger_status_compact = "";
             ctx.esc_clear_armed = view.editor.gestures.escapeClearArmed();
@@ -1627,7 +1623,6 @@ pub fn Runtime(comptime App: type) type {
                 }
             }
             const render_requests = activeRenderRequests(app);
-            var upgrade_status_buf: [64]u8 = undefined;
             var queued_cards = try buildQueuedCardProjection(App, app);
             defer queued_cards.deinit(app.alloc);
             var child_display_name: ?text_utils.EncodedText = if (child_view) |view|
@@ -1646,7 +1641,6 @@ pub fn Runtime(comptime App: type) type {
                 render_requests.visibleAnimationPhase();
             const main_footer_ctx = footerContext(
                 app,
-                &upgrade_status_buf,
                 shimmer_pos,
                 &queued_cards,
             );
@@ -4428,12 +4422,6 @@ const CoordinatorTestWorker = struct {
     }
 };
 
-const CoordinatorTestUpgrader = struct {
-    fn statusLabel(_: *@This(), _: []u8) []const u8 {
-        return "";
-    }
-};
-
 const CoordinatorTestPacer = struct {
     pending: bool = false,
     completed_token_progress: ?types.TurnTokenProgress = null,
@@ -4521,7 +4509,6 @@ const CoordinatorTestApp = struct {
     gateway_metadata_model: ?[]const u8 = null,
     gateway_metadata: model_capabilities.GatewayMetadata = .{},
     permission_state: app_permission_runtime.State = .{},
-    upgrader: CoordinatorTestUpgrader = .{},
     terminal_client: CoordinatorTestTerminalClient = .{},
 
     pub fn slashRegistry(_: *const CoordinatorTestApp) command_specs.SlashRegistry {
@@ -4635,11 +4622,9 @@ test "core.app_render_runtime keeps final token progress during paced response t
     };
     defer app.deinit();
 
-    var upgrade_status_buf: [64]u8 = undefined;
     const queued_cards: QueuedCardProjection = .{};
     const ctx = Runtime(CoordinatorTestApp).footerContext(
         &app,
-        &upgrade_status_buf,
         0,
         &queued_cards,
     );
@@ -4672,11 +4657,9 @@ test "core.app_render_runtime keeps configured controls visible while model capa
     defer app.deinit();
     try app.selected_model.appendSlice(alloc, "anthropic/claude-opus-4.8");
 
-    var upgrade_status_buf: [64]u8 = undefined;
     const queued_cards: QueuedCardProjection = .{};
     const ctx = Runtime(CoordinatorTestApp).footerContext(
         &app,
-        &upgrade_status_buf,
         0,
         &queued_cards,
     );
@@ -4720,11 +4703,9 @@ test "core.app_render_runtime projects only the visible inline completion suffix
     app.skills.items = @constCast(&skills);
     try app.input_runtime.textReplacementState().replace(alloc, "explain $man");
 
-    var upgrade_status_buf: [64]u8 = undefined;
     const queued_cards: QueuedCardProjection = .{};
     const ctx = Runtime(CoordinatorTestApp).footerContext(
         &app,
-        &upgrade_status_buf,
         0,
         &queued_cards,
     );
@@ -4744,11 +4725,9 @@ test "core.app_render_runtime projects an inline slash completion suffix after t
     app.shell.layout.cols = 80;
     try app.input_runtime.textReplacementState().replace(alloc, "explain /he");
 
-    var upgrade_status_buf: [64]u8 = undefined;
     const queued_cards: QueuedCardProjection = .{};
     const ctx = Runtime(CoordinatorTestApp).footerContext(
         &app,
-        &upgrade_status_buf,
         0,
         &queued_cards,
     );

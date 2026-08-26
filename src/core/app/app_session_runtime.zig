@@ -137,7 +137,7 @@ test "automatic compaction follows direct Responses total-token threshold" {
         capabilities,
     ));
     try std.testing.expect(!shouldBeginAutomaticCompaction(
-        .ai_gateway_api_key,
+        .grok_subscription,
         true,
         244_800,
         capabilities,
@@ -350,12 +350,6 @@ pub const HistoryAppendOutcome = enum {
 pub const ResumeHandoffIntent = enum {
     none,
     requested,
-    upgrade_requested,
-};
-
-const ResumeNotice = union(enum) {
-    session,
-    upgrade: []const u8,
 };
 
 pub const ResumeViewStage = union(enum) {
@@ -373,7 +367,7 @@ pub const ResumeHandoffState = struct {
 pub fn shouldCreateResumeHandoff(state: ResumeHandoffState) bool {
     return state.intent != .none and
         state.has_writable_session and
-        (!state.is_pristine or state.intent == .upgrade_requested) and
+        !state.is_pristine and
         !state.has_unresolved_degraded_tail;
 }
 
@@ -408,15 +402,6 @@ test "resume handoff policy requires requested durable non-pristine state" {
                 .has_unresolved_degraded_tail = false,
             },
             .expected = false,
-        },
-        .{
-            .state = .{
-                .intent = .upgrade_requested,
-                .has_writable_session = true,
-                .is_pristine = true,
-                .has_unresolved_degraded_tail = false,
-            },
-            .expected = true,
         },
         .{
             .state = .{
@@ -1963,24 +1948,10 @@ pub fn Runtime(comptime App: type) type {
         }
 
         pub fn resumeRequestedSession(app: *App) !void {
-            return resumeRequestedSessionWithNotice(app, .session);
-        }
-
-        pub fn resumeRequestedSessionAfterUpgrade(
-            app: *App,
-            version: []const u8,
-        ) !void {
-            return resumeRequestedSessionWithNotice(app, .{ .upgrade = version });
-        }
-
-        fn resumeRequestedSessionWithNotice(
-            app: *App,
-            notice: ResumeNotice,
-        ) !void {
             if (comptime runtime_profile.allows(App, .js_host_sessions) and
                 !runtime_profile.allows(App, .durable_sessions))
             {
-                return resumeRequestedJsHostSessionWithNotice(app, notice);
+                return resumeRequestedJsHostSession(app);
             }
             var target = app.requested_resume orelse return;
             app.requested_resume = null;
@@ -2015,19 +1986,12 @@ pub fn Runtime(comptime App: type) type {
             errdefer if (loaded_owned) loaded.deinit(app.alloc);
 
             loaded_owned = false;
-            try installResumedSession(app, &loaded, notice);
+            try installResumedSession(app, &loaded);
             errdefer closeWritableSession(app, .{});
             try app.commitStartupResumeReplayAnchor();
         }
 
         fn resumeRequestedJsHostSession(app: *App) !void {
-            return resumeRequestedJsHostSessionWithNotice(app, .session);
-        }
-
-        fn resumeRequestedJsHostSessionWithNotice(
-            app: *App,
-            notice: ResumeNotice,
-        ) !void {
             var target = app.requested_resume orelse return;
             app.requested_resume = null;
             defer target.deinit(app.alloc);
@@ -2106,7 +2070,7 @@ pub fn Runtime(comptime App: type) type {
                 return;
             };
             defer display.deinit(app.alloc);
-            hydrateResumedSession(app, loaded.state, display.title, notice) catch |err| {
+            hydrateResumedSession(app, loaded.state, display.title) catch |err| {
                 traceJsHostRestoreFailure("hydrate", session_id, err);
                 try continueWithFreshJsHostSession(app);
                 return;
@@ -2157,23 +2121,6 @@ pub fn Runtime(comptime App: type) type {
             }
         }
 
-        pub fn startResumedSessionReconciliation(app: *App) void {
-            if (comptime !@hasField(App, "auth") or !provider_runtime.supported(App)) return;
-            if (comptime !@hasDecl(@TypeOf(app.auth), "credentialSource") or
-                !@hasDecl(@TypeOf(app.auth), "accountId") or
-                !@hasDecl(@TypeOf(app.session.usage), "replaceProviderReconciliationCredential")) return;
-
-            const source = app.auth.credentialSource() orelse return;
-            const credential = app.auth.apiKey() orelse return;
-            app.session.usage.replaceProviderReconciliationCredential(
-                app.alloc,
-                provider_runtime.provider(app),
-                source,
-                app.auth.accountId(),
-                credential,
-            );
-        }
-
         pub fn resumeSelectedSession(app: *App) !bool {
             const selected_id = app.session_persistence.session_picker.selectedId() orelse return false;
             const log_options = session_log.Options{
@@ -2190,9 +2137,8 @@ pub fn Runtime(comptime App: type) type {
 
             try app.prepareLiveSessionResume(log_options);
             loaded_owned = false;
-            try installResumedSession(app, &loaded, .session);
+            try installResumedSession(app, &loaded);
             requestSubagentBackgroundRecovery(app);
-            startResumedSessionReconciliation(app);
             try app.finishLiveSessionResume();
             return true;
         }
@@ -2219,7 +2165,6 @@ pub fn Runtime(comptime App: type) type {
         fn installResumedSession(
             app: *App,
             loaded: *session_store.LoadedWritableSession,
-            notice: ResumeNotice,
         ) !void {
             var loaded_owned = true;
             errdefer if (loaded_owned) loaded.deinit(app.alloc);
@@ -2236,7 +2181,7 @@ pub fn Runtime(comptime App: type) type {
                 app.session_persistence.writable = null;
             }
             const active = &app.session_persistence.writable.?;
-            try hydrateResumedSession(app, active.state, display.title, notice);
+            try hydrateResumedSession(app, active.state, display.title);
             active.resume_view_stale = true;
             enableSessionStores(app);
             refreshSubagentProjectionAfterSessionInstall(app);
@@ -2246,7 +2191,6 @@ pub fn Runtime(comptime App: type) type {
             app: *App,
             state: session_codec.DurableSessionState,
             display_title: []const u8,
-            notice: ResumeNotice,
         ) !void {
             if (comptime @hasField(App, "next_image_id")) {
                 app.next_image_id = try nextImageIdForResumedHistory(
@@ -2289,7 +2233,7 @@ pub fn Runtime(comptime App: type) type {
                     .app = app,
                     .projection = &projection,
                 };
-                try writeResumeNotice(app, &sink, display_title, notice);
+                try writeResumeNotice(app, &sink, display_title);
                 try replayHistoryToSink(app, &sink, state.history);
                 try writeRecoveryCheckpointToSink(app, &sink, state);
                 const projection_finished_ns = io_mod.nanoTimestamp();
@@ -2309,7 +2253,7 @@ pub fn Runtime(comptime App: type) type {
                 );
             } else {
                 var sink = LiveHistorySink(App){ .app = app };
-                try writeResumeNotice(app, &sink, display_title, notice);
+                try writeResumeNotice(app, &sink, display_title);
                 try replayHistoryToSink(app, &sink, state.history);
                 try writeRecoveryCheckpointToSink(app, &sink, state);
             }
@@ -4117,10 +4061,6 @@ pub fn Runtime(comptime App: type) type {
             app.session_persistence.resume_handoff_intent = .requested;
         }
 
-        pub fn requestUpgradeResumeHandoff(app: *App) void {
-            app.session_persistence.resume_handoff_intent = .upgrade_requested;
-        }
-
         pub fn prepareResumeHandoff(app: *App) !void {
             app.session_persistence.write_mutex.lockUncancelable(io_mod.getIo());
             defer app.session_persistence.write_mutex.unlock(io_mod.getIo());
@@ -4591,29 +4531,13 @@ pub fn Runtime(comptime App: type) type {
             app: *App,
             sink: anytype,
             display_title: []const u8,
-            notice: ResumeNotice,
         ) !void {
             try setCachedSessionTitle(app, display_title);
-            switch (notice) {
-                .session => try sink.appendNotice(.{
-                    .topic = "session resumed",
-                    .tone = .neutral,
-                    .body = display_title,
-                }),
-                .upgrade => |version| {
-                    const body = try std.fmt.allocPrint(
-                        app.alloc,
-                        "fx has been updated to v{s}",
-                        .{version},
-                    );
-                    defer app.alloc.free(body);
-                    try sink.appendNotice(.{
-                        .topic = "",
-                        .tone = .success,
-                        .body = body,
-                    });
-                },
-            }
+            try sink.appendNotice(.{
+                .topic = "session resumed",
+                .tone = .neutral,
+                .body = display_title,
+            });
         }
 
         fn writeRecoveryCheckpointToSink(
@@ -5364,7 +5288,6 @@ pub fn Runtime(comptime App: type) type {
             const handoff_intent = app.session_persistence.resume_handoff_intent;
             app.session_persistence.resume_handoff_intent = .none;
             if (comptime @hasField(@TypeOf(app.session), "usage")) {
-                app.session.usage.cancelReconciliation();
                 app.session.usage.finishProfilePublicationsBeforeShutdown();
                 app.session.usage.configureCheckpointSink(null);
             }
@@ -6083,7 +6006,6 @@ const FakeWorker = struct {
 const CompactTestAuth = struct {
     const Credential = struct {
         api_key: []const u8,
-        gateway_team: ?[]const u8 = null,
         account_id: ?[]const u8 = null,
         source: types.CredentialSource,
     };
@@ -7115,36 +7037,6 @@ test "resume handoff suppresses missing and pristine writable sessions" {
     try std.testing.expect(app.session_persistence.writable == null);
 }
 
-test "upgrade resume handoff owns a validated pristine session" {
-    const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const paths = try testPaths(alloc, &tmp);
-    defer {
-        alloc.free(paths.home);
-        alloc.free(paths.workspace);
-    }
-    const home = try TestHome.install(alloc, paths.home);
-    defer home.deinit();
-    var app = try TestApp.init(alloc, paths.workspace);
-    defer app.deinit();
-    try configureTestPreferences(&app);
-    try Runtime(TestApp).initializePersistence(&app, true);
-    try Runtime(TestApp).beginFreshPersistedSession(&app);
-    const expected_id = try alloc.dupe(
-        u8,
-        app.session_persistence.writable.?.active_id,
-    );
-    defer alloc.free(expected_id);
-    Runtime(TestApp).requestUpgradeResumeHandoff(&app);
-
-    var handoff = Runtime(TestApp).finalizePersistenceWithResumeHandoff(&app) orelse
-        return error.TestExpectedResumeHandoff;
-    defer handoff.deinit(alloc);
-
-    try std.testing.expectEqualStrings(expected_id, handoff.session_id);
-}
-
 test "resume handoff owns the exact non-pristine session id after final replacement" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
@@ -7273,7 +7165,7 @@ test "resume handoff revalidates after successful preparation" {
 
     try Runtime(TestApp).prepareResumeHandoff(&app);
     try corruptActiveWatermark(alloc, &app);
-    Runtime(TestApp).requestUpgradeResumeHandoff(&app);
+    Runtime(TestApp).requestResumeHandoff(&app);
 
     try std.testing.expect(
         Runtime(TestApp).finalizePersistenceWithResumeHandoff(&app) == null,
@@ -8421,147 +8313,6 @@ test "resume view persistence waits for main frame and retries failed writes" {
         .{ .follow_symlinks = false },
     );
     try std.testing.expectEqual(std.Io.File.Kind.file, stat.kind);
-}
-
-test "upgrade resume restores active session with the installed version notice" {
-    const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    const paths = try testPaths(alloc, &tmp);
-    defer {
-        alloc.free(paths.home);
-        alloc.free(paths.workspace);
-    }
-
-    const home = try TestHome.install(alloc, paths.home);
-    defer home.deinit();
-
-    var app = try TestApp.init(alloc, paths.workspace);
-    defer app.deinit();
-
-    try configureTestPreferences(&app);
-    try Runtime(TestApp).configureStartupPreferences(
-        &app,
-        .gateway,
-        "configured/model",
-        .process_override,
-        "env/model",
-        types.ReasoningEffort.literal("high"),
-        true,
-    );
-    try Runtime(TestApp).initializePersistence(&app, true);
-    var calls = [_]types.ToolCall{.{
-        .id = "call_read",
-        .name = "read_file",
-        .arguments_json = "{\"path\":\"src/main.zig\"}",
-    }};
-    var results = [_]types.PersistedToolResult{.{
-        .tool_call_id = @constCast("call_read"),
-        .tool_name = @constCast("read_file"),
-        .status = .success,
-        .output = @constCast("file contents"),
-        .output_bytes = 13,
-        .stored_output_bytes = 13,
-    }};
-    var steps = [_]types.ToolExecutionStep{.{
-        .assistant = @constCast("I'll inspect it."),
-        .tool_calls = calls[0..],
-        .tool_results = results[0..],
-    }};
-    var resumed_images = [_]types.ImageAttachment{.{
-        .id = 41,
-        .path = @constCast("/tmp/resumed.png"),
-        .media_type = @constCast("image/png"),
-        .snapshot_path = @constCast("/tmp/fx-session/images/image-41-0123456789abcdef.bin"),
-        .snapshot_sha256 = @constCast("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
-    }};
-    const history = [_]types.HistoryTurn{
-        .{ .compacted_summary = .{
-            .summary = @constCast("older context"),
-            .removed_turn_count = 2,
-            .compaction_count = 1,
-        } },
-        .{ .assistant = .{
-            .user = .{ .text = @constCast("hello"), .images = &resumed_images },
-            .assistant = @constCast("hi"),
-        } },
-        .{ .assistant = .{
-            .user = .{ .text = @constCast("inspect file") },
-            .assistant = @constCast(""),
-            .execution = .{ .tool_steps = steps[0..] },
-        } },
-        .{ .background_command = .{
-            .user = .{ .text = @constCast("run server") },
-            .assistant = @constCast("The server is ready."),
-            .execution = .{ .tool_steps = steps[0..] },
-            .log_path = @constCast("/tmp/server.log"),
-            .expect_url = true,
-            .url = null,
-        } },
-    };
-    try writeSessionFixture(
-        alloc,
-        app.session_persistence.store.?,
-        "session-1",
-        &history,
-        2,
-    );
-    app.requested_resume = .{ .id = try alloc.dupe(u8, "session-1") };
-    app.total_web_search_requests = 99;
-
-    try Runtime(TestApp).resumeRequestedSessionAfterUpgrade(&app, "9.9.9");
-
-    try std.testing.expect(app.requested_resume == null);
-    try std.testing.expectEqual(@as(usize, 1), app.startup_resume_anchor_count);
-    try std.testing.expect(app.startup_resume_anchor_saw_writable);
-    try std.testing.expectEqual(@as(usize, 4), app.startup_resume_anchor_history_len);
-    try std.testing.expectEqual(@as(usize, 3), app.startup_resume_anchor_notice_count);
-    try std.testing.expectEqualStrings(
-        "session-1",
-        app.session_persistence.writable.?.active_id,
-    );
-    try std.testing.expect(app.session_persistence.subagent_host != null);
-    try std.testing.expectEqual(@as(usize, 4), app.session.historyLen());
-    try std.testing.expectEqual(@as(usize, 42), app.next_image_id);
-    try std.testing.expectEqual(@as(usize, 2), app.session.contextHistoryStart());
-    const context = try app.session.snapshotContextHistory(alloc);
-    defer session_runtime.freeHistoryTurnSlice(alloc, context);
-    try std.testing.expectEqual(@as(usize, 3), context.len);
-    try std.testing.expect(context[0] == .compacted_summary);
-    try std.testing.expect(std.mem.find(u8, context[0].compacted_summary.summary, "older context") != null);
-    try std.testing.expect(std.mem.find(u8, context[0].compacted_summary.summary, "hello") != null);
-    try std.testing.expectEqualStrings("inspect file", context[1].assistant.user.text);
-    try std.testing.expectEqualStrings("run server", context[2].background_command.user.text);
-    try std.testing.expectEqual(@as(usize, 3), app.notices.items.len);
-    try std.testing.expectEqualStrings("● fx has been updated to v9.9.9", app.notices.items[0]);
-    try std.testing.expect(std.mem.find(u8, app.notices.items[1], "older context") != null);
-    try std.testing.expect(std.mem.find(u8, app.notices.items[2], "Re-check runtime context") != null);
-    try std.testing.expectEqual(@as(usize, 2), app.completed_tool_statuses.items.len);
-    try std.testing.expectEqualStrings("● Completed read_file\n", app.completed_tool_statuses.items[0]);
-    try std.testing.expectEqualStrings("● Completed read_file\n", app.completed_tool_statuses.items[1]);
-    try std.testing.expectEqual(@as(usize, 3), app.cards.items.len);
-    try std.testing.expect(!app.cards.items[0].has_prior_turns);
-    try std.testing.expect(app.cards.items[1].has_prior_turns);
-    try std.testing.expect(app.cards.items[2].has_prior_turns);
-    try std.testing.expectEqualStrings("hello", app.cards.items[0].text);
-    try std.testing.expectEqualStrings("inspect file", app.cards.items[1].text);
-    try std.testing.expectEqualStrings("run server", app.cards.items[2].text);
-    try std.testing.expectEqualStrings(
-        "hi\nI'll inspect it.\nI'll inspect it.\nThe server is ready.\n",
-        app.assistant_text.items,
-    );
-    try std.testing.expectEqual(@as(usize, 0), app.transcript.items.len);
-    try std.testing.expectEqual(@as(u64, 17), app.total_input_tokens);
-    try std.testing.expectEqual(@as(u64, 23), app.total_output_tokens);
-    try std.testing.expectEqual(@as(u64, 0), app.total_web_search_requests);
-    try std.testing.expectEqualStrings("env/model", app.selected_model.items);
-    try std.testing.expectEqualStrings(
-        "saved/model",
-        app.session_persistence.session_preferences.?.model,
-    );
-    try std.testing.expectEqual(types.ReasoningEffort.literal("medium"), app.effort);
-    try std.testing.expect(!app.fast_mode);
 }
 
 test "resumed recovery checkpoint replays its unfinished turn once" {
@@ -10866,69 +10617,6 @@ test "renameActiveSession persists the title to the sidecar and session index" {
     defer display.deinit(alloc);
     try std.testing.expect(display.present);
     try std.testing.expectEqualStrings("deploy pipeline fix", display.title);
-}
-
-const ReconciliationOriginUsage = struct {
-    replaced_provider: ?model_provider.ProviderId = null,
-    replaced_source: ?types.CredentialSource = null,
-
-    fn replaceProviderReconciliationCredential(
-        self: *@This(),
-        _: Allocator,
-        provider: model_provider.ProviderId,
-        source: types.CredentialSource,
-        _: ?[]const u8,
-        _: []const u8,
-    ) void {
-        self.replaced_provider = provider;
-        self.replaced_source = source;
-    }
-};
-
-const ReconciliationOriginAuth = struct {
-    source: types.CredentialSource,
-
-    fn credentialSource(self: *const @This()) ?types.CredentialSource {
-        return self.source;
-    }
-
-    fn apiKey(_: *const @This()) ?[]const u8 {
-        return "origin-bound-token";
-    }
-
-    fn accountId(_: *const @This()) ?[]const u8 {
-        return null;
-    }
-
-    fn gatewayTeam(_: *const @This()) ?[]const u8 {
-        return null;
-    }
-};
-
-const ReconciliationOriginApp = struct {
-    alloc: Allocator = std.testing.allocator,
-    auth: ReconciliationOriginAuth,
-    session: struct { usage: ReconciliationOriginUsage = .{} } = .{},
-    selected_provider: model_provider.ProviderId,
-    selected_model: std.ArrayList(u8) = .empty,
-};
-
-test "resumed sessions install provider-scoped usage reconciliation authority" {
-    var chatgpt = ReconciliationOriginApp{
-        .auth = .{ .source = .chatgpt_subscription },
-        .selected_provider = .codex,
-    };
-    Runtime(ReconciliationOriginApp).startResumedSessionReconciliation(&chatgpt);
-    try std.testing.expectEqual(model_provider.ProviderId.codex, chatgpt.session.usage.replaced_provider.?);
-    try std.testing.expectEqual(types.CredentialSource.chatgpt_subscription, chatgpt.session.usage.replaced_source.?);
-
-    var gateway = ReconciliationOriginApp{
-        .auth = .{ .source = .ai_gateway_api_key },
-        .selected_provider = .gateway,
-    };
-    Runtime(ReconciliationOriginApp).startResumedSessionReconciliation(&gateway);
-    try std.testing.expectEqual(model_provider.ProviderId.gateway, gateway.session.usage.replaced_provider.?);
-    try std.testing.expectEqual(types.CredentialSource.ai_gateway_api_key, gateway.session.usage.replaced_source.?);
 }
 
 test "ensureCachedSessionTitle derives from the first prompt and then freezes" {

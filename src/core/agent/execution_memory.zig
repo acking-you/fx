@@ -988,13 +988,13 @@ test "execution memory redacts secret values from arguments results and provider
     var calls = [_]ToolCall{.{
         .id = "call_secret",
         .name = "run_command",
-        .arguments_json = "{\"command\":\"echo ok && AI_GATEWAY_API_KEY=abcdefghijklmnop && curl -H 'Authorization: Bearer abcdefghijklmnop' https://example.com\",\"api_key\":\"secret-value\"}",
+        .arguments_json = "{\"command\":\"echo ok && OPENAI_API_KEY=abcdefghijklmnop && curl -H 'Authorization: Bearer abcdefghijklmnop' https://example.com\",\"api_key\":\"secret-value\"}",
         .provider_result = "github_pat_abcdefghijklmnop",
         .responses_item_id = "fc_1",
         .responses_output_index = 1,
     }};
     const raw_secret_call =
-        \\{"type":"function_call","id":"fc_1","call_id":"call_secret","name":"run_command","arguments":"{\"command\":\"AI_GATEWAY_API_KEY=abcdefghijklmnop\",\"api_key\":\"secret-value\"}","status":"completed"}
+        \\{"type":"function_call","id":"fc_1","call_id":"call_secret","name":"run_command","arguments":"{\"command\":\"OPENAI_API_KEY=abcdefghijklmnop\",\"api_key\":\"secret-value\"}","status":"completed"}
     ;
     var raw_items = [_]types.ResponsesProviderOutputItem{
         .{
@@ -1130,7 +1130,7 @@ test "durable execution memory masks token-shaped values" {
         .id = "call_secret",
         .name = "mcp__fixture__echo",
         .arguments_json =
-        \\{"command":"AI_GATEWAY_API_KEY=abcdefghijklmnop curl -H 'Authorization: Bearer abcdefghijklmnop' https://example.com sk-abcdefghijklmnop","nested":{"values":["github_pat_abcdefghijklmnop","xoxb-abcdefghijklmnop","plain"]},"api_key":"named-secret"}
+        \\{"command":"OPENAI_API_KEY=abcdefghijklmnop curl -H 'Authorization: Bearer abcdefghijklmnop' https://example.com sk-abcdefghijklmnop","nested":{"values":["github_pat_abcdefghijklmnop","xoxb-abcdefghijklmnop","plain"]},"api_key":"named-secret"}
         ,
     };
     const result = try makePersistedToolResult(

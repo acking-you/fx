@@ -4,7 +4,6 @@ const debug_trace = @import("../shared/debug_trace.zig");
 const io_mod = @import("../shared/io.zig");
 const secret = @import("../auth/secret.zig");
 
-pub const service_name = "FX_AI_GATEWAY_API_KEY";
 const mcp_credentials_service_name = "FX_MCP_OAUTH_CREDENTIALS_V1";
 
 /// Backing store for a resolved account name. Must outlive any argv built from it.
@@ -76,10 +75,6 @@ fn posixAccountName(buf: *AccountBuffer) ?[]const u8 {
     return buf[0..name.len];
 }
 
-pub fn load(alloc: std.mem.Allocator) !?[]u8 {
-    return loadFromService(alloc, service_name);
-}
-
 pub fn loadMcpCredentials(alloc: std.mem.Allocator) !?[]u8 {
     return loadMcpValueMacControlled(alloc, mcp_credentials_service_name, null);
 }
@@ -95,80 +90,6 @@ pub fn loadMcpCredentialsCancellable(
     );
 }
 
-fn loadFromService(alloc: std.mem.Allocator, service: []const u8) !?[]u8 {
-    if (!isAvailable()) return null;
-
-    var account_buf: AccountBuffer = undefined;
-    const account = try accountName(&account_buf);
-    const result = std.process.run(alloc, io_mod.getIo(), .{
-        .argv = &.{ "/usr/bin/security", "find-generic-password", "-a", account, "-s", service, "-w" },
-    }) catch |err| {
-        debug_trace.logf("keychain", "load failed step=spawn err={s}", .{@errorName(err)});
-        return error.KeychainReadFailed;
-    };
-    defer alloc.free(result.stderr);
-    if (result.term != .exited or result.term.exited != 0) {
-        secret.zeroAndFree(alloc, result.stdout);
-        if (std.mem.indexOf(u8, result.stderr, "could not be found") != null) {
-            debug_trace.logf("keychain", "load failed step=lookup err=KeychainItemNotFound", .{});
-            return error.KeychainItemNotFound;
-        }
-        debug_trace.logf("keychain", "load failed step=lookup err=KeychainReadFailed", .{});
-        return error.KeychainReadFailed;
-    }
-
-    const trimmed = std.mem.trim(u8, result.stdout, "\r\n");
-    if (trimmed.len == 0) {
-        secret.zeroAndFree(alloc, result.stdout);
-        return null;
-    }
-    if (trimmed.len == result.stdout.len) return result.stdout;
-
-    const key = try alloc.dupe(u8, trimmed);
-    secret.zeroAndFree(alloc, result.stdout);
-    return key;
-}
-
-fn storeArgv(account: []const u8) [8][]const u8 {
-    return .{ "/usr/bin/security", "add-generic-password", "-a", account, "-s", service_name, "-U", "-w" };
-}
-
-const store_value_script =
-    \\log_user 0
-    \\set timeout 10
-    \\fconfigure stdin -translation binary -encoding binary
-    \\set account_length [gets stdin]
-    \\set service_length [gets stdin]
-    \\set secret_length [gets stdin]
-    \\set account [read stdin $account_length]
-    \\set service [read stdin $service_length]
-    \\set secret [read stdin $secret_length]
-    \\spawn -noecho /usr/bin/security add-generic-password -a $account -s $service -U -w
-    \\expect {
-    \\    -exact "password data for new item:" {}
-    \\    timeout { exit 124 }
-    \\    eof { exit 1 }
-    \\}
-    \\send -- "$secret\r"
-    \\expect {
-    \\    -exact "retype password for new item:" {}
-    \\    timeout { exit 124 }
-    \\    eof { exit 1 }
-    \\}
-    \\send -- "$secret\r"
-    \\expect {
-    \\    eof {}
-    \\    timeout { exit 124 }
-    \\}
-    \\set result [wait]
-    \\if {![string is integer -strict [lindex $result 3]]} { exit 1 }
-    \\exit [lindex $result 3]
-;
-
-// `security add-generic-password -w` uses a 128-byte interactive buffer. MCP's
-// aggregate credential store is larger, so use the native Security API through
-// the stable system osascript host. Account and service are non-secret argv;
-// credential bytes travel only through stdin/stdout.
 const mcp_keychain_script =
     \\ObjC.import("Security");
     \\ObjC.import("Foundation");
@@ -221,40 +142,6 @@ const mcp_keychain_script =
     \\}
 ;
 
-fn storeValueArgv() [3][]const u8 {
-    return .{ "/usr/bin/expect", "-c", store_value_script };
-}
-
-/// The returned argv borrows `account_buf`, which must outlive it.
-pub fn storeInteractiveArgv(account_buf: *AccountBuffer) Error![8][]const u8 {
-    if (!isAvailable()) return error.UnsupportedPlatform;
-    return storeArgv(try accountName(account_buf));
-}
-
-pub fn storeInteractive() Error!void {
-    if (!isAvailable()) return error.UnsupportedPlatform;
-
-    // Let macOS prompt for the secret; do not put it in argv.
-    var account_buf: AccountBuffer = undefined;
-    const argv = try storeInteractiveArgv(&account_buf);
-    var child = std.process.spawn(io_mod.getIo(), .{
-        .argv = &argv,
-        .stdin = .inherit,
-        .stdout = .inherit,
-        .stderr = .inherit,
-    }) catch |err| return writeFailed("interactive_spawn", err);
-    const term = child.wait(io_mod.getIo()) catch |err| return writeFailed("interactive_wait", err);
-    if (term != .exited or term.exited != 0) return writeFailedTerm("interactive_exit", term);
-}
-
-pub fn storeValue(value: []const u8) Error!void {
-    if (!isAvailable()) return error.UnsupportedPlatform;
-    if (value.len == 0) return error.KeychainWriteFailed;
-
-    if (comptime builtin.os.tag == .macos) return storeValueMac(service_name, value);
-    return error.UnsupportedPlatform;
-}
-
 pub fn storeMcpCredentials(value: []const u8) Error!void {
     return storeMcpCredentialsControlled(value, null);
 }
@@ -297,40 +184,6 @@ fn writeFailed(step: []const u8, err: anyerror) Error {
 fn writeFailedTerm(step: []const u8, term: std.process.Child.Term) Error {
     debug_trace.logf("keychain", "store failed step={s} term={t}", .{ step, term });
     return error.KeychainWriteFailed;
-}
-
-fn storeValueMac(service: []const u8, value: []const u8) Error!void {
-    var account_buf: AccountBuffer = undefined;
-    const account = try accountName(&account_buf);
-    const argv = storeValueArgv();
-    var child = std.process.spawn(io_mod.getIo(), .{
-        .argv = &argv,
-        .stdin = .pipe,
-        .stdout = .ignore,
-        .stderr = .ignore,
-    }) catch |err| return writeFailed("spawn", err);
-    defer child.kill(io_mod.getIo());
-
-    var input = child.stdin orelse return writeFailed("stdin", error.BrokenPipe);
-    child.stdin = null;
-    var input_open = true;
-    defer if (input_open) input.close(io_mod.getIo());
-
-    var header_buffer: [96]u8 = undefined;
-    const header = std.fmt.bufPrint(
-        &header_buffer,
-        "{d}\n{d}\n{d}\n",
-        .{ account.len, service.len, value.len },
-    ) catch |err| return writeFailed("header", err);
-    input.writeStreamingAll(io_mod.getIo(), header) catch |err| return writeFailed("write_header", err);
-    input.writeStreamingAll(io_mod.getIo(), account) catch |err| return writeFailed("write_account", err);
-    input.writeStreamingAll(io_mod.getIo(), service) catch |err| return writeFailed("write_service", err);
-    input.writeStreamingAll(io_mod.getIo(), value) catch |err| return writeFailed("write_secret", err);
-    input.close(io_mod.getIo());
-    input_open = false;
-
-    const term = child.wait(io_mod.getIo()) catch |err| return writeFailed("wait", err);
-    if (term != .exited or term.exited != 0) return writeFailedTerm("exit", term);
 }
 
 fn mcpScriptArgv(
@@ -604,41 +457,6 @@ fn deleteMcpValueMac(
     return error.KeychainDeleteFailed;
 }
 
-fn deleteServiceItem(
-    alloc: std.mem.Allocator,
-    service: []const u8,
-) Error!bool {
-    if (!isAvailable()) return error.UnsupportedPlatform;
-
-    var account_buf: AccountBuffer = undefined;
-    const account = try accountName(&account_buf);
-    const result = std.process.run(alloc, io_mod.getIo(), .{
-        .argv = &.{
-            "/usr/bin/security",
-            "delete-generic-password",
-            "-a",
-            account,
-            "-s",
-            service,
-        },
-    }) catch |err| {
-        debug_trace.logf("keychain", "delete failed step=spawn err={s}", .{@errorName(err)});
-        return error.KeychainDeleteFailed;
-    };
-    defer alloc.free(result.stdout);
-    defer alloc.free(result.stderr);
-    if (result.term == .exited and result.term.exited == 0) return true;
-    if (std.mem.find(u8, result.stderr, "could not be found") != null) return false;
-    debug_trace.logf("keychain", "delete failed step=remove term={t}", .{result.term});
-    return error.KeychainDeleteFailed;
-}
-
-const test_service_name = "FX_TEST_AI_GATEWAY_API_KEY";
-
-fn deleteTestServiceItem(alloc: std.mem.Allocator) void {
-    _ = deleteServiceItem(alloc, test_service_name) catch {};
-}
-
 test "account name resolves from the operating system when USER is unset" {
     if (comptime builtin.os.tag != .macos) return error.SkipZigTest;
     try std.testing.expect(io_mod.getenv("USER") == null);
@@ -647,28 +465,6 @@ test "account name resolves from the operating system when USER is unset" {
     const account = try accountName(&buf);
     try std.testing.expect(account.len > 0);
     try std.testing.expectEqual(@intFromPtr(&buf), @intFromPtr(account.ptr));
-}
-
-test "stored key round-trips byte-identically with USER unset" {
-    if (comptime builtin.os.tag != .macos) return error.SkipZigTest;
-    if (isDisabled()) return error.SkipZigTest;
-    try std.testing.expect(io_mod.getenv("USER") == null);
-
-    const alloc = std.testing.allocator;
-    const written = "vt1-round-trip-value";
-
-    storeValueMac(test_service_name, written) catch return error.SkipZigTest;
-    defer deleteTestServiceItem(alloc);
-
-    const read_back = (try loadFromService(alloc, test_service_name)) orelse
-        return error.KeychainItemNotFound;
-    defer secret.zeroAndFree(alloc, read_back);
-    try std.testing.expectEqualStrings(written, read_back);
-    try std.testing.expect(try deleteServiceItem(alloc, test_service_name));
-    try std.testing.expectError(
-        error.KeychainItemNotFound,
-        loadFromService(alloc, test_service_name),
-    );
 }
 
 test "MCP Keychain storage round-trips values beyond the security prompt limit" {
@@ -691,14 +487,6 @@ test "MCP Keychain storage round-trips values beyond the security prompt limit" 
         error.KeychainItemNotFound,
         loadMcpValueMac(alloc, test_mcp_service),
     );
-}
-
-test "Keychain store command has no secret argument" {
-    const argv = storeArgv("user");
-    try std.testing.expectEqualStrings("-w", argv[argv.len - 1]);
-    for (argv) |arg| {
-        try std.testing.expect(!std.mem.eql(u8, arg, "vca_secret_value"));
-    }
 }
 
 test "cancellable MCP Keychain runner interrupts and reaps a stalled child" {
@@ -761,13 +549,4 @@ test "cancellable MCP Keychain store wait interrupts a stalled child" {
     );
     thread.join();
     try std.testing.expect(io_mod.milliTimestamp() - started_ms < 1_000);
-}
-
-test "Keychain value store uses a bounded PTY bridge without a secret argument" {
-    const argv = storeValueArgv();
-    try std.testing.expectEqualStrings("/usr/bin/expect", argv[0]);
-    try std.testing.expect(std.mem.indexOf(u8, argv[2], "set timeout 10") != null);
-    for (argv) |arg| {
-        try std.testing.expect(!std.mem.eql(u8, arg, "vca_secret_value"));
-    }
 }

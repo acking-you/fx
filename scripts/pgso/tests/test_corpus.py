@@ -30,8 +30,6 @@ TRAINING_E2E_TESTS = (
     "file-tool-permissions.test.ts",
     "gateway-stream-lifecycle.test.ts",
     "web-fetch-fake-network.test.ts",
-    "web-search-fake-gateway.test.ts",
-    "vision-route-fake-gateway.test.ts",
     "acp.test.ts",
     "mcp-http.test.ts",
     "mcp-legacy-remote.test.ts",
@@ -58,7 +56,6 @@ VERIFICATION_E2E_TESTS = (
     "auto-mode-reliability.test.ts",
     "tui-auth-source-selection.test.ts",
     "tui-composer-edit-contracts.test.ts",
-    "tui-cost.test.ts",
     "tui-decision-prompts.test.ts",
     "tui-file-picker.test.ts",
     "tui-input-line-delete.test.ts",
@@ -69,7 +66,6 @@ VERIFICATION_E2E_TESTS = (
     "tui-slash-extra.test.ts",
     "tui-slash-menu.test.ts",
     "web-fetch-permission-progress.test.ts",
-    "web-search-permission-progress.test.ts",
     "yolo-permission-mode.test.ts",
 )
 
@@ -84,8 +80,6 @@ EXCLUDED_E2E_TESTS = (
     "tui-keybindings.test.ts",
     "tui-render-lab.test.ts",
     "tui-render-live-stress.test.ts",
-    "web-fetch-live.test.ts",
-    "web-search-live.test.ts",
 )
 
 
@@ -151,7 +145,7 @@ class PgsoCorpusTests(unittest.TestCase):
             "argv": ["bun", "test", "--max-concurrency", "1", f"./{test_file}"],
             "cwd": "tests/e2e",
             "env_set": {"FX_SOUND": "0"},
-            "env_unset": ["AI_GATEWAY_API_KEY", "VERCEL_OIDC_TOKEN"],
+            "env_unset": ["OPENAI_API_KEY"],
             "timeout_seconds": 60,
             "requires_tmux": True,
             "test_file": test_file,
@@ -305,7 +299,7 @@ class PgsoCorpusTests(unittest.TestCase):
             "notifications.test.ts",
             "tui-agent.test.ts",
             "tui-command-permissions.test.ts",
-            "web-search-live.test.ts",
+            "provider-live.test.ts",
         ):
             with self.subTest(test_file=test_file):
                 (self.root / "tests" / "e2e" / test_file).write_text("test")
@@ -331,7 +325,7 @@ class PgsoCorpusTests(unittest.TestCase):
             "LLVM_PROFILE_FILE",
             "TMUX",
             "TMUX_TMPDIR",
-            "AI_GATEWAY_API_KEY",
+            "OPENAI_API_KEY",
             "FX_TRACE_LOG",
             "FX_TRACE_SCOPES",
         ):
@@ -365,8 +359,8 @@ class PgsoCorpusTests(unittest.TestCase):
             EXCLUDED_E2E_TESTS,
             tuple(test_file for test_file, _ in corpus.intentional_exclusions),
         )
-        self.assertEqual(38, len(corpus.scenarios))
-        self.assertEqual(54, len(corpus.candidate_scenarios))
+        self.assertEqual(36, len(corpus.scenarios))
+        self.assertEqual(50, len(corpus.candidate_scenarios))
         self.assertEqual(
             100,
             next(

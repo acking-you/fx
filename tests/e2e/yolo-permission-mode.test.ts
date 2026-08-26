@@ -105,11 +105,8 @@ describe("yolo permission mode", () => {
           cwd: fixture.workspace,
           env: {
             HOME: fixture.home,
-            AI_GATEWAY_API_KEY: "fake-yolo-key",
-            VERCEL_OIDC_TOKEN: undefined,
-            FX_AUTO_UPGRADE: "0",
-            FX_GATEWAY_BASE_URL: fake.baseUrl,
-            FX_GATEWAY_CHAT_URL: fake.chatUrl,
+            OPENAI_API_KEY: "fake-yolo-key",
+                        FX_RESPONSES_BASE_URL: fake.baseUrl,
             FX_MODEL: FAKE_GATEWAY_MODEL,
             FX_TRACE_LOG: tracePath,
             FX_TRACE_SCOPES: "permission",
@@ -166,8 +163,7 @@ describe("yolo permission mode", () => {
         cwd: fixture.workspace,
         env: {
           HOME: fixture.home,
-          AI_GATEWAY_API_KEY: undefined,
-          VERCEL_OIDC_TOKEN: undefined,
+          OPENAI_API_KEY: undefined,
           FX_PERMISSION_MODE: undefined,
         },
       });
@@ -213,11 +209,8 @@ describe("yolo permission mode", () => {
           cwd: fixture.workspace,
           env: {
             HOME: fixture.home,
-            AI_GATEWAY_API_KEY: "fake-yolo-key",
-            VERCEL_OIDC_TOKEN: undefined,
-            FX_AUTO_UPGRADE: "0",
-            FX_GATEWAY_BASE_URL: fake.baseUrl,
-            FX_GATEWAY_CHAT_URL: fake.chatUrl,
+            OPENAI_API_KEY: "fake-yolo-key",
+                        FX_RESPONSES_BASE_URL: fake.baseUrl,
             FX_MODEL: FAKE_GATEWAY_MODEL,
           },
           timeoutMs: TIMEOUT,
@@ -257,9 +250,7 @@ describe.skipIf(!tmuxAvailable())("yolo interactive mode", () => {
         height: 40,
         env: {
           HOME: fixture.home,
-          AI_GATEWAY_API_KEY: undefined,
-          VERCEL_OIDC_TOKEN: undefined,
-          FX_AUTO_UPGRADE: "0",
+          OPENAI_API_KEY: undefined,
           FX_PERMISSION_MODE: undefined,
         },
       });
@@ -344,11 +335,8 @@ describe.skipIf(!tmuxAvailable())("yolo interactive mode", () => {
         height: 40,
         env: {
           HOME: fixture.home,
-          AI_GATEWAY_API_KEY: "fake-live-permission-key",
-          VERCEL_OIDC_TOKEN: undefined,
-          FX_AUTO_UPGRADE: "0",
-          FX_GATEWAY_BASE_URL: fake.baseUrl,
-          FX_GATEWAY_CHAT_URL: fake.chatUrl,
+          OPENAI_API_KEY: "fake-live-permission-key",
+                    FX_RESPONSES_BASE_URL: fake.baseUrl,
           FX_MODEL: FAKE_GATEWAY_MODEL,
           FX_PERMISSION_MODE: undefined,
           FX_TRACE_LOG: tracePath,
@@ -422,11 +410,8 @@ describe.skipIf(!tmuxAvailable())("yolo interactive mode", () => {
         height: 40,
         env: {
           HOME: fixture.home,
-          AI_GATEWAY_API_KEY: "fake-live-permission-key",
-          VERCEL_OIDC_TOKEN: undefined,
-          FX_AUTO_UPGRADE: "0",
-          FX_GATEWAY_BASE_URL: fake.baseUrl,
-          FX_GATEWAY_CHAT_URL: fake.chatUrl,
+          OPENAI_API_KEY: "fake-live-permission-key",
+                    FX_RESPONSES_BASE_URL: fake.baseUrl,
           FX_MODEL: FAKE_GATEWAY_MODEL,
           FX_PERMISSION_MODE: undefined,
           FX_TRACE_LOG: tracePath,
@@ -488,9 +473,7 @@ describe.skipIf(!tmuxAvailable())("yolo interactive mode", () => {
         height: 24,
         env: {
           HOME: fixture.home,
-          AI_GATEWAY_API_KEY: undefined,
-          VERCEL_OIDC_TOKEN: undefined,
-          FX_AUTO_UPGRADE: "0",
+          OPENAI_API_KEY: undefined,
           FX_PERMISSION_MODE: undefined,
         },
       });

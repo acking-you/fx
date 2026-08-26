@@ -260,24 +260,11 @@ fn appendLegacyCleanup(writer: *std.Io.Writer, cleanup: config_runtime.LegacyCle
 
 pub fn Commands(comptime App: type) type {
     return struct {
-        fn update_channel_label(app: *App) []const u8 {
-            if (comptime @hasField(App, "upgrader")) {
-                const Upgrader = @TypeOf(app.upgrader);
-                if (comptime @hasDecl(Upgrader, "channel")) {
-                    return app.upgrader.channel().label();
-                }
-            }
-            return "stable";
-        }
-
         pub fn showStatus(app: *App) !void {
             const auth = app.auth.statusSnapshot();
             const text = try (output_contracts.StatusSnapshot{
                 .model = provider_runtime.model(app),
                 .provider = provider_runtime.provider(app),
-                .update_channel = update_channel_label(app),
-                .build_channel = if (@hasDecl(App, "build_update_channel")) App.build_update_channel.label() else "stable",
-                .build_revision = if (@hasDecl(App, "build_revision")) App.build_revision else "",
                 .auth = auth,
                 .auth_help = auth.missingHelp(.interactive),
                 .permission_mode = app.permission_engine.mode,

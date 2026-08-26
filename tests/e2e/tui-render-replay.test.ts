@@ -58,7 +58,7 @@ async function launch(options: {
   );
 
   const s = await TmuxSession.create({
-    cmd: `env -u AI_GATEWAY_API_KEY -u VERCEL_OIDC_TOKEN FX_DISABLE_KEYCHAIN=1 FX_SKIP_ONBOARDING=1 ${FX_BIN}`,
+    cmd: `env -u OPENAI_API_KEY FX_DISABLE_KEYCHAIN=1 FX_SKIP_ONBOARDING=1 ${FX_BIN}`,
     cwd: workDir,
     width: 88,
     height: 30,
@@ -103,7 +103,7 @@ async function launchAutomaticRecording(): Promise<{
   const goldenPath = join(workDir, "grid.txt");
   const tracePath = join(workDir, "trace.log");
   const s = await TmuxSession.create({
-    cmd: `env -u AI_GATEWAY_API_KEY -u VERCEL_OIDC_TOKEN FX_DISABLE_KEYCHAIN=1 FX_SKIP_ONBOARDING=1 ${FX_BIN} --record`,
+    cmd: `env -u OPENAI_API_KEY FX_DISABLE_KEYCHAIN=1 FX_SKIP_ONBOARDING=1 ${FX_BIN} --record`,
     cwd: workDir,
     width: 180,
     height: 36,
@@ -308,15 +308,14 @@ describe("tui: render record/replay", () => {
         { length: 33 },
         (_, index) => `captured input line ${index + 1}: ${"x".repeat(32)}`,
       ).join("\n");
-      const authNotice = "● Auth: Fx needs a model credential. Use /login for Vercel, ChatGPT Codex, or Grok, set OPENAI_API_KEY for a Responses API, or set AI_GATEWAY_API_KEY for Vercel AI Gateway.";
+      const authNotice = "● Auth: Fx needs a model credential.";
       const launched = await launch({ recordInput: true });
       session = launched.session;
 
       await session.pasteText(pasted);
       await session.waitForText("[Pasted text #1, 33 lines]", 5_000);
       await session.sendKeys("Enter");
-      await session.waitForText("● Auth: Fx needs a model credential.", 5_000);
-      expect((await session.captureFullScrollback()).replace(/\s+/g, " ")).toContain(authNotice);
+      await session.waitForText(authNotice, 5_000);
 
       const stdin = readTapeFrames(launched.tapePath)
         .filter((frame) => frame.kind === 2)

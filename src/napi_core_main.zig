@@ -11,13 +11,12 @@ const debug_trace = @import("core/shared/debug_trace.zig");
 const io_mod = @import("core/shared/io.zig");
 const types = @import("core/shared/types.zig");
 const fetch_state = @import("napi_fetch_state.zig");
-const streamable_http = @import("core/mcp/streamable_http.zig");
 const host_model_catalog = @import("gateway/host_model_catalog.zig");
 const host_stream_provider = @import("gateway/host_stream_provider.zig");
 const oauth_transport = @import("core/auth/oauth_transport.zig");
 const secret = @import("core/auth/secret.zig");
 const builtin_context = @import("builtins/context.zig");
-const builtin_gateway = @import("builtins/gateway.zig");
+const builtin_gateway = @import("builtins/responses.zig");
 const builtin_modes = @import("builtins/modes.zig");
 
 const c = @cImport({
@@ -418,7 +417,6 @@ const Runtime = struct {
     model: ?[]u8,
     home: []u8,
     workspace_root: []u8,
-    gateway_chat_url: []u8,
     responses_base_url: ?[]u8,
     thread: std.Thread,
     exited: std.atomic.Value(bool) = .init(false),
@@ -448,10 +446,8 @@ const Runtime = struct {
         if (self.credential_source == .openai_api_key) {
             gateway.cli_model_catalog = host_model_catalog.cliProvider(&self.catalog_context);
             gateway.model_catalog = host_model_catalog.provider(&self.catalog_context);
-            gateway.credits = null;
         }
         gateway.permission_reviewer = null;
-        gateway.deferred_usage = null;
         gateway.responses_compaction = null;
         const providers = provider_set.gateway_only(gateway);
         acp_server.runWithTransport(
@@ -463,7 +459,7 @@ const Runtime = struct {
                     builtin_gateway.default_model,
                 .default_agent_step_limit = 64,
                 .gateway_retry_count = 0,
-                .gateway_chat_url = self.gateway_chat_url,
+                .gateway_chat_url = builtin_gateway.default_chat_url,
                 .gateway_models_path = builtin_gateway.models_path,
                 .gateway_provider = provider,
                 .provider_set = providers,
@@ -519,7 +515,6 @@ const Runtime = struct {
         if (self.model) |model| self.alloc.free(model);
         self.alloc.free(self.home);
         self.alloc.free(self.workspace_root);
-        self.alloc.free(self.gateway_chat_url);
         if (self.responses_base_url) |base_url| self.alloc.free(base_url);
         self.alloc.destroy(self);
         releaseRuntimeSlot();
@@ -626,7 +621,6 @@ const CreateError = error{
     InvalidModel,
     InvalidHome,
     InvalidWorkspaceRoot,
-    InvalidGatewayUrl,
     InvalidResponsesBaseUrl,
     OutOfMemory,
     ThreadFailed,
@@ -650,11 +644,8 @@ fn createRuntime(env: c.napi_env, options: c.napi_value) CreateError!*Runtime {
     const credential_source = if (credential_source_name) |value|
         types.parseCredentialSource(value) orelse return error.InvalidCredentialSource
     else
-        types.CredentialSource.ai_gateway_api_key;
-    switch (credential_source) {
-        .ai_gateway_api_key, .openai_api_key => {},
-        else => return error.InvalidCredentialSource,
-    }
+        types.CredentialSource.openai_api_key;
+    if (credential_source != .openai_api_key) return error.InvalidCredentialSource;
     const model = getNamedString(env, options, "model", alloc, max_model_bytes) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.InvalidModel,
@@ -670,16 +661,6 @@ fn createRuntime(env: c.napi_env, options: c.napi_value) CreateError!*Runtime {
         else => return error.InvalidWorkspaceRoot,
     }) orelse return error.InvalidWorkspaceRoot;
     errdefer alloc.free(workspace_root);
-    const gateway_chat_url = (getNamedString(env, options, "gatewayChatUrl", alloc, max_url_bytes) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return error.InvalidGatewayUrl,
-    }) orelse (alloc.dupe(u8, builtin_gateway.default_chat_url) catch return error.OutOfMemory);
-    errdefer alloc.free(gateway_chat_url);
-    streamable_http.validateEndpoint(gateway_chat_url) catch return error.InvalidGatewayUrl;
-    if (!std.mem.eql(u8, gateway_chat_url, builtin_gateway.default_chat_url)) {
-        const uri = std.Uri.parse(gateway_chat_url) catch return error.InvalidGatewayUrl;
-        if (!std.ascii.eqlIgnoreCase(uri.scheme, "http")) return error.InvalidGatewayUrl;
-    }
     const responses_base_url = getNamedString(env, options, "responsesBaseUrl", alloc, max_url_bytes) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.InvalidResponsesBaseUrl,
@@ -703,11 +684,10 @@ fn createRuntime(env: c.napi_env, options: c.napi_value) CreateError!*Runtime {
         .model = model,
         .home = home,
         .workspace_root = workspace_root,
-        .gateway_chat_url = gateway_chat_url,
         .responses_base_url = responses_base_url,
         .thread = undefined,
     };
-    runtime.stream_context = host_stream_provider.initContext(builtin_gateway.buildAgentRequest, .{ .fixed = runtime.gateway_chat_url }, .{
+    runtime.stream_context = host_stream_provider.initContext(.{
         .context = &runtime.fetch,
         .open_fn = FetchBridge.open,
         .status_fn = FetchBridge.statusFn,
@@ -729,11 +709,10 @@ fn throwCreateError(env: c.napi_env, err: CreateError) c.napi_value {
     return switch (err) {
         error.TooManyRuntimes => throw(env, "LIBFX_NATIVE_LIMIT", "too many active native runtimes"),
         error.InvalidApiKey => throw(env, "LIBFX_INVALID_ARGUMENT", "apiKey is required and must be a bounded string"),
-        error.InvalidCredentialSource => throw(env, "LIBFX_INVALID_ARGUMENT", "credentialSource must be ai_gateway_api_key or openai_api_key"),
+        error.InvalidCredentialSource => throw(env, "LIBFX_INVALID_ARGUMENT", "credentialSource must be openai_api_key, chatgpt_subscription, or grok_subscription"),
         error.InvalidModel => throw(env, "LIBFX_INVALID_ARGUMENT", "model must be a bounded string"),
         error.InvalidHome => throw(env, "LIBFX_INVALID_ARGUMENT", "home is required and must be a bounded string"),
         error.InvalidWorkspaceRoot => throw(env, "LIBFX_INVALID_ARGUMENT", "workspaceRoot is required and must be a bounded string"),
-        error.InvalidGatewayUrl => throw(env, "LIBFX_INVALID_ARGUMENT", "gatewayChatUrl must be a bounded string"),
         error.InvalidResponsesBaseUrl => throw(env, "LIBFX_INVALID_ARGUMENT", "responsesBaseUrl must be a bounded secure or loopback base URL"),
         error.OutOfMemory => throw(env, "LIBFX_NATIVE_OOM", "could not allocate native runtime"),
         error.ThreadFailed => throw(env, "LIBFX_NATIVE_THREAD", "could not start native runtime thread"),

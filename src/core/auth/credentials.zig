@@ -1,5 +1,4 @@
 const std = @import("std");
-const builtin = @import("builtin");
 const chatgpt_oauth = @import("chatgpt_oauth.zig");
 const grok_oauth = @import("grok_oauth.zig");
 const debug_trace = @import("../shared/debug_trace.zig");
@@ -15,17 +14,11 @@ pub const Source = types.CredentialSource;
 pub const CatalogPublicOnly = union(enum) {
     no_credential,
     credential_refresh_failed: Source,
-    authenticated_credential_rejected: Source,
-    chatgpt_subscription,
-    grok_subscription,
 
     fn credentialSource(self: CatalogPublicOnly) ?Source {
         return switch (self) {
             .no_credential => null,
             .credential_refresh_failed => |source| source,
-            .authenticated_credential_rejected => |source| source,
-            .chatgpt_subscription => .chatgpt_subscription,
-            .grok_subscription => .grok_subscription,
         };
     }
 };
@@ -33,19 +26,13 @@ pub const CatalogPublicOnly = union(enum) {
 pub const CatalogPublicOnlyReason = std.meta.Tag(CatalogPublicOnly);
 
 pub const CatalogAuthenticatedSource = enum {
-    vercel_oidc_token,
-    ai_gateway_api_key,
     openai_api_key,
-    stored_key,
     chatgpt_subscription,
     grok_subscription,
 
     fn credentialSource(self: CatalogAuthenticatedSource) Source {
         return switch (self) {
-            .vercel_oidc_token => .vercel_oidc_token,
-            .ai_gateway_api_key => .ai_gateway_api_key,
             .openai_api_key => .openai_api_key,
-            .stored_key => .stored_key,
             .chatgpt_subscription => .chatgpt_subscription,
             .grok_subscription => .grok_subscription,
         };
@@ -53,14 +40,13 @@ pub const CatalogAuthenticatedSource = enum {
 };
 
 /// A borrowed authorization decision for one model-catalog request. Public-only
-/// states cannot carry credential or team bytes; authenticated states carry the
-/// only values the request is allowed to send.
+/// states cannot carry credential bytes; authenticated states carry only the
+/// values the selected provider is allowed to receive.
 pub const CatalogAccess = union(enum) {
     public_only: CatalogPublicOnly,
     authenticated: struct {
         source: CatalogAuthenticatedSource,
         credential: []const u8,
-        team_context: ?[]const u8,
         account_id: ?[]const u8 = null,
     },
 
@@ -83,33 +69,11 @@ pub const CatalogAccess = union(enum) {
         };
     }
 
-    pub fn publicFallbackAfterRejection(self: CatalogAccess) ?CatalogAccess {
-        return switch (self) {
-            .public_only => null,
-            .authenticated => |access| if (access.source == .openai_api_key or access.source == .chatgpt_subscription or access.source == .grok_subscription)
-                null
-            else
-                .{
-                    .public_only = .{
-                        .authenticated_credential_rejected = access.source.credentialSource(),
-                    },
-                },
-        };
-    }
-
     pub fn authorizationCredential(self: CatalogAccess) ?[]const u8 {
         return switch (self) {
             .public_only => null,
             .authenticated => |access| access.credential,
         };
-    }
-
-    pub fn teamContext(self: CatalogAccess) ?[]const u8 {
-        const team = switch (self) {
-            .public_only => return null,
-            .authenticated => |access| access.team_context orelse return null,
-        };
-        return if (team.len > 0) team else null;
     }
 
     pub fn accountId(self: CatalogAccess) ?[]const u8 {
@@ -127,7 +91,6 @@ pub fn catalogAccessAt(credential: ?Credential, now_ms: i64) CatalogAccess {
     return catalogAccessForCredentialAndAccount(
         selected.source,
         selected.token,
-        selected.gatewayTeam(),
         selected.accountId(),
     );
 }
@@ -143,23 +106,18 @@ pub fn catalogAccessAfterRefreshFailure(source: Source) CatalogAccess {
 pub fn catalogAccessForCredential(
     source: ?Source,
     credential: []const u8,
-    team_context: ?[]const u8,
 ) CatalogAccess {
-    return catalogAccessForCredentialAndAccount(source, credential, team_context, null);
+    return catalogAccessForCredentialAndAccount(source, credential, null);
 }
 
 pub fn catalogAccessForCredentialAndAccount(
     source: ?Source,
     credential: []const u8,
-    team_context: ?[]const u8,
     account_id: ?[]const u8,
 ) CatalogAccess {
     const selected_source = source orelse return .{ .public_only = .no_credential };
     const authenticated_source: CatalogAuthenticatedSource = switch (selected_source) {
-        .vercel_oidc_token => .vercel_oidc_token,
-        .ai_gateway_api_key => .ai_gateway_api_key,
         .openai_api_key => .openai_api_key,
-        .stored_key => .stored_key,
         .chatgpt_subscription => .chatgpt_subscription,
         .grok_subscription => .grok_subscription,
     };
@@ -167,47 +125,32 @@ pub fn catalogAccessForCredentialAndAccount(
         .authenticated = .{
             .source = authenticated_source,
             .credential = credential,
-            .team_context = if (authenticated_source == .chatgpt_subscription or authenticated_source == .grok_subscription) null else team_context,
             .account_id = if (authenticated_source == .grok_subscription) account_id else null,
         },
     };
 }
 
-/// Current native product copy. Store mechanics and availability come from the
-/// injected host port; Core retains the stable user-facing source name.
-pub const stored_key_backend_label = if (builtin.os.tag == .macos) "macOS Keychain" else "profile file";
-
 /// Both modes resolve the same source set; the mode selects only whether an
 /// expired subscription credential is refreshed first.
 pub const LoadMode = enum { stored, refresh_if_needed };
 
-pub const missing_credential_message = "Fx needs a model credential. Set OPENAI_API_KEY for a Responses API, use fx login codex for ChatGPT Codex, use fx login grok for Grok, or set AI_GATEWAY_API_KEY for Vercel AI Gateway.";
-pub const missing_interactive_credential_message = "Fx needs a model credential. Set OPENAI_API_KEY for a Responses API, use /login for ChatGPT Codex or Grok, or set AI_GATEWAY_API_KEY for Vercel AI Gateway.";
+pub const missing_credential_message = "Fx needs a model credential. Set OPENAI_API_KEY for a Responses API, use fx login codex for ChatGPT Codex, or use fx login grok for Grok.";
+pub const missing_interactive_credential_message = "Fx needs a model credential. Set OPENAI_API_KEY for a Responses API, or use /login for ChatGPT Codex or Grok.";
 pub const missing_chatgpt_credential_message = "fx needs a Codex subscription login for this model. Run fx login codex.";
 pub const missing_chatgpt_interactive_credential_message = "Codex needs a subscription login. Run /login and choose Sign in with Codex.";
 pub const missing_grok_credential_message = "fx needs a Grok subscription login for this model. Run fx login grok.";
 pub const missing_grok_interactive_credential_message = "Grok needs a subscription login. Run /login and choose Sign in with Grok.";
-pub const unreadable_store_message = "Fx could not read the stored API key from " ++ stored_key_backend_label ++ ". A key may be saved but unreadable. Set FX_TRACE_LOG for the failing step, or set AI_GATEWAY_API_KEY.";
 
 pub const Credential = struct {
     token: []u8,
     source: Source,
     account_id: ?[]u8 = null,
-    team_id: ?[]u8 = null,
-    team_slug: ?[]u8 = null,
     refresh_after_ms: ?i64 = null,
 
     pub fn deinit(self: *Credential, alloc: std.mem.Allocator) void {
         secret.zeroAndFree(alloc, self.token);
         if (self.account_id) |account_id| alloc.free(account_id);
-        if (self.team_id) |team| alloc.free(team);
-        if (self.team_slug) |team| alloc.free(team);
         self.* = undefined;
-    }
-
-    pub fn gatewayTeam(self: Credential) ?[]const u8 {
-        if (self.team_id) |team| return team;
-        return self.team_slug;
     }
 
     pub fn accountId(self: Credential) ?[]const u8 {
@@ -220,19 +163,11 @@ pub const Credential = struct {
     }
 };
 
-pub const StoredKeyReadStatus = enum {
-    not_attempted,
-    not_found,
-    unavailable,
-};
-
 pub const Resolution = struct {
     credential: ?Credential = null,
-    stored_key_status: StoredKeyReadStatus = .not_attempted,
 };
 
-/// The single credential resolution method. Walks source precedence, then falls back to
-/// the stored key, reporting why that store was silent when it produced nothing.
+/// The single credential resolution method. Walks the supported source precedence.
 pub fn resolve(
     alloc: std.mem.Allocator,
     transport: oauth_transport.Provider,
@@ -288,32 +223,17 @@ pub fn resolvePreferring(
     preferred: ?Source,
 ) !Resolution {
     if (preferred) |source| {
-        if (source != .stored_key or !secret_store.isDisabled()) {
-            const chosen = loadPreferredSource(alloc, transport, secret_store, mode, source) catch |err| blk: {
-                if (err == error.OutOfMemory) return err;
-                debug_trace.logf("auth", "preferred source load failed source={t} err={s}", .{ source, @errorName(err) });
-                break :blk null;
-            };
-            if (chosen) |credential| return .{ .credential = credential };
-            debug_trace.logf("auth", "preferred source unavailable source={t}; using precedence", .{source});
-        }
+        const chosen = loadPreferredSource(alloc, transport, secret_store, mode, source) catch |err| blk: {
+            if (err == error.OutOfMemory) return err;
+            debug_trace.logf("auth", "preferred source load failed source={t} err={s}", .{ source, @errorName(err) });
+            break :blk null;
+        };
+        if (chosen) |credential| return .{ .credential = credential };
+        debug_trace.logf("auth", "preferred source unavailable source={t}; using precedence", .{source});
     }
 
-    if (try loadSource(alloc, transport, secret_store, .vercel_oidc_token)) |credential| return .{ .credential = credential };
-    if (try loadSource(alloc, transport, secret_store, .ai_gateway_api_key)) |credential| return .{ .credential = credential };
     if (try loadSource(alloc, transport, secret_store, .openai_api_key)) |credential| return .{ .credential = credential };
-
-    if (secret_store.isDisabled()) return .{};
-
-    var status: StoredKeyReadStatus = .not_found;
-    const stored = loadSource(alloc, transport, secret_store, .stored_key) catch |err| blk: {
-        if (err == error.OutOfMemory) return err;
-        status = .unavailable;
-        debug_trace.logf("auth", "stored key load failed err={s} status={t}", .{ @errorName(err), status });
-        break :blk null;
-    };
-    if (stored) |credential| return .{ .credential = credential };
-    return .{ .stored_key_status = status };
+    return .{};
 }
 
 /// Loading a subscription source may refresh an expired credential, which
@@ -342,14 +262,11 @@ fn loadPreferredSource(
 pub fn loadSource(
     alloc: std.mem.Allocator,
     transport: oauth_transport.Provider,
-    secret_store: host.SecretStore,
+    _: host.SecretStore,
     source: Source,
 ) !?Credential {
     return switch (source) {
-        .vercel_oidc_token => loadEnvCredential(alloc, "VERCEL_OIDC_TOKEN", source),
-        .ai_gateway_api_key => loadEnvCredential(alloc, "AI_GATEWAY_API_KEY", source),
         .openai_api_key => loadEnvCredential(alloc, "OPENAI_API_KEY", source),
-        .stored_key => loadStoredKeyCredential(alloc, secret_store),
         .chatgpt_subscription => loadChatGptCredential(alloc, transport, .if_needed),
         .grok_subscription => loadGrokCredential(alloc, transport, .if_needed),
     };
@@ -357,28 +274,13 @@ pub fn loadSource(
 
 pub fn sourceExists(
     alloc: std.mem.Allocator,
-    secret_store: host.SecretStore,
+    _: host.SecretStore,
     source: Source,
 ) !bool {
     return switch (source) {
-        .vercel_oidc_token => nonEmptyEnvValue("VERCEL_OIDC_TOKEN") != null,
-        .ai_gateway_api_key => nonEmptyEnvValue("AI_GATEWAY_API_KEY") != null,
         .openai_api_key => nonEmptyEnvValue("OPENAI_API_KEY") != null,
         .chatgpt_subscription => chatgpt_oauth.sourceExists(alloc),
         .grok_subscription => grok_oauth.sourceExists(alloc),
-        .stored_key => blk: {
-            if (secret_store.isDisabled()) break :blk false;
-            const stored = secret_store.load(alloc) catch |err| switch (err) {
-                error.OutOfMemory => return err,
-                else => {
-                    debug_trace.logf("auth", "source probe failed source=stored_key err={s}", .{@errorName(err)});
-                    break :blk false;
-                },
-            };
-            const value = stored orelse break :blk false;
-            secret.zeroAndFree(alloc, value);
-            break :blk true;
-        },
     };
 }
 
@@ -392,15 +294,6 @@ fn loadEnvCredential(
         .token = try alloc.dupe(u8, value),
         .source = source,
     };
-}
-
-fn loadStoredKeyCredential(
-    alloc: std.mem.Allocator,
-    secret_store: host.SecretStore,
-) !?Credential {
-    if (secret_store.isDisabled()) return null;
-    const value = (try secret_store.load(alloc)) orelse return null;
-    return .{ .token = value, .source = .stored_key };
 }
 
 fn loadChatGptCredential(
@@ -475,10 +368,7 @@ pub fn refreshGrokCredential(
 
 pub fn sourceLabel(source: Source) []const u8 {
     return switch (source) {
-        .vercel_oidc_token => "VERCEL_OIDC_TOKEN",
-        .ai_gateway_api_key => "AI_GATEWAY_API_KEY",
         .openai_api_key => "OPENAI_API_KEY",
-        .stored_key => "stored API key (" ++ stored_key_backend_label ++ ")",
         .chatgpt_subscription => "Codex subscription",
         .grok_subscription => "Grok subscription",
     };
@@ -488,30 +378,10 @@ pub fn sourceRefreshable(source: Source) bool {
     return source == .chatgpt_subscription or source == .grok_subscription;
 }
 
-test "stored key label discloses the backend that answered" {
-    try std.testing.expect(std.mem.find(u8, sourceLabel(.stored_key), stored_key_backend_label) != null);
-    try std.testing.expect(std.mem.find(u8, unreadable_store_message, stored_key_backend_label) != null);
-    for ([_]Source{ .vercel_oidc_token, .ai_gateway_api_key }) |source| {
-        try std.testing.expect(!std.mem.eql(u8, sourceLabel(source), sourceLabel(.stored_key)));
-    }
-}
-
 test "missing credential messages use surface commands in preferred order" {
     try std.testing.expect(std.mem.find(u8, missing_credential_message, "OPENAI_API_KEY") != null);
     try std.testing.expect(std.mem.find(u8, missing_credential_message, "fx login codex") != null);
     try std.testing.expect(std.mem.find(u8, missing_interactive_credential_message, "/login") != null);
-}
-
-test "credential gateway team prefers team id" {
-    var credential = Credential{
-        .token = try std.testing.allocator.dupe(u8, "token"),
-        .source = .vercel_oidc_token,
-        .team_id = try std.testing.allocator.dupe(u8, "team_123"),
-        .team_slug = try std.testing.allocator.dupe(u8, "vercel-labs"),
-    };
-    defer credential.deinit(std.testing.allocator);
-
-    try std.testing.expectEqualStrings("team_123", credential.gatewayTeam().?);
 }
 
 test "catalog access isolates public and authenticated provider credentials" {
@@ -519,7 +389,6 @@ test "catalog access isolates public and authenticated provider credentials" {
     try std.testing.expectEqual(CatalogPublicOnlyReason.no_credential, missing.publicOnlyReason().?);
     try std.testing.expect(missing.credentialSource() == null);
     try std.testing.expect(missing.authorizationCredential() == null);
-    try std.testing.expect(missing.teamContext() == null);
 
     const refresh_failed = catalogAccessAfterRefreshFailure(.chatgpt_subscription);
     try std.testing.expectEqual(CatalogPublicOnlyReason.credential_refresh_failed, refresh_failed.publicOnlyReason().?);
@@ -528,12 +397,9 @@ test "catalog access isolates public and authenticated provider credentials" {
     const chatgpt = catalogAccessForCredential(
         .chatgpt_subscription,
         "chatgpt-secret",
-        "chatgpt-account",
     );
     try std.testing.expectEqual(Source.chatgpt_subscription, chatgpt.credentialSource().?);
     try std.testing.expectEqualStrings("chatgpt-secret", chatgpt.authorizationCredential().?);
-    try std.testing.expect(chatgpt.teamContext() == null);
-    try std.testing.expect(chatgpt.publicFallbackAfterRejection() == null);
 
     var grok_credential = Credential{
         .token = try std.testing.allocator.dupe(u8, "grok-secret"),
@@ -543,37 +409,19 @@ test "catalog access isolates public and authenticated provider credentials" {
     defer grok_credential.deinit(std.testing.allocator);
     const grok = catalogAccessAt(grok_credential, 0);
     try std.testing.expectEqualStrings("acct_grok", grok.accountId().?);
-    try std.testing.expect(grok.teamContext() == null);
-
-    const rejected: CatalogAccess = .{ .public_only = .{ .authenticated_credential_rejected = .stored_key } };
-    try std.testing.expectEqual(CatalogPublicOnlyReason.authenticated_credential_rejected, rejected.publicOnlyReason().?);
-    try std.testing.expectEqual(Source.stored_key, rejected.credentialSource().?);
-    try std.testing.expect(rejected.authorizationCredential() == null);
-    try std.testing.expect(rejected.teamContext() == null);
 }
 
-test "authenticated catalog access carries source and permitted request context" {
-    for ([_]Source{ .vercel_oidc_token, .ai_gateway_api_key, .stored_key }) |source| {
-        var credential = Credential{
-            .token = try std.testing.allocator.dupe(u8, "token"),
-            .source = source,
-            .team_slug = try std.testing.allocator.dupe(u8, "vercel-labs"),
-        };
-        defer credential.deinit(std.testing.allocator);
+test "authenticated catalog access carries a BYOK source" {
+    var credential = Credential{
+        .token = try std.testing.allocator.dupe(u8, "token"),
+        .source = .openai_api_key,
+    };
+    defer credential.deinit(std.testing.allocator);
 
-        const authenticated = catalogAccessAt(credential, 0);
-        try std.testing.expect(authenticated.publicOnlyReason() == null);
-        try std.testing.expectEqual(source, authenticated.credentialSource().?);
-        try std.testing.expectEqualStrings("token", authenticated.authorizationCredential().?);
-        try std.testing.expectEqualStrings("vercel-labs", authenticated.teamContext().?);
-
-        const fallback = authenticated.publicFallbackAfterRejection().?;
-        try std.testing.expectEqual(CatalogPublicOnlyReason.authenticated_credential_rejected, fallback.publicOnlyReason().?);
-        try std.testing.expectEqual(source, fallback.credentialSource().?);
-        try std.testing.expect(fallback.authorizationCredential() == null);
-        try std.testing.expect(fallback.teamContext() == null);
-        try std.testing.expect(fallback.publicFallbackAfterRejection() == null);
-    }
+    const authenticated = catalogAccessAt(credential, 0);
+    try std.testing.expect(authenticated.publicOnlyReason() == null);
+    try std.testing.expectEqual(Source.openai_api_key, authenticated.credentialSource().?);
+    try std.testing.expectEqualStrings("token", authenticated.authorizationCredential().?);
 }
 
 var stable_credential_test_environ: ?*std.process.Environ.Map = null;
@@ -618,117 +466,25 @@ const CredentialTestEnv = struct {
     }
 };
 
-const SecretStoreFixture = struct {
-    value: ?[]const u8 = null,
-    disabled: bool = false,
-    unreadable: bool = false,
-    load_calls: usize = 0,
-
-    fn provider(self: *@This()) host.SecretStore {
-        return .{
-            .context = self,
-            .backend_label = "test credential store",
-            .is_disabled_fn = isDisabled,
-            .load_fn = load,
-            .store_fn = store,
-            .store_interactive_fn = storeInteractive,
-        };
-    }
-
-    fn isDisabled(raw_context: ?*anyopaque) bool {
-        const self: *@This() = @ptrCast(@alignCast(raw_context.?));
-        return self.disabled;
-    }
-
-    fn load(
-        raw_context: ?*anyopaque,
-        alloc: std.mem.Allocator,
-    ) host.SecretStoreLoadError!?[]u8 {
-        const self: *@This() = @ptrCast(@alignCast(raw_context.?));
-        self.load_calls += 1;
-        if (self.unreadable) return error.StoredKeyUnreadable;
-        const value = self.value orelse return null;
-        return try alloc.dupe(u8, value);
-    }
-
-    fn store(
-        _: ?*anyopaque,
-        _: std.mem.Allocator,
-        _: []const u8,
-    ) host.SecretStoreWriteError!void {
-        return error.StoredKeyWriteFailed;
-    }
-
-    fn storeInteractive(
-        _: ?*anyopaque,
-    ) host.SecretStoreWriteError!bool {
-        return false;
-    }
-};
-
-test "source-specific credential loading bypasses generic precedence" {
+test "BYOK credential resolution loads OPENAI_API_KEY" {
     const alloc = std.testing.allocator;
     const env = try CredentialTestEnv.install(alloc, &.{
-        .{ "VERCEL_OIDC_TOKEN", "oidc-token" },
-        .{ "AI_GATEWAY_API_KEY", "api-key" },
+        .{ "OPENAI_API_KEY", "api-key" },
     });
     defer env.deinit();
 
     const resolution = try resolve(alloc, oauth_transport.unavailable_provider, host.unavailable_secret_store, .refresh_if_needed);
     var startup = resolution.credential orelse return error.TestExpectedCredential;
     defer startup.deinit(alloc);
-    try std.testing.expectEqualStrings("oidc-token", startup.token);
-    try std.testing.expectEqual(Source.vercel_oidc_token, startup.source);
-
-    var api_key = (try loadSource(alloc, oauth_transport.unavailable_provider, host.unavailable_secret_store, .ai_gateway_api_key)).?;
-    defer api_key.deinit(alloc);
-    try std.testing.expectEqualStrings("api-key", api_key.token);
-    try std.testing.expectEqual(Source.ai_gateway_api_key, api_key.source);
-
-    var oidc = (try loadSource(alloc, oauth_transport.unavailable_provider, host.unavailable_secret_store, .vercel_oidc_token)).?;
-    defer oidc.deinit(alloc);
-    try std.testing.expectEqualStrings("oidc-token", oidc.token);
-    try std.testing.expectEqual(Source.vercel_oidc_token, oidc.source);
-
-    try std.testing.expect(try sourceExists(alloc, host.unavailable_secret_store, .ai_gateway_api_key));
-    try std.testing.expect(try sourceExists(alloc, host.unavailable_secret_store, .vercel_oidc_token));
-    try std.testing.expect(!(try sourceExists(alloc, host.unavailable_secret_store, .stored_key)));
-}
-
-test "a remembered choice outranks the environment" {
-    const alloc = std.testing.allocator;
-    const env = try CredentialTestEnv.install(alloc, &.{
-        .{ "VERCEL_OIDC_TOKEN", "oidc-token" },
-        .{ "AI_GATEWAY_API_KEY", "api-key" },
-    });
-    defer env.deinit();
-
-    const resolution = try resolvePreferring(alloc, oauth_transport.unavailable_provider, host.unavailable_secret_store, .refresh_if_needed, .ai_gateway_api_key);
-    var credential = resolution.credential orelse return error.TestExpectedCredential;
-    defer credential.deinit(alloc);
-    try std.testing.expectEqual(Source.ai_gateway_api_key, credential.source);
-    try std.testing.expectEqualStrings("api-key", credential.token);
-}
-
-test "a remembered choice that no longer resolves falls back to precedence" {
-    const alloc = std.testing.allocator;
-    const env = try CredentialTestEnv.install(alloc, &.{
-        .{ "AI_GATEWAY_API_KEY", "api-key" },
-    });
-    defer env.deinit();
-
-    // The remembered direct key is absent, so precedence must still answer.
-    const resolution = try resolvePreferring(alloc, oauth_transport.unavailable_provider, host.unavailable_secret_store, .refresh_if_needed, .openai_api_key);
-    var credential = resolution.credential orelse return error.TestExpectedCredential;
-    defer credential.deinit(alloc);
-    try std.testing.expectEqual(Source.ai_gateway_api_key, credential.source);
+    try std.testing.expectEqualStrings("api-key", startup.token);
+    try std.testing.expectEqual(Source.openai_api_key, startup.source);
+    try std.testing.expect(try sourceExists(alloc, host.unavailable_secret_store, .openai_api_key));
 }
 
 test "no remembered choice resolves exactly as plain precedence" {
     const alloc = std.testing.allocator;
     const env = try CredentialTestEnv.install(alloc, &.{
-        .{ "VERCEL_OIDC_TOKEN", "oidc-token" },
-        .{ "AI_GATEWAY_API_KEY", "api-key" },
+        .{ "OPENAI_API_KEY", "api-key" },
     });
     defer env.deinit();
 
@@ -739,57 +495,4 @@ test "no remembered choice resolves exactly as plain precedence" {
 
     try std.testing.expectEqual(plain.credential.?.source, preferred.credential.?.source);
     try std.testing.expectEqualStrings(plain.credential.?.token, preferred.credential.?.token);
-}
-
-test "a disabled stored key is reported as never attempted, not as absent" {
-    const alloc = std.testing.allocator;
-    const env = try CredentialTestEnv.install(alloc, &.{});
-    defer env.deinit();
-    var store_fixture = SecretStoreFixture{ .disabled = true };
-
-    for ([_]LoadMode{ .stored, .refresh_if_needed }) |mode| {
-        var resolution = try resolve(alloc, oauth_transport.unavailable_provider, store_fixture.provider(), mode);
-        defer if (resolution.credential) |*credential| credential.deinit(alloc);
-        try std.testing.expect(resolution.credential == null);
-        try std.testing.expectEqual(StoredKeyReadStatus.not_attempted, resolution.stored_key_status);
-    }
-    try std.testing.expectEqual(@as(usize, 0), store_fixture.load_calls);
-}
-
-test "credential resolution loads a stored key only through the injected host port" {
-    const alloc = std.testing.allocator;
-    const env = try CredentialTestEnv.install(alloc, &.{});
-    defer env.deinit();
-    var store_fixture = SecretStoreFixture{ .value = "injected-test-value" };
-
-    var resolution = try resolve(
-        alloc,
-        oauth_transport.unavailable_provider,
-        store_fixture.provider(),
-        .stored,
-    );
-    defer if (resolution.credential) |*credential| credential.deinit(alloc);
-
-    try std.testing.expectEqual(@as(usize, 1), store_fixture.load_calls);
-    try std.testing.expectEqual(StoredKeyReadStatus.not_attempted, resolution.stored_key_status);
-    try std.testing.expectEqual(Source.stored_key, resolution.credential.?.source);
-    try std.testing.expectEqualStrings("injected-test-value", resolution.credential.?.token);
-}
-
-test "credential resolution preserves unreadable store classification" {
-    const alloc = std.testing.allocator;
-    const env = try CredentialTestEnv.install(alloc, &.{});
-    defer env.deinit();
-    var store_fixture = SecretStoreFixture{ .unreadable = true };
-
-    const resolution = try resolve(
-        alloc,
-        oauth_transport.unavailable_provider,
-        store_fixture.provider(),
-        .stored,
-    );
-
-    try std.testing.expectEqual(@as(usize, 1), store_fixture.load_calls);
-    try std.testing.expect(resolution.credential == null);
-    try std.testing.expectEqual(StoredKeyReadStatus.unavailable, resolution.stored_key_status);
 }

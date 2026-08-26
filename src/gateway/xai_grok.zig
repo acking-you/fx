@@ -195,7 +195,7 @@ pub fn streamPrepared(
     const auth_header = try std.fmt.allocPrint(alloc, "Bearer {s}", .{request.credential.secret});
     defer secret.zeroAndFree(alloc, auth_header);
     const request_endpoint = if (io_mod.getenv(e2e_endpoint_env)) |override| endpoint: {
-        if (!gateway_client.isLoopbackHttpUrl(override)) return error.InvalidE2EXaiGrokEndpoint;
+        if (!gateway_client.isLoopbackUrl(override)) return error.InvalidE2EXaiGrokEndpoint;
         break :endpoint override;
     } else endpoint;
     const uri = try std.Uri.parse(request_endpoint);
@@ -315,7 +315,7 @@ pub fn streamPrepared(
     );
     return .{ .completed = .{
         .completion = completion,
-        .usage = .{ .immediate = null },
+        .usage = .immediate,
         .ownership = .owned,
     } };
 }
@@ -575,7 +575,7 @@ test "xAI Grok rejects wrong-origin and invalid-account credentials before netwo
         error.GrokSubscriptionCredentialRequired,
         agent_stream_provider.stream(std.testing.allocator, testModelRequest(
             "gateway-key",
-            .ai_gateway_api_key,
+            .openai_api_key,
             null,
             &delivery,
             &evidence,

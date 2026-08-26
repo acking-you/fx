@@ -13,9 +13,9 @@ const js_host_model_catalog = @import("gateway/js_host_model_catalog.zig");
 const oauth_transport = @import("core/auth/oauth_transport.zig");
 const output_contracts = @import("core/output/output_contracts.zig");
 const builtin_context = @import("builtins/context.zig");
-const builtin_gateway = @import("builtins/gateway.zig");
+const builtin_gateway = @import("builtins/responses.zig");
 const provider_catalog = @import("core/auth/provider_catalog.zig");
-const vercel_model_policy = @import("gateway/vercel_model_policy.zig");
+const model_capabilities = @import("core/config/model_capabilities.zig");
 const builtin_modes = @import("builtins/modes.zig");
 
 const Allocator = std.mem.Allocator;
@@ -62,12 +62,11 @@ const js_host_gateway_provider = gateway_provider.Provider{
 
 const js_host_provider_set = provider_set.gateway_only(.{
     .presentation = provider_catalog.find(.gateway),
-    .auth_strategy = .vercel,
-    .fallback_model_capabilities_fn = vercel_model_policy.capabilitiesForModel,
+    .auth_strategy = .api_key,
+    .fallback_model_capabilities_fn = model_capabilities.capabilitiesForModel,
     .agent_stream = js_host_stream_provider.provider(),
     .cli_model_catalog = .{ .fetch_fn = fetchCliModelCatalog },
     .model_catalog = js_host_model_catalog.provider,
-    .credits = .{ .fetch_fn = fetchCredits },
 });
 
 fn resolveChatUrl(_: ?*anyopaque, fallback: []const u8) []const u8 {
@@ -79,7 +78,7 @@ fn fetchCliModelCatalog(
     alloc: Allocator,
     input: gateway_provider.CliModelCatalogInput,
 ) gateway_provider.CliModelCatalogResult {
-    const result = model_catalog.fetchWithPublicFallback(js_host_model_catalog.provider, alloc, .{
+    const result = model_catalog.fetchCatalog(js_host_model_catalog.provider, alloc, .{
         .access = input.access,
         .endpoint = input.endpoint,
         .cancel_flag = input.cancel_flag,
@@ -91,7 +90,6 @@ fn fetchCliModelCatalog(
             defer model_catalog.freeModelCatalog(alloc, &catalog);
             const ids = model_catalog.projectModelIds(alloc, catalog.items) catch return .{ .failure = .{
                 .access = loaded.provenance.access,
-                .anonymous_fallback_used = loaded.provenance.anonymous_fallback_used,
                 .failure = .{ .category = .resource_exhausted },
             } };
             break :project .{ .loaded = .{
@@ -101,12 +99,4 @@ fn fetchCliModelCatalog(
         },
         .failed => |failed| .{ .failure = failed },
     };
-}
-
-fn fetchCredits(
-    _: ?*anyopaque,
-    _: Allocator,
-    _: gateway_provider.CreditsLookupInput,
-) output_contracts.CreditsSnapshot {
-    return .{};
 }

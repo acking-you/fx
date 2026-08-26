@@ -27,7 +27,6 @@ class PgsoModelTests(unittest.TestCase):
             llvm_version="21.1.8",
             bitcode_sha256="b" * 64,
             corpus_sha256="c" * 64,
-            update_channel="stable",
             generation_flags=("--disable-vp",),
         )
 
@@ -48,7 +47,6 @@ class PgsoModelTests(unittest.TestCase):
             "llvm_version": "21.1.9",
             "bitcode_sha256": "e" * 64,
             "corpus_sha256": "f" * 64,
-            "update_channel": "dev",
             "generation_flags": ("--different",),
         }
 

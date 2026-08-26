@@ -1524,8 +1524,8 @@ pub const Runtime = struct {
         self.child.scroll_from_bottom = rows_from_bottom;
         self.child.viewport_mutation = .none;
         if (rows_from_bottom == 0) {
-            if (self.routedNode()) |node| {
-                self.child.presented_through_sequence = node.through_sequence;
+            if (self.child.chat) |chat| {
+                self.child.presented_through_sequence = chat.through_sequence;
             }
         }
     }
@@ -7873,6 +7873,7 @@ test "leaving a selected child acknowledges activity that arrived while visible"
     // sequence that was actually shown.
     update.nodes[0].unread_count = 0;
     try std.testing.expect(try runtime.replaceSnapshot(alloc, update));
+    runtime.child.chat.?.through_sequence = 7;
     try std.testing.expect(runtime.visibleChildAcknowledgementSequence() == null);
     runtime.commitChildPresentationViewport(20, 10, 4);
     try std.testing.expect(runtime.visibleChildAcknowledgementSequence() == null);
@@ -8816,6 +8817,7 @@ fn testChildChat(alloc: Allocator, node: *const projection.Node) !projection.Chi
     return .{
         .child_id = child_id,
         .parent_id = parent_id,
+        .through_sequence = node.through_sequence,
         .mode = node.mode,
         .state = node.state,
         .generation = node.generation,

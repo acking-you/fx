@@ -56,34 +56,6 @@ pub const CliModelCatalogProvider = struct {
     }
 };
 
-pub const CreditsLookupInput = struct {
-    credential: ?[]const u8,
-    credential_source: ?credentials.Source = null,
-    tenant: ?[]const u8,
-};
-
-pub const FetchCreditsFn = *const fn (
-    ?*anyopaque,
-    Allocator,
-    CreditsLookupInput,
-) output_contracts.CreditsSnapshot;
-
-pub const CreditsProvider = struct {
-    /// When set, context must remain valid until every in-flight `fetch` returns.
-    context: ?*anyopaque = null,
-    fetch_fn: FetchCreditsFn,
-
-    /// The returned snapshot owns its populated provider fields. The caller
-    /// must call `CreditsSnapshot.deinit`.
-    pub fn fetch(
-        self: CreditsProvider,
-        alloc: Allocator,
-        input: CreditsLookupInput,
-    ) output_contracts.CreditsSnapshot {
-        return self.fetch_fn(self.context, alloc, input);
-    }
-};
-
 pub const AccountUsageLookupInput = struct {
     credential: ?[]const u8,
     account_id: ?[]const u8,
@@ -114,61 +86,10 @@ pub const AccountUsageProvider = struct {
     }
 };
 
-fn fetchCreditsUnavailable(
-    _: ?*anyopaque,
-    alloc: Allocator,
-    _: CreditsLookupInput,
-) output_contracts.CreditsSnapshot {
-    return .{
-        .err_message = alloc.dupe(u8, "Credits are unavailable for the selected provider.") catch null,
-    };
-}
-
-pub const unavailable_credits_provider = CreditsProvider{
-    .fetch_fn = fetchCreditsUnavailable,
-};
-
 pub const Provider = struct {
     oauth_transport: oauth_transport.Provider,
     chat_url: ChatUrlProvider,
 };
-
-test "credits lookup dispatches through the injected provider" {
-    const Fake = struct {
-        calls: usize = 0,
-        saw_expected_input: bool = false,
-
-        fn fetch(
-            raw: ?*anyopaque,
-            alloc: Allocator,
-            input: CreditsLookupInput,
-        ) output_contracts.CreditsSnapshot {
-            const self: *@This() = @ptrCast(@alignCast(raw.?));
-            self.calls += 1;
-            self.saw_expected_input =
-                std.mem.eql(u8, input.credential orelse "", "credential") and
-                std.mem.eql(u8, input.tenant orelse "", "tenant");
-            return .{
-                .balance = alloc.dupe(u8, "10") catch null,
-            };
-        }
-    };
-
-    var fake: Fake = .{};
-    const provider = CreditsProvider{
-        .context = &fake,
-        .fetch_fn = Fake.fetch,
-    };
-    var snapshot = provider.fetch(std.testing.allocator, .{
-        .credential = "credential",
-        .tenant = "tenant",
-    });
-    defer snapshot.deinit(std.testing.allocator);
-
-    try std.testing.expectEqual(@as(usize, 1), fake.calls);
-    try std.testing.expect(fake.saw_expected_input);
-    try std.testing.expectEqualStrings("10", snapshot.balance.?);
-}
 
 test "account usage lookup dispatches the bound Codex identity" {
     const Fake = struct {
@@ -229,7 +150,7 @@ pub const CapabilityResolver = struct {
         fallback: model_capabilities.Capabilities,
     ) model_capabilities.ResolveError!model_capabilities.Capabilities {
         if (self.state == .idle) {
-            const result = model_catalog.fetchWithPublicFallback(provider, alloc, input);
+            const result = model_catalog.fetchCatalog(provider, alloc, input);
             const loaded = switch (result) {
                 .loaded => |loaded| loaded,
                 .failed => |failed| {
@@ -323,12 +244,9 @@ const FakeCatalog = struct {
     outcome: enum {
         cancelled,
         unavailable,
-        authenticated_rejected_then_ready,
         ready,
     },
     calls: usize = 0,
-    saw_authenticated_access: bool = false,
-    saw_public_retry: bool = false,
 
     fn fetch(
         raw: ?*anyopaque,
@@ -337,23 +255,10 @@ const FakeCatalog = struct {
     ) Allocator.Error!model_catalog.ProviderResult {
         const self: *FakeCatalog = @ptrCast(@alignCast(raw.?));
         self.calls += 1;
-        if (self.outcome == .authenticated_rejected_then_ready) {
-            if (self.calls == 1) {
-                self.saw_authenticated_access =
-                    std.mem.eql(u8, input.access.authorizationCredential() orelse "", "test-key") and
-                    std.mem.eql(u8, input.access.teamContext() orelse "", "team_123");
-                return .{ .failure = .{ .category = .authentication, .http_status = .unauthorized } };
-            }
-            self.saw_public_retry =
-                input.access.authorizationCredential() == null and
-                input.access.teamContext() == null and
-                input.access.publicOnlyReason() == .authenticated_credential_rejected;
-            self.outcome = .ready;
-        }
+        _ = input;
         switch (self.outcome) {
             .cancelled => return .{ .failure = .{ .category = .cancellation } },
             .unavailable => return .{ .failure = .{ .category = .transport } },
-            .authenticated_rejected_then_ready => unreachable,
             .ready => {
                 var entries: std.ArrayList(model_catalog.ModelCatalogEntry) = .empty;
                 errdefer model_catalog.freeModelCatalog(alloc, &entries);
@@ -477,7 +382,7 @@ test "capability resolver uses provider catalog metadata" {
         std.testing.allocator,
         fake.provider(),
         .{
-            .access = credentials.catalogAccessForCredential(.ai_gateway_api_key, "test-key", "team_123"),
+            .access = credentials.catalogAccessForCredential(.openai_api_key, "test-key"),
             .endpoint = "/v1/models",
             .cancel_flag = &cancel_flag,
         },
@@ -502,28 +407,6 @@ test "capability resolver uses provider catalog metadata" {
     );
     try std.testing.expect(!missing.supports_fast_mode);
     try std.testing.expect(!missing.supports_vision);
-}
-
-test "capability resolver retries rejected authenticated catalog access anonymously" {
-    var resolver: CapabilityResolver = .{};
-    defer resolver.deinit(std.testing.allocator);
-    var fake = FakeCatalog{ .outcome = .authenticated_rejected_then_ready };
-
-    const capabilities = try resolver.resolve(
-        std.testing.allocator,
-        fake.provider(),
-        .{
-            .access = credentials.catalogAccessForCredential(.ai_gateway_api_key, "test-key", "team_123"),
-            .endpoint = "/v1/models",
-        },
-        "provider/model",
-        .{},
-    );
-
-    try std.testing.expectEqual(@as(usize, 2), fake.calls);
-    try std.testing.expect(fake.saw_authenticated_access);
-    try std.testing.expect(fake.saw_public_retry);
-    try std.testing.expect(capabilities.supports_vision);
 }
 
 test "capability resolver degrades terminal catalog failures to local capabilities" {

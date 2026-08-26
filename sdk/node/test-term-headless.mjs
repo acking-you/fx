@@ -27,15 +27,14 @@ let requestedModel;
 let firstChunkAt;
 const startedAt = performance.now();
 const mockFetch = async (_url, init) => {
-  requestedModel = new Headers(init.headers).get("ai-language-model-id");
+  requestedModel = JSON.parse(new TextDecoder().decode(init.body)).model;
   return new Response(new ReadableStream({
     async start(controller) {
       firstChunkAt = performance.now();
-      controller.enqueue(encoded.encode('data: {"type":"text-delta","delta":"streamed"}\n'));
+      controller.enqueue(encoded.encode('data: {"type":"response.output_text.delta","item_id":"answer","output_index":0,"content_index":0,"delta":"streamed"}\n\n'));
       await new Promise((resolve) => setTimeout(resolve, 20));
-      controller.enqueue(encoded.encode('data: {"type":"text-delta","delta":" response"}\n'));
-      controller.enqueue(encoded.encode('data: {"type":"finish","finishReason":{"unified":"stop"},"usage":{"inputTokens":{"total":1},"outputTokens":{"total":2}}}\n'));
-      controller.enqueue(encoded.encode("data: [DONE]\n"));
+      controller.enqueue(encoded.encode('data: {"type":"response.output_text.delta","item_id":"answer","output_index":0,"content_index":0,"delta":" response"}\n\n'));
+      controller.enqueue(encoded.encode('data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}\n\n'));
       controller.close();
     },
   }), { status: 200, headers: { "content-type": "text/event-stream" } });
@@ -48,7 +47,7 @@ const runtime = await createFxTerminal({
     get(id) { return config.get(id) ?? null; },
     set(id, value) { config.set(id, value); },
   },
-  env: { AI_GATEWAY_API_KEY: "term-headless-key" },
+  env: { OPENAI_API_KEY: "term-headless-key" },
   fetch: mockFetch,
   onEvent(event) { events.push(event); },
 });

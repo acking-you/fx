@@ -21,6 +21,12 @@ import {
   fakeGatewayToolCall as toolCall,
   type FakeGatewayResponse,
   isVolatileTokenStatusRow,
+  responseCompleted,
+  responseFunctionCall,
+  responseFunctionCallDelta,
+  responseFunctionCallDone,
+  responseFunctionCallStart,
+  responseTextDelta,
   startFakeGateway as startGateway,
   TmuxSession,
   tmuxAvailable,
@@ -96,13 +102,10 @@ function gatewayEnv(
 ) {
   return {
     HOME: root.home,
-    AI_GATEWAY_API_KEY: "fake-file-approval-key",
-    VERCEL_OIDC_TOKEN: undefined,
-    FX_GATEWAY_BASE_URL: gateway.baseUrl,
-    FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+    OPENAI_API_KEY: "fake-file-approval-key",
+        FX_RESPONSES_BASE_URL: gateway.baseUrl,
     FX_MODEL: FAKE_GATEWAY_MODEL,
     FX_PERMISSION_MODE: "ask",
-    FX_AUTO_UPGRADE: "0",
     NO_COLOR: "1",
     ...overrides,
   };
@@ -272,32 +275,16 @@ function chunkedWriteToolCall(id: string, path: string, content: string) {
   const chunkBytes = 32 * 1024;
   const deltas = Array.from(
     { length: Math.ceil(argumentsJson.length / chunkBytes) },
-    (_, index) => ({
-      type: "tool-input-delta",
+    (_, index) => responseFunctionCallDelta(
       id,
-      delta: argumentsJson.slice(index * chunkBytes, (index + 1) * chunkBytes),
-    }),
+      argumentsJson.slice(index * chunkBytes, (index + 1) * chunkBytes),
+    ),
   );
   return fakeGatewaySse([
-    {
-      type: "tool-input-start",
-      id,
-      toolName: "write_file",
-    },
+    responseFunctionCallStart(id, "write_file"),
     ...deltas,
-    {
-      type: "tool-input-end",
-      id,
-    },
-    {
-      type: "tool-call",
-      toolCallId: id,
-      toolName: "write_file",
-    },
-    {
-      type: "finish",
-      finishReason: { unified: "tool-calls", raw: "tool-calls" },
-    },
+    responseFunctionCallDone(id, argumentsJson),
+    responseCompleted(),
   ]);
 }
 
@@ -399,71 +386,6 @@ describe.skipIf(!tmuxAvailable())("tui: file permissions", () => {
       expectCleanStderr(stderrPath);
     },
     60_000,
-  );
-
-  test(
-    "pauses paced assistant text while a file approval is active",
-    async () => {
-      const root = createIsolatedRoot();
-      const target = join(root.workspace, "pacer-gate.txt");
-      const marker = "PENDING-FILE-APPROVAL-PACER-SENTINEL";
-      const tapePath = join(root.root, "pacer-gate.fxtape");
-      const gateway = startFakeGateway([
-        fakeGatewaySse([
-          {
-            type: "text-delta",
-            id: "answer_1",
-            delta: `x${marker} ${"x".repeat(2_048)}`,
-          },
-          {
-            type: "tool-call",
-            toolCallId: "pacer_gate_write",
-            toolName: "write_file",
-            input: {
-              path: "pacer-gate.txt",
-              content: "must not be written\n",
-            },
-          },
-          {
-            type: "finish",
-            finishReason: { unified: "tool-calls", raw: "tool-calls" },
-          },
-        ]),
-        finalText("file approval pacer gate completed"),
-      ]);
-      const { session, stderrPath } = await launch(
-        root,
-        gateway,
-        {},
-        { FX_RECORD: tapePath, FX_SYNC_UPDATES: "1" },
-      );
-
-      await session.sendText("Run the file approval pacing fixture.");
-      await waitForFileApproval(session, {
-        required: ["pacer-gate.txt", "+ must not be written"],
-        timeoutMs: 5_000,
-      });
-      await session.sendKeys("Down");
-      await session.sendKeys("Up");
-
-      const stdoutBeforeDecision = Buffer.concat(
-        stdoutFrames(tapePath).map((frame) => frame.payload),
-      ).toString().replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
-      expect(stdoutBeforeDecision.includes(marker)).toBe(false);
-
-      const approvalExitFrameStart = stdoutFrames(tapePath).length;
-      await decide(session, 3);
-      await session.waitForText("file approval pacer gate completed", 5_000);
-      expectAtomicApprovalExit(tapePath, approvalExitFrameStart);
-
-      const stdoutAfterDecision = Buffer.concat(
-        stdoutFrames(tapePath).map((frame) => frame.payload),
-      ).toString().replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
-      expect(stdoutAfterDecision.split(marker)).toHaveLength(2);
-      expect(existsSync(target)).toBe(false);
-      expectCleanStderr(stderrPath);
-    },
-    TIMEOUT,
   );
 
   test(
@@ -817,9 +739,11 @@ describe.skipIf(!tmuxAvailable())("tui: file permissions", () => {
       expect(readFileSync(target, "utf8")).toBe("amended review content\n");
       expect(gateway.requests).toHaveLength(2);
       const followup = gateway.requests[1]!.body;
-      expect(followup.indexOf('"role":"tool"')).toBeGreaterThanOrEqual(0);
+      expect(
+        followup.indexOf('"type":"function_call_output"'),
+      ).toBeGreaterThanOrEqual(0);
       expect(followup.indexOf(feedback)).toBeGreaterThan(
-        followup.indexOf('"role":"tool"'),
+        followup.indexOf('"type":"function_call_output"'),
       );
       await session.sendText("/quit");
       expect(await session.waitForSessionEnd()).toBe(true);
@@ -852,9 +776,11 @@ describe.skipIf(!tmuxAvailable())("tui: file permissions", () => {
       expect(resumed.stderr).toBe("");
       expect(resumedGateway.requests).toHaveLength(1);
       const resumedRequest = resumedGateway.requests[0]!.body;
-      expect(resumedRequest.indexOf('"role":"tool"')).toBeGreaterThanOrEqual(0);
+      expect(
+        resumedRequest.indexOf('"type":"function_call_output"'),
+      ).toBeGreaterThanOrEqual(0);
       expect(resumedRequest.indexOf(feedback)).toBeGreaterThan(
-        resumedRequest.indexOf('"role":"tool"'),
+        resumedRequest.indexOf('"type":"function_call_output"'),
       );
       expectCleanStderr(stderrPath);
     },

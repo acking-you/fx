@@ -106,19 +106,6 @@ pub fn collectFromHome(
             }
             try incidents.append(alloc, incident);
         }
-        for (usage.pending) |pending| {
-            if (pending_hints.items.len == max_recovery_pending) {
-                unknown_pending = true;
-                break;
-            }
-            const id = try alloc.dupe(u8, pending.id);
-            errdefer alloc.free(id);
-            try pending_hints.append(alloc, .{
-                .id = id,
-                .observed_at_ms = pending.observed_at_ms orelse
-                    @max(state.updated_at_ms, 0),
-            });
-        }
         if (usage.billing == .incomplete and
             usage.incidents.len == 0 and
             usage.settled_through_sequence == usage.next_sequence - 1)
@@ -275,28 +262,13 @@ test "recovery registry reads only marked durable session state" {
         .allocator = alloc,
         .persist = Checkpoint.persist,
     });
-    const sequence = try runtime_usage.reserveInvocation();
-    try runtime_usage.finishObservedInvocation(
+    const observation = try session_usage.InvocationObservation.begin(&runtime_usage);
+    try observation.completeDirect(
         alloc,
-        sequence,
-        1,
-        .observed_generation,
-        "gen_01ARZ3NDEKTSV4RRFFQ69G5FAV",
-        "https://ai-gateway.vercel.sh",
-        null,
+        "provider/model",
+        .{ .input_tokens = 10, .output_tokens = 2, .cached_input_tokens = 1, .reasoning_output_tokens = 1 },
+        .{ .http_ok = true, .terminal_finish_reason = .stop },
     );
-    try runtime_usage.applyGeneration(alloc, .{
-        .id = "gen_01ARZ3NDEKTSV4RRFFQ69G5FAV",
-        .created_at_ms = 1000,
-        .model = "provider/model",
-        .total_cost = 0.25,
-        .input_tokens = 10,
-        .output_tokens = 2,
-        .cache_read_tokens = 1,
-        .cache_write_tokens = 0,
-        .reasoning_tokens = 1,
-        .billable_web_search_calls = 0,
-    });
     const saved_usage = try runtime_usage.snapshot(alloc);
     try std.testing.expect(session_usage.needsProfileRecovery(saved_usage));
 
@@ -347,11 +319,8 @@ test "recovery registry reads only marked durable session state" {
     var recovery = try collectFromHome(alloc, home);
     defer recovery.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 1), recovery.facts.len);
-    try std.testing.expectEqualStrings(
-        "gen_01ARZ3NDEKTSV4RRFFQ69G5FAV",
-        recovery.facts[0].id,
-    );
-    try std.testing.expectEqual(@as(usize, 1), recovery.pending.len);
+    try std.testing.expect(std.mem.startsWith(u8, recovery.facts[0].id, "gen_D"));
+    try std.testing.expectEqual(@as(usize, 0), recovery.pending.len);
     try std.testing.expect(!recovery.unknown_pending);
 
     var marker_after_file = try tmp.dir.openFile(

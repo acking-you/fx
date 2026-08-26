@@ -14,11 +14,11 @@ pub const Entry = struct {
 pub const entries = [_]Entry{
     .{
         .id = .gateway,
-        .slug = "vercel",
-        .aliases = &.{ "gateway", "ai-gateway" },
-        .name = "Vercel AI Gateway",
-        .route_name = "Vercel AI Gateway",
-        .description = "Vercel AI Gateway credentials and billing",
+        .slug = "byok",
+        .aliases = &.{ "gateway", "responses" },
+        .name = "BYOK Responses",
+        .route_name = "BYOK Responses API",
+        .description = "API key and configurable Responses-compatible endpoint",
         .subscription = false,
     },
     .{
@@ -57,8 +57,9 @@ pub fn label(id: model_provider.ProviderId) []const u8 {
 }
 
 test "auth provider catalog uses the model provider identity and explicit aliases" {
-    try std.testing.expectEqual(model_provider.ProviderId.gateway, parse("vercel").?);
+    try std.testing.expectEqual(model_provider.ProviderId.gateway, parse("byok").?);
     try std.testing.expectEqual(model_provider.ProviderId.gateway, parse("gateway").?);
+    try std.testing.expectEqual(model_provider.ProviderId.gateway, parse("responses").?);
     try std.testing.expectEqual(model_provider.ProviderId.codex, parse("codex").?);
     try std.testing.expectEqual(model_provider.ProviderId.grok, parse("grok").?);
     try std.testing.expect(parse("openai-codex") == null);

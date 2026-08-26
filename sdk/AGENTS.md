@@ -74,7 +74,7 @@ npm run --prefix sdk/node test:term
 node --experimental-wasm-jspi sdk/tests/test-term-session-resume.mjs
 ```
 
-For a live Gateway transport change, `AI_GATEWAY_API_KEY` must already be present in the environment before running the opt-in smoke test:
+For a live Responses transport change, `OPENAI_API_KEY` must already be present in the environment before running the opt-in smoke test:
 
 ```sh
 node --experimental-wasm-jspi sdk/tests/test-core-live.mjs

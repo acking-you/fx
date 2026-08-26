@@ -15,12 +15,6 @@ import { FX_BIN, runFx } from "../evals/eval-helpers";
 const TIMEOUT = 20_000;
 const FETCH_URL = "https://example.com/docs";
 const OUTER_MODEL = "openai/gpt-5";
-const PROVIDER_MODELS = [
-  "anthropic/claude-sonnet-4.6",
-  "openai/gpt-5",
-  "google/gemini-3-pro",
-  "xai/grok-4",
-] as const;
 
 type GatewayRequest = {
   body: string;
@@ -39,16 +33,23 @@ function sse(events: object[], done = true) {
 
 function outerToolCalls(calls: Array<{ id: string; name: string; input: object }>) {
   return sse([
-    ...calls.map((call) => ({
-      type: "tool-call",
-      toolCallId: call.id,
-      toolName: call.name,
-      input: call.input,
-    })),
-    {
-      type: "finish",
-      finishReason: { unified: "tool-calls", raw: "tool-calls" },
-    },
+    ...calls.flatMap((call, output_index) => [{
+      type: "response.output_item.added",
+      output_index,
+      item: {
+        type: "function_call",
+        id: `${call.id}_item`,
+        call_id: call.id,
+        name: call.name,
+      },
+    }, {
+      type: "response.function_call_arguments.done",
+      item_id: `${call.id}_item`,
+      call_id: call.id,
+      output_index,
+      arguments: JSON.stringify(call.input),
+    }]),
+    { type: "response.completed", response: { status: "completed" } },
   ]);
 }
 
@@ -58,13 +59,18 @@ function outerWebFetchCall(input: object = { url: FETCH_URL }) {
 
 function outerText(text: string) {
   return sse([
-    { type: "text-delta", id: "answer_1", delta: text },
     {
-      type: "finish",
-      finishReason: { unified: "stop", raw: "stop" },
-      usage: {
-        inputTokens: { total: 11 },
-        outputTokens: { total: 13 },
+      type: "response.output_text.delta",
+      item_id: "answer_1",
+      output_index: 0,
+      content_index: 0,
+      delta: text,
+    },
+    {
+      type: "response.completed",
+      response: {
+        status: "completed",
+        usage: { input_tokens: 11, output_tokens: 13, total_tokens: 24 },
       },
     },
   ]);
@@ -79,24 +85,21 @@ function startFakeGateway(
     port: 0,
     async fetch(req) {
       const url = new URL(req.url);
-      if (url.pathname === "/coding-agent/v1/models") {
+      if (url.pathname === "/v1/models") {
         return Response.json({
-          data: PROVIDER_MODELS.map((id) => ({
-            id,
-            type: "language",
-            tags: ["tool-use"],
-          })),
+          data: [{ id: model, object: "model" }],
         });
       }
-      if (req.method !== "POST") return new Response("not found", { status: 404 });
+      if (req.method !== "POST" || url.pathname !== "/v1/responses") {
+        return new Response("not found", { status: 404 });
+      }
       requests.push({ body: await req.text(), headers: req.headers });
       return responses.shift() ?? new Response("unexpected request", { status: 500 });
     },
   });
 
   return {
-    chatUrl: `http://127.0.0.1:${server.port}/v3/ai/language-model`,
-    baseUrl: `http://127.0.0.1:${server.port}`,
+    baseUrl: `http://127.0.0.1:${server.port}/v1`,
     model,
     requests,
     stop() {
@@ -129,10 +132,8 @@ function fakeGatewayEnv(
 ) {
   return {
     HOME: root.home,
-    AI_GATEWAY_API_KEY: "fake-web-fetch-key",
-    VERCEL_OIDC_TOKEN: undefined,
-    FX_GATEWAY_BASE_URL: gateway.baseUrl,
-    FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+    OPENAI_API_KEY: "fake-web-fetch-key",
+    FX_RESPONSES_BASE_URL: gateway.baseUrl,
     FX_MODEL: gateway.model,
     ...extra,
   };
@@ -164,7 +165,7 @@ function requestJson(request: GatewayRequest) {
       type: string;
       name: string;
       description: string;
-      inputSchema: {
+      parameters: {
         type: string;
         properties: Record<string, { type: string; description?: string }>;
         required?: string[];
@@ -182,11 +183,11 @@ function expectWebFetchSchema(request: GatewayRequest) {
   const schema = toolSchema(requestJson(request), "web_fetch");
   expect(schema).toBeDefined();
   expect(schema?.type).toBe("function");
-  expect(schema?.inputSchema.type).toBe("object");
-  expect(schema?.inputSchema.properties.url.type).toBe("string");
-  expect(schema?.inputSchema.properties.prompt).toBeUndefined();
-  expect(schema?.inputSchema.required).toEqual(["url"]);
-  expect(schema?.inputSchema.additionalProperties).toBe(false);
+  expect(schema?.parameters.type).toBe("object");
+  expect(schema?.parameters.properties.url.type).toBe("string");
+  expect(schema?.parameters.properties.prompt).toBeUndefined();
+  expect(schema?.parameters.required).toEqual(["url"]);
+  expect(schema?.parameters.additionalProperties).toBe(false);
 }
 
 function expectNoFetchProgress(text: string) {
@@ -288,32 +289,29 @@ async function runAcpPrompt(client: AcpClient, text: string) {
   }
 }
 
-describe("web_fetch Gateway fixture", () => {
+describe("web_fetch Responses fixture", () => {
   test(
-    "representative providers receive the same strict public web_fetch schema",
+    "the direct provider receives the strict public web_fetch schema",
     async () => {
-      for (const model of PROVIDER_MODELS) {
-        const root = createIsolatedRoot();
-        const gateway = startFakeGateway([outerText(`schema ok for ${model}`)], model);
-        try {
-          const result = await runFx(
-            ["ask", "--auto", "--json", "--no-save", "Say schema ok."],
-            {
-              cwd: root.workspace,
-              env: fakeGatewayEnv(root, gateway),
-              timeoutMs: TIMEOUT,
-            },
-          );
+      const root = createIsolatedRoot();
+      const gateway = startFakeGateway([outerText("schema ok")]);
+      try {
+        const result = await runFx(
+          ["ask", "--auto", "--json", "--no-save", "Say schema ok."],
+          {
+            cwd: root.workspace,
+            env: fakeGatewayEnv(root, gateway),
+            timeoutMs: TIMEOUT,
+          },
+        );
 
-          parseFxJson(result);
-          expect(gateway.requests).toHaveLength(1);
-          expect(gateway.requests[0].headers.get("ai-language-model-id")).toBe(model);
-          expectWebFetchSchema(gateway.requests[0]);
-          expect(gateway.requests[0].body).toContain("gateway.perplexity_search");
-        } finally {
-          gateway.stop();
-          rmSync(root.root, { recursive: true, force: true });
-        }
+        parseFxJson(result);
+        expect(gateway.requests).toHaveLength(1);
+        expect(JSON.parse(gateway.requests[0].body).model).toBe("gpt-5");
+        expectWebFetchSchema(gateway.requests[0]);
+      } finally {
+        gateway.stop();
+        rmSync(root.root, { recursive: true, force: true });
       }
     },
     TIMEOUT,

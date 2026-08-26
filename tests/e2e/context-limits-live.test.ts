@@ -60,10 +60,7 @@ describe.skipIf(!LIVE_ENABLED || !HAS_API_KEY)("live source context limits", () 
             env: {
               HOME: home,
               FX_MODEL: MODEL,
-              FX_AUTO_UPGRADE: "0",
-              FX_GATEWAY_BASE_URL: undefined,
-              FX_GATEWAY_CHAT_URL: undefined,
-              FX_E2E_GATEWAY_CHAT_URL: undefined,
+              FX_RESPONSES_BASE_URL: undefined,
               FX_TRACE_LOG: tracePath,
               FX_TRACE_SCOPES: "agent,gateway,stream",
             },

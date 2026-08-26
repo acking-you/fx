@@ -4,7 +4,6 @@ const provider_route = @import("../core/gateway/provider_route.zig");
 const secret = @import("../core/auth/secret.zig");
 const io_mod = @import("../core/shared/io.zig");
 const gateway_client = @import("client.zig");
-const credential_authority = @import("../core/auth/credential_authority.zig");
 const openai_responses = @import("openai_responses.zig");
 const responses_stream = @import("responses_stream.zig");
 
@@ -37,22 +36,8 @@ pub const Transport = struct {
 };
 
 pub const ProviderContext = struct {
-    build_fn: *const fn (Allocator, stream_provider.RequestData) anyerror![]u8,
-    endpoint: Endpoint,
     transport: Transport,
     endpoint_overrides: ?provider_route.EndpointOverrides = null,
-};
-
-pub const Endpoint = union(enum) {
-    fixed: []const u8,
-    resolve: *const fn () []const u8,
-
-    fn url(self: Endpoint) []const u8 {
-        return switch (self) {
-            .fixed => |fixed| fixed,
-            .resolve => |resolve| resolve(),
-        };
-    }
 };
 
 pub fn provider(context: *ProviderContext) stream_provider.Provider {
@@ -62,12 +47,8 @@ pub fn provider(context: *ProviderContext) stream_provider.Provider {
     };
 }
 
-pub fn initContext(
-    build_fn: *const fn (Allocator, stream_provider.RequestData) anyerror![]u8,
-    endpoint: Endpoint,
-    transport: Transport,
-) ProviderContext {
-    return .{ .build_fn = build_fn, .endpoint = endpoint, .transport = transport };
+pub fn initContext(transport: Transport) ProviderContext {
+    return .{ .transport = transport };
 }
 
 fn stream(raw: ?*anyopaque, alloc: Allocator, request: stream_provider.ModelRequest) anyerror!stream_provider.Result {
@@ -76,11 +57,10 @@ fn stream(raw: ?*anyopaque, alloc: Allocator, request: stream_provider.ModelRequ
     const route = if (request.credential.source) |source|
         provider_route.fromCredentialSource(source) orelse return error.UnsupportedCredentialSource
     else
-        provider_route.ProviderRoute.vercel_gateway;
+        provider_route.ProviderRoute.openai_responses_byok;
     if (route == .codex_responses_oauth) return error.CodexCredentialUnavailable;
 
     const payload = switch (route) {
-        .vercel_gateway => try context.build_fn(alloc, request.data()),
         .openai_responses_byok => try openai_responses.buildRequest(alloc, request.data()),
         .codex_responses_oauth => unreachable,
     };
@@ -96,21 +76,6 @@ fn stream(raw: ?*anyopaque, alloc: Allocator, request: stream_provider.ModelRequ
         .{ .name = "authorization", .value = auth },
     });
     switch (route) {
-        .vercel_gateway => {
-            try headers.appendSlice(alloc, &.{
-                .{ .name = "HTTP-Referer", .value = "https://github.com/vercel-labs/fx" },
-                .{ .name = "X-Title", .value = "fx" },
-                .{ .name = "ai-gateway-protocol-version", .value = "0.0.1" },
-                .{ .name = "ai-language-model-specification-version", .value = "4" },
-                .{ .name = "ai-language-model-id", .value = request.model },
-                .{ .name = "ai-language-model-streaming", .value = "true" },
-            });
-            if (request.credential.tenant) |team| if (team.len > 0) try headers.append(alloc, .{ .name = "x-vercel-ai-gateway-team", .value = team });
-            if (request.session_id) |session_id| if (session_id.len > 0) try headers.appendSlice(alloc, &.{
-                .{ .name = "x-session-id", .value = session_id },
-                .{ .name = "x-session-affinity", .value = session_id },
-            });
-        },
         .openai_responses_byok => {
             try headers.append(alloc, .{ .name = "accept", .value = "text/event-stream" });
             if (io_mod.getenv("OPENAI_ORG_ID")) |organization| {
@@ -130,7 +95,6 @@ fn stream(raw: ?*anyopaque, alloc: Allocator, request: stream_provider.ModelRequ
     var owned_endpoint: ?[]u8 = null;
     defer if (owned_endpoint) |endpoint| alloc.free(endpoint);
     const endpoint = switch (route) {
-        .vercel_gateway => context.endpoint.url(),
         .openai_responses_byok => direct: {
             owned_endpoint = try provider_route.resolveEndpointAlloc(
                 alloc,
@@ -176,16 +140,6 @@ fn stream(raw: ?*anyopaque, alloc: Allocator, request: stream_provider.ModelRequ
     reader.init(transport, handle, request.cancel_flag, request.cooperative_pulse);
     var events = request.events;
     const completion = (switch (route) {
-        .vercel_gateway => gateway_client.consumeGatewaySseStream(
-            alloc,
-            &reader.interface,
-            &events,
-            EventBridge.content,
-            EventBridge.toolStart,
-            EventBridge.reasoning,
-            request.cancel_flag,
-            request.content_capture_limit,
-        ),
         .openai_responses_byok => responses_stream.consume(alloc, &reader.interface, .{
             .context = &events,
             .on_content_chunk = EventBridge.content,
@@ -202,44 +156,9 @@ fn stream(raw: ?*anyopaque, alloc: Allocator, request: stream_provider.ModelRequ
     };
     return .{ .completed = .{
         .completion = completion,
-        .usage = if (route == .openai_responses_byok)
-            .{ .immediate = null }
-        else
-            gatewayUsageOutcome(request, completion),
+        .usage = .immediate,
         .ownership = .owned,
     } };
-}
-
-fn gatewayUsageOutcome(
-    request: stream_provider.ModelRequest,
-    completion: @import("../core/shared/types.zig").ModelCompletion,
-) stream_provider.UsageOutcome {
-    const reference = gatewayUsageReference(request, completion) orelse
-        return .{ .unavailable = .possibly_billed };
-    return if (completion.billing != null)
-        .{ .immediate = reference }
-    else
-        .{ .deferred = reference };
-}
-
-fn gatewayUsageReference(
-    request: stream_provider.ModelRequest,
-    completion: @import("../core/shared/types.zig").ModelCompletion,
-) ?stream_provider.DeferredUsageReference {
-    const generation_id = completion.generation_id orelse return null;
-    const source = request.credential.source orelse return null;
-    return .{
-        .provider = .gateway,
-        .generation_id = generation_id,
-        .scope = gateway_client.generationBaseUrl(),
-        .tenant = request.credential.tenant,
-        .account_id = request.credential.account_id,
-        .credential_source = source,
-        .credential_identity = credential_authority.derive(
-            source,
-            request.credential.account_id,
-        ),
-    };
 }
 
 const EventBridge = struct {

@@ -1,7 +1,5 @@
 const std = @import("std");
 
-const UpdateChannel = enum { stable, dev };
-
 const WasmSurface = enum {
     none,
     core,
@@ -41,12 +39,9 @@ pub fn build(b: *std.Build) void {
 
     const git_commit = readGitCommit(b);
     const app_version = readAppVersion(b);
-    const update_channel = b.option(UpdateChannel, "update-channel", "Build update channel (stable or dev)") orelse .stable;
-
     const build_options = b.addOptions();
     build_options.addOption([]const u8, "git_commit", git_commit);
     build_options.addOption([]const u8, "app_version", app_version);
-    build_options.addOption([]const u8, "update_channel", @tagName(update_channel));
     build_options.addOption(WasmSurface, "wasm_surface", .none);
 
     const exe = b.addExecutable(.{
@@ -80,6 +75,10 @@ pub fn build(b: *std.Build) void {
     const exe_tests = b.addTest(.{
         .root_module = exe.root_module,
     });
+    // Some runtime tests execute the freshly built product binary. Serialize
+    // the two large native compilations so `zig build test` does not hold both
+    // compiler graphs in memory at once.
+    exe_tests.step.dependOn(b.getInstallStep());
     const run_exe_tests = b.addRunArtifact(exe_tests);
     run_exe_tests.step.dependOn(b.getInstallStep());
     run_exe_tests.setEnvironmentVariable(
@@ -91,10 +90,10 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_exe_tests.step);
 
     if (wasm_surface != .none) {
-        addWasmArtifact(b, wasm_surface, git_commit, app_version, update_channel);
+        addWasmArtifact(b, wasm_surface, git_commit, app_version);
     }
     if (napi_surface != .none) {
-        addNapiArtifact(b, napi_surface, target, git_commit, app_version, update_channel);
+        addNapiArtifact(b, napi_surface, target, git_commit, app_version);
     }
 
     const mcp_test_exports = b.createModule(.{
@@ -313,7 +312,6 @@ fn addWasmArtifact(
     surface: WasmSurface,
     git_commit: []const u8,
     app_version: []const u8,
-    update_channel: UpdateChannel,
 ) void {
     const wasm_target = b.resolveTargetQuery(.{
         .cpu_arch = .wasm32,
@@ -333,7 +331,6 @@ fn addWasmArtifact(
     const wasm_options = b.addOptions();
     wasm_options.addOption([]const u8, "git_commit", git_commit);
     wasm_options.addOption([]const u8, "app_version", app_version);
-    wasm_options.addOption([]const u8, "update_channel", @tagName(update_channel));
     wasm_options.addOption(WasmSurface, "wasm_surface", surface);
 
     const wasm_root = switch (surface) {
@@ -371,12 +368,10 @@ fn addNapiArtifact(
     target: std.Build.ResolvedTarget,
     git_commit: []const u8,
     app_version: []const u8,
-    update_channel: UpdateChannel,
 ) void {
     const napi_options = b.addOptions();
     napi_options.addOption([]const u8, "git_commit", git_commit);
     napi_options.addOption([]const u8, "app_version", app_version);
-    napi_options.addOption([]const u8, "update_channel", @tagName(update_channel));
     napi_options.addOption(NapiSurface, "napi_surface", surface);
 
     const root = switch (surface) {

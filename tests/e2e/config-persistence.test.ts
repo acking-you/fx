@@ -27,8 +27,7 @@ import {
 
 const TIMEOUT = 20_000;
 const NO_AUTH = {
-  AI_GATEWAY_API_KEY: "",
-  VERCEL_OIDC_TOKEN: "",
+  OPENAI_API_KEY: "",
   FX_MODEL: undefined,
   NO_COLOR: "1",
 };
@@ -129,11 +128,9 @@ describe.skipIf(!tmuxAvailable())("config persistence", () => {
       const root = mkdtempSync(join(tmpdir(), "fx-config-persistence-"));
       const gateway = startFakeGateway([], {
         models: [{
-          id: "anthropic/claude-opus-4.7",
-          type: "language",
-          tags: ["tool-use"],
-          reasoning_options: [{ type: "effort", values: ["high"] }],
-          fast_options: [{ type: "toggle" }],
+          id: "gpt-5.6-sol",
+          object: "model",
+          owned_by: "openai",
         }],
       });
       try {
@@ -194,8 +191,9 @@ describe.skipIf(!tmuxAvailable())("config persistence", () => {
         );
         const catalogEnv = {
           ...NO_AUTH,
+          OPENAI_API_KEY: "fake-preference-catalog-key",
           HOME: home,
-          FX_E2E_GATEWAY_MODELS_URL: `${gateway.baseUrl}/coding-agent/v1/models`,
+          FX_RESPONSES_BASE_URL: gateway.baseUrl,
         };
 
         session = await TmuxSession.create({
@@ -206,13 +204,13 @@ describe.skipIf(!tmuxAvailable())("config persistence", () => {
         await session.waitForText("Run /help", TIMEOUT);
         await session.sendKeys("BTab");
         await session.waitForText("auto ·", TIMEOUT);
-        await session.pasteText("/model anthropic/claude-opus-4.7 auto normal");
+        await session.pasteText("/model gpt-5.6-sol auto normal");
         const beforeModelCommit = JSON.parse(
           readFileSync(join(home, ".fx", "settings.json"), "utf8"),
         );
         expect(beforeModelCommit).not.toHaveProperty("model");
         await session.sendKeys("Enter");
-        await session.waitForText("● Switched to anthropic/claude-opus-4.7", TIMEOUT);
+        await session.waitForText("● Switched to gpt-5.6-sol", TIMEOUT);
         await session.sendText("/fast");
         await session.waitForText("● Fast: on", TIMEOUT);
         await session.sendText("/statusline context");
@@ -229,7 +227,7 @@ describe.skipIf(!tmuxAvailable())("config persistence", () => {
         session = null;
 
         const stored = JSON.parse(readFileSync(join(home, ".fx", "settings.json"), "utf8"));
-        expect(stored.models.gateway).toBe("anthropic/claude-opus-4.7");
+        expect(stored.models.gateway).toBe("gpt-5.6-sol");
         expect(stored.permission_mode).toBe("auto");
         expect(stored.effort).toBe("auto");
         expect(stored.fast_mode).toBe(true);
@@ -278,15 +276,15 @@ describe.skipIf(!tmuxAvailable())("config persistence", () => {
           stderrPath: stderrBPath,
         });
         const startup = await session.waitForText(
-          "auto · opus 4.7 · ⚡︎",
+          "auto · gpt-5.6-sol · ⚡︎",
           TIMEOUT,
         );
-        expect(startup).toContain("auto · opus 4.7 · ⚡︎");
+        expect(startup).toContain("auto · gpt-5.6-sol · ⚡︎");
         expect(startup).not.toContain("adaptive");
         expect(startup).not.toContain("⚡︎ fast");
         await session.sendText("/settings");
         const pane = await session.waitForText("←→ Change", TIMEOUT);
-        expect(pane).toContain("anthropic/claude-opus-4.7");
+        expect(pane).toContain("gpt-5.6-sol");
         expect(pane).toContain("Startup scrollback");
         expect(pane).toContain("Prompt history");
         await session.sendKeys("Escape");
@@ -324,7 +322,7 @@ describe.skipIf(!tmuxAvailable())("config persistence", () => {
         const afterOverride = JSON.parse(
           readFileSync(join(home, ".fx", "settings.json"), "utf8"),
         );
-        expect(afterOverride.models.gateway).toBe("anthropic/claude-opus-4.7");
+        expect(afterOverride.models.gateway).toBe("gpt-5.6-sol");
         expect(readFileSync(stderrAPath, "utf8")).toBe("");
         expect(readFileSync(stderrBPath, "utf8")).toBe("");
       } finally {
@@ -540,9 +538,8 @@ describe.skipIf(!tmuxAvailable())("config persistence", () => {
       const gateway = startFakeGateway([], {
         models: [{
           id: "xai/grok-build-1",
-          type: "language",
-          released: 1,
-          tags: ["tool-use"],
+          object: "model",
+          created: 1,
         }],
       });
       try {
@@ -560,8 +557,9 @@ describe.skipIf(!tmuxAvailable())("config persistence", () => {
           cwd: realpathSync(workspace),
           env: {
             ...NO_AUTH,
+            OPENAI_API_KEY: "fake-picker-catalog-key",
             HOME: home,
-            FX_E2E_GATEWAY_MODELS_URL: `${gateway.baseUrl}/coding-agent/v1/models`,
+            FX_RESPONSES_BASE_URL: gateway.baseUrl,
           },
           stderrPath,
         });
@@ -604,83 +602,14 @@ describe.skipIf(!tmuxAvailable())("config persistence", () => {
   );
 
   test(
-    "configured effort and Fast are visible before model catalog resolves",
-    async () => {
-      const root = mkdtempSync(join(tmpdir(), "fx-startup-preferences-"));
-      let releaseCatalog: (() => void) | null = null;
-      const catalogRelease = new Promise<void>((resolve) => {
-        releaseCatalog = resolve;
-      });
-      const gateway = startFakeGateway([], {
-        models: async () => {
-          await catalogRelease;
-          return [{
-            id: "anthropic/claude-opus-4.8",
-            type: "language",
-            released: 1,
-            tags: ["fast", "tool-use"],
-            reasoning_options: [{ type: "effort", values: ["high", "xhigh"] }],
-            pricing: {
-              fast: { input: "0.1", output: "0.2" },
-            },
-          }];
-        },
-      });
-      try {
-        const home = join(root, "home");
-        const workspace = join(root, "workspace");
-        const stderrPath = join(root, "stderr.log");
-        mkdirSync(join(home, ".fx"), { recursive: true, mode: 0o700 });
-        mkdirSync(workspace);
-        writeFileSync(
-          join(home, ".fx", "settings.json"),
-          JSON.stringify({
-            model: "anthropic/claude-opus-4.8",
-            permission_mode: "auto",
-            effort: "xhigh",
-            fast_mode: true,
-          }) + "\n",
-          { mode: 0o600 },
-        );
-
-        session = await TmuxSession.create({
-          cwd: realpathSync(workspace),
-          env: {
-            ...NO_AUTH,
-            HOME: home,
-            FX_AUTO_UPGRADE: "0",
-            FX_E2E_GATEWAY_MODELS_URL: `${gateway.baseUrl}/coding-agent/v1/models`,
-          },
-          stderrPath,
-        });
-        const pane = await session.waitForText("auto · opus 4.8", TIMEOUT);
-        expect(pane).toContain("auto · opus 4.8 · xhigh · ⚡︎");
-        releaseCatalog?.();
-        releaseCatalog = null;
-
-        await session.sendText("/quit");
-        await session.waitForSessionEnd(TIMEOUT);
-        session = null;
-        expect(readFileSync(stderrPath, "utf8")).toBe("");
-      } finally {
-        releaseCatalog?.();
-        gateway.stop();
-        rmSync(root, { recursive: true, force: true });
-      }
-    },
-    30_000,
-  );
-
-  test(
-    "Fast command rejects a tag-only intrinsic Fast alias",
+    "Fast command rejects a name-only Fast alias",
     async () => {
       const root = mkdtempSync(join(tmpdir(), "fx-fast-unsupported-"));
       const gateway = startFakeGateway([], {
         models: [{
-          id: "anthropic/claude-opus-4.8-fast",
-          type: "language",
-          released: 1,
-          tags: ["fast", "tool-use"],
+          id: "company-fast-alias",
+          object: "model",
+          created: 1,
         }],
       });
       try {
@@ -691,7 +620,7 @@ describe.skipIf(!tmuxAvailable())("config persistence", () => {
         mkdirSync(workspace);
         const settingsPath = join(home, ".fx", "settings.json");
         const initialSettings = JSON.stringify({
-          model: "anthropic/claude-opus-4.8-fast",
+          model: "company-fast-alias",
           fast_mode: false,
         }) + "\n";
         writeFileSync(settingsPath, initialSettings, { mode: 0o600 });
@@ -700,9 +629,9 @@ describe.skipIf(!tmuxAvailable())("config persistence", () => {
           cwd: realpathSync(workspace),
           env: {
             ...NO_AUTH,
-            AI_GATEWAY_API_KEY: "fake-standard-key",
+            OPENAI_API_KEY: "fake-standard-key",
             HOME: home,
-            FX_E2E_GATEWAY_MODELS_URL: `${gateway.baseUrl}/coding-agent/v1/models`,
+            FX_RESPONSES_BASE_URL: gateway.baseUrl,
           },
           stderrPath,
         });
@@ -734,11 +663,10 @@ describe.skipIf(!tmuxAvailable())("config persistence", () => {
       const root = mkdtempSync(join(tmpdir(), "fx-settings-effort-"));
       const gateway = startFakeGateway([], {
         models: [{
-          id: "zai/glm-5.2",
-          type: "language",
-          released: 1,
-          tags: ["reasoning", "tool-use"],
-          reasoning_options: [{ type: "effort", values: ["low", "medium"] }],
+          id: "gpt-5.6-sol",
+          object: "model",
+          created: 1,
+          owned_by: "openai",
         }],
       });
       try {
@@ -750,7 +678,7 @@ describe.skipIf(!tmuxAvailable())("config persistence", () => {
         mkdirSync(workspace);
         writeFileSync(
           settingsPath,
-          JSON.stringify({ model: "zai/glm-5.2", effort: "low" }) + "\n",
+          JSON.stringify({ model: "gpt-5.6-sol", effort: "low" }) + "\n",
           { mode: 0o600 },
         );
 
@@ -758,8 +686,9 @@ describe.skipIf(!tmuxAvailable())("config persistence", () => {
           cwd: realpathSync(workspace),
           env: {
             ...NO_AUTH,
+            OPENAI_API_KEY: "fake-settings-catalog-key",
             HOME: home,
-            FX_E2E_GATEWAY_MODELS_URL: `${gateway.baseUrl}/coding-agent/v1/models`,
+            FX_RESPONSES_BASE_URL: gateway.baseUrl,
           },
           stderrPath,
         });
@@ -778,7 +707,7 @@ describe.skipIf(!tmuxAvailable())("config persistence", () => {
           stored = JSON.parse(readFileSync(settingsPath, "utf8"));
         }
         expect(stored).toMatchObject({
-          model: "zai/glm-5.2",
+          model: "gpt-5.6-sol",
           effort: "medium",
         });
         expect(session.paneStatus()).toEqual({ dead: false, status: null });
@@ -800,141 +729,9 @@ describe.skipIf(!tmuxAvailable())("config persistence", () => {
     60_000,
   );
 
-  test(
-    "Opus 4.8 Fast pricing drives picker request and persistence",
-    async () => {
-      const root = mkdtempSync(join(tmpdir(), "fx-anthropic-capabilities-"));
-      const gateway = startFakeGateway(
-        [fakeGatewayFinalText("Opus fast complete")],
-        {
-          models: [
-            {
-              id: "openai/gpt-5",
-              type: "language",
-              released: 1,
-              tags: ["tool-use"],
-            },
-            {
-              id: "anthropic/claude-opus-4.8",
-              type: "language",
-              released: 1,
-              tags: ["fast", "tool-use"],
-              reasoning_options: [{ type: "effort", values: ["high", "xhigh"] }],
-              pricing: {
-                fast: { input: "0.1", output: "0.2" },
-              },
-            },
-          ],
-        },
-      );
-      try {
-        const home = join(root, "home");
-        const opusWorkspace = join(root, "opus-workspace");
-        const stderrPath = join(root, "stderr.log");
-        mkdirSync(join(home, ".fx"), { recursive: true, mode: 0o700 });
-        mkdirSync(opusWorkspace);
-        const opusRoot = realpathSync(opusWorkspace);
-        const settingsPath = join(home, ".fx", "settings.json");
-        const initialSettings = JSON.stringify({
-          model: "anthropic/claude-opus-4.8",
-          effort: "high",
-          fast_mode: false,
-          credential_source: "ai_gateway_api_key",
-        }) + "\n";
-        writeFileSync(
-          settingsPath,
-          initialSettings,
-          { mode: 0o600 },
-        );
-        const gatewayEnv = {
-          ...NO_AUTH,
-          AI_GATEWAY_API_KEY: "fake-gateway-key",
-          VERCEL_OIDC_TOKEN: undefined,
-          FX_DISABLE_KEYCHAIN: "1",
-          HOME: home,
-          FX_GATEWAY_BASE_URL: gateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
-          FX_E2E_GATEWAY_MODELS_URL: `${gateway.baseUrl}/coding-agent/v1/models`,
-        };
-
-        session = await TmuxSession.create({
-          cwd: opusRoot,
-          env: gatewayEnv,
-          stderrPath,
-        });
-        await session.waitForText("Run /help", TIMEOUT);
-        await session.sendLiteral("/model openai");
-        await session.waitForText("openai/gpt-5", TIMEOUT);
-        await session.sendKeys("C-u");
-        await session.waitForPane(
-          (pane) =>
-            hasEmptyComposer(pane) &&
-            !pane.includes("openai/gpt-5"),
-          TIMEOUT,
-        );
-        await session.sendLiteral("/model");
-        await session.sendKeys("Enter");
-        await session.waitForText("anthropic/claude-opus-4.8", TIMEOUT);
-        expect(readFileSync(settingsPath, "utf8")).toBe(initialSettings);
-        await session.sendKeys("Enter");
-        // Gateway order is preserved after fx's default sentinel.
-        await session.waitForText("default", TIMEOUT);
-        for (let i = 0; i < 2; i += 1) await session.sendKeys("Down");
-        await session.waitForText("xhigh", TIMEOUT);
-        await session.sendKeys("Enter");
-        await session.waitForText("normal", TIMEOUT);
-        await session.sendLiteral("fast");
-        await session.waitForText("/model anthropic/claude-opus-4.8 xhigh fast", TIMEOUT);
-        await session.sendKeys("Enter");
-        const selectedFastStatus = await session.waitForText("opus 4.8 · xhigh · ⚡︎", TIMEOUT);
-        expect(selectedFastStatus).not.toContain("⚡︎ fast");
-        await session.sendText("Use fast.");
-        await session.waitForText("Opus fast complete", TIMEOUT);
-        expect(gateway.requests).toHaveLength(1);
-        expect(gateway.requests[0]!.headers.get("ai-language-model-id")).toBe(
-          "anthropic/claude-opus-4.8",
-        );
-        expect(gateway.requests[0]!.headers.get("authorization")).toBe(
-          "Bearer fake-gateway-key",
-        );
-        expect(gateway.requests[0]!.headers.get("x-vercel-ai-gateway-team")).toBeNull();
-        expect(JSON.parse(gateway.requests[0]!.body)).not.toHaveProperty("fast");
-        expect(JSON.parse(gateway.requests[0]!.body)).toMatchObject({
-          providerOptions: { gateway: { speed: "fast" } },
-        });
-        await session.sendText("/quit");
-        await session.waitForSessionEnd(TIMEOUT);
-        session = null;
-
-        const stored = JSON.parse(readFileSync(settingsPath, "utf8"));
-        expect(stored).toMatchObject({
-          models: { gateway: "anthropic/claude-opus-4.8" },
-          effort: "xhigh",
-          fast_mode: true,
-        });
-
-        session = await TmuxSession.create({
-          cwd: opusRoot,
-          env: gatewayEnv,
-          stderrPath,
-        });
-        const restoredFastStatus = await session.waitForText("opus 4.8 · xhigh · ⚡︎", TIMEOUT);
-        expect(restoredFastStatus).not.toContain("⚡︎ fast");
-        await session.sendText("/quit");
-        await session.waitForSessionEnd(TIMEOUT);
-        session = null;
-
-        expect(readFileSync(stderrPath, "utf8")).toBe("");
-      } finally {
-        gateway.stop();
-        rmSync(root, { recursive: true, force: true });
-      }
-    },
-    60_000,
-  );
 
   test(
-    "GPT 5.6 Sol priority pricing drives the Fast request",
+    "GPT 5.6 Sol uses the Responses priority service tier",
     async () => {
       const root = mkdtempSync(join(tmpdir(), "fx-openai-capabilities-"));
       const gateway = startFakeGateway(
@@ -944,22 +741,10 @@ describe.skipIf(!tmuxAvailable())("config persistence", () => {
         ],
         {
           models: [{
-            id: "openai/gpt-5.6-sol",
-            type: "language",
+            id: "gpt-5.6-sol",
+            object: "model",
             owned_by: "openai",
-            released: 1,
-            tags: ["reasoning", "tool-use"],
-            reasoning_options: [{
-              type: "effort",
-              values: ["future-tier", "max"],
-            }],
-            context_window: 1_050_000,
-            max_tokens: 128_000,
-            pricing: {
-              service_tiers: {
-                priority: { input: "0.1", output: "0.2" },
-              },
-            },
+            created: 1,
           }],
         },
       );
@@ -974,7 +759,7 @@ describe.skipIf(!tmuxAvailable())("config persistence", () => {
         writeFileSync(
           settingsPath,
           JSON.stringify({
-            model: "openai/gpt-5.6-sol",
+            model: "gpt-5.6-sol",
             effort: "minimal",
             fast_mode: true,
           }) + "\n",
@@ -982,11 +767,9 @@ describe.skipIf(!tmuxAvailable())("config persistence", () => {
         );
         const gatewayEnv = {
           ...NO_AUTH,
-          AI_GATEWAY_API_KEY: "fake-capability-key",
+          OPENAI_API_KEY: "fake-capability-key",
           HOME: home,
-          FX_GATEWAY_BASE_URL: gateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
-          FX_E2E_GATEWAY_MODELS_URL: `${gateway.baseUrl}/coding-agent/v1/models`,
+          FX_RESPONSES_BASE_URL: gateway.baseUrl,
         };
 
         const staleResult = await runFx(
@@ -1004,10 +787,10 @@ describe.skipIf(!tmuxAvailable())("config persistence", () => {
         );
         expect(JSON.parse(gateway.requests[0]!.body)).not.toHaveProperty("fast");
         expect(JSON.parse(gateway.requests[0]!.body)).toMatchObject({
-          providerOptions: { gateway: { speed: "fast" } },
+          service_tier: "priority",
         });
         expect(JSON.parse(readFileSync(settingsPath, "utf8"))).toMatchObject({
-          model: "openai/gpt-5.6-sol",
+          model: "gpt-5.6-sol",
           effort: "minimal",
           fast_mode: true,
         });
@@ -1019,16 +802,16 @@ describe.skipIf(!tmuxAvailable())("config persistence", () => {
         });
         await session.waitForText("Run /help", TIMEOUT);
         await session.sendLiteral("/model sol");
-        await session.waitForText("openai/gpt-5.6-sol", TIMEOUT);
+        await session.waitForText("gpt-5.6-sol", TIMEOUT);
         await session.sendKeys("Enter");
         const efforts = await session.waitForText("default", TIMEOUT);
         expect(efforts).not.toContain("minimal");
-        for (let i = 0; i < 2; i += 1) await session.sendKeys("Down");
+        for (let i = 0; i < 6; i += 1) await session.sendKeys("Down");
         await session.waitForText("max", TIMEOUT);
         await session.sendKeys("Enter");
         await session.waitForText("normal", TIMEOUT);
         await session.sendLiteral("fast");
-        await session.waitForText("/model openai/gpt-5.6-sol max fast", TIMEOUT);
+        await session.waitForText("/model gpt-5.6-sol max fast", TIMEOUT);
         await session.sendKeys("Enter");
         const selected = await session.waitForText("gpt-5.6-sol · max · ⚡︎", TIMEOUT);
         expect(selected).not.toContain("⚡︎ fast");
@@ -1038,33 +821,21 @@ describe.skipIf(!tmuxAvailable())("config persistence", () => {
           readFileSync(settingsPath, "utf8"),
         );
         expect(stored).toMatchObject({
-          models: { gateway: "openai/gpt-5.6-sol" },
+          models: { gateway: "gpt-5.6-sol" },
           effort: "max",
           fast_mode: true,
         });
 
-        await session.sendText("/effort future-tier");
-        await session.waitForText("● Effort: future-tier", TIMEOUT);
-        expect(JSON.parse(readFileSync(settingsPath, "utf8"))).toMatchObject({
-          models: { gateway: "openai/gpt-5.6-sol" },
-          effort: "future-tier",
-          fast_mode: true,
-        });
-        await session.sendText("/effort max");
-        await session.waitForText("● Effort: max", TIMEOUT);
-
         await session.sendText("Use max fast.");
         await session.waitForText("GPT 5.6 max fast complete", TIMEOUT);
         expect(gateway.requests).toHaveLength(2);
-        expect(gateway.requests[1]!.headers.get("ai-language-model-id")).toBe(
-          "openai/gpt-5.6-sol",
-        );
         expect(gateway.requests[1]!.headers.get("authorization")).toBe(
           "Bearer fake-capability-key",
         );
         expect(JSON.parse(gateway.requests[1]!.body)).toMatchObject({
-          reasoning: "max",
-          providerOptions: { gateway: { speed: "fast" } },
+          model: "gpt-5.6-sol",
+          reasoning: { effort: "max" },
+          service_tier: "priority",
         });
         expect(JSON.parse(gateway.requests[1]!.body)).not.toHaveProperty("fast");
 
@@ -1080,65 +851,6 @@ describe.skipIf(!tmuxAvailable())("config persistence", () => {
     60_000,
   );
 
-  test(
-    "Fable 5 xhigh picker selection persists without fast mode",
-    async () => {
-      const root = mkdtempSync(join(tmpdir(), "fx-fable-capabilities-"));
-      const gateway = startFakeGateway([], {
-        models: [{
-          id: "anthropic/claude-fable-5",
-          type: "language",
-          released: 1,
-            tags: ["reasoning", "tool-use"],
-            reasoning_options: [{ type: "effort", values: ["high", "xhigh"] }],
-            context_window: 1_000_000,
-          max_tokens: 128_000,
-        }],
-      });
-      try {
-        const home = join(root, "home");
-        const workspace = join(root, "workspace");
-        const stderrPath = join(root, "stderr.log");
-        mkdirSync(join(home, ".fx"), { recursive: true, mode: 0o700 });
-        mkdirSync(workspace);
-        const workspaceRoot = realpathSync(workspace);
-
-        session = await TmuxSession.create({
-          cwd: workspaceRoot,
-          env: {
-            ...NO_AUTH,
-            HOME: home,
-            FX_E2E_GATEWAY_MODELS_URL: `${gateway.baseUrl}/coding-agent/v1/models`,
-          },
-          stderrPath,
-        });
-        await session.waitForText("Run /help", TIMEOUT);
-        await session.sendLiteral("/model fable");
-        await session.waitForText("anthropic/claude-fable-5", TIMEOUT);
-        await session.sendKeys("Enter");
-        await session.waitForText("default", TIMEOUT);
-        for (let i = 0; i < 2; i += 1) await session.sendKeys("Down");
-        await session.waitForText("xhigh", TIMEOUT);
-        await session.sendKeys("Enter");
-        await session.waitForText("fable-5 · xhigh", TIMEOUT);
-        await session.sendText("/quit");
-        await session.waitForSessionEnd(TIMEOUT);
-        session = null;
-
-        const stored = JSON.parse(readFileSync(join(home, ".fx", "settings.json"), "utf8"));
-        expect(stored).toMatchObject({
-          models: { gateway: "anthropic/claude-fable-5" },
-          effort: "xhigh",
-        });
-        expect(stored.fast_mode).toBe(false);
-        expect(readFileSync(stderrPath, "utf8")).toBe("");
-      } finally {
-        gateway.stop();
-        rmSync(root, { recursive: true, force: true });
-      }
-    },
-    60_000,
-  );
 
   test(
     "model picker selection persists when a matching skill exists",
@@ -1147,9 +859,8 @@ describe.skipIf(!tmuxAvailable())("config persistence", () => {
       const gateway = startFakeGateway([], {
         models: [{
           id: "xai/grok-build-1",
-          type: "language",
-          released: 1,
-          tags: ["tool-use"],
+          object: "model",
+          created: 1,
         }],
       });
       try {
@@ -1169,8 +880,9 @@ describe.skipIf(!tmuxAvailable())("config persistence", () => {
           cwd: workspaceRoot,
           env: {
             ...NO_AUTH,
+            OPENAI_API_KEY: "fake-skill-catalog-key",
             HOME: home,
-            FX_E2E_GATEWAY_MODELS_URL: `${gateway.baseUrl}/coding-agent/v1/models`,
+            FX_RESPONSES_BASE_URL: gateway.baseUrl,
           },
           stderrPath,
         });
@@ -1212,1333 +924,4 @@ describe.skipIf(!tmuxAvailable())("config persistence", () => {
     60_000,
   );
 
-  test(
-    "Gateway catalog reasoning drives portable effort requests and persistence",
-    async () => {
-      const root = mkdtempSync(join(tmpdir(), "fx-gateway-capabilities-"));
-      const gateway = startFakeGateway(
-        [
-          fakeGatewayFinalText("portable auto complete"),
-          fakeGatewayFinalText("portable future complete"),
-        ],
-        {
-          models: [{
-            id: "provider/new-reasoning-model",
-            type: "language",
-            released: 99,
-            tags: ["reasoning", "tool-use"],
-            reasoning_options: [{
-              type: "effort",
-              values: ["future-tier", "high"],
-            }],
-            context_window: 750_000,
-            max_tokens: 32_000,
-          }],
-        },
-      );
-      try {
-        const home = join(root, "home");
-        const workspace = join(root, "workspace");
-        const stderrPath = join(root, "stderr.log");
-        mkdirSync(join(home, ".fx"), { recursive: true, mode: 0o700 });
-        mkdirSync(workspace);
-        const workspaceRoot = realpathSync(workspace);
-
-        session = await TmuxSession.create({
-          cwd: workspaceRoot,
-          env: {
-            ...NO_AUTH,
-            AI_GATEWAY_API_KEY: "fake-capability-key",
-            VERCEL_OIDC_TOKEN: undefined,
-            HOME: home,
-            FX_GATEWAY_BASE_URL: gateway.baseUrl,
-            FX_GATEWAY_CHAT_URL: gateway.chatUrl,
-            FX_E2E_GATEWAY_MODELS_URL: `${gateway.baseUrl}/coding-agent/v1/models`,
-          },
-          stderrPath,
-        });
-        await session.waitForText("Run /help", TIMEOUT);
-        await session.sendText("/statusline context");
-        await session.waitForText("● Statusline: context: on", TIMEOUT);
-        await session.sendLiteral("/model new-reasoning");
-        await session.waitForText("provider/new-reasoning-model", TIMEOUT);
-        await session.sendKeys("Enter");
-        const autoEffortPicker = await session.waitForText("default", TIMEOUT);
-        expect(autoEffortPicker).toContain("future-tier");
-        expect(autoEffortPicker).toContain("high");
-        await session.sendKeys("Enter");
-        await session.waitForText("● Switched to provider/new-reasoning-model", TIMEOUT);
-
-        let stored = JSON.parse(readFileSync(join(home, ".fx", "settings.json"), "utf8"));
-        expect(stored.models.gateway).toBe("provider/new-reasoning-model");
-        expect(stored.fast_mode).toBe(false);
-
-        await session.sendText("Use portable auto.");
-        await session.waitForText("portable auto complete", TIMEOUT);
-        const footer = await session.waitForText("Context: 0k/750k 0%", TIMEOUT);
-        expect(footer).toContain("new-reasoning-model");
-        expect(gateway.requests).toHaveLength(1);
-        expect(gateway.requests[0]!.headers.get("ai-language-model-id")).toBe(
-          "provider/new-reasoning-model",
-        );
-        expect(
-          gateway.requests[0]!.headers.get(
-            "ai-language-model-specification-version",
-          ),
-        ).toBe("4");
-        expect(JSON.parse(gateway.requests[0]!.body)).not.toHaveProperty("reasoning");
-
-        await session.sendLiteral("/model new-reasoning");
-        await session.waitForText("provider/new-reasoning-model", TIMEOUT);
-        await session.sendKeys("Enter");
-        await session.waitForText("default", TIMEOUT);
-        await session.sendKeys("Down");
-        await session.waitForText("future-tier", TIMEOUT);
-        await session.sendKeys("Enter");
-        await session.waitForText("· future-tier", TIMEOUT);
-
-        stored = JSON.parse(readFileSync(join(home, ".fx", "settings.json"), "utf8"));
-        const persistenceDeadline = Date.now() + TIMEOUT;
-        while (stored.effort !== "future-tier" && Date.now() < persistenceDeadline) {
-          await Bun.sleep(25);
-          stored = JSON.parse(readFileSync(join(home, ".fx", "settings.json"), "utf8"));
-        }
-        expect(stored).toMatchObject({
-          models: { gateway: "provider/new-reasoning-model" },
-          effort: "future-tier",
-        });
-
-        await session.sendText("Use portable future.");
-        await session.waitForText("portable future complete", TIMEOUT);
-        expect(gateway.requests).toHaveLength(2);
-        expect(
-          gateway.requests[1]!.headers.get(
-            "ai-language-model-specification-version",
-          ),
-        ).toBe("4");
-        expect(JSON.parse(gateway.requests[1]!.body)).toMatchObject({
-          reasoning: "future-tier",
-        });
-        expect(JSON.parse(gateway.requests[1]!.body)).not.toHaveProperty(
-          "providerOptions",
-        );
-
-        await session.sendText("/quit");
-        await session.waitForSessionEnd(TIMEOUT);
-        session = null;
-
-        stored = JSON.parse(readFileSync(join(home, ".fx", "settings.json"), "utf8"));
-        expect(stored).toMatchObject({
-          models: { gateway: "provider/new-reasoning-model" },
-          effort: "future-tier",
-        });
-        expect(stored.fast_mode).toBe(false);
-        expect(readFileSync(stderrPath, "utf8")).toBe("");
-      } finally {
-        gateway.stop();
-        rmSync(root, { recursive: true, force: true });
-      }
-    },
-    60_000,
-  );
-
-  serialTest(
-    "settings persistence remains available when session storage is unavailable",
-    async () => {
-      const root = mkdtempSync(join(tmpdir(), "fx-config-first-write-"));
-      try {
-        const home = join(root, "home");
-        const workspace = join(root, "workspace");
-        const stderrPath = join(root, "stderr.log");
-        mkdirSync(join(home, ".fx"), { recursive: true, mode: 0o700 });
-        writeFileSync(join(home, ".fx", "sessions"), "blocked\n", {
-          mode: 0o600,
-        });
-        mkdirSync(workspace);
-        const workspaceRoot = realpathSync(workspace);
-
-        session = await TmuxSession.create({
-          cwd: workspaceRoot,
-          env: {
-            ...NO_AUTH,
-            HOME: home,
-          },
-          stderrPath,
-        });
-        await session.waitForText("Run /help", TIMEOUT);
-        await session.sendText("/settings startup-scrollback off");
-        await session.waitForText("startup_scrollback: off", TIMEOUT);
-        await session.sendText("/quit");
-        await session.waitForSessionEnd(TIMEOUT);
-        session = null;
-
-        expect(tree(home)).toEqual([
-          ".fx",
-          ".fx/history.jsonl",
-          ".fx/history.lock",
-          ".fx/sessions",
-          ".fx/settings.json",
-          ".fx/settings.lock",
-        ]);
-        expect(statSync(join(home, ".fx")).mode & 0o777).toBe(0o700);
-        expect(statSync(join(home, ".fx", "history.jsonl")).mode & 0o777).toBe(0o600);
-        expect(statSync(join(home, ".fx", "history.lock")).mode & 0o777).toBe(0o600);
-        expect(statSync(join(home, ".fx", "settings.json")).mode & 0o777).toBe(0o600);
-        expect(statSync(join(home, ".fx", "settings.lock")).mode & 0o777).toBe(0o600);
-        expect(readFileSync(stderrPath, "utf8")).toBe("");
-      } finally {
-        rmSync(root, { recursive: true, force: true });
-      }
-    },
-    30_000,
-  );
-
-  serialTest(
-    "workspace statusline stays active when user settings cannot be saved",
-    async () => {
-      const root = mkdtempSync(join(tmpdir(), "fx-statusline-write-failure-"));
-      try {
-        const home = join(root, "home");
-        const workspace = join(root, "workspace-write-failure-visible");
-        const settingsPath = join(home, ".fx", "settings.json");
-        const externalSettings = join(root, "external-settings.json");
-        const stderrPath = join(root, "stderr.log");
-        mkdirSync(join(home, ".fx"), { recursive: true, mode: 0o700 });
-        mkdirSync(workspace);
-        writeFileSync(settingsPath, '{"statusLine":{"workspace":false}}\n', { mode: 0o600 });
-        writeFileSync(externalSettings, '{"statusLine":{"workspace":false}}\n', { mode: 0o600 });
-
-        session = await TmuxSession.create({
-          cwd: realpathSync(workspace),
-          env: { ...NO_AUTH, HOME: home },
-          stderrPath,
-        });
-        await session.waitForText("Run /help", TIMEOUT);
-        expect(await session.capturePane()).not.toContain("workspace-write-failure-visible");
-
-        rmSync(settingsPath);
-        symlinkSync(externalSettings, settingsPath);
-        await session.sendText("/statusline workspace");
-        await session.waitForText("active for this process but not saved to user settings", TIMEOUT);
-        await session.waitForPane(
-          (pane) => pane.includes("workspace-write-failure-visible"),
-          TIMEOUT,
-        );
-        expect(JSON.parse(readFileSync(externalSettings, "utf8")).statusLine.workspace).toBe(false);
-
-        await session.sendText("/quit");
-        await session.waitForSessionEnd(TIMEOUT);
-        session = null;
-        expect(readFileSync(stderrPath, "utf8")).toBe("");
-      } finally {
-        rmSync(root, { recursive: true, force: true });
-      }
-    },
-    30_000,
-  );
-
-  serialTest("config diagnostics preserve invalid, oversized, and unsafe primaries", async () => {
-    const root = mkdtempSync(join(tmpdir(), "fx-config-diagnostics-"));
-    try {
-      const home = join(root, "home");
-      const workspace = join(root, "workspace");
-      mkdirSync(join(home, ".fx"), { recursive: true, mode: 0o700 });
-      mkdirSync(workspace);
-      const workspaceRoot = realpathSync(workspace);
-      const settingsPath = join(home, ".fx", "settings.json");
-
-      const malformed = "{bad\n";
-      writeFileSync(settingsPath, malformed, { mode: 0o600 });
-      const malformedStatus = await runFx(["status", "--json"], {
-        cwd: workspaceRoot,
-        env: { HOME: home },
-      });
-      expect(malformedStatus.code).toBe(0);
-      expect(malformedStatus.stderr).toContain("malformed_settings");
-      expect(readFileSync(settingsPath, "utf8")).toBe(malformed);
-
-      const malformedStatusLine = "{\"statusLine\":{\"context\":1}}\n";
-      writeFileSync(settingsPath, malformedStatusLine, { mode: 0o600 });
-      const malformedStatusLineStatus = await runFx(["status", "--json"], {
-        cwd: workspaceRoot,
-        env: { HOME: home },
-      });
-      expect(malformedStatusLineStatus.code).toBe(0);
-      expect(malformedStatusLineStatus.stderr).toContain("malformed_settings");
-      expect(readFileSync(settingsPath, "utf8")).toBe(malformedStatusLine);
-
-      const inertOutputSettings =
-        JSON.stringify({
-          output_level: { legacy: true },
-          workspaces: {
-            [workspaceRoot]: {
-              output_level: ["quiet", 7],
-            },
-          },
-        }) + "\n";
-      writeFileSync(settingsPath, inertOutputSettings, { mode: 0o600 });
-      const inertStatus = await runFx(["status", "--json"], {
-        cwd: workspaceRoot,
-        env: { HOME: home },
-      });
-      expect(inertStatus.code).toBe(0);
-      expect(inertStatus.stderr).not.toContain("legacy_workspace_preferences");
-      const inertDoctor = await runFx(["doctor", "--json"], {
-        cwd: workspaceRoot,
-        env: { HOME: home },
-      });
-      expect(inertDoctor.code).toBe(0);
-      expect(inertDoctor.stdout).not.toContain("legacy_workspace_preferences");
-
-      session = await TmuxSession.create({
-        cwd: workspaceRoot,
-        env: { ...NO_AUTH, HOME: home },
-      });
-      await session.waitForText("Run /help", TIMEOUT);
-      expect(await session.capturePane()).not.toContain(
-        "legacy_workspace_preferences",
-      );
-      await session.kill();
-      session = null;
-
-      expect(readFileSync(settingsPath, "utf8")).toBe(inertOutputSettings);
-
-      const oversized = JSON.stringify({ padding: "x".repeat(65 * 1024) }) + "\n";
-      writeFileSync(settingsPath, oversized, { mode: 0o600 });
-      const oversizedDoctor = await runFx(["doctor", "--json"], {
-        cwd: workspaceRoot,
-        env: { HOME: home },
-      });
-      expect(oversizedDoctor.code).toBe(0);
-      expect(oversizedDoctor.stdout).toContain("settings_too_large");
-      expect(readFileSync(settingsPath, "utf8")).toBe(oversized);
-
-      const external = join(root, "external-settings.json");
-      writeFileSync(external, "{\"model\":\"external\"}\n", { mode: 0o600 });
-      rmSync(settingsPath);
-      symlinkSync(external, settingsPath);
-      const unsafeStatus = await runFx(["status", "--json"], {
-        cwd: workspaceRoot,
-        env: { HOME: home },
-      });
-      expect(unsafeStatus.code).toBe(0);
-      expect(unsafeStatus.stderr).toContain("durable_path_unsafe");
-      expect(readFileSync(external, "utf8")).toBe("{\"model\":\"external\"}\n");
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-
-  serialTest(
-    "concurrent global mutations preserve both values and unknown keys",
-    async () => {
-      const root = mkdtempSync(join(tmpdir(), "fx-config-concurrent-"));
-      try {
-        const home = join(root, "home");
-        const workspace = join(root, "workspace");
-        mkdirSync(join(home, ".fx"), { recursive: true, mode: 0o700 });
-        mkdirSync(workspace);
-        const workspaceRoot = realpathSync(workspace);
-        writeFileSync(
-          join(home, ".fx", "settings.json"),
-          JSON.stringify({
-            future_global: { nested: "keep-global" },
-            workspaces: {
-              [workspaceRoot]: {
-                future_workspace: {
-                  nested: { keep: true },
-                },
-              },
-            },
-          }) + "\n",
-          { mode: 0o600 },
-        );
-        writeFileSync(join(home, ".fx", "sessions"), "blocked\n", {
-          mode: 0o600,
-        });
-        const env = {
-          ...NO_AUTH,
-          HOME: home,
-        };
-
-        [session, secondSession] = await Promise.all([
-          TmuxSession.create({ cwd: workspaceRoot, env }),
-          TmuxSession.create({ cwd: workspaceRoot, env }),
-        ]);
-        await Promise.all([
-          session.waitForText("Run /help", TIMEOUT),
-          secondSession.waitForText("Run /help", TIMEOUT),
-        ]);
-        await Promise.all([
-          session.sendText("/settings startup-scrollback off"),
-          secondSession.sendText("/statusline context"),
-        ]);
-        await Promise.all([
-          session.waitForText("startup_scrollback: off", TIMEOUT),
-          secondSession.waitForText("● Statusline: context:", TIMEOUT),
-        ]);
-        await Promise.all([
-          session.sendText("/quit"),
-          secondSession.sendText("/quit"),
-        ]);
-        await Promise.all([
-          session.waitForSessionEnd(TIMEOUT),
-          secondSession.waitForSessionEnd(TIMEOUT),
-        ]);
-        session = null;
-        secondSession = null;
-
-        const stored = JSON.parse(
-          readFileSync(join(home, ".fx", "settings.json"), "utf8"),
-        );
-        expect(stored.future_global).toEqual({ nested: "keep-global" });
-        expect(stored.startup_scrollback).toBe(false);
-        expect(stored.statusLine).toMatchObject({ context: true });
-        expect(stored.workspaces[workspaceRoot]).toMatchObject({
-          future_workspace: {
-            nested: { keep: true },
-          },
-        });
-      } finally {
-        rmSync(root, { recursive: true, force: true });
-      }
-    },
-    45_000,
-  );
-
-  serialTest(
-    "stale workspace mutations preserve an ordered remove and add",
-    async () => {
-      const root = mkdtempSync(join(tmpdir(), "fx-workspace-concurrent-"));
-      try {
-        const home = join(root, "home");
-        const workspace = join(root, "workspace");
-        const added = join(root, "added");
-        const launch = join(root, "launch");
-        const stderrAPath = join(root, "stderr-a.log");
-        const stderrBPath = join(root, "stderr-b.log");
-        mkdirSync(join(home, ".fx"), { recursive: true, mode: 0o700 });
-        mkdirSync(workspace);
-        mkdirSync(added);
-        mkdirSync(launch);
-        const workspaceRoot = realpathSync(workspace);
-        const addedRoot = realpathSync(added);
-        const launchRoot = realpathSync(launch);
-        const savedRoots = Array.from({ length: 15 }, (_, index) => {
-          const path = join(root, `saved-${index}`);
-          mkdirSync(path);
-          return realpathSync(path);
-        });
-        writeFileSync(
-          join(home, ".fx", "settings.json"),
-          JSON.stringify({
-            workspaces: {
-              [workspaceRoot]: {
-                additional_directories: savedRoots,
-              },
-            },
-          }) + "\n",
-          { mode: 0o600 },
-        );
-        writeFileSync(join(home, ".fx", "sessions"), "blocked\n", {
-          mode: 0o600,
-        });
-        const env = {
-          ...NO_AUTH,
-          HOME: home,
-        };
-
-        [session, secondSession] = await Promise.all([
-          TmuxSession.create({
-            cwd: workspaceRoot,
-            env,
-            stderrPath: stderrAPath,
-          }),
-          TmuxSession.create({
-            cmd: `${FX_BIN} --add-dir ${launchRoot}`,
-            cwd: workspaceRoot,
-            env,
-            stderrPath: stderrBPath,
-          }),
-        ]);
-        await Promise.all([
-          session.waitForText("Run /help", TIMEOUT),
-          secondSession.waitForText("Run /help", TIMEOUT),
-        ]);
-
-        await session.sendText(`/workspace remove ${savedRoots[0]}`);
-        await session.waitForText("remove ", TIMEOUT);
-        await session.waitForText("saved-14 saved=true", TIMEOUT);
-        await secondSession.sendText(`/workspace add ${addedRoot}`);
-        await secondSession.waitForText("add ", TIMEOUT);
-        await secondSession.waitForText("launch saved=false", TIMEOUT);
-
-        await Promise.all([
-          session.sendText("/quit"),
-          secondSession.sendText("/quit"),
-        ]);
-        await Promise.all([
-          session.waitForSessionEnd(TIMEOUT),
-          secondSession.waitForSessionEnd(TIMEOUT),
-        ]);
-        session = null;
-        secondSession = null;
-
-        const stored = JSON.parse(
-          readFileSync(join(home, ".fx", "settings.json"), "utf8"),
-        );
-        expect(
-          stored.workspaces[workspaceRoot].additional_directories,
-        ).toEqual([...savedRoots.slice(1), addedRoot]);
-        expect(readFileSync(stderrAPath, "utf8")).toBe("");
-        expect(readFileSync(stderrBPath, "utf8")).toBe("");
-      } finally {
-        rmSync(root, { recursive: true, force: true });
-      }
-    },
-    60_000,
-  );
-
-  serialTest(
-    "workspace add rejects effective capacity without changing settings",
-    async () => {
-      const root = mkdtempSync(join(tmpdir(), "fx-workspace-capacity-"));
-      try {
-        const home = join(root, "home");
-        const workspace = join(root, "workspace");
-        const added = join(root, "added");
-        const launch = join(root, "launch");
-        const stderrPath = join(root, "stderr.log");
-        mkdirSync(join(home, ".fx"), { recursive: true, mode: 0o700 });
-        mkdirSync(workspace);
-        mkdirSync(added);
-        mkdirSync(launch);
-        const workspaceRoot = realpathSync(workspace);
-        const addedRoot = realpathSync(added);
-        const launchRoot = realpathSync(launch);
-        const savedRoots = Array.from({ length: 15 }, (_, index) => {
-          const path = join(root, `saved-${index}`);
-          mkdirSync(path);
-          return realpathSync(path);
-        });
-        const settingsPath = join(home, ".fx", "settings.json");
-        const originalSettings =
-          JSON.stringify({
-            workspaces: {
-              [workspaceRoot]: {
-                additional_directories: savedRoots,
-              },
-            },
-          }) + "\n";
-        writeFileSync(settingsPath, originalSettings, { mode: 0o600 });
-        writeFileSync(join(home, ".fx", "sessions"), "blocked\n", {
-          mode: 0o600,
-        });
-
-        session = await TmuxSession.create({
-          cmd: `${FX_BIN} --add-dir ${launchRoot}`,
-          cwd: workspaceRoot,
-          env: {
-            ...NO_AUTH,
-            HOME: home,
-          },
-          stderrPath,
-        });
-        await session.waitForText("Run /help", TIMEOUT);
-        await session.sendText(`/workspace add ${addedRoot}`);
-        await session.waitForText(
-          "Workspace settings were not changed: additional directory limit reached",
-          TIMEOUT,
-        );
-        await session.sendText("/quit");
-        await session.waitForSessionEnd(TIMEOUT);
-        session = null;
-
-        expect(readFileSync(settingsPath, "utf8")).toBe(originalSettings);
-        expect(readFileSync(stderrPath, "utf8")).toBe("");
-      } finally {
-        rmSync(root, { recursive: true, force: true });
-      }
-    },
-    45_000,
-  );
-
-  serialTest(
-    "workspace removal persists after an observed source disappears",
-    async () => {
-      const root = mkdtempSync(join(tmpdir(), "fx-workspace-source-disappears-"));
-      try {
-        const home = join(root, "home");
-        const workspace = join(root, "workspace");
-        const shared = join(root, "shared");
-        const savedLink = join(root, "saved-link");
-        const stderrPath = join(root, "stderr.log");
-        mkdirSync(join(home, ".fx"), { recursive: true, mode: 0o700 });
-        mkdirSync(workspace);
-        mkdirSync(shared);
-        symlinkSync(shared, savedLink, "dir");
-        const workspaceRoot = realpathSync(workspace);
-        const settingsPath = join(home, ".fx", "settings.json");
-        writeFileSync(
-          settingsPath,
-          JSON.stringify({
-            workspaces: {
-              [workspaceRoot]: { additional_directories: [savedLink] },
-            },
-          }) + "\n",
-          { mode: 0o600 },
-        );
-
-        session = await TmuxSession.create({
-          cwd: workspaceRoot,
-          env: {
-            ...NO_AUTH,
-            HOME: home,
-          },
-          stderrPath,
-        });
-        await session.waitForText("Run /help", TIMEOUT);
-        rmSync(savedLink);
-        await session.sendText(`/workspace remove ${savedLink}`);
-        await session.waitForText("additional directories: (none)", TIMEOUT);
-        await session.sendText("/quit");
-        await session.waitForSessionEnd(TIMEOUT);
-        session = null;
-
-        const stored = JSON.parse(readFileSync(settingsPath, "utf8"));
-        expect(
-          stored.workspaces?.[workspaceRoot]?.additional_directories,
-        ).toBeUndefined();
-        expect(readFileSync(stderrPath, "utf8")).toBe("");
-      } finally {
-        rmSync(root, { recursive: true, force: true });
-      }
-    },
-    45_000,
-  );
-
-  serialTest(
-    "workspace removal persists after an observed source retargets",
-    async () => {
-      const root = mkdtempSync(join(tmpdir(), "fx-workspace-source-moves-"));
-      try {
-        const home = join(root, "home");
-        const workspace = join(root, "workspace");
-        const first = join(root, "first");
-        const second = join(root, "second");
-        const savedLink = join(root, "saved-link");
-        const stderrPath = join(root, "stderr.log");
-        mkdirSync(join(home, ".fx"), { recursive: true, mode: 0o700 });
-        mkdirSync(workspace);
-        mkdirSync(first);
-        mkdirSync(second);
-        symlinkSync(first, savedLink, "dir");
-        const workspaceRoot = realpathSync(workspace);
-        const firstRoot = realpathSync(first);
-        const settingsPath = join(home, ".fx", "settings.json");
-        writeFileSync(
-          settingsPath,
-          JSON.stringify({
-            workspaces: {
-              [workspaceRoot]: { additional_directories: [savedLink] },
-            },
-          }) + "\n",
-          { mode: 0o600 },
-        );
-
-        session = await TmuxSession.create({
-          cwd: workspaceRoot,
-          env: {
-            ...NO_AUTH,
-            HOME: home,
-          },
-          stderrPath,
-        });
-        await session.waitForText("Run /help", TIMEOUT);
-        rmSync(savedLink);
-        symlinkSync(second, savedLink, "dir");
-        await session.sendText(`/workspace remove ${firstRoot}`);
-        await session.waitForText("additional directories: (none)", TIMEOUT);
-        await session.sendText("/quit");
-        await session.waitForSessionEnd(TIMEOUT);
-        session = null;
-
-        const stored = JSON.parse(readFileSync(settingsPath, "utf8"));
-        expect(
-          stored.workspaces?.[workspaceRoot]?.additional_directories,
-        ).toBeUndefined();
-        expect(readFileSync(stderrPath, "utf8")).toBe("");
-      } finally {
-        rmSync(root, { recursive: true, force: true });
-      }
-    },
-    45_000,
-  );
-
-  serialTest(
-    "workspace removal consumes a concurrent exact canonical replacement",
-    async () => {
-      const root = mkdtempSync(join(tmpdir(), "fx-workspace-target-replaced-"));
-      try {
-        const home = join(root, "home");
-        const workspace = join(root, "workspace");
-        const target = join(root, "target");
-        const unseenBefore = join(root, "unseen-before");
-        const unseenAfter = join(root, "unseen-after");
-        const targetLink = join(root, "target-link");
-        const stderrPath = join(root, "stderr.log");
-        mkdirSync(join(home, ".fx"), { recursive: true, mode: 0o700 });
-        mkdirSync(workspace);
-        mkdirSync(target);
-        mkdirSync(unseenBefore);
-        mkdirSync(unseenAfter);
-        symlinkSync(target, targetLink, "dir");
-        const workspaceRoot = realpathSync(workspace);
-        const targetRoot = realpathSync(target);
-        const unseenBeforeRoot = realpathSync(unseenBefore);
-        const unseenAfterRoot = realpathSync(unseenAfter);
-        const settingsPath = join(home, ".fx", "settings.json");
-        writeFileSync(
-          settingsPath,
-          JSON.stringify({
-            workspaces: {
-              [workspaceRoot]: { additional_directories: [targetLink] },
-            },
-          }) + "\n",
-          { mode: 0o600 },
-        );
-
-        session = await TmuxSession.create({
-          cwd: workspaceRoot,
-          env: {
-            ...NO_AUTH,
-            HOME: home,
-          },
-          stderrPath,
-        });
-        await session.waitForText("Run /help", TIMEOUT);
-        writeFileSync(
-          settingsPath,
-          JSON.stringify({
-            workspaces: {
-              [workspaceRoot]: {
-                additional_directories: [
-                  unseenBeforeRoot,
-                  targetRoot,
-                  unseenAfterRoot,
-                ],
-              },
-            },
-          }) + "\n",
-          { mode: 0o600 },
-        );
-
-        await session.sendText(`/workspace remove ${targetRoot}`);
-        await session.waitForText("runtime_changed=true", TIMEOUT);
-        const stored = JSON.parse(readFileSync(settingsPath, "utf8"));
-        expect(stored.workspaces[workspaceRoot].additional_directories).toEqual([
-          unseenBeforeRoot,
-          unseenAfterRoot,
-        ]);
-
-        await session.sendText("/clear");
-        await session.waitForPane(
-          (pane) => hasEmptyComposer(pane) && !pane.includes(targetRoot),
-          TIMEOUT,
-        );
-        await session.sendText("/workspace list");
-        await session.waitForText(unseenBeforeRoot, TIMEOUT);
-        await session.waitForText(unseenAfterRoot, TIMEOUT);
-        const pane = await session.capturePaneGrid();
-        expect(pane).not.toContain(targetRoot);
-        await session.sendText("/quit");
-        await session.waitForSessionEnd(TIMEOUT);
-        session = null;
-
-        expect(readFileSync(stderrPath, "utf8")).toBe("");
-      } finally {
-        rmSync(root, { recursive: true, force: true });
-      }
-    },
-    45_000,
-  );
-
-  serialTest(
-    "workspace removal prefers a concurrent canonical survivor before restart",
-    async () => {
-      const root = mkdtempSync(join(tmpdir(), "fx-workspace-survivor-moves-"));
-      try {
-        const home = join(root, "home");
-        const workspace = join(root, "workspace");
-        const removed = join(root, "removed");
-        const survivor = join(root, "survivor");
-        const retarget = join(root, "retarget");
-        const unseenBefore = join(root, "unseen-before");
-        const unseenAfter = join(root, "unseen-after");
-        const removedLink = join(root, "removed-link");
-        const survivorLinkA = join(root, "survivor-link-a");
-        const survivorLinkB = join(root, "survivor-link-b");
-        const stderrAPath = join(root, "stderr-a.log");
-        const stderrBPath = join(root, "stderr-b.log");
-        mkdirSync(join(home, ".fx"), { recursive: true, mode: 0o700 });
-        mkdirSync(workspace);
-        mkdirSync(removed);
-        mkdirSync(survivor);
-        mkdirSync(retarget);
-        mkdirSync(unseenBefore);
-        mkdirSync(unseenAfter);
-        symlinkSync(removed, removedLink, "dir");
-        symlinkSync(survivor, survivorLinkA, "dir");
-        symlinkSync(survivor, survivorLinkB, "dir");
-        const workspaceRoot = realpathSync(workspace);
-        const removedRoot = realpathSync(removed);
-        const survivorRoot = realpathSync(survivor);
-        const retargetRoot = realpathSync(retarget);
-        const unseenBeforeRoot = realpathSync(unseenBefore);
-        const unseenAfterRoot = realpathSync(unseenAfter);
-        const settingsPath = join(home, ".fx", "settings.json");
-        writeFileSync(
-          settingsPath,
-          JSON.stringify({
-            workspaces: {
-              [workspaceRoot]: {
-                additional_directories: [removedLink, survivorLinkA, survivorLinkB],
-              },
-            },
-          }) + "\n",
-          { mode: 0o600 },
-        );
-        const env = {
-          ...NO_AUTH,
-          HOME: home,
-        };
-
-        session = await TmuxSession.create({
-          cwd: workspaceRoot,
-          env,
-          stderrPath: stderrAPath,
-        });
-        await session.waitForText("Run /help", TIMEOUT);
-        writeFileSync(
-          settingsPath,
-          JSON.stringify({
-            workspaces: {
-              [workspaceRoot]: {
-                additional_directories: [
-                  unseenBeforeRoot,
-                  removedLink,
-                  survivorLinkA,
-                  survivorRoot,
-                  survivorLinkB,
-                  unseenAfterRoot,
-                ],
-              },
-            },
-          }) + "\n",
-          { mode: 0o600 },
-        );
-        rmSync(survivorLinkA);
-        rmSync(survivorLinkB);
-        symlinkSync(retarget, survivorLinkA, "dir");
-        symlinkSync(retarget, survivorLinkB, "dir");
-        await session.sendText(`/workspace remove ${removedRoot}`);
-        await session.waitForText("runtime_changed=true", TIMEOUT);
-        await session.sendText("/quit");
-        await session.waitForSessionEnd(TIMEOUT);
-        session = null;
-
-        const stored = JSON.parse(readFileSync(settingsPath, "utf8"));
-        expect(stored.workspaces[workspaceRoot].additional_directories).toEqual([
-          unseenBeforeRoot,
-          survivorRoot,
-          unseenAfterRoot,
-        ]);
-        rmSync(survivorLinkA);
-        rmSync(survivorLinkB);
-
-        secondSession = await TmuxSession.create({
-          cwd: workspaceRoot,
-          env,
-          stderrPath: stderrBPath,
-        });
-        await secondSession.waitForText("Run /help", TIMEOUT);
-        await secondSession.sendText("/workspace list");
-        await secondSession.waitForText(unseenBeforeRoot, TIMEOUT);
-        await secondSession.waitForText(survivorRoot, TIMEOUT);
-        await secondSession.waitForText(unseenAfterRoot, TIMEOUT);
-        const pane = await secondSession.capturePaneGrid();
-        expect(pane).not.toContain(retargetRoot);
-        await secondSession.sendText("/quit");
-        await secondSession.waitForSessionEnd(TIMEOUT);
-        secondSession = null;
-
-        expect(readFileSync(stderrAPath, "utf8")).toBe("");
-        expect(readFileSync(stderrBPath, "utf8")).toBe("");
-      } finally {
-        rmSync(root, { recursive: true, force: true });
-      }
-    },
-    60_000,
-  );
-
-  serialTest(
-    "workspace removal uses observed identity and preserves an unseen source",
-    async () => {
-      const root = mkdtempSync(join(tmpdir(), "fx-workspace-source-retarget-"));
-      try {
-        const home = join(root, "home");
-        const workspace = join(root, "workspace");
-        const first = join(root, "first");
-        const second = join(root, "second");
-        const savedLink = join(root, "saved-link");
-        const unseenLink = join(root, "unseen-link");
-        const stderrPath = join(root, "stderr.log");
-        mkdirSync(join(home, ".fx"), { recursive: true, mode: 0o700 });
-        mkdirSync(workspace);
-        mkdirSync(first);
-        mkdirSync(second);
-        symlinkSync(first, savedLink, "dir");
-        const workspaceRoot = realpathSync(workspace);
-        const firstRoot = realpathSync(first);
-        const settingsPath = join(home, ".fx", "settings.json");
-        writeFileSync(
-          settingsPath,
-          JSON.stringify({
-            workspaces: {
-              [workspaceRoot]: { additional_directories: [savedLink] },
-            },
-          }) + "\n",
-          { mode: 0o600 },
-        );
-
-        session = await TmuxSession.create({
-          cwd: workspaceRoot,
-          env: {
-            ...NO_AUTH,
-            HOME: home,
-          },
-          stderrPath,
-        });
-        await session.waitForText("Run /help", TIMEOUT);
-
-        symlinkSync(first, unseenLink, "dir");
-        writeFileSync(
-          settingsPath,
-          JSON.stringify({
-            workspaces: {
-              [workspaceRoot]: {
-                additional_directories: [savedLink, unseenLink],
-              },
-            },
-          }) + "\n",
-          { mode: 0o600 },
-        );
-        rmSync(savedLink);
-        symlinkSync(second, savedLink, "dir");
-
-        await session.sendText(`/workspace remove ${savedLink}`);
-        await session.waitForText(firstRoot, TIMEOUT);
-        await session.sendText("/quit");
-        await session.waitForSessionEnd(TIMEOUT);
-        session = null;
-
-        const stored = JSON.parse(readFileSync(settingsPath, "utf8"));
-        expect(stored.workspaces[workspaceRoot].additional_directories).toEqual([
-          unseenLink,
-        ]);
-        expect(readFileSync(stderrPath, "utf8")).toBe("");
-      } finally {
-        rmSync(root, { recursive: true, force: true });
-      }
-    },
-    45_000,
-  );
-
-  serialTest(
-    "workspace add canonicalizes observed aliases before restart",
-    async () => {
-      const root = mkdtempSync(join(tmpdir(), "fx-workspace-source-restart-"));
-      try {
-        const home = join(root, "home");
-        const workspace = join(root, "workspace");
-        const first = join(root, "first");
-        const second = join(root, "second");
-        const added = join(root, "added");
-        const savedLink = join(root, "saved-link");
-        const stderrAPath = join(root, "stderr-a.log");
-        const stderrBPath = join(root, "stderr-b.log");
-        mkdirSync(join(home, ".fx"), { recursive: true, mode: 0o700 });
-        mkdirSync(workspace);
-        mkdirSync(first);
-        mkdirSync(second);
-        mkdirSync(added);
-        symlinkSync(first, savedLink, "dir");
-        const workspaceRoot = realpathSync(workspace);
-        const firstRoot = realpathSync(first);
-        const secondRoot = realpathSync(second);
-        const addedRoot = realpathSync(added);
-        const settingsPath = join(home, ".fx", "settings.json");
-        writeFileSync(
-          settingsPath,
-          JSON.stringify({
-            workspaces: {
-              [workspaceRoot]: {
-                additional_directories: [savedLink, firstRoot],
-              },
-            },
-          }) + "\n",
-          { mode: 0o600 },
-        );
-        const env = {
-          ...NO_AUTH,
-          HOME: home,
-        };
-
-        session = await TmuxSession.create({
-          cwd: workspaceRoot,
-          env,
-          stderrPath: stderrAPath,
-        });
-        await session.waitForText("Run /help", TIMEOUT);
-        rmSync(savedLink);
-        symlinkSync(second, savedLink, "dir");
-        await session.sendText(`/workspace add ${addedRoot}`);
-        await session.waitForText(addedRoot, TIMEOUT);
-        await session.sendText("/quit");
-        await session.waitForSessionEnd(TIMEOUT);
-        session = null;
-
-        const stored = JSON.parse(readFileSync(settingsPath, "utf8"));
-        expect(stored.workspaces[workspaceRoot].additional_directories).toEqual([
-          firstRoot,
-          addedRoot,
-        ]);
-        rmSync(savedLink);
-
-        secondSession = await TmuxSession.create({
-          cwd: workspaceRoot,
-          env,
-          stderrPath: stderrBPath,
-        });
-        await secondSession.waitForText("Run /help", TIMEOUT);
-        await secondSession.sendText("/workspace list");
-        await secondSession.waitForText(firstRoot, TIMEOUT);
-        await secondSession.waitForText(addedRoot, TIMEOUT);
-        const pane = await secondSession.capturePaneGrid();
-        expect(pane).not.toContain(secondRoot);
-        await secondSession.sendText("/quit");
-        await secondSession.waitForSessionEnd(TIMEOUT);
-        secondSession = null;
-
-        expect(readFileSync(stderrAPath, "utf8")).toBe("");
-        expect(readFileSync(stderrBPath, "utf8")).toBe("");
-      } finally {
-        rmSync(root, { recursive: true, force: true });
-      }
-    },
-    60_000,
-  );
-
-  serialTest(
-    "workspace slash mutations persist across restart and remove cleanly",
-    async () => {
-      const root = mkdtempSync(join(tmpdir(), "fx-workspace-slash-persistence-"));
-      try {
-        const home = join(root, "home");
-        const workspace = join(root, "workspace");
-        const shared = join(root, "shared project");
-        const stderrAPath = join(root, "stderr-a.log");
-        const stderrBPath = join(root, "stderr-b.log");
-        mkdirSync(join(home, ".fx"), { recursive: true, mode: 0o700 });
-        mkdirSync(workspace);
-        mkdirSync(shared);
-        const workspaceRoot = realpathSync(workspace);
-        const sharedRoot = realpathSync(shared);
-        const env = {
-          ...NO_AUTH,
-          HOME: home,
-        };
-
-        session = await TmuxSession.create({
-          cwd: workspaceRoot,
-          env,
-          stderrPath: stderrAPath,
-        });
-        await session.waitForText("Run /help", TIMEOUT);
-        await session.sendText(`/workspace add ${sharedRoot}`);
-        await session.waitForPane(
-          (pane) =>
-            pane.replace(/\s+/g, "").includes(
-              "saved_changed=trueruntime_changed=true",
-            ),
-          TIMEOUT,
-        );
-        await session.sendText("/quit");
-        await session.waitForSessionEnd(TIMEOUT);
-        session = null;
-
-        const stored = JSON.parse(
-          readFileSync(join(home, ".fx", "settings.json"), "utf8"),
-        );
-        expect(stored.workspaces[workspaceRoot].additional_directories).toEqual([
-          sharedRoot,
-        ]);
-
-        secondSession = await TmuxSession.create({
-          cwd: workspaceRoot,
-          env,
-          stderrPath: stderrBPath,
-        });
-        await secondSession.waitForText("Run /help", TIMEOUT);
-        await secondSession.sendText("/workspace list");
-        await secondSession.waitForText(sharedRoot, TIMEOUT);
-        await secondSession.waitForPane(
-          (pane) => pane.replaceAll("\n", "").includes("active=true"),
-          TIMEOUT,
-        );
-        await secondSession.sendText(`/workspace remove ${sharedRoot}`);
-        await secondSession.waitForText("additional directories: (none)", TIMEOUT);
-        await secondSession.sendText("/quit");
-        await secondSession.waitForSessionEnd(TIMEOUT);
-        secondSession = null;
-
-        const cleared = JSON.parse(
-          readFileSync(join(home, ".fx", "settings.json"), "utf8"),
-        );
-        expect(cleared.workspaces?.[workspaceRoot]?.additional_directories).toBeUndefined();
-        expect(readFileSync(stderrAPath, "utf8")).toBe("");
-        expect(readFileSync(stderrBPath, "utf8")).toBe("");
-      } finally {
-        rmSync(root, { recursive: true, force: true });
-      }
-    },
-    60_000,
-  );
-
-  serialTest(
-    "workspace list marks a directory deleted during the session unavailable",
-    async () => {
-      const root = mkdtempSync(join(tmpdir(), "fx-workspace-live-availability-"));
-      try {
-        const home = join(root, "home");
-        const workspace = join(root, "workspace");
-        const shared = join(root, "shared");
-        const stderrPath = join(root, "stderr.log");
-        mkdirSync(join(home, ".fx"), { recursive: true, mode: 0o700 });
-        mkdirSync(workspace);
-        mkdirSync(shared);
-        const workspaceRoot = realpathSync(workspace);
-        const sharedRoot = realpathSync(shared);
-        const env = {
-          ...NO_AUTH,
-          HOME: home,
-        };
-
-        session = await TmuxSession.create({
-          cwd: workspaceRoot,
-          env,
-          stderrPath,
-        });
-        await session.waitForText("Run /help", TIMEOUT);
-        await session.sendText(`/workspace add ${sharedRoot}`);
-        await session.waitForPane(
-          (pane) =>
-            pane.replace(/\s+/g, "").includes(
-              `${sharedRoot}saved=truecommand_line=falseavailable=trueactive=true`,
-            ),
-          TIMEOUT,
-        );
-
-        rmSync(sharedRoot, { recursive: true });
-        await session.sendText("/workspace list");
-        await session.waitForPane(
-          (pane) =>
-            pane.replace(/\s+/g, "").includes(
-              `${sharedRoot}saved=truecommand_line=falseavailable=falseactive=false`,
-            ),
-          TIMEOUT,
-        );
-        const scrollback = await session.captureFullScrollback();
-        expect(scrollback.replace(/\s+/g, "")).toContain(
-          `${sharedRoot}saved=truecommand_line=falseavailable=falseactive=false`,
-        );
-
-        await session.sendText("/quit");
-        await session.waitForSessionEnd(TIMEOUT);
-        session = null;
-        expect(readFileSync(stderrPath, "utf8")).toBe("");
-      } finally {
-        rmSync(root, { recursive: true, force: true });
-      }
-    },
-    60_000,
-  );
-
-  serialTest(
-    "workspace list restores canonical access through a new symlinked ancestor",
-    async () => {
-      const root = mkdtempSync(join(tmpdir(), "fx-workspace-restored-canonical-"));
-      try {
-        const home = join(root, "home");
-        const workspace = join(root, "workspace");
-        const realParent = join(root, "real-parent");
-        const shared = join(realParent, "shared");
-        const parentLink = join(root, "parent-link");
-        const source = join(parentLink, "shared");
-        const stderrPath = join(root, "stderr.log");
-        const fixture = "RESTORED_CANONICAL_ROOT_FIXTURE";
-        const instructionSentinel = "RESTORED_ROOT_AGENTS_MUST_NOT_LOAD";
-        mkdirSync(join(home, ".fx"), { recursive: true, mode: 0o700 });
-        mkdirSync(workspace);
-        mkdirSync(shared, { recursive: true });
-        writeFileSync(join(shared, "fixture.txt"), `${fixture}\n`);
-        writeFileSync(join(shared, "AGENTS.md"), `${instructionSentinel}\n`);
-        const workspaceRoot = realpathSync(workspace);
-        const sharedRoot = realpathSync(shared);
-        writeFileSync(
-          join(home, ".fx", "settings.json"),
-          JSON.stringify({
-            sandbox: "none",
-            permission_mode: "auto",
-            permission: {},
-            workspaces: {
-              [workspaceRoot]: { additional_directories: [source] },
-            },
-          }),
-        );
-
-        const gateway = startFakeGateway([
-          fakeGatewayToolCall("restored-root-read", "read_file", {
-            path: join(source, "fixture.txt"),
-            line_count: 10,
-          }),
-          fakeGatewayFinalText("RESTORED_CANONICAL_ROOT_COMPLETE"),
-        ]);
-        try {
-          session = await TmuxSession.create({
-            cwd: workspaceRoot,
-            env: {
-              HOME: home,
-              AI_GATEWAY_API_KEY: "fake-restored-root-key",
-              VERCEL_OIDC_TOKEN: undefined,
-              FX_AUTO_UPGRADE: "0",
-              FX_GATEWAY_BASE_URL: gateway.baseUrl,
-              FX_GATEWAY_CHAT_URL: gateway.chatUrl,
-              FX_E2E_GATEWAY_CHAT_URL: gateway.chatUrl,
-              FX_MODEL: FAKE_GATEWAY_MODEL,
-            },
-            stderrPath,
-          });
-          await session.waitForText("Run /help", TIMEOUT);
-
-          symlinkSync(realParent, parentLink, "dir");
-          await session.sendText("/workspace list");
-          await session.waitForPane(
-            (pane) =>
-              pane.replace(/\s+/g, "").includes(
-                `${sharedRoot}saved=truecommand_line=falseavailable=trueactive=true`,
-              ),
-            TIMEOUT,
-          );
-
-          await session.sendText("Read the restored workspace fixture once.");
-          await session.waitForText("RESTORED_CANONICAL_ROOT_COMPLETE", TIMEOUT);
-          expect(gateway.requests).toHaveLength(2);
-          for (const request of gateway.requests) {
-            expect(request.body).not.toContain(instructionSentinel);
-            expect(request.body).not.toContain("target outside workspace");
-            expect(request.body).not.toContain("Not executed");
-          }
-          expect(gateway.requests[1]!.body).toContain(fixture);
-          expect(readFileSync(stderrPath, "utf8")).toBe("");
-          expect(session.isAlive()).toBe(true);
-          expect(session.isPaneAlive()).toBe(true);
-
-          await session.sendText("/quit");
-          await session.waitForSessionEnd(TIMEOUT);
-          session = null;
-        } finally {
-          gateway.stop();
-        }
-      } finally {
-        rmSync(root, { recursive: true, force: true });
-      }
-    },
-    60_000,
-  );
-
-  serialTest(
-    "workspace slash removal explains launch restoration and uses friendly errors",
-    async () => {
-      const root = mkdtempSync(join(tmpdir(), "fx-workspace-launch-removal-"));
-      try {
-        const home = join(root, "home");
-        const workspace = join(root, "workspace");
-        const shared = join(root, "shared");
-        const unknown = join(root, "unknown");
-        const stderrPath = join(root, "stderr.log");
-        mkdirSync(join(home, ".fx"), { recursive: true, mode: 0o700 });
-        mkdirSync(workspace);
-        mkdirSync(shared);
-        mkdirSync(unknown);
-        const workspaceRoot = realpathSync(workspace);
-        const sharedRoot = realpathSync(shared);
-        const unknownRoot = realpathSync(unknown);
-        const env = {
-          ...NO_AUTH,
-          HOME: home,
-        };
-
-        session = await TmuxSession.create({
-          cmd: `${FX_BIN} --add-dir ${sharedRoot}`,
-          cwd: workspaceRoot,
-          env,
-          stderrPath,
-        });
-        await session.waitForText("Run /help", TIMEOUT);
-        await session.sendText(`/workspace remove ${unknownRoot}`);
-        await session.waitForText(
-          "Workspace update rejected: directory is not configured as an additional workspace",
-          TIMEOUT,
-        );
-        await session.sendText(`/workspace remove ${workspaceRoot}`);
-        await session.waitForText(
-          "the primary workspace cannot be added or removed",
-          TIMEOUT,
-        );
-        let pane = await session.capturePaneGrid();
-        expect(pane).not.toContain("PrimaryDirectory");
-
-        await session.sendText(`/workspace remove ${sharedRoot}`);
-        await session.waitForPane(
-          (pane) =>
-            pane.replaceAll("\n", "").includes("launch_flag_can_restore=true"),
-          TIMEOUT,
-        );
-        await session.waitForText(
-          "warning: repeating --add-dir can restore removed access on the next launch",
-          TIMEOUT,
-        );
-        await session.waitForText("additional directories: (none)", TIMEOUT);
-        pane = await session.capturePaneGrid();
-        expect(pane).not.toContain("PrimaryDirectory");
-
-        await session.sendText("/quit");
-        await session.waitForSessionEnd(TIMEOUT);
-        session = null;
-
-        const settingsPath = join(home, ".fx", "settings.json");
-        if (statSync(settingsPath, { throwIfNoEntry: false })) {
-          const stored = JSON.parse(readFileSync(settingsPath, "utf8"));
-          expect(
-            stored.workspaces?.[workspaceRoot]?.additional_directories,
-          ).toBeUndefined();
-        }
-        expect(readFileSync(stderrPath, "utf8")).toBe("");
-      } finally {
-        rmSync(root, { recursive: true, force: true });
-      }
-    },
-    45_000,
-  );
 });

@@ -41,8 +41,6 @@ const command_specs = @import("../slash_commands/command_specs.zig");
 const types = @import("../shared/types.zig");
 const subagent_input = @import("../subagent/input_action.zig");
 const worker_runtime = @import("../agent/worker_runtime.zig");
-const auto_upgrade = @import("../upgrade/auto_upgrade.zig");
-const upgrade_helpers = @import("../upgrade/upgrade_helpers.zig");
 const test_ui_input = @import("../../ui/input/runtime.zig");
 const visual_layout = @import("../../ui/input/visual_layout.zig");
 const approval_ui = @import("../../ui/footer/approval_ui.zig");
@@ -68,13 +66,11 @@ const input_question_runtime = @import("input_question_runtime.zig");
 const input_full_transcript_runtime = @import("input_full_transcript_runtime.zig");
 const input_selection_runtime = @import("input_selection_runtime.zig");
 const input_limit_feedback = @import("input_limit_feedback.zig");
-const app_upgrade_runtime = @import("app_upgrade_runtime.zig");
 
 const ModelPickerStage = picker_state.ModelPickerStage;
 const ToolPermissionDecision = types.ToolPermissionDecision;
 
 pub const file_picker_completion_cap = input_completion_runtime.file_picker_completion_cap;
-const ctrl_g_upgrade_byte: u8 = 7;
 const ctrl_x_manager_byte: u8 = 24;
 
 fn classifyResumeFailure(err: anyerror) session_catalog.ResumeFailure {
@@ -896,7 +892,6 @@ pub fn Runtime(comptime App: type) type {
                 try handleTextByte(app, .composer, byte, max_input_len);
                 return;
             }
-            if (try routeUpgradeShortcut(app, byte)) return;
             if (routePickerControlByte(app, byte)) return;
 
             if (isComposerEditingByte(byte, raw.composer_shortcut) and
@@ -1158,24 +1153,12 @@ pub fn Runtime(comptime App: type) type {
             return true;
         }
 
-        fn routeUpgradeShortcut(app: *App, byte: u8) !bool {
-            if (byte != ctrl_g_upgrade_byte) return false;
-            if (comptime @hasDecl(App, "applyReadyUpgradeShortcut")) {
-                try app.applyReadyUpgradeShortcut();
-            }
-            return true;
-        }
-
         fn routeActiveModalInput(
             app: *App,
             raw: input_action.RawTerminalInput,
             max_input_len: usize,
         ) !bool {
             const byte = raw.byte;
-            if ((app.question_prompt.isActive() or approvalOwnsCurrentSurface(app)) and byte == ctrl_g_upgrade_byte) {
-                _ = try routeUpgradeShortcut(app, byte);
-                return true;
-            }
             // A presented child approval is resolvable from the main chat or
             // the manager, so only that exact modal may delegate Ctrl-X.
             if ((comptime runtime_profile.allows(App, .subagents)) and
@@ -1428,13 +1411,15 @@ pub fn Runtime(comptime App: type) type {
                 },
                 ' ' => {
                     dismissMentionSkillsMenuForSpace(app);
+                    var advanced_model_picker = false;
                     if (app.input_runtime.edit_state.selectionRange() == null and
                         !commandSkillsMenuActive(app) and
                         completion_rt.hasModelQuery(app))
                     {
-                        if (try completion_rt.advanceModelPickerOnSpace(app)) {
-                            app.shell.render_requests.request(.footer);
-                        }
+                        advanced_model_picker = try completion_rt.advanceModelPickerOnSpace(app);
+                    }
+                    if (advanced_model_picker) {
+                        app.shell.render_requests.request(.footer);
                     } else {
                         switch (try insertComposerSliceBounded(app, " ", max_input_len, false)) {
                             .inserted => {
@@ -2866,23 +2851,6 @@ const RoutingSubagents = struct {
     }
 };
 
-const RoutingUpgradeStatus = struct {
-    state: auto_upgrade.State = .ready,
-    stop_count: usize = 0,
-
-    pub fn getState(self: *const RoutingUpgradeStatus) auto_upgrade.State {
-        return self.state;
-    }
-
-    pub fn stop(self: *RoutingUpgradeStatus) void {
-        self.stop_count += 1;
-    }
-
-    pub fn statusLabel(_: *const RoutingUpgradeStatus, _: []u8) []const u8 {
-        return "";
-    }
-};
-
 const RoutingWorker = struct {
     submitted_permission: ?ToolPermissionDecision = null,
     submitted_permission_feedback: [64]u8 = undefined,
@@ -3085,7 +3053,6 @@ const RoutingFakeApp = struct {
     worker: RoutingWorker = .{},
     subagents: RoutingSubagents = .{},
     permission_engine: permissions.PermissionEngine = .{},
-    upgrader: RoutingUpgradeStatus = .{},
     pending_images: std.ArrayList(types.ImageAttachment) = .empty,
     next_image_id_counter: usize = 1,
     selected_model: std.ArrayList(u8) = .empty,
@@ -3144,8 +3111,6 @@ const RoutingFakeApp = struct {
     load_more_session_count: usize = 0,
     selected_credential_source: ?types.CredentialSource = null,
     selected_auth_action: ?auth_runtime.AcquisitionAction = null,
-    upgrade_apply_count: usize = 0,
-    upgrade_denied_count: usize = 0,
     suspend_count: usize = 0,
     workspace_access: app_workspace_runtime.Access = .{},
 
@@ -3391,30 +3356,6 @@ const RoutingFakeApp = struct {
         return true;
     }
 
-    pub fn prepareResumeHandoffForUpgrade(_: *RoutingFakeApp) !void {}
-
-    pub fn requestUpgradeRelaunch(
-        self: *RoutingFakeApp,
-        _: []const u8,
-    ) !void {
-        self.upgrade_apply_count += 1;
-    }
-
-    pub fn requestResumeHandoffForUpgrade(_: *RoutingFakeApp) void {}
-
-    pub fn applyReadyUpgradeShortcut(self: *RoutingFakeApp) !void {
-        const outcome = try app_upgrade_runtime.Runtime(RoutingFakeApp).applyReadyUpgradeWithDeps(
-            self,
-            .{
-                .ctx = self,
-                .current_executable_path = currentExecutablePathForRouting,
-            },
-        );
-        if (outcome != .relaunch_requested) {
-            self.upgrade_denied_count += 1;
-        }
-    }
-
     pub fn nextImageId(self: *RoutingFakeApp) usize {
         return image_attachments.allocateImageId(&self.next_image_id_counter);
     }
@@ -3516,16 +3457,6 @@ fn routingOpenUrl(
     _: []const u8,
 ) host.UrlOpenError!bool {
     return false;
-}
-
-fn currentExecutablePathForRouting(
-    _: ?*anyopaque,
-    executable_buf: []u8,
-) upgrade_helpers.ExecutablePathError![]const u8 {
-    const executable_path = "/tmp/fx-routing-upgraded";
-    if (executable_path.len > executable_buf.len) return error.PathTooLong;
-    @memcpy(executable_buf[0..executable_path.len], executable_path);
-    return executable_buf[0..executable_path.len];
 }
 
 fn readTraceFileForTest(alloc: std.mem.Allocator, path: []const u8) ![]u8 {
@@ -3784,7 +3715,7 @@ test "app_input_runtime routes auth picker navigation before composer history" {
     const alloc = std.testing.allocator;
     var app = try RoutingFakeApp.init(alloc);
     defer app.deinit();
-    app.auth.source_inventory = auth_runtime.SourceSet.initMany(&.{ .ai_gateway_api_key, .stored_key });
+    app.auth.source_inventory = auth_runtime.SourceSet.initOne(.openai_api_key);
     app.auth.openPicker(alloc);
 
     try Runtime(RoutingFakeApp).routeModifiedHistory(&app, .down, 1);
@@ -3797,7 +3728,7 @@ test "app_input_runtime Tab cycles the active auth picker" {
     const alloc = std.testing.allocator;
     var app = try RoutingFakeApp.init(alloc);
     defer app.deinit();
-    app.auth.source_inventory = auth_runtime.SourceSet.initMany(&.{ .ai_gateway_api_key, .stored_key });
+    app.auth.source_inventory = auth_runtime.SourceSet.initOne(.openai_api_key);
     app.auth.openPicker(alloc);
 
     try Runtime(RoutingFakeApp).handleByte(&app, '\t', 4096, 100);
@@ -3884,22 +3815,21 @@ test "app_input_runtime auth picker enter closes before selecting a switched sou
     const alloc = std.testing.allocator;
     var app = try RoutingFakeApp.init(alloc);
     defer app.deinit();
-    app.auth.source_inventory = auth_runtime.SourceSet.initMany(&.{ .ai_gateway_api_key, .stored_key });
+    app.auth.source_inventory = auth_runtime.SourceSet.initOne(.openai_api_key);
     app.auth.openPicker(alloc);
     app.auth.openSwitchCredentialPicker(alloc);
-    _ = app.auth.movePicker(1);
 
     try Runtime(RoutingFakeApp).handleByte(&app, '\r', 4096, 100);
 
     try std.testing.expect(!app.auth.pickerView().active);
-    try std.testing.expectEqual(types.CredentialSource.stored_key, app.selected_credential_source.?);
+    try std.testing.expectEqual(types.CredentialSource.openai_api_key, app.selected_credential_source.?);
 }
 
 test "app_input_runtime auth picker delegates typed acquisition actions" {
     const alloc = std.testing.allocator;
     var app = try RoutingFakeApp.init(alloc);
     defer app.deinit();
-    app.auth.source_inventory = auth_runtime.SourceSet.initMany(&.{ .ai_gateway_api_key, .stored_key });
+    app.auth.source_inventory = auth_runtime.SourceSet.initOne(.openai_api_key);
     app.auth.openPicker(alloc);
 
     try Runtime(RoutingFakeApp).handleByte(&app, '\r', 4096, 100);
@@ -3912,7 +3842,7 @@ test "app_input_runtime Escape closes auth picker without arming composer clear"
     const alloc = std.testing.allocator;
     var app = try RoutingFakeApp.init(alloc);
     defer app.deinit();
-    app.auth.source_inventory = auth_runtime.SourceSet.initOne(.ai_gateway_api_key);
+    app.auth.source_inventory = auth_runtime.SourceSet.initOne(.openai_api_key);
     app.auth.openPicker(alloc);
 
     try Runtime(RoutingFakeApp).resolveEscape(&app, false, 1);
@@ -3938,7 +3868,7 @@ test "app_input_runtime auth stage Escape pops before closing the picker" {
     const alloc = std.testing.allocator;
     var app = try RoutingFakeApp.init(alloc);
     defer app.deinit();
-    app.auth.source_inventory = auth_runtime.SourceSet.initOne(.stored_key);
+    app.auth.source_inventory = auth_runtime.SourceSet.initOne(.openai_api_key);
     app.auth.openPicker(alloc);
 
     for (0..3) |_| _ = app.auth.movePicker(1);
@@ -4098,7 +4028,7 @@ test "app_input_runtime composer editing dismisses auth picker before inserting"
     const alloc = std.testing.allocator;
     var app = try RoutingFakeApp.init(alloc);
     defer app.deinit();
-    app.auth.source_inventory = auth_runtime.SourceSet.initOne(.ai_gateway_api_key);
+    app.auth.source_inventory = auth_runtime.SourceSet.initOne(.openai_api_key);
     app.auth.openPicker(alloc);
 
     try Runtime(RoutingFakeApp).handleByte(&app, 'x', 4096, 100);
@@ -5665,6 +5595,36 @@ test "model picker spaces do not commit before enter" {
     try std.testing.expectEqualStrings(
         "/model anthropic/claude-sonnet-4.6 auto",
         app.input_runtime.edit_state.input.items,
+    );
+}
+
+test "typing a no-control model selection keeps trailing arguments local until enter" {
+    const alloc = std.testing.allocator;
+    const model = "openai/gpt-5";
+    const command = "/model " ++ model ++ " auto normal";
+    const completions = [_][]const u8{model};
+    var app = try RoutingFakeApp.init(alloc);
+    defer app.deinit();
+    app.model_completion_values = &completions;
+    app.stream.active = true;
+
+    for (command) |byte| {
+        try Runtime(RoutingFakeApp).handleByte(&app, byte, 4096, 100);
+    }
+
+    try std.testing.expectEqualStrings(command, app.input_runtime.edit_state.input.items);
+    try std.testing.expectEqual(@as(usize, 0), app.preference_commit_count);
+    try std.testing.expectEqual(@as(usize, 0), app.submitted_prompt_count);
+
+    try Runtime(RoutingFakeApp).handleByte(&app, '\r', 4096, 100);
+
+    try std.testing.expectEqualStrings("", app.input_runtime.edit_state.input.items);
+    try std.testing.expectEqual(@as(usize, 1), app.preference_commit_count);
+    try std.testing.expectEqual(@as(usize, 0), app.submitted_prompt_count);
+    try std.testing.expectEqualStrings(model, app.selected_model.items);
+    try std.testing.expectEqualStrings(
+        "Next turn will use " ++ model,
+        app.notice_body.items,
     );
 }
 
@@ -7245,42 +7205,6 @@ test "app_input_runtime remapped ctrl+c reaches prompt cancellation" {
     }
 }
 
-test "app_input_runtime ctrl+g invokes upgrade shortcut without composer mutation" {
-    const alloc = std.testing.allocator;
-    var app = try RoutingFakeApp.init(alloc);
-    defer app.deinit();
-
-    try Runtime(RoutingFakeApp).handleByte(&app, ctrl_g_upgrade_byte, 4096, 100);
-
-    try std.testing.expectEqual(@as(usize, 1), app.upgrade_apply_count);
-    try std.testing.expectEqual(@as(usize, 0), app.upgrade_denied_count);
-    try std.testing.expectEqual(@as(usize, 0), app.input_runtime.edit_state.input.items.len);
-    try std.testing.expectEqual(@as(usize, 0), app.submitted_prompt_count);
-}
-
-test "app_input_runtime immediate ctrl+g follows bare Escape" {
-    const alloc = std.testing.allocator;
-    var app = try RoutingFakeApp.init(alloc);
-    defer app.deinit();
-
-    try feedRoutingBytes(&app, "\x1b\x07");
-
-    try std.testing.expectEqual(@as(usize, 1), app.upgrade_apply_count);
-    try std.testing.expectEqual(@as(usize, 0), app.upgrade_denied_count);
-    try std.testing.expectEqual(@as(u8, 0), app.terminal_input_runtime.terminal_action_decoder.stage);
-}
-
-test "app_input_runtime ctrl+r no longer invokes the ready upgrade shortcut" {
-    const alloc = std.testing.allocator;
-    var app = try RoutingFakeApp.init(alloc);
-    defer app.deinit();
-
-    try Runtime(RoutingFakeApp).handleByte(&app, 18, 4096, 100);
-
-    try std.testing.expectEqual(@as(usize, 0), app.upgrade_apply_count);
-    try std.testing.expectEqual(@as(usize, 0), app.upgrade_denied_count);
-}
-
 test "app_input_runtime ctrl+z suspends to job control without composer mutation" {
     const alloc = std.testing.allocator;
     var app = try RoutingFakeApp.init(alloc);
@@ -7383,40 +7307,6 @@ test "app_input_runtime ctrl+d does not exit while a response is streaming" {
     try Runtime(RoutingFakeApp).handleByte(&app, 4, 4096, 100);
 
     try std.testing.expect(!app.should_exit);
-}
-
-test "app_input_runtime ctrl+g is denied while stream or modal owns state" {
-    const alloc = std.testing.allocator;
-
-    {
-        var app = try RoutingFakeApp.init(alloc);
-        defer app.deinit();
-        app.stream.active = true;
-
-        try Runtime(RoutingFakeApp).handleByte(&app, ctrl_g_upgrade_byte, 4096, 100);
-
-        try std.testing.expectEqual(@as(usize, 0), app.upgrade_apply_count);
-        try std.testing.expectEqual(@as(usize, 1), app.upgrade_denied_count);
-        try std.testing.expect(std.mem.find(u8, app.transcript.items, "response finishes") != null);
-    }
-
-    {
-        var app = try RoutingFakeApp.init(alloc);
-        defer app.deinit();
-        const opts = [_]types.QuestionOption{
-            .{ .label = "Alpha", .description = null },
-        };
-        const entries = [_]types.QuestionBatchEntry{
-            .{ .question = "Continue?", .options = &opts },
-        };
-        try app.question_prompt.syncFrom(alloc, &entries);
-
-        try Runtime(RoutingFakeApp).handleByte(&app, ctrl_g_upgrade_byte, 4096, 100);
-
-        try std.testing.expectEqual(@as(usize, 0), app.upgrade_apply_count);
-        try std.testing.expectEqual(@as(usize, 1), app.upgrade_denied_count);
-        try std.testing.expect(app.question_prompt.isActive());
-    }
 }
 
 test "app_input_runtime ctrl+c drops an active approval amendment" {
@@ -7618,8 +7508,8 @@ fn openRoutingModelMenu(app: *RoutingFakeApp, model_ids: []const []const u8) !vo
 }
 
 fn openRoutingAuthPicker(app: *RoutingFakeApp) !void {
-    app.auth.source_inventory.insert(.vercel_oidc_token);
-    app.auth.source_inventory.insert(.ai_gateway_api_key);
+    app.auth.source_inventory.insert(.openai_api_key);
+    app.auth.source_inventory.insert(.openai_api_key);
     app.auth.openPicker(app.alloc);
     try std.testing.expect(app.auth.movePicker(1));
     try std.testing.expectEqual(@as(usize, 4), app.auth.pickerView().choiceCount());

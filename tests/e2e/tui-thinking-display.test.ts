@@ -2,7 +2,13 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startFakeGateway, TmuxSession, tmuxAvailable } from "./tmux-helpers";
+import {
+  responseCompleted,
+  responseTextDelta,
+  startFakeGateway,
+  TmuxSession,
+  tmuxAvailable,
+} from "./tmux-helpers";
 
 const TIMEOUT = 30_000;
 const MODEL = "openai/gpt-5";
@@ -22,32 +28,29 @@ function reasoningStream(reasoning: string, answer: string) {
   return new Response(
     new ReadableStream<Uint8Array>({
       async start(controller) {
-        controller.enqueue(encoder.encode(send({ type: "reasoning-start", id: "r1" })));
         // Stream one line per chunk, as a provider does, so each chunk drains
         // through the worker-event queue separately.
         for (const [index, line] of reasoning.split("\n").entries()) {
           controller.enqueue(
             encoder.encode(
-              send({ type: "reasoning-delta", id: "r1", delta: `${line}\n` }),
+              send({
+                type: "response.reasoning_summary_text.delta",
+                item_id: "r1",
+                output_index: 0,
+                summary_index: 0,
+                delta: `${line}\n`,
+              }),
             ),
           );
           // Keep the completed heading on screen long enough to prove the
           // live activity state before the finalized summary replaces it.
           await Bun.sleep(index === 0 ? 250 : 10);
         }
-        controller.enqueue(encoder.encode(send({ type: "reasoning-end", id: "r1" })));
-        controller.enqueue(encoder.encode(send({ type: "text-start", id: "a1" })));
         controller.enqueue(
-          encoder.encode(send({ type: "text-delta", id: "a1", delta: answer })),
+          encoder.encode(send(responseTextDelta(answer, "a1", 1))),
         );
         controller.enqueue(
-          encoder.encode(
-            send({
-              type: "finish",
-              finishReason: { unified: "stop", raw: "stop" },
-              usage: { inputTokens: { total: 4 }, outputTokens: { total: 8 } },
-            }),
-          ),
+          encoder.encode(send(responseCompleted(4, 8))),
         );
         controller.enqueue(encoder.encode("data: [DONE]\n\n"));
         controller.close();
@@ -96,7 +99,7 @@ describe.skipIf(!tmuxAvailable())("TUI thinking display", () => {
       ].join("\n");
 
       gateway = startFakeGateway([() => reasoningStream(reasoning, ANSWER)], {
-        models: [{ id: MODEL, type: "language", tags: ["reasoning", "tool-use"] }],
+        models: [{ id: "gpt-5", object: "model", owned_by: "openai" }],
       });
 
       session = await TmuxSession.create({
@@ -107,14 +110,9 @@ describe.skipIf(!tmuxAvailable())("TUI thinking display", () => {
         stderrPath,
         env: {
           HOME: home,
-          AI_GATEWAY_API_KEY: "fake-tui-thinking-key",
-          VERCEL_OIDC_TOKEN: undefined,
-          FX_AUTO_UPGRADE: "0",
+          OPENAI_API_KEY: "fake-tui-thinking-key",
           FX_PERMISSION_MODE: "auto",
-          FX_GATEWAY_BASE_URL: gateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
-          FX_E2E_GATEWAY_CHAT_URL: gateway.chatUrl,
-          FX_E2E_GATEWAY_MODELS_URL: `${gateway.baseUrl}/coding-agent/v1/models`,
+          FX_RESPONSES_BASE_URL: gateway.baseUrl,
           FX_MODEL: MODEL,
         },
       });

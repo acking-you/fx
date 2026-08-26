@@ -198,14 +198,6 @@ pub const top_level_specs = [_]TopLevelSpec{
         },
     },
     .{
-        .kind = .credits,
-        .token = "credits",
-        .aliases = &.{"balance"},
-        .usage = "credits [--json]",
-        .summary = "Show the AI Gateway credit balance",
-        .options = &.{json_option},
-    },
-    .{
         .kind = .usage,
         .token = "usage",
         .usage = "usage [--period <24h|7d|30d>|--codex] [--json]",
@@ -218,17 +210,6 @@ pub const top_level_specs = [_]TopLevelSpec{
         .details = &.{
             "Reports only usage recorded by fx on this machine.",
             "With --codex, queries the signed-in Codex account instead of local state.",
-            "This command does not query account-wide AI Gateway reports.",
-        },
-    },
-    .{
-        .kind = .upgrade,
-        .token = "upgrade",
-        .usage = "upgrade [--channel <stable|dev>] [--json]",
-        .summary = "Upgrade 𝒇x on the selected release channel",
-        .options = &.{
-            .{ .flag = "--channel <stable|dev>", .description = "Select and remember the release channel" },
-            json_option,
         },
     },
     .{
@@ -285,7 +266,6 @@ pub const top_level_help_groups = [_]TopLevelHelpGroup{
         .{ .kind = .login, .usage = "login <codex|grok>" },
         .{ .kind = .logout, .usage = "logout <codex|grok>" },
         .{ .kind = .provider, .usage = "provider <gateway|codex|grok>" },
-        .{ .kind = .credits, .usage = "credits|balance" },
         .{ .kind = .usage, .usage = "usage [--period <24h|7d|30d>|--codex]" },
     } },
     .{ .entries = &.{
@@ -294,7 +274,6 @@ pub const top_level_help_groups = [_]TopLevelHelpGroup{
         .{ .kind = .models, .usage = "models" },
         .{ .kind = .permissions, .usage = "permissions" },
         .{ .kind = .workspace, .usage = "workspace" },
-        .{ .kind = .upgrade, .usage = "upgrade" },
         .{ .kind = .acp, .usage = "acp" },
         .{ .kind = .help, .usage = "help" },
     } },
@@ -360,8 +339,7 @@ pub const top_level_notes = [_][]const u8{
 };
 
 pub const top_level_resources = [_]TopLevelResource{
-    .{ .label = "Learn more about 𝒇x:", .value = "https://fx.sh/docs", .link = true },
-    .{ .label = "Report a problem:", .value = "run `/feedback` inside 𝒇x" },
+    .{ .label = "Source and documentation:", .value = "https://github.com/acking-you/fx", .link = true },
 };
 
 pub const top_level_registry = TopLevelRegistry{
@@ -427,12 +405,10 @@ pub const slash_specs = [_]SlashSpec{
     .{ .kind = .mcp, .command = "/mcp", .help_entry = "/mcp [list|resource|prompt|add|remove|path|reload|auth|logout]", .completion_description = "manage MCP servers, resources, and prompts", .presentation_category = .extensions, .has_args = true, .accepts_payload = true },
     .{ .kind = .skills, .command = "/skills", .help_entry = "/skills [list|add|install|show|create|remove|path] [name|url|path] ($ opens skill search)", .completion_description = "browse and manage skills", .presentation_category = .extensions, .has_args = true, .accepts_payload = true },
     .{ .kind = .copy, .command = "/copy", .help_entry = "/copy", .completion_description = "copy the last assistant response", .presentation_category = .session },
-    .{ .kind = .feedback, .command = "/feedback", .help_entry = "/feedback", .completion_description = "open the fx feedback form", .presentation_category = .product, .show_in_welcome = true },
     .{ .kind = .trace, .command = "/trace", .help_entry = "/trace", .completion_description = "copy a private diagnostic trace", .presentation_category = .product },
     .{ .kind = .compact, .command = "/compact", .help_entry = "/compact", .completion_description = "compact older conversation turns", .presentation_category = .session },
     .{ .kind = .settings, .command = "/settings", .help_entry = "/settings [startup-scrollback [on|off]]", .completion_description = "browse and update settings", .presentation_category = .appearance, .has_args = true, .accepts_payload = true },
     .{ .kind = .alias, .command = "/alias", .aliases = &.{}, .help_entry = "/alias [name] [command]", .completion_description = "show alias availability", .presentation_category = .extensions, .has_args = true, .accepts_payload = true },
-    .{ .kind = .credits, .command = "/credits", .aliases = &.{"/balance"}, .help_entry = "/credits (/balance)", .completion_description = "show gateway credits balance", .presentation_category = .account, .requires_prompt_credential = true },
     .{ .kind = .paste, .command = "/paste", .help_entry = "/paste", .completion_description = "attach an image from the clipboard when supported", .presentation_category = .media },
     .{ .kind = .fast, .command = "/fast", .help_entry = "/fast", .completion_description = "toggle Fast mode when supported", .presentation_category = .model },
     .{ .kind = .statusline, .command = "/statusline", .help_entry = "/statusline [context|session|workspace]", .completion_description = "toggle status line segments", .presentation_category = .appearance, .has_args = true, .accepts_payload = true },
@@ -528,12 +504,10 @@ test "built-in slash commands register exact active order" {
         "/mcp",
         "/skills",
         "/copy",
-        "/feedback",
         "/trace",
         "/compact",
         "/settings",
         "/alias",
-        "/credits",
         "/paste",
         "/fast",
         "/statusline",
@@ -565,9 +539,6 @@ test "built-in slash registry resolves primary commands and aliases" {
 
     const model = command_specs.matchedSlashPrefix(slash_registry, "/model\tmodel-id", .model) orelse return error.TestExpectedEqual;
     try std.testing.expectEqualStrings("/model", model);
-
-    const credits = slash_registry.lookup("/credits") orelse return error.TestExpectedEqual;
-    try std.testing.expect(credits.requires_prompt_credential);
 
     for ([_][]const u8{ "/model", "/models" }) |command| {
         const catalog_command = slash_registry.lookup(command) orelse return error.TestExpectedEqual;

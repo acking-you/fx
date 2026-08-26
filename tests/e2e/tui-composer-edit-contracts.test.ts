@@ -95,11 +95,9 @@ async function startFx(
       ),
       {
         models: [{
-          id: FAKE_GATEWAY_MODEL,
-          type: "language",
-          tags: ["vision", "file-input", "tool-use"],
-          context_window: 256_000,
-          max_tokens: 64_000,
+          id: "gpt-5",
+          object: "model",
+          owned_by: "openai",
         }],
       },
     );
@@ -110,15 +108,9 @@ async function startFx(
     cwd: workspace,
     env: {
       HOME: home,
-      AI_GATEWAY_API_KEY: withGateway ? "fake-edit-contract-key" : undefined,
-      VERCEL_OIDC_TOKEN: undefined,
-      FX_GATEWAY_BASE_URL: gateway?.baseUrl,
-      FX_GATEWAY_CHAT_URL: gateway?.chatUrl,
-      FX_E2E_GATEWAY_MODELS_URL: gateway
-        ? `${gateway.baseUrl}/coding-agent/v1/models`
-        : undefined,
+      OPENAI_API_KEY: withGateway ? "fake-edit-contract-key" : undefined,
+      FX_RESPONSES_BASE_URL: gateway?.baseUrl,
       FX_MODEL: withGateway ? FAKE_GATEWAY_MODEL : undefined,
-      FX_AUTO_UPGRADE: "0",
       FX_TRACE_LOG: tracePath,
       FX_TRACE_SCOPES: traceScopes,
     },
@@ -191,17 +183,17 @@ function userParts(requestIndex = 0): Array<{
   text?: string;
 }> {
   const body = JSON.parse(gateway!.requests[requestIndex]!.body) as {
-    prompt: Array<{
+    input: Array<{
       role: string;
       content: Array<{ type: string; text?: string }>;
     }>;
   };
-  const message = body.prompt.findLast((entry) => entry.role === "user");
+  const message = body.input.findLast((entry) => entry.role === "user");
   return message?.content ?? [];
 }
 
 function finalUserText(requestIndex = 0): string {
-  return userParts(requestIndex).find((part) => part.type === "text")?.text ??
+  return userParts(requestIndex).find((part) => part.type === "input_text")?.text ??
     "";
 }
 
@@ -221,9 +213,13 @@ function nestedText(content: unknown): string {
 
 function gatewayPromptText(requestIndex = 0): string {
   const body = JSON.parse(gateway!.requests[requestIndex]!.body) as {
-    prompt: Array<{ content: unknown }>;
+    instructions?: string;
+    input: Array<{ content?: unknown }>;
   };
-  return body.prompt.map((message) => nestedText(message.content)).join("\n");
+  return [
+    body.instructions ?? "",
+    ...body.input.map((message) => nestedText(message.content)),
+  ].join("\n");
 }
 
 function expectCleanRuntime(active: TmuxSession): void {
@@ -428,9 +424,6 @@ tmuxTest(
 
     expect(finalUserText()).toBe(prompt);
     expect(gateway!.modelRequests).toHaveLength(1);
-    expect(JSON.parse(gateway!.requests[0]!.body)).toMatchObject({
-      maxOutputTokens: 64_000,
-    });
     expect(await active.captureFullScrollback()).not.toContain(
       "local prompt safety limit",
     );
@@ -459,9 +452,6 @@ tmuxTest(
 
     expect(finalUserText()).toBe(`HEAD-EDIT-${prompt}-TAIL-EDIT`);
     expect(gateway!.modelRequests).toHaveLength(1);
-    expect(JSON.parse(gateway!.requests[0]!.body)).toMatchObject({
-      maxOutputTokens: 64_000,
-    });
     expectCleanRuntime(active);
   },
   TIMEOUT,
@@ -654,7 +644,7 @@ tmuxTest(
     await waitForGatewayRequest();
 
     expect(finalUserText()).toBe("[Image #2][Image #3]");
-    expect(userParts().filter((part) => part.type === "file")).toHaveLength(2);
+    expect(userParts().filter((part) => part.type === "input_image")).toHaveLength(2);
     expectCleanRuntime(active);
   },
   TIMEOUT,
@@ -673,7 +663,7 @@ tmuxTest(
     await waitForGatewayRequest();
 
     expect(finalUserText()).toBe("[Image #2]");
-    expect(userParts().filter((part) => part.type === "file")).toHaveLength(1);
+    expect(userParts().filter((part) => part.type === "input_image")).toHaveLength(1);
     expectCleanRuntime(active);
   },
   TIMEOUT,
@@ -755,8 +745,8 @@ tmuxTest(
 
     expect(finalUserText(0)).toBe("[Image #1] describe history image");
     expect(finalUserText(1)).toBe("[Image #2] describe history image");
-    expect(userParts(0).filter((part) => part.type === "file")).toHaveLength(1);
-    expect(userParts(1).filter((part) => part.type === "file")).toHaveLength(1);
+    expect(userParts(0).filter((part) => part.type === "input_image")).toHaveLength(1);
+    expect(userParts(1).filter((part) => part.type === "input_image")).toHaveLength(1);
     expectCleanRuntime(active);
   },
   TIMEOUT,
@@ -895,7 +885,7 @@ tmuxTest(
     await waitForGatewayRequest();
 
     expect(finalUserText()).toBe("inspect [Image #1],");
-    expect(userParts().filter((part) => part.type === "file")).toHaveLength(1);
+    expect(userParts().filter((part) => part.type === "input_image")).toHaveLength(1);
     expectCleanRuntime(active);
   },
   TIMEOUT,
@@ -913,7 +903,7 @@ tmuxTest(
     await waitForGatewayRequest();
 
     expect(finalUserText()).toBe("[Image #2] duplicate [Image #1]");
-    expect(userParts().filter((part) => part.type === "file")).toHaveLength(1);
+    expect(userParts().filter((part) => part.type === "input_image")).toHaveLength(1);
     expectCleanRuntime(active);
   },
   TIMEOUT,
@@ -932,7 +922,7 @@ tmuxTest(
     await waitForGatewayRequest();
 
     expect(finalUserText()).toBe("[Image #1] TAIL");
-    expect(userParts().filter((part) => part.type === "file")).toHaveLength(1);
+    expect(userParts().filter((part) => part.type === "input_image")).toHaveLength(1);
     expectCleanRuntime(active);
   },
   TIMEOUT,

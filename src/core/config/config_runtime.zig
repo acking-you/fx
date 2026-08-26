@@ -9,7 +9,6 @@ const workspace_access = @import("../workspace/workspace_access.zig");
 const settings_store = @import("settings_store.zig");
 const model_provider = @import("model_provider.zig");
 const model_preferences = @import("model_preferences.zig");
-const update_target = @import("../upgrade/update_target.zig");
 pub const context_limits = @import("context_limits.zig");
 
 const Allocator = std.mem.Allocator;
@@ -48,8 +47,6 @@ pub const Settings = struct {
     context: ?bool = null,
     fast_mode: ?bool = null,
     slash_menu_categories: ?bool = null,
-    auto_upgrade: ?bool = null,
-    update_channel: ?update_target.Channel = null,
     startup_scrollback: ?bool = null,
     prompt_history_enabled: ?bool = null,
     effort: ?types.ReasoningEffort = null,
@@ -555,8 +552,6 @@ fn isProfileOnlySettingKey(key: []const u8) bool {
         "context_limits",
         "skill_match_fuzzy",
         "first_call_tool_choice",
-        "auto_upgrade",
-        "update_channel",
         "permission_mode",
         "credential_source",
         "yolo_acknowledged",
@@ -641,9 +636,6 @@ fn mergeDetailedSettingsLayer(
             .user_workspace => .user_workspace,
             else => .compiled_default,
         });
-        if (source == .user_workspace) {
-            incoming.update_channel = null;
-        }
         updateConfigSources(state.sources, incoming, source);
         if (incoming.has_permission_rules) {
             switch (permission_source) {
@@ -1024,7 +1016,6 @@ fn mergeWorkspaceOverridesFromValue(target: *Settings, alloc: Allocator, root_va
 
     var override_settings = try parseSettingsValueForLayer(alloc, override_val, .profile, true, false);
     defer override_settings.deinit(alloc);
-    override_settings.update_channel = null;
     override_settings.context_limits.retag(.user_workspace);
     mergeSettings(target, &override_settings, alloc);
 }
@@ -1345,19 +1336,6 @@ fn parseProfileOnlyFields(
         settings.slash_menu_categories = value.bool;
     }
 
-    if (root.object.get("auto_upgrade")) |auto_upgrade_value| {
-        const value = auto_upgrade_value;
-        if (value != .bool) return error.InvalidAutoUpgradeType;
-        settings.auto_upgrade = value.bool;
-    }
-
-    if (root.object.get("update_channel")) |update_channel_value| {
-        const value = update_channel_value;
-        if (value != .string) return error.InvalidUpdateChannelType;
-        settings.update_channel = update_target.Channel.parse(value.string) orelse
-            return error.InvalidUpdateChannelValue;
-    }
-
     if (root.object.get("startup_scrollback")) |startup_scrollback_value| {
         const value = startup_scrollback_value;
         if (value != .bool) return error.InvalidStartupScrollbackType;
@@ -1462,8 +1440,6 @@ fn mergeSettings(target: *Settings, incoming: *Settings, alloc: Allocator) void 
     if (incoming.context) |value| target.context = value;
     if (incoming.fast_mode) |value| target.fast_mode = value;
     if (incoming.slash_menu_categories) |value| target.slash_menu_categories = value;
-    if (incoming.auto_upgrade) |value| target.auto_upgrade = value;
-    if (incoming.update_channel) |value| target.update_channel = value;
     if (incoming.startup_scrollback) |value| target.startup_scrollback = value;
     if (incoming.prompt_history_enabled) |value| target.prompt_history_enabled = value;
     if (incoming.effort) |value| target.effort = value;
@@ -2862,12 +2838,12 @@ test "project profile-only settings are ignored and diagnosed by key" {
     try writeFixtureFile(
         tmp.dir,
         "home/.fx/settings.json",
-        "{\"model\":\"profile/model\",\"permission_mode\":\"auto\",\"permission\":{\"bash\":{\"profile *\":\"allow\"}},\"prompt_history\":{\"enabled\":true},\"statusLine\":{\"sandbox\":true,\"context\":false},\"first_call_tool_choice\":\"none\",\"auto_upgrade\":false,\"update_channel\":\"dev\",\"fast_mode\":false,\"input_appearance\":\"tint\",\"maxxing_mode\":\"minimal\",\"slash_menu_categories\":false,\"effort\":\"high\",\"output_level\":\"quiet\",\"startup_scrollback\":false}\n",
+        "{\"model\":\"profile/model\",\"permission_mode\":\"auto\",\"permission\":{\"bash\":{\"profile *\":\"allow\"}},\"prompt_history\":{\"enabled\":true},\"statusLine\":{\"sandbox\":true,\"context\":false},\"first_call_tool_choice\":\"none\",\"fast_mode\":false,\"input_appearance\":\"tint\",\"maxxing_mode\":\"minimal\",\"slash_menu_categories\":false,\"effort\":\"high\",\"output_level\":\"quiet\",\"startup_scrollback\":false}\n",
     );
     try writeFixtureFile(
         tmp.dir,
         "workspace/.fx.json",
-        "{\"model\":\"project/model\",\"permission_mode\":\"ask\",\"permission\":\"deny\",\"prompt_history\":{\"enabled\":false},\"statusLine\":{\"sandbox\":false,\"context\":true},\"skill_match_fuzzy\":true,\"first_call_tool_choice\":\"auto\",\"auto_upgrade\":true,\"update_channel\":\"stable\",\"fast_mode\":true,\"input_appearance\":\"lines\",\"maxxing_mode\":\"normal\",\"slash_menu_categories\":true,\"effort\":\"low\",\"output_level\":\"normal\",\"startup_scrollback\":true,\"max_agent_steps\":17}\n",
+        "{\"model\":\"project/model\",\"permission_mode\":\"ask\",\"permission\":\"deny\",\"prompt_history\":{\"enabled\":false},\"statusLine\":{\"sandbox\":false,\"context\":true},\"skill_match_fuzzy\":true,\"first_call_tool_choice\":\"auto\",\"fast_mode\":true,\"input_appearance\":\"lines\",\"maxxing_mode\":\"normal\",\"slash_menu_categories\":true,\"effort\":\"low\",\"output_level\":\"normal\",\"startup_scrollback\":true,\"max_agent_steps\":17}\n",
     );
 
     const home_root = try io_mod.dirRealpathAlloc(std.testing.allocator, tmp.dir, "home");
@@ -2884,8 +2860,6 @@ test "project profile-only settings are ignored and diagnosed by key" {
     try std.testing.expectEqual(true, result.settings.prompt_history_enabled.?);
     try std.testing.expectEqual(false, result.settings.statusline_context.?);
     try std.testing.expectEqual(types.ToolChoice.none, result.settings.first_call_tool_choice.?);
-    try std.testing.expectEqual(false, result.settings.auto_upgrade.?);
-    try std.testing.expectEqual(update_target.Channel.dev, result.settings.update_channel.?);
     try std.testing.expectEqual(false, result.settings.fast_mode.?);
     try std.testing.expectEqual(false, result.settings.slash_menu_categories.?);
     try std.testing.expectEqual(types.ReasoningEffort.literal("high"), result.settings.effort.?);
@@ -2893,7 +2867,7 @@ test "project profile-only settings are ignored and diagnosed by key" {
     try std.testing.expectEqual(@as(usize, 1), result.settings.permission_rules.rules.len);
     try expectPermissionRule(result.settings.permission_rules.rules[0], "bash", "profile *", .allow);
 
-    try std.testing.expectEqual(@as(usize, 13), result.diagnostics.len);
+    try std.testing.expectEqual(@as(usize, 11), result.diagnostics.len);
     inline for (&.{
         "model",
         "permission_mode",
@@ -2902,8 +2876,6 @@ test "project profile-only settings are ignored and diagnosed by key" {
         "statusLine",
         "skill_match_fuzzy",
         "first_call_tool_choice",
-        "auto_upgrade",
-        "update_channel",
         "fast_mode",
         "slash_menu_categories",
         "effort",
@@ -3400,36 +3372,10 @@ test "invalid user settings report newest valid manual recovery backup" {
     try std.testing.expect(result.settings.models.get(.gateway) == null);
 }
 
-test "update channel resolves only from the global user profile" {
-    const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.createDirPath(io_mod.getIo(), "home/.fx");
-    try tmp.dir.createDirPath(io_mod.getIo(), "workspace");
-
-    const home_root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "home");
-    defer alloc.free(home_root);
-    const workspace_root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "workspace");
-    defer alloc.free(workspace_root);
-    const user_settings = try std.fmt.allocPrint(
-        alloc,
-        "{{\"update_channel\":\"dev\",\"workspaces\":{{\"{s}\":{{\"update_channel\":\"stable\"}}}}}}",
-        .{workspace_root},
-    );
-    defer alloc.free(user_settings);
-
-    try writeFixtureFile(tmp.dir, "home/.fx/settings.json", user_settings);
-    try writeFixtureFile(tmp.dir, "workspace/.fx.json", "{\"update_channel\":\"stable\"}");
-
-    var settings = try loadMergedSettingsFromHome(alloc, home_root, workspace_root);
-    defer settings.deinit(alloc);
-    try std.testing.expectEqual(update_target.Channel.dev, settings.update_channel.?);
-}
-
 test "all currently parsed read-only settings survive detailed loading" {
     var parsed = try parseSettingsJson(
         std.testing.allocator,
-        "{\"permission_mode\":\"yolo\",\"yolo_acknowledged\":true,\"max_agent_steps\":0,\"max_tool_result_bytes\":65536,\"first_call_tool_choice\":\"none\",\"context\":false,\"auto_upgrade\":false,\"update_channel\":\"dev\"}",
+        "{\"permission_mode\":\"yolo\",\"yolo_acknowledged\":true,\"max_agent_steps\":0,\"max_tool_result_bytes\":65536,\"first_call_tool_choice\":\"none\",\"context\":false}",
     );
     defer parsed.deinit(std.testing.allocator);
 
@@ -3439,8 +3385,6 @@ test "all currently parsed read-only settings survive detailed loading" {
     try std.testing.expectEqual(@as(usize, 65536), parsed.max_tool_result_bytes.?);
     try std.testing.expectEqual(types.ToolChoice.none, parsed.first_call_tool_choice.?);
     try std.testing.expectEqual(false, parsed.context.?);
-    try std.testing.expectEqual(false, parsed.auto_upgrade.?);
-    try std.testing.expectEqual(update_target.Channel.dev, parsed.update_channel.?);
 }
 
 test "additional directories load only from the current profile workspace" {

@@ -26,8 +26,6 @@ permissions:
   contents: read
 
 env:
-  AI_GATEWAY_API_KEY: ""
-  VERCEL_OIDC_TOKEN: ""
   FX_SOUND: "0"
 
 jobs:
@@ -65,7 +63,6 @@ jobs:
             --llvm-bin "${{ steps.setup.outputs.llvm-bin }}" \
             --output-dir "$RUNNER_TEMP/fx-pgso-seed" \
             --target aarch64-macos \
-            --update-channel stable \
             --bun "${{ steps.setup.outputs.bun-bin }}" \
             --hyperfine "${{ steps.setup.outputs.hyperfine-bin }}"
 

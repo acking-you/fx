@@ -583,9 +583,7 @@ function baseEnv(root: ReturnType<typeof createRoot>) {
   return {
     HOME: root.home,
     PATH: `${root.bin}${delimiter}${process.env.PATH ?? ""}`,
-    AI_GATEWAY_API_KEY: "fake-mcp-auth-key",
-    VERCEL_OIDC_TOKEN: undefined,
-    FX_AUTO_UPGRADE: "0",
+    OPENAI_API_KEY: "fake-mcp-auth-key",
     FX_PERMISSION_MODE: "auto",
     FX_MODEL: MODEL,
     FX_TRACE_LOG: root.trace,
@@ -637,7 +635,7 @@ function startToolGateway() {
     fakeGatewayToolCall("call_mcp", TOOL_NAME, { text: "authenticated" }),
     fakeGatewayFinalText("Authenticated MCP call complete."),
   ], {
-    models: [{ id: MODEL, type: "language", tags: ["tool-use"] }],
+    models: [{ id: MODEL, object: "model" }],
   });
 }
 
@@ -652,7 +650,7 @@ function startDelayedToolGateway(delayMs: number, finalText: string) {
     },
     fakeGatewayFinalText(finalText),
   ], {
-    models: [{ id: MODEL, type: "language", tags: ["tool-use"] }],
+    models: [{ id: MODEL, object: "model" }],
   });
 }
 
@@ -675,7 +673,7 @@ function startRefreshRecoveryGateway(delayMs: number) {
     }),
     fakeGatewayFinalText("Refresh recovery complete."),
   ], {
-    models: [{ id: MODEL, type: "language", tags: ["tool-use"] }],
+    models: [{ id: MODEL, object: "model" }],
   });
 }
 
@@ -695,19 +693,17 @@ function collectRegularFiles(root: string): string[] {
 
 function toolResultText(body: string, toolCallId: string): string {
   const request = JSON.parse(body) as {
-    prompt?: Array<{ content?: Array<Record<string, unknown>> }>;
+    input?: Array<Record<string, unknown>>;
   };
-  const result = (request.prompt ?? [])
-    .flatMap((message) => message.content ?? [])
+  const result = (request.input ?? [])
     .find((part) =>
-      part.type === "tool-result" && part.toolCallId === toolCallId
+      part.type === "function_call_output" && part.call_id === toolCallId
     );
   if (!result) throw new Error(`Missing tool result for ${toolCallId}`);
-  const output = result.output as Record<string, unknown>;
-  if (output.type !== "text" || typeof output.value !== "string") {
+  if (typeof result.output !== "string") {
     throw new Error(`Invalid tool result for ${toolCallId}`);
   }
-  return output.value;
+  return result.output;
 }
 
 function preserveAuthFailure(
@@ -789,7 +785,7 @@ describe("MCP remote authentication lifecycle", () => {
       }),
       fakeGatewayFinalText("Template authentication failure observed."),
     ], {
-      models: [{ id: MODEL, type: "language", tags: ["tool-use"] }],
+      models: [{ id: MODEL, object: "model" }],
     });
 
     const result = await runFx(
@@ -798,8 +794,7 @@ describe("MCP remote authentication lifecycle", () => {
         cwd: root.workspace,
         env: {
           ...baseEnv(root),
-          FX_GATEWAY_BASE_URL: gateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+                    FX_RESPONSES_BASE_URL: gateway.baseUrl,
         },
         timeoutMs: 25_000,
       },
@@ -876,7 +871,7 @@ describe("MCP remote authentication lifecycle", () => {
       }),
       fakeGatewayFinalText("Authenticated MCP features complete."),
     ], {
-      models: [{ id: MODEL, type: "language", tags: ["tool-use"] }],
+      models: [{ id: MODEL, object: "model" }],
     });
 
     const result = await runFx(
@@ -885,8 +880,7 @@ describe("MCP remote authentication lifecycle", () => {
         cwd: root.workspace,
         env: {
           ...baseEnv(root),
-          FX_GATEWAY_BASE_URL: gateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+                    FX_RESPONSES_BASE_URL: gateway.baseUrl,
         },
         timeoutMs: 25_000,
       },
@@ -965,7 +959,7 @@ describe("MCP remote authentication lifecycle", () => {
       }),
       fakeGatewayFinalText("Private feature rotation failure observed."),
     ], {
-      models: [{ id: MODEL, type: "language", tags: ["tool-use"] }],
+      models: [{ id: MODEL, object: "model" }],
     });
 
     const result = await runFx(
@@ -974,8 +968,7 @@ describe("MCP remote authentication lifecycle", () => {
         cwd: root.workspace,
         env: {
           ...baseEnv(root),
-          FX_GATEWAY_BASE_URL: gateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+                    FX_RESPONSES_BASE_URL: gateway.baseUrl,
           FX_E2E_MCP_AUTH_AUTOMATE: "1",
         },
         timeoutMs: 25_000,
@@ -1091,7 +1084,7 @@ describe("MCP remote authentication lifecycle", () => {
       }),
       fakeGatewayFinalText("Public feature rotation control complete."),
     ], {
-      models: [{ id: MODEL, type: "language", tags: ["tool-use"] }],
+      models: [{ id: MODEL, object: "model" }],
     });
 
     const result = await runFx(
@@ -1100,8 +1093,7 @@ describe("MCP remote authentication lifecycle", () => {
         cwd: root.workspace,
         env: {
           ...baseEnv(root),
-          FX_GATEWAY_BASE_URL: gateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+                    FX_RESPONSES_BASE_URL: gateway.baseUrl,
         },
         timeoutMs: 30_000,
       },
@@ -1184,7 +1176,7 @@ describe("MCP remote authentication lifecycle", () => {
         },
         fakeGatewayFinalText("Resource cache ordering observed."),
       ], {
-        models: [{ id: MODEL, type: "language", tags: ["tool-use"] }],
+        models: [{ id: MODEL, object: "model" }],
       });
 
       const result = await runFx(
@@ -1193,8 +1185,7 @@ describe("MCP remote authentication lifecycle", () => {
           cwd: root.workspace,
           env: {
             ...baseEnv(root),
-            FX_GATEWAY_BASE_URL: gateway.baseUrl,
-            FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+                        FX_RESPONSES_BASE_URL: gateway.baseUrl,
           },
           timeoutMs: 25_000,
         },
@@ -1257,7 +1248,7 @@ describe("MCP remote authentication lifecycle", () => {
         },
         fakeGatewayFinalText("Refreshed subscription complete."),
     ], {
-      models: [{ id: MODEL, type: "language", tags: ["tool-use"] }],
+      models: [{ id: MODEL, object: "model" }],
     });
     const result = await runFx(
       ["ask", "--json", "--auto", "--no-save", "Refresh the active authenticated subscription."],
@@ -1265,8 +1256,7 @@ describe("MCP remote authentication lifecycle", () => {
         cwd: root.workspace,
         env: {
           ...baseEnv(root),
-          FX_GATEWAY_BASE_URL: gateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+                    FX_RESPONSES_BASE_URL: gateway.baseUrl,
         },
         timeoutMs: 30_000,
       },
@@ -1312,7 +1302,7 @@ describe("MCP remote authentication lifecycle", () => {
           return fakeGatewayFinalText("Subscription challenge recovered.");
         },
       ], {
-        models: [{ id: MODEL, type: "language", tags: ["tool-use"] }],
+        models: [{ id: MODEL, object: "model" }],
       });
 
       const result = await runFx(
@@ -1322,8 +1312,7 @@ describe("MCP remote authentication lifecycle", () => {
           env: {
             ...baseEnv(root),
             FX_E2E_MCP_AUTH_AUTOMATE: "1",
-            FX_GATEWAY_BASE_URL: gateway.baseUrl,
-            FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+                        FX_RESPONSES_BASE_URL: gateway.baseUrl,
           },
           timeoutMs: 20_000,
         },
@@ -1360,7 +1349,7 @@ describe("MCP remote authentication lifecycle", () => {
       }),
       fakeGatewayFinalText("Private pagination rotation complete."),
     ], {
-      models: [{ id: MODEL, type: "language", tags: ["tool-use"] }],
+      models: [{ id: MODEL, object: "model" }],
     });
 
     const result = await runFx(
@@ -1370,8 +1359,7 @@ describe("MCP remote authentication lifecycle", () => {
         env: {
           ...baseEnv(root),
           FX_E2E_MCP_AUTH_AUTOMATE: "1",
-          FX_GATEWAY_BASE_URL: gateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+                    FX_RESPONSES_BASE_URL: gateway.baseUrl,
         },
         timeoutMs: 20_000,
       },
@@ -1427,7 +1415,7 @@ describe("MCP remote authentication lifecycle", () => {
         }),
         fakeGatewayFinalText("Authentication cache partition observed."),
       ], {
-        models: [{ id: MODEL, type: "language", tags: ["tool-use"] }],
+        models: [{ id: MODEL, object: "model" }],
       });
 
       const result = await runFx(
@@ -1436,8 +1424,7 @@ describe("MCP remote authentication lifecycle", () => {
           cwd: root.workspace,
           env: {
             ...baseEnv(root),
-            FX_GATEWAY_BASE_URL: gateway.baseUrl,
-            FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+                        FX_RESPONSES_BASE_URL: gateway.baseUrl,
           },
           timeoutMs: 20_000,
         },
@@ -1499,7 +1486,7 @@ describe("MCP remote authentication lifecycle", () => {
         }),
         fakeGatewayFinalText("MCP search isolation observed."),
       ], {
-        models: [{ id: MODEL, type: "language", tags: ["tool-use"] }],
+        models: [{ id: MODEL, object: "model" }],
       });
 
       const result = await runFx(
@@ -1508,8 +1495,7 @@ describe("MCP remote authentication lifecycle", () => {
           cwd: root.workspace,
           env: {
             ...baseEnv(root),
-            FX_GATEWAY_BASE_URL: gateway.baseUrl,
-            FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+                        FX_RESPONSES_BASE_URL: gateway.baseUrl,
           },
           timeoutMs: 20_000,
         },
@@ -1546,7 +1532,7 @@ describe("MCP remote authentication lifecycle", () => {
         }),
         fakeGatewayFinalText("MCP authentication is required."),
       ], {
-        models: [{ id: MODEL, type: "language", tags: ["tool-use"] }],
+        models: [{ id: MODEL, object: "model" }],
       });
 
       const result = await runFx(
@@ -1555,8 +1541,7 @@ describe("MCP remote authentication lifecycle", () => {
           cwd: root.workspace,
           env: {
             ...baseEnv(root),
-            FX_GATEWAY_BASE_URL: gateway.baseUrl,
-            FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+                        FX_RESPONSES_BASE_URL: gateway.baseUrl,
           },
           timeoutMs: 20_000,
         },
@@ -1612,8 +1597,7 @@ describe("MCP remote authentication lifecycle", () => {
             cwd: root.workspace,
             env: {
               ...keychainEnv,
-              FX_GATEWAY_BASE_URL: gateway.baseUrl,
-              FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+                            FX_RESPONSES_BASE_URL: gateway.baseUrl,
             },
             timeoutMs: 20_000,
           },
@@ -1644,15 +1628,14 @@ describe("MCP remote authentication lifecycle", () => {
         gateway = startFakeGateway([
           fakeGatewayFinalText("TUI idle."),
         ], {
-          models: [{ id: MODEL, type: "language", tags: ["tool-use"] }],
+          models: [{ id: MODEL, object: "model" }],
         });
         tui = await TmuxSession.create({
           isolated: true,
           cwd: root.workspace,
           env: {
             ...keychainEnv,
-            FX_GATEWAY_BASE_URL: gateway.baseUrl,
-            FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+                        FX_RESPONSES_BASE_URL: gateway.baseUrl,
           },
           width: 110,
           height: 34,
@@ -1694,15 +1677,14 @@ describe("MCP remote authentication lifecycle", () => {
       auth = startAuthFixture(upstream.url);
       const root = createRoot(auth, true, "http", auth.url, false);
       gateway = startFakeGateway([], {
-        models: [{ id: MODEL, type: "language", tags: ["tool-use"] }],
+        models: [{ id: MODEL, object: "model" }],
       });
       tui = await TmuxSession.create({
         isolated: true,
         cwd: root.workspace,
         env: {
           ...baseEnv(root),
-          FX_GATEWAY_BASE_URL: gateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+                    FX_RESPONSES_BASE_URL: gateway.baseUrl,
         },
         width: 110,
         height: 34,
@@ -1771,12 +1753,11 @@ describe("MCP remote authentication lifecycle", () => {
       gateway = startFakeGateway([
         fakeGatewayFinalText("TUI idle."),
       ], {
-        models: [{ id: MODEL, type: "language", tags: ["tool-use"] }],
+        models: [{ id: MODEL, object: "model" }],
       });
       const tuiEnv = {
         ...baseEnv(root),
-        FX_GATEWAY_BASE_URL: gateway.baseUrl,
-        FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+                FX_RESPONSES_BASE_URL: gateway.baseUrl,
       };
       tui = await TmuxSession.create({
         isolated: true,
@@ -1832,8 +1813,7 @@ describe("MCP remote authentication lifecycle", () => {
           cwd: root.workspace,
           env: {
             ...baseEnv(root),
-            FX_GATEWAY_BASE_URL: gateway.baseUrl,
-            FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+                        FX_RESPONSES_BASE_URL: gateway.baseUrl,
           },
           timeoutMs: 20_000,
         },
@@ -1860,15 +1840,14 @@ describe("MCP remote authentication lifecycle", () => {
       gateway = startFakeGateway([
         fakeGatewayFinalText("TUI idle."),
       ], {
-        models: [{ id: MODEL, type: "language", tags: ["tool-use"] }],
+        models: [{ id: MODEL, object: "model" }],
       });
       tui = await TmuxSession.create({
         isolated: true,
         cwd: root.workspace,
         env: {
           ...baseEnv(root),
-          FX_GATEWAY_BASE_URL: gateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+                    FX_RESPONSES_BASE_URL: gateway.baseUrl,
         },
         width: 110,
         height: 34,
@@ -1917,15 +1896,14 @@ describe("MCP remote authentication lifecycle", () => {
       });
       const root = createRoot(auth);
       gateway = startFakeGateway([], {
-        models: [{ id: MODEL, type: "language", tags: ["tool-use"] }],
+        models: [{ id: MODEL, object: "model" }],
       });
       tui = await TmuxSession.create({
         isolated: true,
         cwd: root.workspace,
         env: {
           ...baseEnv(root),
-          FX_GATEWAY_BASE_URL: gateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+                    FX_RESPONSES_BASE_URL: gateway.baseUrl,
         },
         width: 120,
         height: 34,
@@ -1971,15 +1949,14 @@ describe("MCP remote authentication lifecycle", () => {
       gateway = startFakeGateway([
         fakeGatewayFinalText("TUI idle."),
       ], {
-        models: [{ id: MODEL, type: "language", tags: ["tool-use"] }],
+        models: [{ id: MODEL, object: "model" }],
       });
       tui = await TmuxSession.create({
         isolated: true,
         cwd: root.workspace,
         env: {
           ...baseEnv(root),
-          FX_GATEWAY_BASE_URL: gateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+                    FX_RESPONSES_BASE_URL: gateway.baseUrl,
         },
         width: 110,
         height: 34,
@@ -2007,15 +1984,14 @@ describe("MCP remote authentication lifecycle", () => {
       gateway = startFakeGateway([
         fakeGatewayFinalText("TUI idle."),
       ], {
-        models: [{ id: MODEL, type: "language", tags: ["tool-use"] }],
+        models: [{ id: MODEL, object: "model" }],
       });
       tui = await TmuxSession.create({
         isolated: true,
         cwd: root.workspace,
         env: {
           ...baseEnv(root),
-          FX_GATEWAY_BASE_URL: gateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+                    FX_RESPONSES_BASE_URL: gateway.baseUrl,
         },
         width: 110,
         height: 34,
@@ -2162,8 +2138,7 @@ describe("MCP remote authentication lifecycle", () => {
           cwd: root.workspace,
           env: {
             ...baseEnv(root),
-            FX_GATEWAY_BASE_URL: gateway.baseUrl,
-            FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+                        FX_RESPONSES_BASE_URL: gateway.baseUrl,
             FX_E2E_MCP_AUTH_AUTOMATE: "1",
           },
           timeoutMs: 20_000,
@@ -2199,8 +2174,7 @@ describe("MCP remote authentication lifecycle", () => {
           cwd: root.workspace,
           env: {
             ...baseEnv(root),
-            FX_GATEWAY_BASE_URL: gateway.baseUrl,
-            FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+                        FX_RESPONSES_BASE_URL: gateway.baseUrl,
           },
           timeoutMs: 20_000,
         },
@@ -2234,8 +2208,7 @@ describe("MCP remote authentication lifecycle", () => {
           cwd: root.workspace,
           env: {
             ...baseEnv(root),
-            FX_GATEWAY_BASE_URL: gateway.baseUrl,
-            FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+                        FX_RESPONSES_BASE_URL: gateway.baseUrl,
           },
           timeoutMs: 20_000,
         },
@@ -2512,8 +2485,7 @@ describe("MCP remote authentication lifecycle", () => {
             cwd: root.workspace,
             env: {
               ...baseEnv(root),
-              FX_GATEWAY_BASE_URL: gateway.baseUrl,
-              FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+                            FX_RESPONSES_BASE_URL: gateway.baseUrl,
             },
             timeoutMs: 25_000,
           },
@@ -2555,8 +2527,7 @@ describe("MCP remote authentication lifecycle", () => {
           cwd: root.workspace,
           env: {
             ...baseEnv(root),
-            FX_GATEWAY_BASE_URL: gateway.baseUrl,
-            FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+                        FX_RESPONSES_BASE_URL: gateway.baseUrl,
           },
           timeoutMs: 25_000,
         },
@@ -2600,8 +2571,7 @@ describe("MCP remote authentication lifecycle", () => {
         cwd: root.workspace,
         env: {
           ...baseEnv(root),
-          FX_GATEWAY_BASE_URL: gateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+                    FX_RESPONSES_BASE_URL: gateway.baseUrl,
         },
         width: 110,
         height: 34,
@@ -2656,15 +2626,14 @@ describe("MCP remote authentication lifecycle", () => {
       gateway = startFakeGateway([
         fakeGatewayFinalText("TUI idle."),
       ], {
-        models: [{ id: MODEL, type: "language", tags: ["tool-use"] }],
+        models: [{ id: MODEL, object: "model" }],
       });
       tui = await TmuxSession.create({
         isolated: true,
         cwd: root.workspace,
         env: {
           ...baseEnv(root),
-          FX_GATEWAY_BASE_URL: gateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+                    FX_RESPONSES_BASE_URL: gateway.baseUrl,
         },
         width: 110,
         height: 34,
@@ -2696,8 +2665,7 @@ describe("MCP remote authentication lifecycle", () => {
         cwd: root.workspace,
         env: {
           ...baseEnv(root),
-          FX_GATEWAY_BASE_URL: gateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+                    FX_RESPONSES_BASE_URL: gateway.baseUrl,
         },
         width: 110,
         height: 34,
@@ -2756,8 +2724,7 @@ describe("MCP remote authentication lifecycle", () => {
         cwd: root.workspace,
         env: {
           ...baseEnv(root),
-          FX_GATEWAY_BASE_URL: gateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+                    FX_RESPONSES_BASE_URL: gateway.baseUrl,
         },
         width: 110,
         height: 34,
@@ -2826,15 +2793,14 @@ describe("MCP remote authentication lifecycle", () => {
       gateway = startFakeGateway([
         fakeGatewayFinalText("TUI idle."),
       ], {
-        models: [{ id: MODEL, type: "language", tags: ["tool-use"] }],
+        models: [{ id: MODEL, object: "model" }],
       });
       tui = await TmuxSession.create({
         isolated: true,
         cwd: root.workspace,
         env: {
           ...baseEnv(root),
-          FX_GATEWAY_BASE_URL: gateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+                    FX_RESPONSES_BASE_URL: gateway.baseUrl,
         },
         width: 110,
         height: 34,
@@ -2870,7 +2836,7 @@ describe("MCP remote authentication lifecycle", () => {
         }),
         fakeGatewayFinalText("Refresh failure handled."),
       ], {
-        models: [{ id: MODEL, type: "language", tags: ["tool-use"] }],
+        models: [{ id: MODEL, object: "model" }],
       });
 
       const result = await runFx(
@@ -2879,8 +2845,7 @@ describe("MCP remote authentication lifecycle", () => {
           cwd: root.workspace,
           env: {
             ...baseEnv(root),
-            FX_GATEWAY_BASE_URL: gateway.baseUrl,
-            FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+                        FX_RESPONSES_BASE_URL: gateway.baseUrl,
           },
           timeoutMs: 20_000,
         },

@@ -89,10 +89,7 @@ test "context notice body drops legacy markers from every line" {
 }
 
 pub const CredentialSource = enum {
-    vercel_oidc_token,
-    ai_gateway_api_key,
     openai_api_key,
-    stored_key,
     chatgpt_subscription,
     grok_subscription,
 };
@@ -1442,7 +1439,7 @@ test "provider completion disposition classifies finish reason and tool presence
 test "provider completion disposition allows terminal provider-executed tool calls" {
     const provider_call = ToolCall{
         .id = "provider_search",
-        .name = "perplexity_search",
+        .name = "provider_search",
         .arguments_json = "{}",
         .provider_result = "{\"results\":[]}",
         .provenance = .provider_executed,

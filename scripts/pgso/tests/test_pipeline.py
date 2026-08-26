@@ -200,7 +200,6 @@ class PgsoPipelineTests(unittest.TestCase):
         self.assertNotIn("pgso-ir", control)
         self.assertIn("-Dtarget=aarch64-macos", control)
         self.assertIn("-Doptimize=ReleaseSafe", control)
-        self.assertIn("-Dupdate-channel=stable", control)
         self.assertIn("pgso-ir", ir)
         self.assertIn("-Dpgso-artifact=fx", ir)
         self.assertNotEqual(

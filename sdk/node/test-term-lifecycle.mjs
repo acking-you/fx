@@ -69,7 +69,7 @@ const runtime = await createFxTerminal({
   backend: "wasm",
   wasm: await readFile(wasmPath),
   terminal: instrumentedTerminalHost,
-  env: { AI_GATEWAY_API_KEY: "term-lifecycle-key" },
+  env: { OPENAI_API_KEY: "term-lifecycle-key" },
   fetch,
   onEvent(event) { events.push(event); },
 });
@@ -150,7 +150,7 @@ const abortRuntime = await createFxTerminal({
   backend: "wasm",
   wasm: await readFile(wasmPath),
   terminal: instrumentTerminal(abortTerminal, abortDisposals),
-  env: { AI_GATEWAY_API_KEY: "term-lifecycle-key" },
+  env: { OPENAI_API_KEY: "term-lifecycle-key" },
   fetch,
 });
 const abortFlush = () => new Promise((resolve) => abortTerminal.write("", resolve));
@@ -235,8 +235,8 @@ async function runActiveTransitionChild(scenario, command) {
 
   const completedResponse = (text) => new Response(new ReadableStream({
     start(controller) {
-      controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "text-delta", id: "followup_1", delta: text })}\n\n`));
-      controller.enqueue(encoder.encode('data: {"type":"finish","finishReason":{"unified":"stop","raw":"stop"},"usage":{"inputTokens":{"total":1},"outputTokens":{"total":1}}}\n\n'));
+      controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "response.output_text.delta", item_id: "followup_1", output_index: 0, content_index: 0, delta: text })}\n\n`));
+      controller.enqueue(encoder.encode('data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n'));
       controller.enqueue(encoder.encode("data: [DONE]\n\n"));
       controller.close();
     },
@@ -261,7 +261,7 @@ async function runActiveTransitionChild(scenario, command) {
       pull(controller) {
         if (sent) return;
         sent = true;
-        controller.enqueue(encoder.encode('data: {"type":"text-delta","id":"stream_1","delta":"STREAM_STARTED"}\n\n'));
+        controller.enqueue(encoder.encode('data: {"type":"response.output_text.delta","item_id":"stream_1","output_index":0,"content_index":0,"delta":"STREAM_STARTED"}\n\n'));
         streamStarted = true;
         init.signal.addEventListener("abort", () => {
           firstFetchAborted = true;
@@ -276,7 +276,7 @@ async function runActiveTransitionChild(scenario, command) {
     backend: "wasm",
     wasm: await readFile(wasmPath),
     terminal: childHost,
-    env: { AI_GATEWAY_API_KEY: "term-active-transition-key" },
+    env: { OPENAI_API_KEY: "term-active-transition-key" },
     fetch: childFetch,
   });
   const childFlush = () => new Promise((resolveFlush) => childTerminal.write("", resolveFlush));

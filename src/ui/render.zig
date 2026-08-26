@@ -1,5 +1,4 @@
 const std = @import("std");
-const build_options = @import("build_options");
 const io_mod = @import("../core/shared/io.zig");
 const host = @import("../core/hosts/host.zig");
 const display_width = @import("../core/shared/display_width.zig");
@@ -11,7 +10,6 @@ const main = @import("../main.zig");
 const theme_detection = @import("terminal/theme_detection.zig");
 const theme_protocol = @import("terminal/theme_protocol.zig");
 const visual_layout = @import("input/visual_layout.zig");
-const update_target = @import("../core/upgrade/update_target.zig");
 
 pub const input_prefix = "❯ ";
 pub const TerminalRgb = user_message_card.Rgb;
@@ -168,42 +166,11 @@ pub fn buildInputLineForRow(input: []const u8, cursor: usize, line_index: usize,
     };
 }
 
-const build_channel = update_target.Channel.parse(build_options.update_channel) orelse .stable;
-const welcome_build_label_bytes: usize = 96;
-const dev_revision_bytes: usize = 7;
-
-/// Dev builds ship on every merged PR, so the version alone cannot identify the
-/// binary: the header carries the commit and a brighter `[dev]` tag.
-fn writeBuildLabel(
-    out: []u8,
-    channel: update_target.Channel,
-    version_text: []const u8,
-    revision: []const u8,
-) ![]const u8 {
-    if (channel != .dev) return std.fmt.bufPrint(out, "v{s}", .{version_text});
-    if (revision.len < dev_revision_bytes or std.mem.eql(u8, revision, "unknown")) {
-        return std.fmt.bufPrint(out, "v{s} {s}[dev]{s}", .{ version_text, hint_style, dim_style });
-    }
-    return std.fmt.bufPrint(out, "v{s}-{s} {s}[dev]{s}", .{
-        version_text,
-        revision[0..dev_revision_bytes],
-        hint_style,
-        dim_style,
-    });
-}
-
 pub fn welcomeMessage(alloc: std.mem.Allocator) ![]u8 {
-    var label_buf: [welcome_build_label_bytes]u8 = undefined;
-    const build_label = try writeBuildLabel(
-        &label_buf,
-        build_channel,
-        main.version,
-        build_options.git_commit,
-    );
     return std.fmt.allocPrint(
         alloc,
-        "{s}𝒇x{s}{s} {s} · Run /help for commands" ++ reset_style ++ "\n\n",
-        .{ subtitle_style, reset_style, dim_style, build_label },
+        "{s}𝒇x{s}{s} v{s} · Run /help for commands" ++ reset_style ++ "\n\n",
+        .{ subtitle_style, reset_style, dim_style, main.version },
     );
 }
 
@@ -894,59 +861,14 @@ test "welcomeMessage keeps only the app name bright" {
     const message = try welcomeMessage(std.testing.allocator);
     defer std.testing.allocator.free(message);
 
-    var label_buf: [welcome_build_label_bytes]u8 = undefined;
-    const build_label = try writeBuildLabel(
-        &label_buf,
-        build_channel,
-        main.version,
-        build_options.git_commit,
-    );
     const expected = try std.fmt.allocPrint(
         std.testing.allocator,
-        "{s}𝒇x{s}{s} {s} · Run /help for commands" ++ reset_style ++ "\n\n",
-        .{ subtitle_style, reset_style, dim_style, build_label },
+        "{s}𝒇x{s}{s} v{s} · Run /help for commands" ++ reset_style ++ "\n\n",
+        .{ subtitle_style, reset_style, dim_style, main.version },
     );
     defer std.testing.allocator.free(expected);
 
     try std.testing.expectEqualStrings(expected, message);
-}
-
-test "build label stays bare on the stable channel" {
-    var buf: [welcome_build_label_bytes]u8 = undefined;
-    const label = try writeBuildLabel(&buf, .stable, "0.0.4", "abcdef123456");
-    try std.testing.expectEqualStrings("v0.0.4", label);
-}
-
-test "dev build label carries the commit and restores the dim run after the tag" {
-    initTheme(false, null);
-
-    var buf: [welcome_build_label_bytes]u8 = undefined;
-    const label = try writeBuildLabel(&buf, .dev, "0.0.5", "abcdef123456");
-
-    const expected = try std.fmt.allocPrint(
-        std.testing.allocator,
-        "v0.0.5-abcdef1 {s}[dev]{s}",
-        .{ hint_style, dim_style },
-    );
-    defer std.testing.allocator.free(expected);
-
-    try std.testing.expectEqualStrings(expected, label);
-}
-
-test "dev build label drops an unresolved revision" {
-    initTheme(false, null);
-
-    var buf: [welcome_build_label_bytes]u8 = undefined;
-    const label = try writeBuildLabel(&buf, .dev, "0.0.5", "unknown");
-
-    const expected = try std.fmt.allocPrint(
-        std.testing.allocator,
-        "v0.0.5 {s}[dev]{s}",
-        .{ hint_style, dim_style },
-    );
-    defer std.testing.allocator.free(expected);
-
-    try std.testing.expectEqualStrings(expected, label);
 }
 
 test "buildHintLine hides effort when it is auto" {

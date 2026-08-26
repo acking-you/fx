@@ -110,21 +110,6 @@ async function wasmBytes(input) {
   return input;
 }
 
-function validateGatewayChatUrl(value) {
-  if (value === undefined) return;
-  if (typeof value !== "string") throw new TypeError("FX_GATEWAY_CHAT_URL must be a string");
-  let url;
-  try { url = new URL(value); } catch { throw new TypeError("FX_GATEWAY_CHAT_URL must be a valid URL"); }
-  if (url.username || url.password || url.hash) {
-    throw new TypeError("FX_GATEWAY_CHAT_URL must not contain credentials or a fragment");
-  }
-  if (url.href === "https://ai-gateway.vercel.sh/v3/ai/language-model") return;
-  const loopback = url.hostname === "127.0.0.1" || url.hostname === "[::1]" || url.hostname === "localhost";
-  if (url.protocol !== "http:" || !loopback || !url.port) {
-    throw new TypeError("FX_GATEWAY_CHAT_URL must use the canonical Gateway or explicit loopback HTTP");
-  }
-}
-
 function validateResponsesBaseUrl(value) {
   if (value === undefined) return;
   if (typeof value !== "string") throw new TypeError("Responses base URL must be a string");
@@ -141,15 +126,11 @@ function validateResponsesBaseUrl(value) {
 }
 
 function nativeCredentialFromEnv(env) {
-  for (const [name, source] of [
-    ["AI_GATEWAY_API_KEY", "ai_gateway_api_key"],
-    ["OPENAI_API_KEY", "openai_api_key"],
-  ]) {
-    const value = env?.[name];
-    if (value === undefined) continue;
-    if (typeof value !== "string") throw new TypeError(`${name} must be a string`);
-    if (value.length > 0) return { apiKey: value, credentialSource: source };
+  const value = env?.OPENAI_API_KEY;
+  if (value !== undefined && typeof value !== "string") {
+    throw new TypeError("OPENAI_API_KEY must be a string");
   }
+  if (value?.length > 0) return { apiKey: value, credentialSource: "openai_api_key" };
   return { apiKey: undefined, credentialSource: undefined };
 }
 
@@ -166,16 +147,13 @@ function responsesBaseUrlFromEnv(env) {
 function createNativeCoreRuntime(addon, options) {
   const { apiKey, credentialSource } = nativeCredentialFromEnv(options.env);
   const model = options.env?.FX_MODEL;
-  const gatewayChatUrl = options.env?.FX_GATEWAY_CHAT_URL;
   const responsesBaseUrl = responsesBaseUrlFromEnv(options.env);
-  validateGatewayChatUrl(gatewayChatUrl);
   const core = addon.createCore({
     apiKey,
     home: options.home ?? homedir(),
     workspaceRoot: options.workspaceRoot ?? process.cwd(),
     ...(credentialSource === undefined ? {} : { credentialSource }),
     ...(model === undefined ? {} : { model }),
-    ...(gatewayChatUrl === undefined ? {} : { gatewayChatUrl }),
     ...(responsesBaseUrl === undefined ? {} : { responsesBaseUrl }),
   });
   let exitedResolve;
@@ -289,7 +267,7 @@ function createNativeAgent(addon, options) {
 
 async function createWithFallback(surface, nativeMethod, wasmFactory, defaultWasm, options) {
   const { nativeAddon, backend = "auto", ...runtimeOptions } = options ?? {};
-  validateGatewayChatUrl(runtimeOptions.env?.FX_GATEWAY_CHAT_URL);
+  responsesBaseUrlFromEnv(runtimeOptions.env);
   if (!new Set(["auto", "native", "wasm"]).has(backend)) {
     throw new TypeError('backend must be "auto", "native", or "wasm"');
   }

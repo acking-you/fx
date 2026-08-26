@@ -2,7 +2,6 @@ const std = @import("std");
 const builtin = @import("builtin");
 const app_process_runtime = @import("app_process_runtime.zig");
 const app_session_runtime = @import("app_session_runtime.zig");
-const auto_upgrade = @import("../upgrade/auto_upgrade.zig");
 const acp_runner = @import("../cli/acp_runner.zig");
 const cli_surface = @import("../cli/cli_surface.zig");
 const background_process_provider = @import(
@@ -21,9 +20,8 @@ const mode_registry = @import("../modes/mode_registry.zig");
 const mcp_contract = @import("../mcp/mcp_contract.zig");
 const mcp_runtime = @import("../mcp/mcp_runtime.zig");
 const tool_set_contract = @import("../tooling/tool_set.zig");
-const update_target = @import("../upgrade/update_target.zig");
 const test_builtin_gateway = if (builtin.is_test)
-    @import("../../builtins/gateway.zig")
+    @import("../../builtins/responses.zig")
 else
     struct {};
 const test_builtin_commands = if (builtin.is_test)
@@ -36,7 +34,6 @@ const Allocator = std.mem.Allocator;
 pub const Config = struct {
     version: []const u8 = "",
     revision: []const u8 = "",
-    build_channel: update_target.Channel = .stable,
     command_catalog: command_specs.TopLevelRegistry,
     default_model: []const u8,
     default_agent_step_limit: usize,
@@ -91,11 +88,6 @@ const GetenvFn = *const fn (?*anyopaque, []const u8) ?[]const u8;
 const WriteFn = *const fn (?*anyopaque, []const u8) anyerror!void;
 const FormatUnexpectedErrorFn = *const fn ([]u8, anyerror) anyerror![]const u8;
 const StartWorkerThreadFn = *const fn (?*anyopaque, *anyopaque) anyerror!void;
-const ReplaceProcessFn = *const fn (
-    ?*anyopaque,
-    std.Io,
-    std.process.ReplaceOptions,
-) std.process.ReplaceError;
 const RunDeps = struct {
     cli_ctx: ?*anyopaque = null,
     run_if_requested: RunIfRequestedFn = if (host_target.is_wasm)
@@ -111,8 +103,6 @@ const RunDeps = struct {
     format_unexpected_error: FormatUnexpectedErrorFn = formatUnexpectedError,
     worker_ctx: ?*anyopaque = null,
     start_worker_thread: ?StartWorkerThreadFn = null,
-    replace_ctx: ?*anyopaque = null,
-    replace_process: ReplaceProcessFn = replaceProcessDefault,
 };
 
 fn runWithDeps(comptime App: type, alloc: Allocator, args: []const [:0]const u8, cfg: Config, deps: RunDeps) !RunOutcome {
@@ -208,7 +198,6 @@ fn unavailableCliDispatch(_: ?*anyopaque, _: Allocator, _: []const [:0]const u8,
 }
 
 fn runInteractiveWithDeps(comptime App: type, comptime cooperative: bool, alloc: Allocator, launch: *cli_surface.InteractiveLaunch, deps: RunDeps) !RunOutcome {
-    const resume_requested = launch.requested_resume != null;
     var app = App.init(alloc, launch) catch |err| {
         switch (err) {
             error.NotATerminal => {
@@ -275,10 +264,8 @@ fn runInteractiveWithDeps(comptime App: type, comptime cooperative: bool, alloc:
         app.session.attachProfileUsagePublisher(app.alloc);
     }
     if (comptime !cooperative) {
-        if (resume_requested) app.startResumedSessionReconciliation();
         if (@hasDecl(App, "configureNotifications")) try app.configureNotifications();
         if (@hasDecl(App, "playStartupSound")) app.playStartupSound();
-        if (@hasDecl(App, "startAutoUpgrade")) app.startAutoUpgrade();
         if (@hasDecl(App, "startFileIndex")) app.startFileIndex();
         startWorkerThread(App, &app, deps) catch |err| {
             app.releaseTerminal();
@@ -294,12 +281,6 @@ fn runInteractiveWithDeps(comptime App: type, comptime cooperative: bool, alloc:
         reportUnexpectedInteractiveError(deps, err);
         return err;
     };
-    const relaunch_request: ?auto_upgrade.RelaunchRequest = if (comptime cooperative)
-        null
-    else if (comptime @hasDecl(App, "takeUpgradeRelaunchRequest"))
-        app.takeUpgradeRelaunchRequest()
-    else
-        null;
     const resume_handoff_columns: u16 = if (comptime cooperative)
         0
     else if (comptime @hasDecl(App, "resumeHandoffColumns"))
@@ -311,30 +292,6 @@ fn runInteractiveWithDeps(comptime App: type, comptime cooperative: bool, alloc:
         app.deinit();
         break :blk null;
     } else app.deinitWithResumeHandoff();
-    if (relaunch_request) |request| {
-        if (handoff_value) |value| {
-            var handoff = value;
-            defer handoff.deinit(alloc);
-            var argv = [_][]const u8{
-                request.executablePath(),
-                "resume",
-                handoff.session_id,
-                cli_surface.upgrade_relaunch_arg,
-            };
-            const replace_err = deps.replace_process(
-                deps.replace_ctx,
-                io_mod.getIo(),
-                .{ .argv = &argv },
-            );
-            writeUpgradeRelaunchFailure(deps, replace_err, handoff.session_id);
-        } else {
-            writeStderr(
-                deps,
-                "fx: upgrade installed, but no validated resume handoff was available. Your conversation remains on disk; run `fx doctor`.\n",
-            );
-        }
-        return .{ .exit = 1 };
-    }
     if (handoff_value) |value| {
         var handoff = value;
         defer handoff.deinit(alloc);
@@ -352,33 +309,10 @@ fn runInteractiveWithDeps(comptime App: type, comptime cooperative: bool, alloc:
     return .returned;
 }
 
-fn replaceProcessDefault(
-    _: ?*anyopaque,
-    zio: std.Io,
-    options: std.process.ReplaceOptions,
-) std.process.ReplaceError {
-    return std.process.replace(zio, options);
-}
-
-fn writeUpgradeRelaunchFailure(
-    deps: RunDeps,
-    err: std.process.ReplaceError,
-    session_id: []const u8,
-) void {
-    var buffer: [768]u8 = undefined;
-    const message = std.fmt.bufPrint(
-        &buffer,
-        "fx: upgrade installed, but relaunch failed: {s}\nContinue session with: fx --resume {s}\n",
-        .{ @errorName(err), session_id },
-    ) catch "fx: upgrade installed, but relaunch failed; run `fx doctor`.\n";
-    writeStderr(deps, message);
-}
-
 fn cliSurfaceConfig(cfg: Config) cli_surface.Config {
     return .{
         .version = cfg.version,
         .revision = cfg.revision,
-        .build_channel = cfg.build_channel,
         .command_catalog = cfg.command_catalog,
         .default_model = cfg.default_model,
         .default_agent_step_limit = cfg.default_agent_step_limit,
@@ -580,12 +514,6 @@ const TestCapture = struct {
     record_stderr_event: bool = false,
     record_stdout_event: bool = false,
     resume_handoff_id: ?[]const u8 = null,
-    upgrade_relaunch_path: ?[]const u8 = null,
-    replace_error: std.process.ReplaceError = error.InvalidExe,
-    replace_calls: usize = 0,
-    replace_arg_count: usize = 0,
-    replace_arg_bufs: [4][128]u8 = undefined,
-    replace_arg_lens: [4]usize = .{ 0, 0, 0, 0 },
     fail_unexpected_format: bool = false,
 
     fn init(run_result: cli_surface.RunResult) TestCapture {
@@ -620,13 +548,7 @@ const TestCapture = struct {
                 formatUnexpectedError,
             .worker_ctx = self,
             .start_worker_thread = startWorkerThreadForTest,
-            .replace_ctx = self,
-            .replace_process = replaceProcessForTest,
         };
-    }
-
-    fn replaceArg(self: *const TestCapture, index: usize) []const u8 {
-        return self.replace_arg_bufs[index][0..self.replace_arg_lens[index]];
     }
 };
 
@@ -657,25 +579,6 @@ fn writeStdoutForTest(ctx: ?*anyopaque, text: []const u8) !void {
     if (capture.record_stdout_event) appendTestEvent("stdout-attempt");
     if (capture.stdout_error) |err| return err;
     try capture.stdout.writer.writeAll(text);
-}
-
-fn replaceProcessForTest(
-    ctx: ?*anyopaque,
-    _: std.Io,
-    options: std.process.ReplaceOptions,
-) std.process.ReplaceError {
-    const capture: *TestCapture = @ptrCast(@alignCast(ctx.?));
-    capture.replace_calls += 1;
-    capture.replace_arg_count = options.argv.len;
-    const count = @min(options.argv.len, capture.replace_arg_bufs.len);
-    for (options.argv[0..count], 0..) |arg, index| {
-        if (arg.len > capture.replace_arg_bufs[index].len) {
-            return error.SystemResources;
-        }
-        @memcpy(capture.replace_arg_bufs[index][0..arg.len], arg);
-        capture.replace_arg_lens[index] = arg.len;
-    }
-    return capture.replace_error;
 }
 
 fn failUnexpectedErrorFormatForTest(_: []u8, _: anyerror) ![]const u8 {
@@ -723,27 +626,10 @@ const TestApp = struct {
         return handoff;
     }
 
-    fn takeUpgradeRelaunchRequest(_: *TestApp) ?auto_upgrade.RelaunchRequest {
-        const path = active_capture.?.upgrade_relaunch_path orelse return null;
-        var request = auto_upgrade.RelaunchRequest{
-            .executable_path_len = path.len,
-        };
-        @memcpy(request.executable_path_buf[0..path.len], path);
-        return request;
-    }
-
     fn releaseTerminal(self: *TestApp) void {
         if (self.terminal_released) return;
         self.terminal_released = true;
         appendTestEvent("terminal-release");
-    }
-
-    fn startResumedSessionReconciliation(_: *TestApp) void {
-        appendTestEvent("resume-reconciliation");
-    }
-
-    fn startAutoUpgrade(_: *TestApp) void {
-        appendTestEvent("auto-upgrade");
     }
 
     fn startFileIndex(_: *TestApp) void {
@@ -793,7 +679,7 @@ test "app entry returns after handled CLI success without initializing app" {
     try std.testing.expectEqualStrings("skills", capture.seen_config.?.skill_root_policy.workspace_roots[0].path);
     try std.testing.expect(capture.seen_config.?.gateway_provider.chat_url.resolve_fn == test_builtin_gateway.chat_url_provider.resolve_fn);
     try std.testing.expect(capture.seen_config.?.provider_set.gateway.cli_model_catalog.?.fetch_fn == test_builtin_gateway.cli_model_catalog_provider.fetch_fn);
-    try std.testing.expect(capture.seen_config.?.provider_set.gateway.fx_search.?.execute_fn == test_builtin_gateway.default_web_search_provider.execute_fn);
+    try std.testing.expect(capture.seen_config.?.provider_set.gateway.fx_search == null);
     try std.testing.expect(capture.seen_config.?.provider_set.gateway.model_catalog.?.fetch_fn == test_builtin_gateway.model_catalog_provider.fetch_fn);
     try std.testing.expect(
         capture.seen_config.?.background_process_provider.spawn_prepared_fn ==
@@ -860,7 +746,7 @@ test "app entry runs interactive startup callbacks in active order" {
 
     try std.testing.expectEqual(RunOutcome.returned, outcome);
     try std.testing.expectEqual(@as(usize, 0), capture.stdout_calls);
-    try expectEvents(&.{ "init:none", "mcp-discovery", "rebind-after-init", "auto-upgrade", "file-index", "worker-thread", "model-cache", "run", "terminal-release", "deinit" });
+    try expectEvents(&.{ "init:none", "mcp-discovery", "rebind-after-init", "file-index", "worker-thread", "model-cache", "run", "terminal-release", "deinit" });
 }
 
 test "app entry writes exact resume handoff after interactive teardown" {
@@ -883,7 +769,6 @@ test "app entry writes exact resume handoff after interactive teardown" {
         "init:none",
         "mcp-discovery",
         "rebind-after-init",
-        "auto-upgrade",
         "file-index",
         "worker-thread",
         "model-cache",
@@ -892,77 +777,6 @@ test "app entry writes exact resume handoff after interactive teardown" {
         "deinit",
         "stdout-attempt",
     });
-}
-
-test "app entry relaunches only after teardown with the validated handoff" {
-    const alloc = std.testing.allocator;
-    var capture = TestCapture.init(.{ .interactive = .{} });
-    defer capture.deinit();
-    capture.resume_handoff_id = "session-123";
-    capture.upgrade_relaunch_path = "/tmp/fx-upgraded";
-    capture.record_stderr_event = true;
-
-    const outcome = try runWithDeps(
-        TestApp,
-        alloc,
-        &.{},
-        testConfig(),
-        capture.deps(),
-    );
-
-    try std.testing.expectEqual(@as(u8, 1), outcome.exit);
-    try std.testing.expectEqual(@as(usize, 1), capture.replace_calls);
-    try std.testing.expectEqual(@as(usize, 4), capture.replace_arg_count);
-    try std.testing.expectEqualStrings("/tmp/fx-upgraded", capture.replaceArg(0));
-    try std.testing.expectEqualStrings("resume", capture.replaceArg(1));
-    try std.testing.expectEqualStrings("session-123", capture.replaceArg(2));
-    try std.testing.expectEqualStrings("--upgrade-relaunch", capture.replaceArg(3));
-    try std.testing.expect(std.mem.find(
-        u8,
-        capture.stderr.written(),
-        "relaunch failed: InvalidExe",
-    ) != null);
-    try std.testing.expect(std.mem.find(
-        u8,
-        capture.stderr.written(),
-        "fx --resume session-123",
-    ) != null);
-    try expectEvents(&.{
-        "init:none",
-        "mcp-discovery",
-        "rebind-after-init",
-        "auto-upgrade",
-        "file-index",
-        "worker-thread",
-        "model-cache",
-        "run",
-        "terminal-release",
-        "deinit",
-        "stderr-attempt",
-    });
-}
-
-test "app entry never relaunches without a validated handoff" {
-    const alloc = std.testing.allocator;
-    var capture = TestCapture.init(.{ .interactive = .{} });
-    defer capture.deinit();
-    capture.upgrade_relaunch_path = "/tmp/fx-upgraded";
-
-    const outcome = try runWithDeps(
-        TestApp,
-        alloc,
-        &.{},
-        testConfig(),
-        capture.deps(),
-    );
-
-    try std.testing.expectEqual(@as(u8, 1), outcome.exit);
-    try std.testing.expectEqual(@as(usize, 0), capture.replace_calls);
-    try std.testing.expect(std.mem.find(
-        u8,
-        capture.stderr.written(),
-        "no validated resume handoff",
-    ) != null);
 }
 
 test "app entry ignores resume handoff stdout failures" {
@@ -1008,7 +822,7 @@ test "app entry releases terminal before reporting worker start errors" {
     try std.testing.expectError(error.TestWorkerStartFailed, runWithDeps(TestApp, alloc, &.{}, testConfig(), capture.deps()));
     try std.testing.expectEqualStrings("fx: TestWorkerStartFailed\n", capture.stderr.written());
     try std.testing.expectEqual(@as(usize, 1), capture.stderr_calls);
-    try expectEvents(&.{ "init:none", "mcp-discovery", "rebind-after-init", "auto-upgrade", "file-index", "worker-thread", "terminal-release", "stderr-attempt", "deinit" });
+    try expectEvents(&.{ "init:none", "mcp-discovery", "rebind-after-init", "file-index", "worker-thread", "terminal-release", "stderr-attempt", "deinit" });
 }
 
 test "app entry releases terminal before reporting initial context failures exactly" {
@@ -1041,7 +855,6 @@ test "app entry releases terminal before reporting initial context failures exac
             "init:none",
             "mcp-discovery",
             "rebind-after-init",
-            "auto-upgrade",
             "file-index",
             "worker-thread",
             "model-cache",
@@ -1064,7 +877,7 @@ test "app entry reports run errors before deinit and outer cleanup" {
     try std.testing.expectEqualStrings("fx: TestRunFailed\n", capture.stderr.written());
     try std.testing.expectEqual(@as(usize, 1), capture.stderr_calls);
     try std.testing.expectEqual(@as(usize, 0), capture.stdout_calls);
-    try expectEvents(&.{ "init:none", "mcp-discovery", "rebind-after-init", "auto-upgrade", "file-index", "worker-thread", "model-cache", "run", "terminal-release", "stderr-attempt", "deinit", "outer-defer" });
+    try expectEvents(&.{ "init:none", "mcp-discovery", "rebind-after-init", "file-index", "worker-thread", "model-cache", "run", "terminal-release", "stderr-attempt", "deinit", "outer-defer" });
 }
 
 test "app entry treats terminal input closure as abnormal cleanup without stderr" {
@@ -1091,7 +904,6 @@ test "app entry treats terminal input closure as abnormal cleanup without stderr
         "init:none",
         "mcp-discovery",
         "rebind-after-init",
-        "auto-upgrade",
         "file-index",
         "worker-thread",
         "model-cache",
@@ -1111,7 +923,7 @@ test "app entry preserves run errors when fatal formatting fails" {
     try std.testing.expectError(error.TestRunFailed, runWithDeps(TestApp, alloc, &.{}, testConfig(), capture.deps()));
     try std.testing.expectEqualStrings("", capture.stderr.written());
     try std.testing.expectEqual(@as(usize, 0), capture.stderr_calls);
-    try expectEvents(&.{ "init:none", "mcp-discovery", "rebind-after-init", "auto-upgrade", "file-index", "worker-thread", "model-cache", "run", "terminal-release", "deinit" });
+    try expectEvents(&.{ "init:none", "mcp-discovery", "rebind-after-init", "file-index", "worker-thread", "model-cache", "run", "terminal-release", "deinit" });
 }
 
 test "app entry preserves run errors when fatal writer fails" {
@@ -1125,7 +937,7 @@ test "app entry preserves run errors when fatal writer fails" {
     try std.testing.expectError(error.TestRunFailed, runWithDeps(TestApp, alloc, &.{}, testConfig(), capture.deps()));
     try std.testing.expectEqualStrings("", capture.stderr.written());
     try std.testing.expectEqual(@as(usize, 1), capture.stderr_calls);
-    try expectEvents(&.{ "init:none", "mcp-discovery", "rebind-after-init", "auto-upgrade", "file-index", "worker-thread", "model-cache", "run", "terminal-release", "stderr-attempt", "deinit" });
+    try expectEvents(&.{ "init:none", "mcp-discovery", "rebind-after-init", "file-index", "worker-thread", "model-cache", "run", "terminal-release", "stderr-attempt", "deinit" });
 }
 
 test "app entry passes requested resume into app init" {
@@ -1136,7 +948,7 @@ test "app entry passes requested resume into app init" {
     const outcome = try runWithDeps(TestApp, alloc, &.{ @constCast("resume"), @constCast("session-123") }, testConfig(), capture.deps());
 
     try std.testing.expectEqual(RunOutcome.returned, outcome);
-    try expectEvents(&.{ "init:session-123", "mcp-discovery", "rebind-after-init", "resume-reconciliation", "auto-upgrade", "file-index", "worker-thread", "model-cache", "run", "terminal-release", "deinit" });
+    try expectEvents(&.{ "init:session-123", "mcp-discovery", "rebind-after-init", "file-index", "worker-thread", "model-cache", "run", "terminal-release", "deinit" });
 }
 
 test "app entry maps noninteractive terminal startup to exit one" {

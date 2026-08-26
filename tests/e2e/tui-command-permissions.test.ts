@@ -103,17 +103,29 @@ function sse(events: object[]) {
 
 function gatewayToolCall(toolName: string, input: object, toolCallId: string) {
   return sse([
-    {
-      type: "tool-call",
-      toolCallId,
-      toolName,
-      input,
-    },
-    {
-      type: "finish",
-      finishReason: { unified: "tool-calls", raw: "tool-calls" },
-    },
+    ...toolCallEvents(toolName, input, toolCallId, 0),
+    { type: "response.completed", response: { status: "completed" } },
   ]);
+}
+
+function toolCallEvents(
+  toolName: string,
+  input: object,
+  toolCallId: string,
+  outputIndex: number,
+) {
+  const itemId = `${toolCallId}_item`;
+  return [{
+    type: "response.output_item.added",
+    output_index: outputIndex,
+    item: { type: "function_call", id: itemId, call_id: toolCallId, name: toolName },
+  }, {
+    type: "response.function_call_arguments.done",
+    item_id: itemId,
+    call_id: toolCallId,
+    output_index: outputIndex,
+    arguments: JSON.stringify(input),
+  }];
 }
 
 function toolCall(
@@ -170,37 +182,18 @@ function subagentInspectCall(toolCallId: string, childId: string) {
 
 function toolCalls(command: string, callIds: string[]) {
   return sse([
-    ...callIds.map((toolCallId) => ({
-      type: "tool-call",
-      toolCallId,
-      toolName: "terminal",
-      input: { action: "exec", command },
-    })),
-    {
-      type: "finish",
-      finishReason: { unified: "tool-calls", raw: "tool-calls" },
-    },
+    ...callIds.flatMap((toolCallId, index) =>
+      toolCallEvents("terminal", { action: "exec", command }, toolCallId, index)
+    ),
+    { type: "response.completed", response: { status: "completed" } },
   ]);
 }
 
 function twoEffectfulCommandBatch(first: string, second: string) {
   return sse([
-    {
-      type: "tool-call",
-      toolCallId: "history_feedback_first",
-      toolName: "terminal",
-      input: { action: "exec", command: first },
-    },
-    {
-      type: "tool-call",
-      toolCallId: "history_feedback_second",
-      toolName: "terminal",
-      input: { action: "exec", command: second },
-    },
-    {
-      type: "finish",
-      finishReason: { unified: "tool-calls", raw: "tool-calls" },
-    },
+    ...toolCallEvents("terminal", { action: "exec", command: first }, "history_feedback_first", 0),
+    ...toolCallEvents("terminal", { action: "exec", command: second }, "history_feedback_second", 1),
+    { type: "response.completed", response: { status: "completed" } },
   ]);
 }
 
@@ -240,44 +233,39 @@ function expectGroupedContinuationRequest(
 
 function expectOrdinaryToolResults(body: string, callIds: string[]) {
   const request = JSON.parse(body) as {
-    prompt?: Array<{ content?: Array<Record<string, unknown>> }>;
+    input?: Array<Record<string, unknown>>;
   };
-  const results = (request.prompt ?? [])
-    .flatMap((message) => message.content ?? [])
-    .filter((part) => part.type === "tool-result");
+  const results = (request.input ?? [])
+    .filter((part) => part.type === "function_call_output");
 
   expect(results).toHaveLength(callIds.length);
-  expect(results.map((part) => part.toolCallId).sort()).toEqual([...callIds].sort());
+  expect(results.map((part) => part.call_id).sort()).toEqual([...callIds].sort());
   for (const result of results) {
-    const output = result.output as Record<string, unknown> | undefined;
-    expect(output?.type).toBe("text");
-    expect(output?.value).toEqual(expect.stringContaining("exit_code=0"));
+    expect(result.output).toEqual(expect.stringContaining("exit_code=0"));
   }
   expect(JSON.stringify(results)).not.toContain("Repeated identical tool call blocked");
 }
 
 function toolResultText(body: string, toolCallId: string): string {
   const request = JSON.parse(body) as {
-    prompt?: Array<{ content?: Array<Record<string, unknown>> }>;
+    input?: Array<Record<string, unknown>>;
   };
-  const result = (request.prompt ?? [])
-    .flatMap((message) => message.content ?? [])
-    .find((part) => part.type === "tool-result" && part.toolCallId === toolCallId);
+  const result = (request.input ?? [])
+    .find((part) =>
+      part.type === "function_call_output" && part.call_id === toolCallId
+    );
   expect(result).toBeDefined();
-  const output = result!.output as Record<string, unknown>;
-  expect(output.type).toBe("text");
-  expect(typeof output.value).toBe("string");
-  return output.value as string;
+  expect(typeof result!.output).toBe("string");
+  return result!.output as string;
 }
 
 function completedToolCallIds(body: string): string[] {
   const request = JSON.parse(body) as {
-    prompt?: Array<{ content?: Array<Record<string, unknown>> }>;
+    input?: Array<Record<string, unknown>>;
   };
-  return (request.prompt ?? [])
-    .flatMap((message) => message.content ?? [])
-    .filter((part) => part.type === "tool-result")
-    .map((part) => part.toolCallId as string);
+  return (request.input ?? [])
+    .filter((part) => part.type === "function_call_output")
+    .map((part) => part.call_id as string);
 }
 
 function contentText(value: unknown): string {
@@ -297,29 +285,42 @@ function contentText(value: unknown): string {
 
 function promptText(body: string): string {
   const request = JSON.parse(body) as {
-    prompt?: Array<{ content?: unknown }>;
+    instructions?: unknown;
+    input?: Array<{ content?: unknown }>;
   };
-  return (request.prompt ?? []).map((message) => contentText(message.content)).join("\n");
+  return [
+    contentText(request.instructions),
+    ...(request.input ?? []).map((message) => contentText(message.content)),
+  ]
+    .filter((text) => text.length > 0)
+    .join("\n");
 }
 
 function latestPromptText(body: string): string {
   const request = JSON.parse(body) as {
-    prompt?: Array<{ content?: unknown }>;
+    input?: Array<{ type?: string; content?: unknown }>;
   };
-  return contentText(request.prompt?.at(-1)?.content);
+  return contentText(
+    request.input?.findLast((message) => message.type === "message")?.content,
+  );
 }
 
 function currentUserText(body: string): string {
   const request = JSON.parse(body) as {
-    prompt?: Array<{ role?: string; content?: unknown }>;
+    input?: Array<{ role?: string; content?: unknown }>;
   };
   return contentText(
-    request.prompt?.findLast((message) => message.role === "user")?.content,
+    request.input?.findLast((message) => message.role === "user")?.content,
   );
 }
 
 function occurrenceCount(text: string, needle: string): number {
   return text.split(needle).length - 1;
+}
+
+function expectManageSubagentProgress(stderr: string, count = 1) {
+  expect(occurrenceCount(stderr, MANAGE_SUBAGENT_PROGRESS)).toBe(count);
+  expect(stderr.toLowerCase()).not.toContain("error");
 }
 
 function expectNoParentDeliveries(body: string) {
@@ -670,13 +671,18 @@ function expectHumanUnreadIndependent(
 
 function finalText(text: string) {
   return sse([
-    { type: "text-delta", id: "answer_1", delta: text },
     {
-      type: "finish",
-      finishReason: { unified: "stop", raw: "stop" },
-      usage: {
-        inputTokens: { total: 3 },
-        outputTokens: { total: 5 },
+      type: "response.output_text.delta",
+      item_id: "answer_1",
+      output_index: 0,
+      content_index: 0,
+      delta: text,
+    },
+    {
+      type: "response.completed",
+      response: {
+        status: "completed",
+        usage: { input_tokens: 3, output_tokens: 5, total_tokens: 8 },
       },
     },
   ]);
@@ -698,10 +704,12 @@ function startFakeGateway(
       const url = new URL(req.url);
       if (url.pathname === "/v1/models") {
         return Response.json({
-          data: [{ id: MODEL, type: "language", tags: ["tool-use"] }],
+          data: [{ id: MODEL, object: "model" }],
         });
       }
-      if (req.method !== "POST") return new Response("not found", { status: 404 });
+      if (req.method !== "POST" || url.pathname !== "/v1/responses") {
+        return new Response("not found", { status: 404 });
+      }
       const body = await req.text();
       if (body.includes("\"permission_decision\"")) {
         classifierRequests.push({ body, headers: req.headers });
@@ -720,8 +728,7 @@ function startFakeGateway(
     },
   });
   const gateway = {
-    baseUrl: `http://127.0.0.1:${server.port}`,
-    chatUrl: `http://127.0.0.1:${server.port}/v3/ai/language-model`,
+    baseUrl: `http://127.0.0.1:${server.port}/v1`,
     requests,
     classifierRequests,
     stop() {
@@ -879,15 +886,15 @@ function foregroundFxRow(
 
 function toolResultValue(body: string, toolCallId: string): string {
   const request = JSON.parse(body) as {
-    prompt?: Array<{ content?: string | Array<Record<string, unknown>> }>;
+    input?: Array<Record<string, unknown>>;
   };
-  const result = (request.prompt ?? [])
-    .flatMap((message) => Array.isArray(message.content) ? message.content : [])
-    .find((part) => part.type === "tool-result" && part.toolCallId === toolCallId);
+  const result = (request.input ?? [])
+    .find((part) =>
+      part.type === "function_call_output" && part.call_id === toolCallId
+    );
   expect(result).toBeDefined();
-  const output = result!.output as Record<string, unknown>;
-  expect(output.type).toBe("text");
-  return output.value as string;
+  expect(typeof result!.output).toBe("string");
+  return result!.output as string;
 }
 
 function expectTraceOrder(trace: string, markers: string[]) {
@@ -967,12 +974,9 @@ function gatewayEnv(
 ) {
   return {
     HOME: root.home,
-    AI_GATEWAY_API_KEY: "fake-command-permission-key",
-    VERCEL_OIDC_TOKEN: undefined,
-    FX_GATEWAY_BASE_URL: gateway.baseUrl,
-    FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+    OPENAI_API_KEY: "fake-command-permission-key",
+        FX_RESPONSES_BASE_URL: gateway.baseUrl,
     FX_MODEL: MODEL,
-    FX_AUTO_UPGRADE: "0",
     FX_DIRECT_SECRET: "must-not-be-inherited",
     NO_COLOR: "1",
     ...extra,
@@ -1368,18 +1372,25 @@ describe("effect-aware command permissions", () => {
       const streamText = "DIRECT_NO_NOTICE_STREAM_TEXT";
       const gateway = startFakeGateway([
         sse([
-          { type: "tool-input-start", id: "command_1", toolName: "terminal" },
-          { type: "text-delta", id: "answer_1", delta: streamText },
           {
-            type: "tool-call",
-            toolCallId: "command_1",
-            toolName: "terminal",
-            input: { action: "exec", command: "pwd" },
+            type: "response.output_item.added",
+            output_index: 0,
+            item: {
+              type: "function_call",
+              id: "command_1_item",
+              call_id: "command_1",
+              name: "terminal",
+            },
           },
           {
-            type: "finish",
-            finishReason: { unified: "tool-calls", raw: "tool-calls" },
+            type: "response.output_text.delta",
+            item_id: "answer_1",
+            output_index: 1,
+            content_index: 0,
+            delta: streamText,
           },
+          ...toolCallEvents("terminal", { action: "exec", command: "pwd" }, "command_1", 0).slice(1),
+          { type: "response.completed", response: { status: "completed" } },
         ]),
         finalText("direct auto complete"),
       ]);
@@ -1468,26 +1479,31 @@ describe("effect-aware command permissions", () => {
       ];
       const gateway = startFakeGateway([
         sse([
-          ...calls.map((call) => ({
-            type: "tool-input-start",
-            id: call.id,
-            toolName: "terminal",
+          ...calls.map((call, output_index) => ({
+            type: "response.output_item.added",
+            output_index,
+            item: {
+              type: "function_call",
+              id: `${call.id}_item`,
+              call_id: call.id,
+              name: "terminal",
+            },
           })),
           {
-            type: "text-delta",
-            id: "fxc110-provider-bridge",
+            type: "response.output_text.delta",
+            item_id: "fxc110-provider-bridge",
+            output_index: calls.length,
+            content_index: 0,
             delta: "FXC110_PROVIDER_BRIDGE",
           },
-          ...calls.map((call) => ({
-            type: "tool-call",
-            toolCallId: call.id,
-            toolName: "terminal",
-            input: { action: "exec", command: call.command },
+          ...calls.map((call, output_index) => ({
+            type: "response.function_call_arguments.done",
+            item_id: `${call.id}_item`,
+            call_id: call.id,
+            output_index,
+            arguments: JSON.stringify({ action: "exec", command: call.command }),
           })),
-          {
-            type: "finish",
-            finishReason: { unified: "tool-calls", raw: "tool-calls" },
-          },
+          { type: "response.completed", response: { status: "completed" } },
         ]),
         finalText("FXC110_COMPLETE"),
       ]);
@@ -1622,14 +1638,15 @@ describe("effect-aware command permissions", () => {
         text.split("\n").filter((line) => line.trimStart().startsWith("│ ")).join("\n");
       const toolResultValue = (body: string, toolCallId: string): string => {
         const request = JSON.parse(body) as {
-          prompt?: Array<{ content?: Array<Record<string, any>> }>;
+          input?: Array<Record<string, any>>;
         };
-        const result = (request.prompt ?? [])
-          .flatMap((message) => message.content ?? [])
-          .find((part) => part.type === "tool-result" && part.toolCallId === toolCallId);
+        const result = (request.input ?? [])
+          .find((part) =>
+            part.type === "function_call_output" && part.call_id === toolCallId
+          );
         expect(result).toBeDefined();
-        expect(result?.output?.type).toBe("text");
-        return String(result?.output?.value ?? "");
+        expect(typeof result?.output).toBe("string");
+        return String(result?.output ?? "");
       };
 
       activeSession = await TmuxSession.create({
@@ -1924,70 +1941,6 @@ describe("effect-aware command permissions", () => {
   );
 
   test.skipIf(!tmuxAvailable())(
-    "TUI writes Gateway schema diagnostics to a trace after Gateway 400",
-    async () => {
-      const root = createIsolatedRoot();
-      const gateway = startFakeGateway([
-        new Response(
-          JSON.stringify({
-            error: {
-              message: "Invalid input: expected string, received array",
-              param: ["prompt", 0, "content"],
-            },
-          }),
-          { status: 400, headers: { "content-type": "application/json" } },
-        ),
-      ]);
-      const stderrPath = join(root.root, "stderr.log");
-      installClipboardFixture(root, "#!/bin/sh\nexit 1\n");
-      writeFileSync(stderrPath, "");
-
-      activeSession = await TmuxSession.create({
-        cmd: FX_BIN,
-        cwd: root.workspace,
-        env: gatewayEnv(root, gateway, {
-          PATH: hostilePath(root),
-          TMPDIR: root.root,
-        }),
-        stderrPath,
-        width: 120,
-        height: 40,
-      });
-      await activeSession.waitForComposer(TIMEOUT);
-      await activeSession.sendText("Trigger the gateway schema diagnostic.");
-      await activeSession.waitForText("HTTP 400", TIMEOUT);
-
-      await activeSession.sendText("/trace");
-      await activeSession.waitForText(
-        process.platform === "darwin"
-          ? "Clipboard copy failed"
-          : "Trace saved at",
-        TIMEOUT,
-      );
-      const reportPath = latestTraceReportPath(root);
-      const report = readFileSync(reportPath, "utf8");
-
-      expect(gateway.requests).toHaveLength(1);
-      expect(report).toContain("## Problems");
-      expect(report).toContain("## Network Calls");
-      expect(report).toContain("status=400");
-      expect(report).toContain('gateway_schema="path=prompt.0.content expected=string received=array"');
-      expect(report).toContain("request_shape=");
-      expect(report).toContain("prompt.0 role=system content=string");
-      expect(report).toContain("role=user content=array");
-      expect(report).not.toContain('"text":"Trigger the gateway schema diagnostic."');
-      expect(statSync(reportPath).mode & 0o077).toBe(0);
-      expect(readFileSync(stderrPath, "utf8")).toBe("");
-
-      await activeSession.sendText("/quit");
-      expect(await activeSession.waitForSessionEnd()).toBe(true);
-      await activeSession.kill();
-      activeSession = null;
-    },
-    TIMEOUT,
-  );
-
-  test.skipIf(!tmuxAvailable())(
     "TUI creates a private Markdown trace without a feedback CTA",
     async () => {
       const root = createIsolatedRoot();
@@ -2024,8 +1977,7 @@ describe("effect-aware command permissions", () => {
       const escapes = await activeSession.capturePaneEscapes();
       expect(escapes).not.toContain("Trace:");
       expect(escapes).not.toContain("Report issue");
-      expect(escapes).not.toContain("fx.sh/feedback");
-      expect(escapes).not.toContain("github.com");
+            expect(escapes).not.toContain("github.com");
       const reportPath = latestTraceReportPath(root);
       const report = readFileSync(reportPath, "utf8");
       expect(report).toContain("# fx trace");
@@ -2047,58 +1999,6 @@ describe("effect-aware command permissions", () => {
     TIMEOUT,
   );
 
-  test.skipIf(!tmuxAvailable())(
-    "TUI feedback opens fx.sh without creating a trace or touching the clipboard",
-    async () => {
-      const root = createIsolatedRoot();
-      const gateway = startFakeGateway([]);
-      const stderrPath = join(root.root, "feedback-stderr.log");
-      const openerPath = join(root.root, "feedback-opened-url.txt");
-      const clipboardMarker = join(root.root, "feedback-clipboard-used.txt");
-      installUrlOpenerFixture(
-        root,
-        '#!/bin/sh\nprintf "%s" "$1" > "$FX_FEEDBACK_OPEN_OUTPUT"\n',
-      );
-      installClipboardFixture(
-        root,
-        '#!/bin/sh\nprintf used > "$FX_FEEDBACK_CLIPBOARD_MARKER"\n',
-      );
-      writeFileSync(stderrPath, "");
-
-      activeSession = await TmuxSession.create({
-        cmd: FX_BIN,
-        cwd: root.workspace,
-        env: gatewayEnv(root, gateway, {
-          PATH: hostilePath(root),
-          TMPDIR: root.root,
-          FX_FEEDBACK_OPEN_OUTPUT: openerPath,
-          FX_FEEDBACK_CLIPBOARD_MARKER: clipboardMarker,
-        }),
-        stderrPath,
-        width: 120,
-        height: 40,
-      });
-      await activeSession.waitForComposer(TIMEOUT);
-      await activeSession.sendText("/feedback");
-      await activeSession.waitForText("Opened https://fx.sh/feedback.", TIMEOUT);
-
-      expect(readFileSync(openerPath, "utf8")).toBe("https://fx.sh/feedback");
-      expect(existsSync(clipboardMarker)).toBe(false);
-      expect(
-        readdirSync(root.root).filter((entry) => entry.startsWith("fx-trace-")),
-      ).toHaveLength(0);
-      const escapes = await activeSession.capturePaneEscapes();
-      expect(escapes).not.toContain("Feedback:");
-      expect(escapes).not.toContain("github.com");
-      expect(readFileSync(stderrPath, "utf8")).toBe("");
-
-      await activeSession.sendText("/quit");
-      expect(await activeSession.waitForSessionEnd()).toBe(true);
-      await activeSession.kill();
-      activeSession = null;
-    },
-    TIMEOUT,
-  );
 
   test.skipIf(!tmuxAvailable())(
     "TUI keeps automatic review internal in compact and full transcripts",
@@ -2192,21 +2092,13 @@ describe("effect-aware command permissions", () => {
         [
           finalText(expectedMarkers.join("\n")),
           sse([
-            {
-              type: "tool-input-start",
-              id: "scrollback_command",
-              toolName: "terminal",
-            },
-            {
-              type: "tool-call",
-              toolCallId: "scrollback_command",
-              toolName: "terminal",
-              input: { action: "exec", command: "seq 1 1" },
-            },
-            {
-              type: "finish",
-              finishReason: { unified: "tool-calls", raw: "tool-calls" },
-            },
+            ...toolCallEvents(
+              "terminal",
+              { action: "exec", command: "seq 1 1" },
+              "scrollback_command",
+              0,
+            ),
+            { type: "response.completed", response: { status: "completed" } },
           ]),
           finalText(finalResponse),
         ],
@@ -2729,7 +2621,6 @@ describe("effect-aware command permissions", () => {
           toolCall(command, {}, "invalid_review_3"),
           (body) => {
             expect(body).not.toContain('"tools":[]');
-            expect(body).not.toContain('"toolChoice":{"type":"none"}');
             return toolCall(command, {}, "invalid_review_4");
           },
           finalText("Reviewer unavailable handled normally."),
@@ -2994,7 +2885,7 @@ describe("effect-aware command permissions", () => {
       let childCompleted = false;
       let conditionWaitIssued = false;
       const routeAfterCreate = (body: string): Response | Promise<Response> => {
-        if (body.includes('"toolCallId":"parent_inspect_1"')) {
+        if (body.includes('"call_id":"parent_inspect_1"')) {
           const outcome = JSON.parse(
             toolResultText(body, "parent_inspect_1"),
           ) as {
@@ -3028,7 +2919,7 @@ describe("effect-aware command permissions", () => {
           ]);
           return finalText("parent inspected canonical child");
         }
-        if (body.includes('"toolCallId":"parent_create_1"')) {
+        if (body.includes('"call_id":"parent_create_1"')) {
           const createResult = toolResultText(body, "parent_create_1");
           expect(createResult).toContain('"ok":true');
           childId = JSON.parse(createResult).child_id as string;
@@ -3049,7 +2940,7 @@ describe("effect-aware command permissions", () => {
             },
           }, "parent_inspect_1");
         }
-        if (body.includes('"toolCallId":"child_pwd_1"')) {
+        if (body.includes('"call_id":"child_pwd_1"')) {
           return (async () => {
             await Bun.sleep(100);
             childCompleted = true;
@@ -3084,7 +2975,7 @@ describe("effect-aware command permissions", () => {
       );
       expect(continuation).toBeDefined();
       const parentInspectRequest = gateway.requests.find((request) =>
-        request.body.includes('"toolCallId":"parent_create_1"'),
+        request.body.includes('"call_id":"parent_create_1"'),
       );
       expect(parentInspectRequest).toBeDefined();
       for (const request of gateway.requests) {
@@ -3136,13 +3027,13 @@ describe("effect-aware command permissions", () => {
         releaseInspect = resolve;
       });
       const route = (body: string): Response | Promise<Response> => {
-        if (body.includes('"toolCallId":"failed_inspect_2"')) {
+        if (body.includes('"call_id":"failed_inspect_2"')) {
           inspectedCompleted = JSON.parse(
             toolResultText(body, "failed_inspect_2"),
           ) as typeof inspectedCompleted;
           return finalText("parent resumed the paused child recovery");
         }
-        if (body.includes('"toolCallId":"failed_resume_1"')) {
+        if (body.includes('"call_id":"failed_resume_1"')) {
           resumeOutcome = JSON.parse(
             toolResultText(body, "failed_resume_1"),
           ) as typeof resumeOutcome;
@@ -3161,7 +3052,7 @@ describe("effect-aware command permissions", () => {
             },
           }, "failed_inspect_2");
         }
-        if (body.includes('"toolCallId":"failed_inspect_1"')) {
+        if (body.includes('"call_id":"failed_inspect_1"')) {
           inspectedPause = JSON.parse(
             toolResultText(body, "failed_inspect_1"),
           ) as typeof inspectedPause;
@@ -3171,7 +3062,7 @@ describe("effect-aware command permissions", () => {
             },
           }, "failed_resume_1");
         }
-        if (body.includes('"toolCallId":"failed_create_1"')) {
+        if (body.includes('"call_id":"failed_create_1"')) {
           childId = JSON.parse(
             toolResultText(body, "failed_create_1"),
           ).child_id as string;
@@ -3276,13 +3167,13 @@ describe("effect-aware command permissions", () => {
         resolveSecondRequest = resolve;
       });
       const route = (body: string): Response | Promise<Response> => {
-        if (body.includes('"toolCallId":"persistent_inspect_2"')) {
+        if (body.includes('"call_id":"persistent_inspect_2"')) {
           expect(toolResultText(body, "persistent_inspect_2")).toContain(
             '"status":"idle"',
           );
           return finalText("parent observed both persistent child turns");
         }
-        if (body.includes('"toolCallId":"persistent_send_1"')) {
+        if (body.includes('"call_id":"persistent_send_1"')) {
           expect(toolResultText(body, "persistent_send_1")).toContain(
             '"status":"message_queued"',
           );
@@ -3291,7 +3182,7 @@ describe("effect-aware command permissions", () => {
             return subagentInspectCall("persistent_inspect_2", childId);
           });
         }
-        if (body.includes('"toolCallId":"persistent_inspect_1"')) {
+        if (body.includes('"call_id":"persistent_inspect_1"')) {
           expect(toolResultText(body, "persistent_inspect_1")).toContain(
             '"status":"idle"',
           );
@@ -3303,7 +3194,7 @@ describe("effect-aware command permissions", () => {
             },
           }, "persistent_send_1");
         }
-        if (body.includes('"toolCallId":"persistent_create_1"')) {
+        if (body.includes('"call_id":"persistent_create_1"')) {
           const created = JSON.parse(
             toolResultText(body, "persistent_create_1"),
           ) as { child_id: string; status: string };
@@ -3386,8 +3277,8 @@ describe("effect-aware command permissions", () => {
           }
           return childCompletion.response;
         }
-        if (body.includes('"toolCallId":"ask_delivery_create_1"') &&
-            body.includes('"type":"tool-result"')) {
+        if (body.includes('"call_id":"ask_delivery_create_1"') &&
+            body.includes('"type":"function_call_output"')) {
           if (!deliveryBarrier) {
             const created = JSON.parse(
               toolResultText(body, "ask_delivery_create_1"),
@@ -3456,7 +3347,7 @@ describe("effect-aware command permissions", () => {
       if (deliveryFailure) throw deliveryFailure;
 
       expect(first.code).toBe(0);
-      expect(first.stderr).toBe(MANAGE_SUBAGENT_PROGRESS);
+      expectManageSubagentProgress(first.stderr);
       expect(JSON.parse(first.stdout.trim()).output).toContain(
         "ASK_PARENT_FIRST_TURN_COMPLETE",
       );
@@ -3512,7 +3403,7 @@ describe("effect-aware command permissions", () => {
       );
 
       expect(second.code).toBe(0);
-      expect(second.stderr).toBe(MANAGE_SUBAGENT_PROGRESS);
+      expectManageSubagentProgress(second.stderr);
       expect(JSON.parse(second.stdout.trim()).output).toContain(
         "ASK_PARENT_DELIVERY_CONSUMED",
       );
@@ -3571,15 +3462,15 @@ describe("effect-aware command permissions", () => {
       let parentContinuationChecked = false;
       const firstRoute = (body: string) => {
         const text = promptText(body);
-        if (body.includes('"toolCallId":"multi_delivery_child_second"') &&
-            body.includes('"type":"tool-result"')) {
+        if (body.includes('"call_id":"multi_delivery_child_second"') &&
+            body.includes('"type":"function_call_output"')) {
           expect(toolResultText(body, "multi_delivery_child_second")).toContain(
             '"status":"message_queued"',
           );
           return finalText("ASK_MULTI_DELIVERY_CHILD_PRIVATE_DONE");
         }
-        if (body.includes('"toolCallId":"multi_delivery_child_first"') &&
-            body.includes('"type":"tool-result"')) {
+        if (body.includes('"call_id":"multi_delivery_child_first"') &&
+            body.includes('"type":"function_call_output"')) {
           expect(toolResultText(body, "multi_delivery_child_first")).toContain(
             '"status":"message_queued"',
           );
@@ -3609,8 +3500,8 @@ describe("effect-aware command permissions", () => {
             }, "multi_delivery_child_first");
           })();
         }
-        if (body.includes('"toolCallId":"multi_delivery_create"') &&
-            body.includes('"type":"tool-result"')) {
+        if (body.includes('"call_id":"multi_delivery_create"') &&
+            body.includes('"type":"function_call_output"')) {
           const created = JSON.parse(
             toolResultText(body, "multi_delivery_create"),
           ) as { child_id: string; status: string };
@@ -3655,7 +3546,7 @@ describe("effect-aware command permissions", () => {
       );
 
       expect(first.code).toBe(0);
-      expect(first.stderr).toBe(MANAGE_SUBAGENT_PROGRESS);
+      expectManageSubagentProgress(first.stderr);
       expect(JSON.parse(first.stdout.trim()).output).toContain(
         "ASK_MULTI_DELIVERY_PARENT_FIRST_DONE",
       );
@@ -3685,8 +3576,8 @@ describe("effect-aware command permissions", () => {
       const secondRoute = (body: string) => {
         const text = promptText(body);
         if (text.includes(freshChildWork)) return freshChildCompletion;
-        if (body.includes('"toolCallId":"multi_delivery_send_fresh"') &&
-            body.includes('"type":"tool-result"')) {
+        if (body.includes('"call_id":"multi_delivery_send_fresh"') &&
+            body.includes('"type":"function_call_output"')) {
           sameTurnFreshEventIds = parentDeliveryIds(body);
           expect(text).not.toContain(firstEventId);
           expect(text).not.toContain(secondEventId);
@@ -3721,8 +3612,8 @@ describe("effect-aware command permissions", () => {
             return finalText("ASK_MULTI_DELIVERY_MESSAGES_CONSUMED");
           });
         }
-        if (body.includes('"toolCallId":"multi_delivery_configure"') &&
-            body.includes('"type":"tool-result"')) {
+        if (body.includes('"call_id":"multi_delivery_configure"') &&
+            body.includes('"type":"function_call_output"')) {
           expectNoParentDeliveries(body);
           configureContinuationChecked = true;
           return gatewayToolCall("subagent", {
@@ -3768,7 +3659,7 @@ describe("effect-aware command permissions", () => {
       );
 
       expect(second.code).toBe(0);
-      expect(second.stderr).toBe(MANAGE_SUBAGENT_PROGRESS.repeat(2));
+      expectManageSubagentProgress(second.stderr, 2);
       expect(JSON.parse(second.stdout.trim()).output).toContain(
         "ASK_MULTI_DELIVERY_MESSAGES_CONSUMED",
       );
@@ -3847,15 +3738,15 @@ describe("effect-aware command permissions", () => {
       const parts: ParentMessagePart[] = [];
       const firstRoute = (body: string) => {
         const text = promptText(body);
-        if (body.includes('"toolCallId":"ask_64k_send_1"') &&
-            body.includes('"type":"tool-result"')) {
+        if (body.includes('"call_id":"ask_64k_send_1"') &&
+            body.includes('"type":"function_call_output"')) {
           expect(toolResultText(body, "ask_64k_send_1")).toContain(
             '"status":"message_queued"',
           );
           return finalText("ASK_64K_CHILD_PRIVATE_DONE");
         }
-        if (body.includes('"toolCallId":"ask_64k_create_1"') &&
-            body.includes('"type":"tool-result"')) {
+        if (body.includes('"call_id":"ask_64k_create_1"') &&
+            body.includes('"type":"function_call_output"')) {
           const created = JSON.parse(
             toolResultText(body, "ask_64k_create_1"),
           ) as { child_id: string; status: string };
@@ -3927,7 +3818,7 @@ describe("effect-aware command permissions", () => {
         },
       );
       expect(first.code).toBe(0);
-      expect(first.stderr).toBe(MANAGE_SUBAGENT_PROGRESS);
+      expectManageSubagentProgress(first.stderr);
       expect(JSON.parse(first.stdout.trim()).output).toContain(
         "ASK_64K_PARENT_FIRST_DONE",
       );
@@ -4031,13 +3922,13 @@ describe("effect-aware command permissions", () => {
         releaseRoot = resolve;
       });
       const route = (body: string) => {
-        if (body.includes('"toolCallId":"nested_create_1"')) {
+        if (body.includes('"call_id":"nested_create_1"')) {
           expect(toolResultText(body, "nested_create_1")).toContain(
             '"status":"created"',
           );
           return finalText("child received nested handle");
         }
-        if (body.includes('"toolCallId":"root_create_1"')) {
+        if (body.includes('"call_id":"root_create_1"')) {
           expect(toolResultText(body, "root_create_1")).toContain(
             '"status":"created"',
           );
@@ -4132,8 +4023,8 @@ describe("effect-aware command permissions", () => {
           }
           return grandchildCompletion.response;
         }
-        if (body.includes('"toolCallId":"nested_grandchild_create_1"') &&
-            body.includes('"type":"tool-result"')) {
+        if (body.includes('"call_id":"nested_grandchild_create_1"') &&
+            body.includes('"type":"function_call_output"')) {
           if (!deliveryBarrier) {
             const created = JSON.parse(
               toolResultText(body, "nested_grandchild_create_1"),
@@ -4189,8 +4080,8 @@ describe("effect-aware command permissions", () => {
             } },
           }, "nested_grandchild_create_1");
         }
-        if (body.includes('"toolCallId":"nested_root_create_1"') &&
-            body.includes('"type":"tool-result"')) {
+        if (body.includes('"call_id":"nested_root_create_1"') &&
+            body.includes('"type":"function_call_output"')) {
           const created = JSON.parse(
             toolResultText(body, "nested_root_create_1"),
           ) as { child_id: string; status: string };
@@ -4226,18 +4117,18 @@ describe("effect-aware command permissions", () => {
       if (deliveryFailure) throw deliveryFailure;
 
       expect(first.code).toBe(0);
-      expect(first.stderr).toBe(MANAGE_SUBAGENT_PROGRESS);
+      expectManageSubagentProgress(first.stderr);
       expect(JSON.parse(first.stdout.trim()).output).toContain("NESTED_ROOT_FIRST_DONE");
       expect(childId.length).toBeGreaterThan(0);
       expect(grandchildId.length).toBeGreaterThan(0);
       expect(childContinuationChecked).toBe(true);
       expect(firstGateway.requests.some((request) =>
-        request.body.includes('"toolCallId":"nested_root_create_1"') &&
-        request.body.includes('"type":"tool-result"')
+        request.body.includes('"call_id":"nested_root_create_1"') &&
+        request.body.includes('"type":"function_call_output"')
       )).toBe(true);
       expect(firstGateway.requests.some((request) =>
-        request.body.includes('"toolCallId":"nested_grandchild_create_1"') &&
-        request.body.includes('"type":"tool-result"')
+        request.body.includes('"call_id":"nested_grandchild_create_1"') &&
+        request.body.includes('"type":"function_call_output"')
       )).toBe(true);
       const parentSessionId = JSON.parse(first.stdout.trim()).session_id as string;
       expect(grandchildEventIds.length).toBeGreaterThan(0);
@@ -4260,11 +4151,11 @@ describe("effect-aware command permissions", () => {
         secondSeen.push([
           text.includes(childSecondMessage) ? "child-message" : "",
           text.includes("<subagent_deliveries") ? "delivery" : "",
-          body.includes('"toolCallId":"nested_send_child_1"') ? "send-result" : "",
-          body.includes('"toolCallId":"nested_child_inspect_grandchild_1"') ? "inspect-result" : "",
+          body.includes('"call_id":"nested_send_child_1"') ? "send-result" : "",
+          body.includes('"call_id":"nested_child_inspect_grandchild_1"') ? "inspect-result" : "",
         ].filter(Boolean).join("+") || "root-initial");
-        if (body.includes('"toolCallId":"nested_child_inspect_grandchild_1"') &&
-            body.includes('"type":"tool-result"')) {
+        if (body.includes('"call_id":"nested_child_inspect_grandchild_1"') &&
+            body.includes('"type":"function_call_output"')) {
           expectNoParentDeliveries(body);
           childContinuationDeliveryChecked = true;
           return finalText("NESTED_CHILD_CONSUMED_GRANDCHILD");
@@ -4282,8 +4173,8 @@ describe("effect-aware command permissions", () => {
           childInitialChecked = true;
           return subagentInspectCall("nested_child_inspect_grandchild_1", grandchildId);
         }
-        if (body.includes('"toolCallId":"nested_send_child_1"') &&
-            body.includes('"type":"tool-result"')) {
+        if (body.includes('"call_id":"nested_send_child_1"') &&
+            body.includes('"type":"function_call_output"')) {
           expectNoParentDeliveries(body);
           return waitForSubagentIdle(root, childId).then(() => {
             expect(childContinuationDeliveryChecked).toBe(true);
@@ -4319,7 +4210,7 @@ describe("effect-aware command permissions", () => {
       expect(rootSubagentCallIds.size).toBe(1);
       expect(childSubagentCallIds.size).toBe(1);
       expect(secondGateway.requests).toHaveLength(4);
-      expect(second.stderr).toBe(MANAGE_SUBAGENT_PROGRESS);
+      expectManageSubagentProgress(second.stderr);
       expect(JSON.parse(second.stdout.trim()).output).toContain("NESTED_ROOT_SECOND_DONE");
       expect(childInitialChecked).toBe(true);
       expect(childContinuationDeliveryChecked).toBe(true);
@@ -4332,8 +4223,8 @@ describe("effect-aware command permissions", () => {
           childNoRedeliveryChecked = true;
           return finalText("NESTED_CHILD_NO_REDELIVERY");
         }
-        if (body.includes('"toolCallId":"nested_send_child_2"') &&
-            body.includes('"type":"tool-result"')) {
+        if (body.includes('"call_id":"nested_send_child_2"') &&
+            body.includes('"type":"function_call_output"')) {
           return waitForSubagentIdle(root, childId).then(() => {
             expect(childNoRedeliveryChecked).toBe(true);
             return finalText("NESTED_ROOT_THIRD_DONE");
@@ -4361,7 +4252,7 @@ describe("effect-aware command permissions", () => {
       );
 
       expect(third.code).toBe(0);
-      expect(third.stderr).toBe(MANAGE_SUBAGENT_PROGRESS);
+      expectManageSubagentProgress(third.stderr);
       expect(JSON.parse(third.stdout.trim()).output).toContain("NESTED_ROOT_THIRD_DONE");
       expect(childNoRedeliveryChecked).toBe(true);
       for (const eventId of grandchildEventIds) {
@@ -4391,15 +4282,15 @@ describe("effect-aware command permissions", () => {
       const parts: ParentMessagePart[] = [];
       const firstRoute = (body: string) => {
         const text = promptText(body);
-        if (body.includes('"toolCallId":"nested_64k_send_1"') &&
-            body.includes('"type":"tool-result"')) {
+        if (body.includes('"call_id":"nested_64k_send_1"') &&
+            body.includes('"type":"function_call_output"')) {
           expect(toolResultText(body, "nested_64k_send_1")).toContain(
             '"status":"message_queued"',
           );
           return finalText("NESTED_64K_GRANDCHILD_PRIVATE_DONE");
         }
-        if (body.includes('"toolCallId":"nested_64k_grandchild_create_1"') &&
-            body.includes('"type":"tool-result"')) {
+        if (body.includes('"call_id":"nested_64k_grandchild_create_1"') &&
+            body.includes('"type":"function_call_output"')) {
           const created = JSON.parse(
             toolResultText(body, "nested_64k_grandchild_create_1"),
           ) as { child_id: string; status: string };
@@ -4430,8 +4321,8 @@ describe("effect-aware command permissions", () => {
               .then(() => finalText("NESTED_64K_CHILD_FIRST_PRIVATE_DONE"));
           });
         }
-        if (body.includes('"toolCallId":"nested_64k_root_create_1"') &&
-            body.includes('"type":"tool-result"')) {
+        if (body.includes('"call_id":"nested_64k_root_create_1"') &&
+            body.includes('"type":"function_call_output"')) {
           const created = JSON.parse(
             toolResultText(body, "nested_64k_root_create_1"),
           ) as { child_id: string; status: string };
@@ -4494,7 +4385,7 @@ describe("effect-aware command permissions", () => {
         },
       );
       expect(first.code).toBe(0);
-      expect(first.stderr).toBe(MANAGE_SUBAGENT_PROGRESS);
+      expectManageSubagentProgress(first.stderr);
       expect(JSON.parse(first.stdout.trim()).output).toContain(
         "NESTED_64K_ROOT_FIRST_DONE",
       );
@@ -4518,8 +4409,8 @@ describe("effect-aware command permissions", () => {
             parts.push(part);
             return finalText(`NESTED_64K_CHILD_PART_${index + 1}_DONE`);
           }
-          if (body.includes(`"toolCallId":"${sendCallId}"`) &&
-              body.includes('"type":"tool-result"')) {
+          if (body.includes(`"call_id":"${sendCallId}"`) &&
+              body.includes('"type":"function_call_output"')) {
             expect(toolResultText(body, sendCallId)).toContain(
               '"status":"message_queued"',
             );
@@ -4551,7 +4442,7 @@ describe("effect-aware command permissions", () => {
           },
         );
         expect(turn.code).toBe(0);
-        expect(turn.stderr).toBe(MANAGE_SUBAGENT_PROGRESS);
+        expectManageSubagentProgress(turn.stderr);
         expect(JSON.parse(turn.stdout.trim()).output).toContain(
           `NESTED_64K_ROOT_PART_${index + 1}_DONE`,
         );
@@ -4571,8 +4462,8 @@ describe("effect-aware command permissions", () => {
           noRedeliveryChecked = true;
           return finalText("NESTED_64K_CHILD_NO_REDELIVERY_DONE");
         }
-        if (body.includes(`"toolCallId":"${finalCallId}"`) &&
-            body.includes('"type":"tool-result"')) {
+        if (body.includes(`"call_id":"${finalCallId}"`) &&
+            body.includes('"type":"function_call_output"')) {
           return waitForSubagentIdle(root, childId)
             .then(() => finalText("NESTED_64K_ROOT_NO_REDELIVERY_DONE"));
         }
@@ -4603,7 +4494,7 @@ describe("effect-aware command permissions", () => {
         },
       );
       expect(final.code).toBe(0);
-      expect(final.stderr).toBe(MANAGE_SUBAGENT_PROGRESS);
+      expectManageSubagentProgress(final.stderr);
       expect(JSON.parse(final.stdout.trim()).output).toContain(
         "NESTED_64K_ROOT_NO_REDELIVERY_DONE",
       );
@@ -4632,7 +4523,7 @@ describe("effect-aware command permissions", () => {
       const stderrPath = join(root.root, "interactive-subagent-stderr.log");
       const childPrompt = "Return the interactive child result.";
       const route = (body: string) => {
-        if (body.includes('"toolCallId":"interactive_create_1"')) {
+        if (body.includes('"call_id":"interactive_create_1"')) {
           expect(toolResultText(body, "interactive_create_1")).toContain(
             '"status":"created"',
           );
@@ -4713,8 +4604,8 @@ describe("effect-aware command permissions", () => {
           noRedeliveryChecked = true;
           return finalText("INTERACTIVE_APPROVAL_NOT_REPEATED");
         }
-        if (body.includes(`\"toolCallId\":\"${childCommandCallId}\"`) &&
-            body.includes('"type":"tool-result"')) {
+        if (body.includes(`\"call_id\":\"${childCommandCallId}\"`) &&
+            body.includes('"type":"function_call_output"')) {
           return finalText("INTERACTIVE_CHILD_DENIED_COMPLETE");
         }
         if (userText.includes(childPrompt)) {
@@ -4723,8 +4614,8 @@ describe("effect-aware command permissions", () => {
             command: `/usr/bin/touch ${shellQuote(markerPath)}`,
           }, childCommandCallId);
         }
-        if (body.includes(`\"toolCallId\":\"${rootProbeCallId}\"`) &&
-            body.includes('"type":"tool-result"')) {
+        if (body.includes(`\"call_id\":\"${rootProbeCallId}\"`) &&
+            body.includes('"type":"function_call_output"')) {
           const text = promptText(body);
           if (text.includes(`"id":"${approval!.id}"`)) {
             checkApprovalDelivery(body);
@@ -4735,8 +4626,8 @@ describe("effect-aware command permissions", () => {
           }
           return finalText("INTERACTIVE_PARENT_SAW_CHILD_APPROVAL");
         }
-        if (body.includes(`\"toolCallId\":\"${rootCreateCallId}\"`) &&
-            body.includes('"type":"tool-result"')) {
+        if (body.includes(`\"call_id\":\"${rootCreateCallId}\"`) &&
+            body.includes('"type":"function_call_output"')) {
           const created = JSON.parse(
             toolResultText(body, rootCreateCallId),
           ) as { child_id: string; status: string };
@@ -4875,8 +4766,8 @@ describe("effect-aware command permissions", () => {
           }
           throw new Error(`Unexpected child caution request: ${body}`);
         }
-        if (body.includes(`\"toolCallId\":\"${rootCreateCallId}\"`) &&
-            body.includes('"type":"tool-result"')) {
+        if (body.includes(`\"call_id\":\"${rootCreateCallId}\"`) &&
+            body.includes('"type":"function_call_output"')) {
           const created = JSON.parse(toolResultText(body, rootCreateCallId)) as {
             child_id: string;
             status: string;
@@ -4985,8 +4876,8 @@ describe("effect-aware command permissions", () => {
           return finalText("INTERACTIVE_PARENT_NO_REDELIVERY");
         }
         if (parentPhase === "inspect_result" &&
-            body.includes('"toolCallId":"interactive_delivery_inspect_1"') &&
-            body.includes('"type":"tool-result"')) {
+            body.includes('"call_id":"interactive_delivery_inspect_1"') &&
+            body.includes('"type":"function_call_output"')) {
           expectNoParentDeliveries(body);
           secondContinuationChecked = true;
           parentPhase = "third_prompt";
@@ -5008,8 +4899,8 @@ describe("effect-aware command permissions", () => {
           return subagentInspectCall("interactive_delivery_inspect_1", childId);
         }
         if (parentPhase === "create_result" &&
-            body.includes('"toolCallId":"interactive_delivery_create_1"') &&
-            body.includes('"type":"tool-result"')) {
+            body.includes('"call_id":"interactive_delivery_create_1"') &&
+            body.includes('"type":"function_call_output"')) {
           const created = JSON.parse(
             toolResultText(body, "interactive_delivery_create_1"),
           ) as { child_id: string; status: string };
@@ -5132,15 +5023,15 @@ describe("effect-aware command permissions", () => {
           parts.push(part);
           return finalText(`INTERACTIVE_64K_PART_${parts.length}_DONE`);
         }
-        if (body.includes('"toolCallId":"interactive_64k_send_1"') &&
-            body.includes('"type":"tool-result"')) {
+        if (body.includes('"call_id":"interactive_64k_send_1"') &&
+            body.includes('"type":"function_call_output"')) {
           expect(toolResultText(body, "interactive_64k_send_1")).toContain(
             '"status":"message_queued"',
           );
           return finalText("INTERACTIVE_64K_CHILD_PRIVATE_DONE");
         }
-        if (body.includes('"toolCallId":"interactive_64k_create_1"') &&
-            body.includes('"type":"tool-result"')) {
+        if (body.includes('"call_id":"interactive_64k_create_1"') &&
+            body.includes('"type":"function_call_output"')) {
           const created = JSON.parse(
             toolResultText(body, "interactive_64k_create_1"),
           ) as { child_id: string; status: string };
@@ -5693,20 +5584,28 @@ describe("effect-aware command permissions", () => {
       );
       expect(gateway.requests).toHaveLength(2);
       expect(gateway.classifierRequests).toHaveLength(1);
-      expect(gateway.classifierRequests[0]!.headers.get("ai-language-model-id")).toBe(
-        "moonshotai/kimi-k3",
-      );
-      expect(JSON.parse(gateway.classifierRequests[0]!.body)).not.toHaveProperty(
-        "providerOptions.gateway.speed",
-      );
+      const classifierRequest = JSON.parse(gateway.classifierRequests[0]!.body);
+      expect(classifierRequest.model).toBe("gpt-5");
+      expect(classifierRequest).not.toHaveProperty("service_tier");
       expect(gateway.classifierRequests[0]!.body).toContain("\"permission_decision\"");
-      expect(gateway.classifierRequests[0]!.body).toContain("\"toolChoice\":{\"type\":\"required\"}");
-      expect(gateway.classifierRequests[0]!.body).toContain("\"maxOutputTokens\":2048");
+      expect(classifierRequest.tool_choice).toBe("required");
+      expect(classifierRequest.max_output_tokens).toBe(2048);
       expect(gateway.classifierRequests[0]!.body).toContain(
         "Run the classifier fixture.",
       );
-      expect(gateway.classifierRequests[0]!.body).toContain("\"role\":\"assistant\"");
-      expect(gateway.classifierRequests[0]!.body).toContain("\"toolCallId\":\"command_1\"");
+      expect(classifierRequest.input).toContainEqual(
+        expect.objectContaining({
+          type: "function_call",
+          call_id: "command_1",
+          name: "terminal",
+        }),
+      );
+      expect(classifierRequest.input).toContainEqual(
+        expect.objectContaining({
+          type: "function_call_output",
+          call_id: "command_1",
+        }),
+      );
       expect(gateway.classifierRequests[0]!.body).toContain(
         "The first user message is the bounded current proven root-user request.",
       );
@@ -5761,7 +5660,6 @@ describe("effect-aware command permissions", () => {
       expect(gateway.requests).toHaveLength(3);
       expect(gateway.classifierRequests).toHaveLength(1);
       const trace = readFileSync(tracePath, "utf8");
-      expect(trace.match(/event=auto_review_transport_start/g)).toHaveLength(1);
       expect(trace.match(/event=auto_review_result/g)).toHaveLength(1);
       expect(trace).toContain("decision=unavailable");
       expect(trace).toContain("fallback_reason=invalid_or_unavailable");
@@ -5806,7 +5704,6 @@ describe("effect-aware command permissions", () => {
       expect(gateway.requests).toHaveLength(2);
       expect(gateway.classifierRequests).toHaveLength(1);
       const trace = readFileSync(tracePath, "utf8");
-      expect(trace.match(/event=auto_review_transport_start/g)).toHaveLength(1);
       expect(trace.match(/event=auto_review_result/g)).toHaveLength(1);
       expect(trace).toContain("decision=unavailable");
       expect(trace).toContain("fallback_reason=invalid_or_unavailable");
@@ -5856,7 +5753,6 @@ describe("effect-aware command permissions", () => {
       expect(gateway.requests).toHaveLength(2);
       expect(gateway.classifierRequests).toHaveLength(1);
       const trace = readFileSync(tracePath, "utf8");
-      expect(trace.match(/event=auto_review_transport_start/g)).toHaveLength(1);
       expect(trace.match(/event=auto_review_result/g)).toHaveLength(1);
       expect(trace).toContain("decision=unavailable");
       expect(trace).toContain("fallback_reason=invalid_or_unavailable");

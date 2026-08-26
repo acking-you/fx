@@ -20,6 +20,9 @@ import {
   fakeGatewayFinalText,
   fakeGatewaySse,
   hasEmptyComposer,
+  responseCompleted,
+  responseFunctionCall,
+  responseTextDelta,
   startFakeGateway,
   TmuxSession,
   tmuxAvailable,
@@ -123,12 +126,9 @@ function makePaths(label: string): Paths {
 function gatewayEnv(home: string, gateway: ReturnType<typeof startFakeGateway>) {
   return {
     HOME: home,
-    AI_GATEWAY_API_KEY: "fake-resume-brutal-key",
-    VERCEL_OIDC_TOKEN: undefined,
-    FX_GATEWAY_BASE_URL: gateway.baseUrl,
-    FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+    OPENAI_API_KEY: "fake-resume-brutal-key",
+        FX_RESPONSES_BASE_URL: gateway.baseUrl,
     FX_MODEL: FAKE_GATEWAY_MODEL,
-    FX_AUTO_UPGRADE: "0",
     NO_COLOR: "1",
   };
 }
@@ -183,27 +183,22 @@ function historyBatch(batch: number, config: Config): Response {
       }
     },
   ).join("\n");
-  const events: object[] = [{
-    type: "text-delta",
-    id: `resume-answer-${batch}`,
-    delta: `${lines}\n`,
-  }];
+  const events: object[] = [
+    responseTextDelta(`${lines}\n`, `resume-answer-${batch}`),
+  ];
   for (let tool = 0; tool < config.toolsPerBatch; tool += 1) {
-    events.push({
-      type: "tool-call",
-      toolCallId: `resume-tool-${batch}-${tool}`,
-      toolName: "read_file",
-      input: {
+    events.push(...responseFunctionCall(
+      `resume-tool-${batch}-${tool}`,
+      "read_file",
+      {
         path: "resume-tool-payload.txt",
         line_start: (tool * 73) % 600,
         line_count: 200,
       },
-    });
+      tool + 1,
+    ));
   }
-  events.push({
-    type: "finish",
-    finishReason: { unified: "tool-calls", raw: "tool-calls" },
-  });
+  events.push(responseCompleted());
   return fakeGatewaySse(events);
 }
 

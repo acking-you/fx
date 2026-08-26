@@ -37,10 +37,9 @@ pub const Config = struct {
     api_key: []const u8 = "",
     credential_source: ?types.CredentialSource = null,
     account_id: ?[]const u8 = null,
-    gateway_team: ?[]const u8 = null,
     worker_model: []const u8 = "",
     gateway_retry_count: usize = 3,
-    gateway_chat_url: []const u8 = "https://ai-gateway.vercel.sh/v3/ai/language-model",
+    gateway_chat_url: []const u8 = "",
     usage: ?*session_usage.Usage = null,
     usage_allocator: Allocator = std.heap.c_allocator,
 };
@@ -53,7 +52,6 @@ const OwnedInputs = struct {
     api_key: []u8,
     credential_source: ?types.CredentialSource = null,
     account_id: ?[]u8 = null,
-    gateway_team: ?[]u8 = null,
     worker_model: []u8,
     gateway_retry_count: usize,
     gateway_chat_url: []u8,
@@ -64,7 +62,6 @@ const OwnedInputs = struct {
     fn deinit(self: *OwnedInputs, alloc: Allocator) void {
         alloc.free(self.api_key);
         if (self.account_id) |account_id| alloc.free(account_id);
-        if (self.gateway_team) |team| alloc.free(team);
         alloc.free(self.worker_model);
         alloc.free(self.gateway_chat_url);
         self.* = undefined;
@@ -75,7 +72,6 @@ const OwnedInputs = struct {
             .api_key = self.api_key,
             .credential_source = self.credential_source,
             .account_id = self.account_id,
-            .gateway_team = self.gateway_team,
             .worker_model = self.worker_model,
             .gateway_retry_count = self.gateway_retry_count,
             .gateway_chat_url = self.gateway_chat_url,
@@ -94,7 +90,6 @@ pub const Runtime = struct {
     api_key: []const u8,
     credential_source: ?types.CredentialSource = null,
     account_id: ?[]const u8 = null,
-    gateway_team: ?[]const u8 = null,
     worker_model: []const u8,
     gateway_retry_count: usize,
     gateway_chat_url: []const u8,
@@ -111,7 +106,6 @@ pub const Runtime = struct {
             .api_key = config.api_key,
             .credential_source = config.credential_source,
             .account_id = config.account_id,
-            .gateway_team = config.gateway_team,
             .worker_model = config.worker_model,
             .gateway_retry_count = config.gateway_retry_count,
             .gateway_chat_url = config.gateway_chat_url,
@@ -146,7 +140,6 @@ pub const Runtime = struct {
         self.api_key = inputs.api_key;
         self.credential_source = inputs.credential_source;
         self.account_id = inputs.account_id;
-        self.gateway_team = inputs.gateway_team;
         self.worker_model = inputs.worker_model;
         self.gateway_retry_count = inputs.gateway_retry_count;
         self.gateway_chat_url = inputs.gateway_chat_url;
@@ -256,8 +249,6 @@ pub const Runtime = struct {
         errdefer alloc.free(api_key);
         const account_id = if (self.account_id) |value| try alloc.dupe(u8, value) else null;
         errdefer if (account_id) |value| alloc.free(value);
-        const gateway_team = if (self.gateway_team) |team| try alloc.dupe(u8, team) else null;
-        errdefer if (gateway_team) |team| alloc.free(team);
         const worker_model = try alloc.dupe(u8, self.worker_model);
         errdefer alloc.free(worker_model);
         const gateway_chat_url = try alloc.dupe(u8, self.gateway_chat_url);
@@ -267,7 +258,6 @@ pub const Runtime = struct {
             .policy = self.policy,
             .credential_source = self.credential_source,
             .account_id = account_id,
-            .gateway_team = gateway_team,
             .worker_model = worker_model,
             .gateway_retry_count = self.gateway_retry_count,
             .gateway_chat_url = gateway_chat_url,

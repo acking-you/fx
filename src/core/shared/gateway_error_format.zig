@@ -6,61 +6,6 @@ const Allocator = std.mem.Allocator;
 const max_published_error_bytes: usize = 1024;
 const max_recovery_diagnostic_bytes: usize = 600;
 
-pub fn formatSchemaDiagnostic(alloc: Allocator, detail: []const u8) !?[]u8 {
-    if (detail.len == 0) return null;
-
-    var parsed = std.json.parseFromSlice(std.json.Value, alloc, detail, .{}) catch return null;
-    defer parsed.deinit();
-
-    const root = objectValue(parsed.value) orelse return null;
-    const error_value = root.get("error") orelse return null;
-    const error_object = objectValue(error_value) orelse return null;
-    const message = stringField(error_object, "message");
-
-    const param_path = if (error_object.get("param")) |param_value|
-        try formatParamPath(alloc, param_value)
-    else
-        null;
-    defer if (param_path) |path| alloc.free(path);
-
-    const expected = stringField(error_object, "expected") orelse schemaKindAfter(message, "expected ");
-    const received = stringField(error_object, "received") orelse schemaKindAfter(message, "received ");
-
-    if (param_path == null and expected == null and received == null) return null;
-
-    var out: std.Io.Writer.Allocating = .init(alloc);
-    errdefer out.deinit();
-    var wrote = false;
-    if (param_path) |path| {
-        if (path.len > 0) {
-            try out.writer.writeAll("path=");
-            try appendSafeToken(&out.writer, path);
-            wrote = true;
-        }
-    }
-    if (expected) |kind| {
-        if (kind.len > 0) {
-            if (wrote) try out.writer.writeByte(' ');
-            try out.writer.writeAll("expected=");
-            try appendSafeToken(&out.writer, kind);
-            wrote = true;
-        }
-    }
-    if (received) |kind| {
-        if (kind.len > 0) {
-            if (wrote) try out.writer.writeByte(' ');
-            try out.writer.writeAll("received=");
-            try appendSafeToken(&out.writer, kind);
-            wrote = true;
-        }
-    }
-    if (!wrote) {
-        out.deinit();
-        return null;
-    }
-    return try out.toOwnedSlice();
-}
-
 pub fn formatHttpErrorMessage(alloc: Allocator, status: std.http.Status, detail: []const u8) ![]u8 {
     const status_code = @intFromEnum(status);
     const title = if (status_code == 401 or status_code == 403)
@@ -216,103 +161,6 @@ fn stringField(object: std.json.ObjectMap, key: []const u8) ?[]const u8 {
     };
 }
 
-fn formatParamPath(alloc: Allocator, value: std.json.Value) !?[]u8 {
-    var out: std.Io.Writer.Allocating = .init(alloc);
-    errdefer out.deinit();
-    if (!try writeParamPath(&out.writer, value)) {
-        out.deinit();
-        return null;
-    }
-    return try out.toOwnedSlice();
-}
-
-fn writeParamPath(writer: *std.Io.Writer, value: std.json.Value) !bool {
-    switch (value) {
-        .string => |text| {
-            if (text.len == 0) return false;
-            try appendSafeToken(writer, text);
-            return true;
-        },
-        .array => |array| {
-            if (array.items.len == 0) return false;
-            for (array.items, 0..) |item, i| {
-                if (i > 0) try writer.writeByte('.');
-                switch (item) {
-                    .string => |text| try appendSafeToken(writer, text),
-                    .integer => |number| try writer.print("{d}", .{number}),
-                    .number_string => |raw| try appendSafeToken(writer, raw),
-                    .object => |object| {
-                        if (object.get("path")) |path| {
-                            if (!try writeParamPath(writer, path)) try writer.writeAll("object");
-                        } else if (object.get("param")) |param| {
-                            if (!try writeParamPath(writer, param)) try writer.writeAll("object");
-                        } else {
-                            try writer.writeAll("object");
-                        }
-                    },
-                    else => try writer.writeAll(jsonKindName(item)),
-                }
-            }
-            return true;
-        },
-        .object => |object| {
-            if (object.get("path")) |path| return writeParamPath(writer, path);
-            if (object.get("param")) |param| return writeParamPath(writer, param);
-            return false;
-        },
-        else => return false,
-    }
-}
-
-fn schemaKindAfter(message: ?[]const u8, marker: []const u8) ?[]const u8 {
-    const text = message orelse return null;
-    const marker_index = std.mem.indexOf(u8, text, marker) orelse return null;
-    var start = marker_index + marker.len;
-    while (start < text.len and (text[start] == ' ' or text[start] == '\'' or text[start] == '"' or text[start] == '`')) : (start += 1) {}
-    var end = start;
-    while (end < text.len) : (end += 1) {
-        switch (text[end]) {
-            'a'...'z', 'A'...'Z', '0'...'9', '_', '-' => {},
-            else => break,
-        }
-    }
-    if (end == start) return null;
-    return text[start..end];
-}
-
-fn appendSafeToken(writer: *std.Io.Writer, raw: []const u8) !void {
-    var wrote = false;
-    var last_was_underscore = false;
-    for (raw) |c| {
-        switch (c) {
-            'a'...'z', 'A'...'Z', '0'...'9', '_', '-', '.', '[', ']' => {
-                try writer.writeByte(c);
-                wrote = true;
-                last_was_underscore = c == '_';
-            },
-            else => {
-                if (!last_was_underscore) {
-                    try writer.writeByte('_');
-                    wrote = true;
-                    last_was_underscore = true;
-                }
-            },
-        }
-    }
-    if (!wrote) try writer.writeAll("unknown");
-}
-
-fn jsonKindName(value: std.json.Value) []const u8 {
-    return switch (value) {
-        .null => "null",
-        .bool => "bool",
-        .integer, .float, .number_string => "number",
-        .string => "string",
-        .array => "array",
-        .object => "object",
-    };
-}
-
 fn providerFromGatewayMessage(message: ?[]const u8) ?[]const u8 {
     const text = message orelse return null;
     const marker = "Providers considered: ";
@@ -378,25 +226,25 @@ test "formatHttpErrorMessage renders live restricted provider body shape" {
     );
 }
 
-test "formatHttpErrorMessage renders API key and credits setup bodies" {
+test "formatHttpErrorMessage renders structured API access failures" {
     const api_key_detail =
-        \\{"error":{"code":"api_key_required","message":"Set AI_GATEWAY_API_KEY to use this endpoint."}}
+        \\{"error":{"code":"api_key_required","message":"Set OPENAI_API_KEY to use this endpoint."}}
     ;
     const api_key_line = try formatHttpErrorMessage(std.testing.allocator, .unauthorized, api_key_detail);
     defer std.testing.allocator.free(api_key_line);
     try std.testing.expectEqualStrings(
-        "API access denied · HTTP 401 · api_key_required: Set AI_GATEWAY_API_KEY to use this endpoint.",
+        "API access denied · HTTP 401 · api_key_required: Set OPENAI_API_KEY to use this endpoint.",
         api_key_line,
     );
 
-    const credits_detail =
-        \\{"error":{"code":"credit_card_required","message":"Buy credits to use AI Gateway."}}
+    const policy_detail =
+        \\{"error":{"code":"access_denied","message":"This credential cannot use the selected model."}}
     ;
-    const credits_line = try formatHttpErrorMessage(std.testing.allocator, .forbidden, credits_detail);
-    defer std.testing.allocator.free(credits_line);
+    const policy_line = try formatHttpErrorMessage(std.testing.allocator, .forbidden, policy_detail);
+    defer std.testing.allocator.free(policy_line);
     try std.testing.expectEqualStrings(
-        "API access denied · HTTP 403 · credit_card_required: Buy credits to use AI Gateway.",
-        credits_line,
+        "API access denied · HTTP 403 · access_denied: This credential cannot use the selected model.",
+        policy_line,
     );
 }
 
@@ -404,12 +252,12 @@ test "formatHttpErrorMessage masks structured and fallback secrets" {
     const alloc = std.testing.allocator;
     const secret = "abcdefghijklmnop";
     const structured_detail =
-        \\{"error":{"code":"provider_error","message":"AI_GATEWAY_API_KEY=abcdefghijklmnop"}}
+        \\{"error":{"code":"provider_error","message":"OPENAI_API_KEY=abcdefghijklmnop"}}
     ;
     const structured = try formatHttpErrorMessage(alloc, .service_unavailable, structured_detail);
     defer alloc.free(structured);
     try std.testing.expectEqualStrings(
-        "API request failed · HTTP 503 · provider_error: AI_GATEWAY_API_KEY=[redacted]",
+        "API request failed · HTTP 503 · provider_error: OPENAI_API_KEY=[redacted]",
         structured,
     );
     try std.testing.expect(std.mem.find(u8, structured, secret) == null);
@@ -439,42 +287,6 @@ test "formatHttpRecoveryDiagnostic keeps status code and provider error identity
         "HTTP 503 · Provider: wafer · no_available_providers: No providers are currently available",
         diagnostic,
     );
-}
-
-test "formatSchemaDiagnostic renders array param path and expected kinds" {
-    const detail =
-        \\{"error":{"message":"Invalid input: expected string, received array","param":["prompt",0,"content"]}}
-    ;
-    const diagnostic = try formatSchemaDiagnostic(std.testing.allocator, detail);
-    defer if (diagnostic) |owned| std.testing.allocator.free(owned);
-
-    try std.testing.expect(diagnostic != null);
-    try std.testing.expectEqualStrings(
-        "path=prompt.0.content expected=string received=array",
-        diagnostic.?,
-    );
-}
-
-test "formatSchemaDiagnostic renders live issue-object param path" {
-    const detail =
-        \\{"error":{"message":"Invalid input: expected string, received array","param":[{"expected":"string","code":"invalid_type","path":["prompt",0,"content"],"message":"Invalid input: expected string, received array"}],"type":"invalid_request_error"}}
-    ;
-    const diagnostic = try formatSchemaDiagnostic(std.testing.allocator, detail);
-    defer if (diagnostic) |owned| std.testing.allocator.free(owned);
-
-    try std.testing.expect(diagnostic != null);
-    try std.testing.expectEqualStrings(
-        "path=prompt.0.content expected=string received=array",
-        diagnostic.?,
-    );
-}
-
-test "formatSchemaDiagnostic ignores restricted provider body without schema path" {
-    const detail =
-        \\{"error":{"message":"Your team has restricted access to this provider. Providers considered: wafer","type":"no_providers_available","param":{"name":"RestrictedProvidersError","message":"Your team has restricted access to this provider. Providers considered: wafer"}}}
-    ;
-    const diagnostic = try formatSchemaDiagnostic(std.testing.allocator, detail);
-    try std.testing.expect(diagnostic == null);
 }
 
 test "formatMarkedLine indents wrapped continuation under message text" {

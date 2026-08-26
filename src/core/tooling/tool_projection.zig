@@ -13,6 +13,7 @@ pub const Options = struct {
     permission_rules: types.PermissionRuleSet = .{},
     mcp_runtime: ?*mcp_runtime.McpRuntime = null,
     subagent_available: bool = false,
+    web_search_available: bool = true,
 };
 
 const BuildKind = enum { full, read_only };
@@ -410,7 +411,7 @@ fn writeTestWebSearchProviderAdvertisement(
     _: Allocator,
     writer: *std.Io.Writer,
 ) tool_dispatch.ProviderAdvertisementError!void {
-    try writer.writeAll("{\"type\":\"provider\",\"id\":\"gateway.perplexity_search\",\"name\":\"perplexity_search\",\"args\":{}}");
+    try writer.writeAll("{\"type\":\"provider\",\"id\":\"provider.search\",\"name\":\"provider_search\",\"args\":{}}");
 }
 
 const test_web_fetch = blk: {
@@ -819,6 +820,7 @@ fn appendBuiltinTool(
     if (!includeBuiltinForKind(tool.name, kind, tool_set)) return;
     if (std.mem.eql(u8, tool.name, "subagent") and !options.subagent_available) return;
     if (std.mem.eql(u8, tool.name, "vision")) return;
+    if (std.mem.eql(u8, tool.name, "web_search") and !options.web_search_available) return;
     if (options.permission_mode != .yolo) {
         if (tool.provider_executed and !providerExecutionIsAllowed(tool.name, options.permission_rules)) return;
         if (permissions.rulesDenyAllTargetsForTool(options.permission_rules, tool.name)) return;

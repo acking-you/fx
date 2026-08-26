@@ -19,6 +19,9 @@ import {
   fakeGatewaySse,
   fakeGatewaySerializedToolCall,
   fakeGatewayToolCall,
+  responseCompleted,
+  responseFunctionCall,
+  responseTextDelta,
   startDynamicFakeGateway,
   startFakeGateway,
   terminalFixtureShell,
@@ -82,15 +85,12 @@ function gatewayEnv(
 ): Record<string, string | undefined> {
   return {
     HOME: home,
-    AI_GATEWAY_API_KEY: "fake-ask-presentation-key",
-    VERCEL_OIDC_TOKEN: undefined,
+    OPENAI_API_KEY: "fake-ask-presentation-key",
     FX_DISABLE_KEYCHAIN: "1",
     FX_SKIP_ONBOARDING: "1",
     FX_MODEL: FAKE_GATEWAY_MODEL,
     FX_PERMISSION_MODE: "auto",
-    FX_GATEWAY_BASE_URL: gateway.baseUrl,
-    FX_GATEWAY_CHAT_URL: gateway.chatUrl,
-    FX_E2E_GATEWAY_MODELS_URL: `${gateway.baseUrl}/coding-agent/v1/models`,
+    FX_RESPONSES_BASE_URL: gateway.baseUrl,
   };
 }
 
@@ -112,8 +112,10 @@ function fakeGatewayStreamingText(lines: string[], delayMs: number) {
         for (const line of lines) {
           controller.enqueue(encoder.encode(
             `data: ${JSON.stringify({
-              type: "text-delta",
-              id: "answer_1",
+              type: "response.output_text.delta",
+              item_id: "answer_1",
+              output_index: 0,
+              content_index: 0,
               delta: `${line}\n`,
             })}\n\n`,
           ));
@@ -121,11 +123,14 @@ function fakeGatewayStreamingText(lines: string[], delayMs: number) {
         }
         controller.enqueue(encoder.encode(
           `data: ${JSON.stringify({
-            type: "finish",
-            finishReason: { unified: "stop", raw: "stop" },
-            usage: {
-              inputTokens: { total: 3 },
-              outputTokens: { total: lines.length },
+            type: "response.completed",
+            response: {
+              status: "completed",
+              usage: {
+                input_tokens: 3,
+                output_tokens: lines.length,
+                total_tokens: 3 + lines.length,
+              },
             },
           })}\n\ndata: [DONE]\n\n`,
         ));
@@ -141,22 +146,15 @@ describe("fx ask presentation", () => {
     const root = createRoot();
     const gateway = startFakeGateway([
       fakeGatewaySse([
-        {
-          type: "tool-call",
-          toolCallId: "no-final-newline",
-          toolName: "terminal",
-          input: { action: "exec", command: "printf no-final-newline" },
-        },
-        {
-          type: "tool-call",
-          toolCallId: "next-command",
-          toolName: "terminal",
-          input: { action: "exec", command: "printf 'next-output\\n'" },
-        },
-        {
-          type: "finish",
-          finishReason: { unified: "tool-calls", raw: "tool-calls" },
-        },
+        ...responseFunctionCall("no-final-newline", "terminal", {
+          action: "exec",
+          command: "printf no-final-newline",
+        }),
+        ...responseFunctionCall("next-command", "terminal", {
+          action: "exec",
+          command: "printf 'next-output\\n'",
+        }, 1),
+        responseCompleted(),
       ]),
       fakeGatewayFinalText("Commands complete.\n"),
     ]);
@@ -277,7 +275,7 @@ describe("fx ask presentation", () => {
       tools: Array<{
         name?: string;
         description?: string;
-        inputSchema?: {
+        parameters?: {
           properties?: Record<string, {
             enum?: string[];
             description?: string;
@@ -291,7 +289,7 @@ describe("fx ask presentation", () => {
     expect(terminalTool?.description).toBe(
       "Run one captured command and return its result.",
     );
-    const terminalSchema = terminalTool?.inputSchema;
+    const terminalSchema = terminalTool?.parameters;
     expect(terminalSchema?.properties?.action?.enum).toEqual(["exec"]);
     expect(Object.keys(terminalSchema?.properties ?? {})).toEqual([
       "action",
@@ -334,7 +332,6 @@ describe("fx ask presentation", () => {
       "terminal arguments must match the advertised action schema",
     );
     expect(gateway.requests[5]!.body).not.toContain("tool_permission_denied");
-    expect(gateway.requests[5]!.body).toContain('"request"');
     expect(existsSync(nestedExecMarker)).toBe(false);
     expect(gateway.requests[6]!.body).toContain("neighbor-exec");
     expect(
@@ -608,19 +605,8 @@ describe("fx ask presentation", () => {
       );
       const gateway = startFakeGateway([
         fakeGatewaySse([
-          ...answerLines.map((line) => ({
-            type: "text-delta",
-            id: "answer_1",
-            delta: `${line}\n`,
-          })),
-          {
-            type: "finish",
-            finishReason: { unified: "stop", raw: "stop" },
-            usage: {
-              inputTokens: { total: 3 },
-              outputTokens: { total: 60 },
-            },
-          },
+          ...answerLines.map((line) => responseTextDelta(`${line}\n`)),
+          responseCompleted(3, 60),
         ]),
       ]);
       gateways.push(gateway);
@@ -680,23 +666,12 @@ describe("fx ask presentation", () => {
               await outputGate;
               for (const line of answerLines) {
                 controller.enqueue(encoder.encode(
-                  `data: ${JSON.stringify({
-                    type: "text-delta",
-                    id: "answer_1",
-                    delta: `${line}\n`,
-                  })}\n\n`,
+                  `data: ${JSON.stringify(responseTextDelta(`${line}\n`))}\n\n`,
                 ));
               }
               await responseGate;
               controller.enqueue(encoder.encode(
-                `data: ${JSON.stringify({
-                  type: "finish",
-                  finishReason: { unified: "stop", raw: "stop" },
-                  usage: {
-                    inputTokens: { total: 3 },
-                    outputTokens: { total: answerLines.length },
-                  },
-                })}\n\ndata: [DONE]\n\n`,
+                `data: ${JSON.stringify(responseCompleted(3, answerLines.length))}\n\ndata: [DONE]\n\n`,
               ));
               controller.close();
             },

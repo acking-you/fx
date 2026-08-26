@@ -648,8 +648,7 @@ describe.skipIf(SKIP)("tui: render lab", () => {
     () => {
       outDir = mkdtempSync(join(tmpdir(), "fx-render-lab-test-"));
       const env = { ...process.env };
-      delete env.AI_GATEWAY_API_KEY;
-      delete env.VERCEL_OIDC_TOKEN;
+      delete env.OPENAI_API_KEY;
 
       const output = execFileSync(
         "bun",
@@ -713,8 +712,8 @@ describe.skipIf(SKIP)("tui: render lab", () => {
       }
       expect(readQuiescence(artifacts.manifest)).toHaveLength(1);
       expect(artifacts.gatewayRequests).toEqual([
-        "GET /coding-agent/v1/models",
-        "POST /v3/ai/language-model",
+        "GET /v1/models",
+        "POST /v1/responses",
       ]);
       expect(artifacts.stderr).toBe("");
     },
@@ -734,7 +733,7 @@ describe.skipIf(SKIP)("tui: render lab", () => {
       expect(artifacts.finalFrame.grid.some((row) => /^┃\s*$/.test(row))).toBe(true);
       expect(artifacts.finalFrame.grid.some((row) => row.includes("HTTP 401"))).toBe(false);
       expect(artifacts.finalFrame.grid.some((row) => row.includes("RENDER_LAB_LOCAL_GATEWAY_OK"))).toBe(false);
-      expect(artifacts.gatewayRequests).toEqual(["GET /coding-agent/v1/models", "POST /v3/ai/language-model"]);
+      expect(artifacts.gatewayRequests).toEqual(["GET /v1/models", "POST /v1/responses"]);
       expect(artifacts.stderr).toBe("");
     },
     TIMEOUT,
@@ -754,7 +753,7 @@ describe.skipIf(SKIP)("tui: render lab", () => {
       expect(artifacts.finalFrame.grid.some((row) => /^┃\s*$/.test(row))).toBe(true);
       expect(artifacts.finalFrame.grid.some((row) => row.includes("HTTP 401"))).toBe(false);
       expect(artifacts.finalFrame.grid.some((row) => row.includes("RENDER_LAB_LOCAL_GATEWAY_OK"))).toBe(false);
-      expect(artifacts.gatewayRequests).toEqual(["GET /coding-agent/v1/models", "POST /v3/ai/language-model"]);
+      expect(artifacts.gatewayRequests).toEqual(["GET /v1/models", "POST /v1/responses"]);
       expect(artifacts.stderr).toBe("");
     },
     TIMEOUT,
@@ -771,8 +770,7 @@ function runScenarioArtifacts(scenario: string): {
 } {
   outDir = mkdtempSync(join(tmpdir(), "fx-render-lab-overflow-test-"));
   const env = { ...process.env };
-  delete env.AI_GATEWAY_API_KEY;
-  delete env.VERCEL_OIDC_TOKEN;
+  delete env.OPENAI_API_KEY;
   const output = execFileSync(
     "bun",
     ["run", "render-lab", "--", "--scenario", scenario, "--runs", "1", "--out", outDir],

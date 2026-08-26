@@ -133,15 +133,11 @@ async function startFx(
     cwd,
     env: {
       HOME: testHome,
-      AI_GATEWAY_API_KEY: ENV_TOKEN,
-      VERCEL_OIDC_TOKEN: undefined,
+      OPENAI_API_KEY: ENV_TOKEN,
       FX_DISABLE_KEYCHAIN: "1",
       FX_SKIP_ONBOARDING: "1",
-      FX_GATEWAY_BASE_URL: fakeGateway.baseUrl,
-      FX_GATEWAY_CHAT_URL: fakeGateway.chatUrl,
-      FX_E2E_GATEWAY_MODELS_URL: `${fakeGateway.baseUrl}/coding-agent/v1/models`,
+      FX_RESPONSES_BASE_URL: fakeGateway.baseUrl,
       FX_MODEL: FAKE_GATEWAY_MODEL,
-      FX_AUTO_UPGRADE: "0",
       FX_NO_OPEN_BROWSER: "1",
       FX_TRACE_LOG: tracePath,
       FX_TRACE_SCOPES: tracePath ? "auth,prompt" : undefined,
@@ -891,15 +887,11 @@ async function startFxWithoutAuth(
     cwd,
     env: {
       HOME: testHome,
-      AI_GATEWAY_API_KEY: undefined,
-      VERCEL_OIDC_TOKEN: undefined,
+      OPENAI_API_KEY: undefined,
       FX_DISABLE_KEYCHAIN: "1",
       FX_SKIP_ONBOARDING: "1",
-      FX_GATEWAY_BASE_URL: fakeGateway.baseUrl,
-      FX_GATEWAY_CHAT_URL: fakeGateway.chatUrl,
-      FX_E2E_GATEWAY_MODELS_URL: `${fakeGateway.baseUrl}/coding-agent/v1/models`,
+      FX_RESPONSES_BASE_URL: fakeGateway.baseUrl,
       FX_MODEL: FAKE_GATEWAY_MODEL,
-      FX_AUTO_UPGRADE: "0",
     },
     stderrPath: testStderrPath,
     width: 100,
@@ -951,7 +943,6 @@ tmuxTest(
         pane.includes("Switch credential"),
       TIMEOUT,
     );
-    expect(root).not.toContain("Sign in with Vercel");
     expect(root).not.toContain("Change team");
 
     await session.sendKeys("Down");
@@ -963,7 +954,7 @@ tmuxTest(
     await session.sendKeys("Down");
     await session.sendKeys("Enter");
     const credentials = await session.waitForText("Use this credential", TIMEOUT);
-    expect(credentials).toContain("AI_GATEWAY_API_KEY");
+    expect(credentials).toContain("OPENAI_API_KEY");
     expect(credentials).not.toContain("fx login");
     await session.sendKeys("Escape");
     await session.sendKeys("Escape");
@@ -1026,7 +1017,7 @@ tmuxTest(
     writeFileSync(stderrPath, "");
     gateway = startFakeGateway([], {
       models() {
-        return [{ id: "openai/gpt-5.6-sol", type: "language", tags: ["tool-use"] }];
+        return [{ id: "openai/gpt-5.6-sol", object: "model" }];
       },
     });
     chatgptOauth = startFakeChatGptOAuth();
@@ -1145,7 +1136,7 @@ tmuxTest(
     await openProviderPicker(session);
     await session.sendKeys("Up");
     await session.sendKeys("Enter");
-    await session.waitForText("Switched to Vercel AI Gateway", TIMEOUT);
+    await session.waitForText("Switched to BYOK Responses API", TIMEOUT);
     const savedGateway = JSON.parse(readFileSync(settingsPath, "utf8"));
     expect(savedGateway.provider).toBe("gateway");
     expect(savedGateway.models.gateway).toBe(gatewayModelBefore);
@@ -1259,7 +1250,7 @@ tmuxTest(
 );
 
 test(
-  "OpenAI API key uses the Responses wire protocol without Vercel leakage",
+  "OpenAI API key uses the direct Responses wire protocol",
   async () => {
     home = mkdtempSync(join(tmpdir(), "fx-openai-byok-"));
     const openai = startFakeOpenAIResponses();
@@ -1268,11 +1259,8 @@ test(
         env: {
           HOME: home,
           OPENAI_API_KEY: "sk-openai-byok",
-          AI_GATEWAY_API_KEY: undefined,
-          VERCEL_OIDC_TOKEN: undefined,
           FX_DISABLE_KEYCHAIN: "1",
           FX_SKIP_ONBOARDING: "1",
-          FX_AUTO_UPGRADE: "0",
           FX_MODEL: "openai/gpt-5.4",
           FX_RESPONSES_BASE_URL: openai.baseUrl,
         },
@@ -1297,21 +1285,18 @@ test(
 );
 
 test(
-  "Codex CLI browser login fetches raw models and replays one 401 without Gateway leakage",
+  "Codex CLI browser login fetches raw models and replays one isolated 401",
   async () => {
     home = mkdtempSync(join(tmpdir(), "fx-codex-cli-login-"));
     gateway = startFakeGateway([]);
     chatgptOauth = startFakeChatGptOAuth({ unauthorizedResponses: 1 });
     const env = {
       HOME: home,
-      AI_GATEWAY_API_KEY: ENV_TOKEN,
-      VERCEL_OIDC_TOKEN: undefined,
+      OPENAI_API_KEY: ENV_TOKEN,
       FX_DISABLE_KEYCHAIN: "1",
       FX_SKIP_ONBOARDING: "1",
-      FX_AUTO_UPGRADE: "0",
       FX_NO_OPEN_BROWSER: "1",
-      FX_GATEWAY_BASE_URL: gateway.baseUrl,
-      FX_E2E_GATEWAY_MODELS_URL: `${gateway.baseUrl}/coding-agent/v1/models`,
+      FX_RESPONSES_BASE_URL: gateway.baseUrl,
       ...chatgptOauth.env,
     };
 
@@ -1407,11 +1392,9 @@ tmuxTest(
     chatgptOauth = startFakeChatGptOAuth({ holdCompactionResponse: true });
     const env = {
       HOME: home,
-      AI_GATEWAY_API_KEY: undefined,
-      VERCEL_OIDC_TOKEN: undefined,
+      OPENAI_API_KEY: undefined,
       FX_DISABLE_KEYCHAIN: "1",
       FX_SKIP_ONBOARDING: "1",
-      FX_AUTO_UPGRADE: "0",
       ...chatgptOauth.env,
       FX_CODEX_BASE_URL: `${chatgptOauth.baseUrl}/chatgpt`,
     };
@@ -1512,11 +1495,9 @@ tmuxTest(
     });
     const env = {
       HOME: home,
-      AI_GATEWAY_API_KEY: undefined,
-      VERCEL_OIDC_TOKEN: undefined,
+      OPENAI_API_KEY: undefined,
       FX_DISABLE_KEYCHAIN: "1",
       FX_SKIP_ONBOARDING: "1",
-      FX_AUTO_UPGRADE: "0",
       ...chatgptOauth.env,
       FX_CODEX_BASE_URL: `${chatgptOauth.baseUrl}/chatgpt`,
     };
@@ -1568,14 +1549,11 @@ test(
     try {
       const env = {
         HOME: home,
-        AI_GATEWAY_API_KEY: ENV_TOKEN,
-        VERCEL_OIDC_TOKEN: undefined,
+        OPENAI_API_KEY: ENV_TOKEN,
         FX_DISABLE_KEYCHAIN: "1",
         FX_SKIP_ONBOARDING: "1",
-        FX_AUTO_UPGRADE: "0",
         FX_NO_OPEN_BROWSER: "1",
-        FX_GATEWAY_BASE_URL: gateway.baseUrl,
-        FX_E2E_GATEWAY_MODELS_URL: `${gateway.baseUrl}/coding-agent/v1/models`,
+        FX_RESPONSES_BASE_URL: gateway.baseUrl,
         ...grok.env,
       };
 
@@ -1668,7 +1646,6 @@ test("Grok logout removes local credentials when remote revocation fails", async
       env: {
         HOME: home,
         FX_DISABLE_KEYCHAIN: "1",
-        FX_AUTO_UPGRADE: "0",
         FX_E2E_GROK_REVOKE_URL: grok.env.FX_E2E_GROK_REVOKE_URL,
       },
       timeoutMs: TIMEOUT,
@@ -1680,7 +1657,7 @@ test("Grok logout removes local credentials when remote revocation fails", async
     expect(JSON.parse(readFileSync(join(home, ".fx", "settings.json"), "utf8")).provider)
       .toBe("grok");
     const ask = await runFx(["ask", "--json", "--no-save", "Still Grok?"], {
-      env: { HOME: home, FX_DISABLE_KEYCHAIN: "1", FX_AUTO_UPGRADE: "0" },
+      env: { HOME: home, FX_DISABLE_KEYCHAIN: "1" },
       timeoutMs: TIMEOUT,
     });
     expect(ask.code).toBe(1);
@@ -1703,12 +1680,9 @@ test("Grok 401 replay refuses a different account before the second provider sen
     );
     const env = {
       HOME: home,
-      AI_GATEWAY_API_KEY: ENV_TOKEN,
-      VERCEL_OIDC_TOKEN: undefined,
+      OPENAI_API_KEY: ENV_TOKEN,
       FX_DISABLE_KEYCHAIN: "1",
-      FX_AUTO_UPGRADE: "0",
-      FX_GATEWAY_BASE_URL: gateway.baseUrl,
-      FX_E2E_GATEWAY_MODELS_URL: `${gateway.baseUrl}/coding-agent/v1/models`,
+      FX_RESPONSES_BASE_URL: gateway.baseUrl,
       ...grok.env,
     };
     const ask = await runFx(["ask", "--json", "--auto", "--no-save", "Answer."], {
@@ -1755,12 +1729,9 @@ test("Grok CLI sends verified images directly without advertising the vision fal
     ], {
       env: {
         HOME: home,
-        AI_GATEWAY_API_KEY: ENV_TOKEN,
-        VERCEL_OIDC_TOKEN: undefined,
+        OPENAI_API_KEY: ENV_TOKEN,
         FX_DISABLE_KEYCHAIN: "1",
-        FX_AUTO_UPGRADE: "0",
-        FX_GATEWAY_BASE_URL: gateway.baseUrl,
-        FX_E2E_GATEWAY_MODELS_URL: `${gateway.baseUrl}/coding-agent/v1/models`,
+        FX_RESPONSES_BASE_URL: gateway.baseUrl,
         ...grok.env,
       },
       timeoutMs: TIMEOUT,
@@ -1804,7 +1775,7 @@ tmuxTest(
       await session.sendKeys("Up");
       await session.sendKeys("Up");
       await session.sendKeys("Enter");
-      await session.waitForText("Switched to Vercel AI Gateway", TIMEOUT);
+      await session.waitForText("Switched to BYOK Responses API", TIMEOUT);
       await openProviderPicker(session);
       await session.sendKeys("Down");
       await session.sendKeys("Down");
@@ -1925,7 +1896,7 @@ tmuxTest(
 );
 
 test(
-  "ChatGPT tool loops round-trip encrypted reasoning without Gateway leakage",
+  "ChatGPT tool loops round-trip encrypted reasoning without cross-provider leakage",
   async () => {
     home = mkdtempSync(join(tmpdir(), "fx-chatgpt-tool-loop-"));
     gateway = startFakeGateway([]);
@@ -1942,12 +1913,9 @@ test(
         {
           env: {
             HOME: home,
-            AI_GATEWAY_API_KEY: "gateway-tool-loop-sentinel",
-            VERCEL_OIDC_TOKEN: undefined,
+            OPENAI_API_KEY: "gateway-tool-loop-sentinel",
             FX_DISABLE_KEYCHAIN: "1",
-            FX_AUTO_UPGRADE: "0",
-            FX_GATEWAY_BASE_URL: gateway.baseUrl,
-            FX_E2E_GATEWAY_MODELS_URL: `${gateway.baseUrl}/coding-agent/v1/models`,
+            FX_RESPONSES_BASE_URL: gateway.baseUrl,
             FX_CODEX_BASE_URL: codex.responsesUrl.replace(/\/responses$/, ""),
             FX_E2E_OPENAI_CODEX_MODELS_URL: codex.modelsUrl,
           },
@@ -1970,7 +1938,7 @@ test(
 );
 
 tmuxTest(
-  "Codex remains usable beyond Gateway observation capacity in one process",
+  "Codex remains usable beyond the durable invocation capacity in one process",
   async () => {
     home = mkdtempSync(join(tmpdir(), "fx-codex-capacity-loop-"));
     stderrPath = join(home, "stderr.log");
@@ -2008,7 +1976,7 @@ tmuxTest(
 );
 
 test(
-  "Grok tool loops round-trip encrypted reasoning without Gateway leakage",
+  "Grok tool loops round-trip encrypted reasoning without cross-provider leakage",
   async () => {
     home = mkdtempSync(join(tmpdir(), "fx-grok-tool-loop-"));
     gateway = startFakeGateway([]);
@@ -2025,12 +1993,9 @@ test(
         {
           env: {
             HOME: home,
-            AI_GATEWAY_API_KEY: "gateway-grok-tool-loop-sentinel",
-            VERCEL_OIDC_TOKEN: undefined,
+            OPENAI_API_KEY: "gateway-grok-tool-loop-sentinel",
             FX_DISABLE_KEYCHAIN: "1",
-            FX_AUTO_UPGRADE: "0",
-            FX_GATEWAY_BASE_URL: gateway.baseUrl,
-            FX_E2E_GATEWAY_MODELS_URL: `${gateway.baseUrl}/coding-agent/v1/models`,
+            FX_RESPONSES_BASE_URL: gateway.baseUrl,
             FX_E2E_XAI_GROK_RESPONSES_URL: grok.responsesUrl,
             FX_E2E_XAI_GROK_MODELS_URL: grok.modelsUrl,
             FX_E2E_XAI_GROK_MODALITIES_URL: grok.modalitiesUrl,
@@ -2062,14 +2027,11 @@ test(
     chatgptOauth.setModels([]);
     const env = {
       HOME: home,
-      AI_GATEWAY_API_KEY: ENV_TOKEN,
-      VERCEL_OIDC_TOKEN: undefined,
+      OPENAI_API_KEY: ENV_TOKEN,
       FX_DISABLE_KEYCHAIN: "1",
       FX_SKIP_ONBOARDING: "1",
-      FX_AUTO_UPGRADE: "0",
       FX_NO_OPEN_BROWSER: "1",
-      FX_GATEWAY_BASE_URL: gateway.baseUrl,
-      FX_E2E_GATEWAY_MODELS_URL: `${gateway.baseUrl}/coding-agent/v1/models`,
+      FX_RESPONSES_BASE_URL: gateway.baseUrl,
       ...chatgptOauth.env,
     };
 
@@ -2094,14 +2056,11 @@ test(
     try {
       const env = {
         HOME: home,
-        AI_GATEWAY_API_KEY: ENV_TOKEN,
-        VERCEL_OIDC_TOKEN: undefined,
+        OPENAI_API_KEY: ENV_TOKEN,
         FX_DISABLE_KEYCHAIN: "1",
         FX_SKIP_ONBOARDING: "1",
-        FX_AUTO_UPGRADE: "0",
         FX_NO_OPEN_BROWSER: "1",
-        FX_GATEWAY_BASE_URL: gateway.baseUrl,
-        FX_E2E_GATEWAY_MODELS_URL: `${gateway.baseUrl}/coding-agent/v1/models`,
+        FX_RESPONSES_BASE_URL: gateway.baseUrl,
         ...grok.env,
       };
 
@@ -2140,12 +2099,9 @@ test(
         {
           env: {
             HOME: home,
-            AI_GATEWAY_API_KEY: "gateway-vision-sentinel",
-            VERCEL_OIDC_TOKEN: undefined,
+            OPENAI_API_KEY: "gateway-vision-sentinel",
             FX_DISABLE_KEYCHAIN: "1",
-            FX_AUTO_UPGRADE: "0",
-            FX_GATEWAY_BASE_URL: gateway.baseUrl,
-            FX_E2E_GATEWAY_MODELS_URL: `${gateway.baseUrl}/coding-agent/v1/models`,
+            FX_RESPONSES_BASE_URL: gateway.baseUrl,
             FX_CODEX_BASE_URL: codex.responsesUrl.replace(/\/responses$/, ""),
             FX_E2E_OPENAI_CODEX_MODELS_URL: codex.modelsUrl,
           },
@@ -2196,12 +2152,9 @@ test(
         {
           env: {
             HOME: home,
-            AI_GATEWAY_API_KEY: "gateway-grok-vision-sentinel",
-            VERCEL_OIDC_TOKEN: undefined,
+            OPENAI_API_KEY: "gateway-grok-vision-sentinel",
             FX_DISABLE_KEYCHAIN: "1",
-            FX_AUTO_UPGRADE: "0",
-            FX_GATEWAY_BASE_URL: gateway.baseUrl,
-            FX_E2E_GATEWAY_MODELS_URL: `${gateway.baseUrl}/coding-agent/v1/models`,
+            FX_RESPONSES_BASE_URL: gateway.baseUrl,
             FX_E2E_XAI_GROK_RESPONSES_URL: grok.responsesUrl,
             FX_E2E_XAI_GROK_MODELS_URL: grok.modelsUrl,
             FX_E2E_XAI_GROK_MODALITIES_URL: grok.modalitiesUrl,
@@ -2227,7 +2180,7 @@ test(
 );
 
 test(
-  "Codex automatic review uses gpt-5.4-mini while Gateway review stays untouched",
+  "Codex automatic review uses gpt-5.4-mini without reaching BYOK Responses",
   async () => {
     home = mkdtempSync(join(tmpdir(), "fx-codex-auto-review-"));
     gateway = startFakeGateway([]);
@@ -2244,12 +2197,9 @@ test(
         {
           env: {
             HOME: home,
-            AI_GATEWAY_API_KEY: "gateway-auto-review-sentinel",
-            VERCEL_OIDC_TOKEN: undefined,
+            OPENAI_API_KEY: "gateway-auto-review-sentinel",
             FX_DISABLE_KEYCHAIN: "1",
-            FX_AUTO_UPGRADE: "0",
-            FX_GATEWAY_BASE_URL: gateway.baseUrl,
-            FX_E2E_GATEWAY_MODELS_URL: `${gateway.baseUrl}/coding-agent/v1/models`,
+            FX_RESPONSES_BASE_URL: gateway.baseUrl,
             FX_CODEX_BASE_URL: codex.responsesUrl.replace(/\/responses$/, ""),
             FX_E2E_OPENAI_CODEX_MODELS_URL: codex.modelsUrl,
           },
@@ -2271,7 +2221,7 @@ test(
         api_duration_complete: true,
         next_sequence: 1,
         settled_through_sequence: 0,
-        pending: [],
+        publication_backlog: [],
       });
     } finally {
       codex.stop();
@@ -2281,7 +2231,7 @@ test(
 );
 
 test(
-  "Grok automatic review reuses the admitted Grok model and never reaches Gateway",
+  "Grok automatic review reuses the admitted Grok model without reaching BYOK Responses",
   async () => {
     home = mkdtempSync(join(tmpdir(), "fx-grok-auto-review-"));
     gateway = startFakeGateway([]);
@@ -2298,12 +2248,9 @@ test(
         {
           env: {
             HOME: home,
-            AI_GATEWAY_API_KEY: "gateway-grok-auto-review-sentinel",
-            VERCEL_OIDC_TOKEN: undefined,
+            OPENAI_API_KEY: "gateway-grok-auto-review-sentinel",
             FX_DISABLE_KEYCHAIN: "1",
-            FX_AUTO_UPGRADE: "0",
-            FX_GATEWAY_BASE_URL: gateway.baseUrl,
-            FX_E2E_GATEWAY_MODELS_URL: `${gateway.baseUrl}/coding-agent/v1/models`,
+            FX_RESPONSES_BASE_URL: gateway.baseUrl,
             FX_E2E_XAI_GROK_RESPONSES_URL: grok.responsesUrl,
             FX_E2E_XAI_GROK_MODELS_URL: grok.modelsUrl,
             FX_E2E_XAI_GROK_MODALITIES_URL: grok.modalitiesUrl,
@@ -2335,7 +2282,7 @@ test(
         api_duration_complete: true,
         next_sequence: 1,
         settled_through_sequence: 0,
-        pending: [],
+        publication_backlog: [],
       });
     } finally {
       grok.stop();
@@ -2354,14 +2301,14 @@ tmuxTest(
     writeFileSync(imagePath, Buffer.from("89504e470d0a1a0a72657374", "hex"));
     gateway = startFakeGateway([], {
       models: [{
-        id: FAKE_GATEWAY_MODEL,
-        tags: ["vision", "file-input", "tool-use"],
+        id: "gpt-5",
+        object: "model",
+        owned_by: "openai",
       }],
     });
 
     session = await startFxWithoutAuth(home, stderrPath, gateway);
     const initial = await session.waitForComposer(TIMEOUT);
-    expect(initial).not.toContain("Sign in with Vercel");
     expect(initial).not.toContain("Switch credential");
 
     await session.sendText(`/image ${imagePath}`);
@@ -2402,7 +2349,7 @@ tmuxTest(
     await session.sendText("exercise interactive auth failure");
     const failed = await session.waitForPane(
       (pane) =>
-        pane.includes("AI_GATEWAY_API_KEY authentication failed · HTTP 401") &&
+        pane.includes("OPENAI_API_KEY authentication failed · HTTP 401") &&
         pane.includes("Run /login to choose another source."),
       TIMEOUT,
     );
@@ -2415,136 +2362,3 @@ tmuxTest(
   },
   TIMEOUT,
 );
-
-tmuxTest(
-  "model discovery remains available before login",
-  async () => {
-    home = mkdtempSync(join(tmpdir(), "fx-tui-auth-models-before-login-"));
-    stderrPath = join(home, "stderr.log");
-    writeFileSync(stderrPath, "");
-    gateway = startFakeGateway([]);
-
-    session = await startFx(
-      home,
-      stderrPath,
-      gateway,
-      undefined,
-      { AI_GATEWAY_API_KEY: undefined },
-    );
-    await session.waitForComposer(TIMEOUT);
-    await waitForModelRequestCount(gateway, 1);
-
-    await session.sendText("/models");
-    const pane = await session.waitForPane(
-      (text) =>
-        text.includes(FAKE_GATEWAY_MODEL) &&
-        text.includes("Using the public model catalog; sign in or use an API key for team-private models."),
-      TIMEOUT,
-    );
-    expect(pane).toContain(FAKE_GATEWAY_MODEL);
-    expect(pane).toContain("Using the public model catalog; sign in or use an API key for team-private models.");
-
-    expect(gateway.requests).toHaveLength(0);
-    expect(gateway.modelRequests).toHaveLength(1);
-    expect(gateway.modelRequests[0].headers.get("authorization")).toBeNull();
-    expect(gateway.modelRequests[0].headers.get("x-vercel-ai-gateway-team")).toBeNull();
-    expect(readFileSync(stderrPath, "utf8")).toBe("");
-  },
-  60_000,
-);
-
-tmuxTest(
-  "rejected catalog credential renders the degraded public fallback notice",
-  async () => {
-    home = mkdtempSync(join(tmpdir(), "fx-tui-auth-populated-catalog-fallback-"));
-    stderrPath = join(home, "stderr.log");
-    writeFileSync(stderrPath, "");
-    gateway = startFakeGateway([], {
-      models(request) {
-        if (request.headers.get("authorization")) {
-          return new Response("rejected catalog credential", { status: 401 });
-        }
-        return [{ id: FAKE_GATEWAY_MODEL, tags: ["tool-use"] }];
-      },
-    });
-
-    session = await startFx(home, stderrPath, gateway);
-    await session.waitForComposer(TIMEOUT);
-    await waitForModelRequestCount(gateway, 2);
-
-    await session.sendText("/models");
-    const pane = await session.waitForPane(
-      (text) =>
-        text.includes(FAKE_GATEWAY_MODEL) &&
-        text.includes("Your Gateway credential was rejected; using the public model catalog."),
-      TIMEOUT,
-    );
-    expect(pane).toContain(FAKE_GATEWAY_MODEL);
-    expect(pane).toContain("Your Gateway credential was rejected; using the public model catalog.");
-
-    expect(gateway.modelRequests).toHaveLength(2);
-    expect(gateway.modelRequests[0].headers.get("authorization")).toBe(`Bearer ${ENV_TOKEN}`);
-    expect(gateway.modelRequests[1].headers.get("authorization")).toBeNull();
-    expect(gateway.modelRequests[1].headers.get("x-vercel-ai-gateway-team")).toBeNull();
-    expect(readFileSync(stderrPath, "utf8")).toBe("");
-  },
-  60_000,
-);
-
-for (const scenario of [
-  {
-    name: "ordinary public empty catalog",
-    authenticated: false,
-    status: "Using the public model catalog; sign in or use an API key for team-private models.",
-  },
-  {
-    name: "rejected credential empty fallback catalog",
-    authenticated: true,
-    status: "Your Gateway credential was rejected; using the public model catalog.",
-  },
-]) {
-  tmuxTest(
-    `empty model menu renders the ${scenario.name} status`,
-    async () => {
-      home = mkdtempSync(join(tmpdir(), "fx-tui-auth-empty-catalog-"));
-      stderrPath = join(home, "stderr.log");
-      writeFileSync(stderrPath, "");
-      gateway = startFakeGateway([], {
-        models(request) {
-          if (scenario.authenticated && request.headers.get("authorization")) {
-            return new Response("rejected catalog credential", { status: 401 });
-          }
-          return [];
-        },
-      });
-
-      session = await startFx(
-        home,
-        stderrPath,
-        gateway,
-        undefined,
-        scenario.authenticated ? {} : { AI_GATEWAY_API_KEY: undefined },
-      );
-      await session.waitForComposer(TIMEOUT);
-      await waitForModelRequestCount(gateway, scenario.authenticated ? 2 : 1);
-
-      await session.sendText("/models");
-      const pane = await session.waitForPane(
-        (text) => text.includes("No models available.") && text.includes(scenario.status),
-        TIMEOUT,
-      );
-      expect(pane).toContain("No models available.");
-      expect(pane).toContain(scenario.status);
-
-      expect(gateway.modelRequests).toHaveLength(scenario.authenticated ? 2 : 1);
-      if (scenario.authenticated) {
-        expect(gateway.modelRequests[0].headers.get("authorization")).toBe(`Bearer ${ENV_TOKEN}`);
-      }
-      const publicRequest = gateway.modelRequests.at(-1)!;
-      expect(publicRequest.headers.get("authorization")).toBeNull();
-      expect(publicRequest.headers.get("x-vercel-ai-gateway-team")).toBeNull();
-      expect(readFileSync(stderrPath, "utf8")).toBe("");
-    },
-    60_000,
-  );
-}

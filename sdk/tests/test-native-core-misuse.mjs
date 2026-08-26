@@ -73,9 +73,6 @@ for (const [options, message] of [
   [{ apiKey: "key", credentialSource: "chatgpt_subscription", home: "/tmp", workspaceRoot: "/tmp" }, /credentialSource/],
   [{ apiKey: "key", credentialSource: "unknown", home: "/tmp", workspaceRoot: "/tmp" }, /credentialSource/],
   [{ apiKey: "key", home: "x".repeat(16 * 1024 + 1), workspaceRoot: "/tmp" }, /home/],
-  [{ apiKey: "key", home: "/tmp", workspaceRoot: "/tmp", gatewayChatUrl: "http://attacker.example/chat" }, /gatewayChatUrl/],
-  [{ apiKey: "key", home: "/tmp", workspaceRoot: "/tmp", gatewayChatUrl: "https://user:pass@example.com/chat" }, /gatewayChatUrl/],
-  [{ apiKey: "key", home: "/tmp", workspaceRoot: "/tmp", gatewayChatUrl: "https://example.com/chat" }, /gatewayChatUrl/],
   [{ apiKey: "key", credentialSource: "openai_api_key", home: "/tmp", workspaceRoot: "/tmp", responsesBaseUrl: "http://attacker.example/v1" }, /responsesBaseUrl/],
   [{ apiKey: "key", credentialSource: "openai_api_key", home: "/tmp", workspaceRoot: "/tmp", responsesBaseUrl: "https://user:pass@example.com/v1" }, /responsesBaseUrl/],
 ]) {
@@ -107,7 +104,7 @@ const lifecycleCore = addon.createCore({
   model: "native/test-model",
   home: "/tmp",
   workspaceRoot: "/tmp",
-  gatewayChatUrl: "http://127.0.0.1:31337/chat",
+  responsesBaseUrl: "http://127.0.0.1:31337/v1",
 });
 let nextId = 1;
 let buffered = "";
@@ -145,8 +142,8 @@ const takeFetch = async () => {
   }
 };
 const responseBytes = (text) => Buffer.from([
-  `data: ${JSON.stringify({ type: "text-delta", delta: text })}\n\n`,
-  'data: {"type":"finish","finishReason":{"unified":"stop","raw":"stop"},"usage":{"inputTokens":{"total":1},"outputTokens":{"total":1}}}\n\n',
+  `data: ${JSON.stringify({ type: "response.output_text.delta", item_id: "answer_1", output_index: 0, content_index: 0, delta: text })}\n\n`,
+  'data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n',
   "data: [DONE]\n\n",
 ].join(""));
 const sendPrompt = (sessionId, text) => send("session/prompt", {
@@ -155,7 +152,34 @@ const sendPrompt = (sessionId, text) => send("session/prompt", {
 });
 
 try {
-  assert.ok((await request("initialize", { protocolVersion: 1, clientCapabilities: {} })).result);
+  const initializeId = send("initialize", {
+    protocolVersion: 1,
+    clientCapabilities: {},
+  });
+  const catalogFetch = await Promise.race([
+    takeFetch(),
+    timeout("model catalog fetch"),
+  ]);
+  assert.match(catalogFetch.url, /\/v1\/models$/);
+  assert.equal(addon.startCoreFetchResponse(lifecycleCore, catalogFetch.handle, 200), 1);
+  assert.equal(addon.pushCoreFetchResponse(
+    lifecycleCore,
+    catalogFetch.handle,
+    Buffer.from(JSON.stringify({
+      object: "list",
+      data: [{
+        id: "native/test-model",
+        object: "model",
+        created: 1,
+        owned_by: "test",
+      }],
+    })),
+  ), 1);
+  assert.equal(addon.finishCoreFetch(lifecycleCore, catalogFetch.handle), 1);
+  assert.ok((await Promise.race([
+    waitForResponse(initializeId),
+    timeout("initialize"),
+  ])).result);
   const created = await request("session/new");
   const sessionId = created.result.sessionId;
 

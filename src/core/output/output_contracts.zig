@@ -378,7 +378,7 @@ fn grokProviderConnected(auth: auth_runtime.StatusSnapshot) bool {
 fn writeConnectedProvidersText(writer: *std.Io.Writer, auth: auth_runtime.StatusSnapshot) !void {
     var wrote_provider = false;
     if (gatewayProviderConnected(auth)) {
-        try writer.writeAll("Vercel AI Gateway");
+        try writer.writeAll("BYOK Responses");
         wrote_provider = true;
     }
     if (chatGptProviderConnected(auth)) {
@@ -397,9 +397,6 @@ fn writeConnectedProvidersText(writer: *std.Io.Writer, auth: auth_runtime.Status
 pub const StatusSnapshot = struct {
     model: []const u8,
     provider: model_provider.ProviderId = .gateway,
-    update_channel: []const u8 = "stable",
-    build_channel: []const u8 = "stable",
-    build_revision: []const u8 = "",
     auth: auth_runtime.StatusSnapshot = .{},
     auth_help: ?[]const u8 = null,
     mcp_config_error: ?[]const u8 = null,
@@ -424,11 +421,6 @@ pub const StatusSnapshot = struct {
         if (self.provider != .gateway) {
             try out.writer.print("[status] model_source={s}\n", .{provider_catalog.label(self.provider)});
         }
-        try out.writer.print("[status] update_channel={s}\n", .{self.update_channel});
-        try out.writer.print("[status] build_channel={s}\n", .{self.build_channel});
-        if (self.build_revision.len > 0) {
-            try out.writer.print("[status] build_revision={s}\n", .{self.build_revision});
-        }
         if (self.mcp_config_error) |error_name| {
             try out.writer.print("[status] mcp_config_error={s}\n", .{error_name});
         }
@@ -442,9 +434,6 @@ pub const StatusSnapshot = struct {
         if (self.auth.expired) try out.writer.writeAll("[status] auth_expired=true\n");
         if (self.auth_help) |help| {
             try out.writer.print("[status] auth_help={s}\n", .{help});
-        }
-        if (self.auth.team) |team| {
-            try out.writer.print("[status] team={s}\n", .{team});
         }
         try out.writer.print("[status] permission_mode={s}\n", .{permissionModeLabel(self.permission_mode)});
         try out.writer.print("[status] workspace={s}\n", .{self.workspace_root});
@@ -462,11 +451,6 @@ pub const StatusSnapshot = struct {
         if (self.provider != .gateway) {
             try out.writer.print("model_source={s}\n", .{provider_catalog.label(self.provider)});
         }
-        try out.writer.print("update_channel={s}\n", .{self.update_channel});
-        try out.writer.print("build_channel={s}\n", .{self.build_channel});
-        if (self.build_revision.len > 0) {
-            try out.writer.print("build_revision={s}\n", .{self.build_revision});
-        }
         try out.writer.print("auth={s}\n", .{self.auth.activeSourceLabel()});
         if (self.provider != .gateway) {
             try out.writer.writeAll("connected_providers=");
@@ -476,7 +460,6 @@ pub const StatusSnapshot = struct {
         try out.writer.print("auth_refreshable={}\n", .{self.auth.refreshable()});
         if (self.auth.expired) try out.writer.writeAll("auth_expired=true\n");
         if (self.auth_help) |help| try out.writer.print("auth_help={s}\n", .{help});
-        if (self.auth.team) |team| try out.writer.print("team={s}\n", .{team});
         try out.writer.print("permission_mode={s}\n", .{permissionModeLabel(self.permission_mode)});
         try out.writer.print("workspace={s}\n", .{self.workspace_root});
         try out.writer.print("history_turns={d}\n", .{self.history_turns});
@@ -500,12 +483,6 @@ pub const StatusSnapshot = struct {
             try writer.writeAll(",\"model_source\":");
             try std.json.Stringify.value(provider_catalog.label(self.provider), .{}, writer);
         }
-        try writer.writeAll(",\"update_channel\":");
-        try std.json.Stringify.value(self.update_channel, .{}, writer);
-        try writer.writeAll(",\"build_channel\":");
-        try std.json.Stringify.value(self.build_channel, .{}, writer);
-        try writer.writeAll(",\"build_revision\":");
-        try std.json.Stringify.value(self.build_revision, .{}, writer);
         if (self.mcp_config_error) |error_name| {
             try writer.writeAll(",\"mcp_config_error\":");
             try std.json.Stringify.value(error_name, .{}, writer);
@@ -516,7 +493,7 @@ pub const StatusSnapshot = struct {
             try writer.writeAll(",\"connected_providers\":[");
             var wrote_provider = false;
             if (gatewayProviderConnected(self.auth)) {
-                try std.json.Stringify.value("vercel-ai-gateway", .{}, writer);
+                try std.json.Stringify.value("byok-responses", .{}, writer);
                 wrote_provider = true;
             }
             if (chatGptProviderConnected(self.auth)) {
@@ -535,10 +512,6 @@ pub const StatusSnapshot = struct {
         if (self.auth_help) |help| {
             try writer.writeAll(",\"auth_help\":");
             try std.json.Stringify.value(help, .{}, writer);
-        }
-        if (self.auth.team) |team| {
-            try writer.writeAll(",\"team\":");
-            try std.json.Stringify.value(team, .{}, writer);
         }
         try writer.writeAll(",\"permission_mode\":");
         try std.json.Stringify.value(permissionModeLabel(self.permission_mode), .{}, writer);
@@ -759,11 +732,8 @@ pub const ModelListSnapshot = struct {
         if (!self.private_models_hidden) return null;
         const reason = self.public_only_reason orelse return "Using the public model catalog.";
         return switch (reason) {
-            .no_credential => "Using the public model catalog; set AI_GATEWAY_API_KEY for private Gateway models.",
+            .no_credential => "Using the public model catalog; set OPENAI_API_KEY for authenticated BYOK models.",
             .credential_refresh_failed => "Credential refresh failed; using the public model catalog.",
-            .authenticated_credential_rejected => "Your Gateway credential was rejected; using the public model catalog.",
-            .chatgpt_subscription => "Codex models require an authenticated Codex catalog.",
-            .grok_subscription => "Grok models require an authenticated Grok catalog.",
         };
     }
 };
@@ -1233,9 +1203,6 @@ pub const DoctorSnapshot = struct {
         try out.writer.print("[doctor] auth={s}\n", .{self.auth.activeSourceLabel()});
         try out.writer.print("[doctor] auth_refreshable={}\n", .{self.auth.refreshable()});
         if (self.auth.expired) try out.writer.writeAll("[doctor] auth_expired=true\n");
-        if (self.auth.team) |team| {
-            try out.writer.print("[doctor] team={s}\n", .{team});
-        }
         try out.writer.print("[doctor] permission_mode={s}\n", .{permissionModeLabel(self.permission_mode)});
         try out.writer.print("[doctor] agent_step_limit={d}\n", .{self.agent_step_limit});
 
@@ -1272,10 +1239,6 @@ pub const DoctorSnapshot = struct {
         try std.json.Stringify.value(self.auth.activeSourceLabel(), .{}, writer);
         try writer.print(",\"auth_refreshable\":{}", .{self.auth.refreshable()});
         if (self.auth.expired) try writer.writeAll(",\"auth_expired\":true");
-        if (self.auth.team) |team| {
-            try writer.writeAll(",\"team\":");
-            try std.json.Stringify.value(team, .{}, writer);
-        }
         try writer.writeAll(",\"permission_mode\":");
         try std.json.Stringify.value(permissionModeLabel(self.permission_mode), .{}, writer);
         try writer.print(",\"agent_step_limit\":{d},\"checks\":[", .{self.agent_step_limit});
@@ -1646,250 +1609,6 @@ fn codexUsageFailureMessage(kind: codex_usage.FailureKind) []const u8 {
     };
 }
 
-pub const CreditsSnapshot = struct {
-    balance: ?[]const u8 = null,
-    used: ?[]const u8 = null,
-    plan: ?[]const u8 = null,
-    raw_json: ?[]const u8 = null,
-    err_message: ?[]const u8 = null,
-
-    /// Frees provider-owned fields. `raw_json` remains borrowed presentation
-    /// input and is not released here.
-    pub fn deinit(self: *CreditsSnapshot, alloc: Allocator) void {
-        if (self.balance) |value| alloc.free(value);
-        if (self.used) |value| alloc.free(value);
-        if (self.plan) |value| alloc.free(value);
-        if (self.err_message) |value| alloc.free(value);
-        self.* = undefined;
-    }
-
-    pub fn render(self: CreditsSnapshot, alloc: Allocator, format: OutputFormat) ![]u8 {
-        return switch (format) {
-            .text => self.renderText(alloc),
-            .json => self.renderJson(alloc),
-        };
-    }
-
-    pub fn renderText(self: CreditsSnapshot, alloc: Allocator) ![]u8 {
-        var out: std.Io.Writer.Allocating = .init(alloc);
-        defer out.deinit();
-
-        if (self.err_message) |msg| {
-            try out.writer.writeAll("[credits] error: ");
-            try writeTerminalSafe(&out.writer, alloc, msg);
-            try out.writer.writeByte('\n');
-            return try out.toOwnedSlice();
-        }
-
-        if (self.balance) |b| {
-            try out.writer.writeAll("[credits] balance=");
-            try writeTerminalSafe(&out.writer, alloc, b);
-            try out.writer.writeByte('\n');
-        }
-        if (self.used) |u| {
-            try out.writer.writeAll("[credits] used=");
-            try writeTerminalSafe(&out.writer, alloc, u);
-            try out.writer.writeByte('\n');
-        }
-        if (self.plan) |p| {
-            try out.writer.writeAll("[credits] plan=");
-            try writeTerminalSafe(&out.writer, alloc, p);
-            try out.writer.writeByte('\n');
-        }
-
-        if (self.balance == null and self.used == null and self.plan == null) {
-            if (self.raw_json) |raw| {
-                try out.writer.writeAll("[credits] ");
-                try writeTerminalSafe(&out.writer, alloc, raw);
-                try out.writer.writeByte('\n');
-            } else {
-                try out.writer.writeAll("[credits] no data returned by gateway\n");
-            }
-        }
-
-        return try out.toOwnedSlice();
-    }
-
-    pub fn renderInteractiveBody(self: CreditsSnapshot, alloc: Allocator) ![]u8 {
-        var out: std.Io.Writer.Allocating = .init(alloc);
-        defer out.deinit();
-
-        if (self.err_message) |msg| {
-            try writeTerminalSafe(&out.writer, alloc, msg);
-            return out.toOwnedSlice();
-        }
-        var wrote_field = false;
-        if (self.balance) |balance| {
-            try out.writer.writeAll("balance=");
-            try writeTerminalSafe(&out.writer, alloc, balance);
-            wrote_field = true;
-        }
-        if (self.used) |used| {
-            if (wrote_field) try out.writer.writeByte('\n');
-            try out.writer.writeAll("used=");
-            try writeTerminalSafe(&out.writer, alloc, used);
-            wrote_field = true;
-        }
-        if (self.plan) |plan| {
-            if (wrote_field) try out.writer.writeByte('\n');
-            try out.writer.writeAll("plan=");
-            try writeTerminalSafe(&out.writer, alloc, plan);
-            wrote_field = true;
-        }
-        if (self.balance == null and self.used == null and self.plan == null) {
-            if (self.raw_json) |raw| {
-                try writeTerminalSafe(&out.writer, alloc, raw);
-            } else {
-                try out.writer.writeAll("no data returned by gateway");
-            }
-        }
-        return try out.toOwnedSlice();
-    }
-
-    pub fn renderJson(self: CreditsSnapshot, alloc: Allocator) ![]u8 {
-        var out: std.Io.Writer.Allocating = .init(alloc);
-        defer out.deinit();
-
-        try out.writer.writeAll("{\"kind\":\"credits\"");
-
-        if (self.err_message) |msg| {
-            try out.writer.writeAll(",\"error\":");
-            try std.json.Stringify.value(msg, .{}, &out.writer);
-            try out.writer.writeByte('}');
-            return try out.toOwnedSlice();
-        }
-
-        inline for (.{ .{ "balance", self.balance }, .{ "used", self.used }, .{ "plan", self.plan } }) |pair| {
-            try out.writer.writeAll(",\"");
-            try out.writer.writeAll(pair[0]);
-            try out.writer.writeAll("\":");
-            if (pair[1]) |val| {
-                try std.json.Stringify.value(val, .{}, &out.writer);
-            } else {
-                try out.writer.writeAll("null");
-            }
-        }
-
-        try out.writer.writeByte('}');
-        return try out.toOwnedSlice();
-    }
-};
-
-pub const UpgradeSnapshot = struct {
-    current: []const u8,
-    latest: []const u8,
-    channel: []const u8 = "stable",
-    current_channel: []const u8 = "stable",
-    current_revision: []const u8 = "",
-    latest_revision: []const u8 = "",
-    status: Status,
-    err_message: ?[]const u8 = null,
-
-    pub const Status = enum {
-        upgraded,
-        up_to_date,
-        failed,
-
-        fn label(self: Status) []const u8 {
-            return switch (self) {
-                .upgraded => "upgraded",
-                .up_to_date => "up_to_date",
-                .failed => "failed",
-            };
-        }
-    };
-
-    pub fn render(self: UpgradeSnapshot, alloc: Allocator, format: OutputFormat) ![]u8 {
-        return switch (format) {
-            .text => self.renderText(alloc),
-            .json => self.renderJson(alloc),
-        };
-    }
-
-    pub fn renderText(self: UpgradeSnapshot, alloc: Allocator) ![]u8 {
-        var out: std.Io.Writer.Allocating = .init(alloc);
-        defer out.deinit();
-
-        if (self.err_message) |msg| {
-            try out.writer.print("error: {s}\n", .{msg});
-            return try out.toOwnedSlice();
-        }
-
-        switch (self.status) {
-            .upgraded => {
-                try out.writer.writeAll("upgraded to ");
-                if (std.mem.eql(u8, self.channel, "dev") and self.latest_revision.len > 0) {
-                    try out.writer.print("dev {s} (", .{shortRevision(self.latest_revision)});
-                    try writeVersionWithPrefix(&out.writer, self.latest);
-                    try out.writer.writeByte(')');
-                } else {
-                    try writeVersionWithPrefix(&out.writer, self.latest);
-                }
-                try out.writer.writeByte('\n');
-            },
-            .up_to_date => {
-                if (std.mem.eql(u8, self.channel, "dev") and self.latest_revision.len > 0) {
-                    try out.writer.print("fx dev {s} is already up to date (", .{shortRevision(self.latest_revision)});
-                } else {
-                    try out.writer.writeAll("fx is already up to date (");
-                }
-                try writeVersionWithPrefix(&out.writer, self.latest);
-                try out.writer.writeAll(")\n");
-            },
-            .failed => try out.writer.writeAll("upgrade failed\n"),
-        }
-
-        return try out.toOwnedSlice();
-    }
-
-    pub fn renderJson(self: UpgradeSnapshot, alloc: Allocator) ![]u8 {
-        var out: std.Io.Writer.Allocating = .init(alloc);
-        defer out.deinit();
-
-        try out.writer.writeAll("{\"kind\":\"upgrade\"");
-
-        if (self.err_message) |msg| {
-            try out.writer.writeAll(",\"error\":");
-            try std.json.Stringify.value(msg, .{}, &out.writer);
-            try out.writer.writeByte('}');
-            return try out.toOwnedSlice();
-        }
-
-        try out.writer.writeAll(",\"current\":");
-        try std.json.Stringify.value(self.current, .{}, &out.writer);
-        try out.writer.writeAll(",\"latest\":");
-        try std.json.Stringify.value(self.latest, .{}, &out.writer);
-        if (!std.mem.eql(u8, self.channel, "stable") or
-            !std.mem.eql(u8, self.current_channel, "stable") or
-            self.latest_revision.len > 0)
-        {
-            try out.writer.writeAll(",\"channel\":");
-            try std.json.Stringify.value(self.channel, .{}, &out.writer);
-            try out.writer.writeAll(",\"current_channel\":");
-            try std.json.Stringify.value(self.current_channel, .{}, &out.writer);
-            try out.writer.writeAll(",\"current_revision\":");
-            try std.json.Stringify.value(self.current_revision, .{}, &out.writer);
-            try out.writer.writeAll(",\"latest_revision\":");
-            try std.json.Stringify.value(self.latest_revision, .{}, &out.writer);
-        }
-        try out.writer.writeAll(",\"status\":");
-        try std.json.Stringify.value(self.status.label(), .{}, &out.writer);
-        try out.writer.writeByte('}');
-        return try out.toOwnedSlice();
-    }
-};
-
-fn shortRevision(revision: []const u8) []const u8 {
-    return revision[0..@min(revision.len, 12)];
-}
-
-fn writeVersionWithPrefix(writer: *std.Io.Writer, version: []const u8) !void {
-    if (version.len == 0 or version[0] != 'v') {
-        try writer.writeByte('v');
-    }
-    try writer.writeAll(version);
-}
-
 fn displayGrantTarget(alloc: Allocator, workspace_root: []const u8, grant: types.PermissionGrant) ![]u8 {
     if (std.mem.eql(u8, grant.tool_name, "run_command") or std.mem.eql(u8, grant.tool_name, "bash")) {
         return alloc.dupe(u8, grant.target_path);
@@ -2184,7 +1903,7 @@ test "command failure snapshot renders stable escaped json" {
 test "core status snapshot text and json stay stable" {
     const snapshot = StatusSnapshot{
         .model = "alpha",
-        .auth_help = "Fx needs a model credential. Set OPENAI_API_KEY for a Responses API, use fx login codex for ChatGPT Codex, use fx login grok for Grok, or set AI_GATEWAY_API_KEY for Vercel AI Gateway.",
+        .auth_help = "Fx needs a model credential. Set OPENAI_API_KEY for a Responses API, use fx login codex for ChatGPT Codex, or use fx login grok for Grok.",
         .permission_mode = .ask,
         .workspace_root = "/tmp/fx",
         .history_turns = 3,
@@ -2195,40 +1914,14 @@ test "core status snapshot text and json stay stable" {
     const text = try snapshot.renderText(std.testing.allocator);
     defer std.testing.allocator.free(text);
     try std.testing.expectEqualStrings(
-        "[status] model=alpha\n[status] update_channel=stable\n[status] build_channel=stable\n[status] auth=missing\n[status] auth_refreshable=false\n[status] auth_help=Fx needs a model credential. Set OPENAI_API_KEY for a Responses API, use fx login codex for ChatGPT Codex, use fx login grok for Grok, or set AI_GATEWAY_API_KEY for Vercel AI Gateway.\n[status] permission_mode=ask\n[status] workspace=/tmp/fx\n[status] history_turns=3\n[status] session_permission_grants=1\n[status] agent_step_limit=24\n",
+        "[status] model=alpha\n[status] auth=missing\n[status] auth_refreshable=false\n[status] auth_help=Fx needs a model credential. Set OPENAI_API_KEY for a Responses API, use fx login codex for ChatGPT Codex, or use fx login grok for Grok.\n[status] permission_mode=ask\n[status] workspace=/tmp/fx\n[status] history_turns=3\n[status] session_permission_grants=1\n[status] agent_step_limit=24\n",
         text,
     );
 
     const json = try snapshot.renderJson(std.testing.allocator);
     defer std.testing.allocator.free(json);
     try std.testing.expectEqualStrings(
-        "{\"kind\":\"status\",\"model\":\"alpha\",\"update_channel\":\"stable\",\"build_channel\":\"stable\",\"build_revision\":\"\",\"auth\":\"missing\",\"auth_refreshable\":false,\"auth_help\":\"Fx needs a model credential. Set OPENAI_API_KEY for a Responses API, use fx login codex for ChatGPT Codex, use fx login grok for Grok, or set AI_GATEWAY_API_KEY for Vercel AI Gateway.\",\"permission_mode\":\"ask\",\"workspace\":\"/tmp/fx\",\"history_turns\":3,\"session_permission_grants\":1,\"agent_step_limit\":24}",
-        json,
-    );
-}
-
-test "core status snapshot includes selected team when present" {
-    const snapshot = StatusSnapshot{
-        .model = "alpha",
-        .auth = .{ .active_source = .stored_key, .team = "example-team" },
-        .permission_mode = .ask,
-        .workspace_root = "/tmp/fx",
-        .history_turns = 0,
-        .session_permission_grants = 0,
-        .agent_step_limit = 24,
-    };
-
-    const text = try snapshot.renderText(std.testing.allocator);
-    defer std.testing.allocator.free(text);
-    try std.testing.expectEqualStrings(
-        "[status] model=alpha\n[status] update_channel=stable\n[status] build_channel=stable\n[status] auth=stored API key (" ++ credentials.stored_key_backend_label ++ ")\n[status] auth_refreshable=false\n[status] team=example-team\n[status] permission_mode=ask\n[status] workspace=/tmp/fx\n[status] history_turns=0\n[status] session_permission_grants=0\n[status] agent_step_limit=24\n",
-        text,
-    );
-
-    const json = try snapshot.renderJson(std.testing.allocator);
-    defer std.testing.allocator.free(json);
-    try std.testing.expectEqualStrings(
-        "{\"kind\":\"status\",\"model\":\"alpha\",\"update_channel\":\"stable\",\"build_channel\":\"stable\",\"build_revision\":\"\",\"auth\":\"stored API key (" ++ credentials.stored_key_backend_label ++ ")\",\"auth_refreshable\":false,\"team\":\"example-team\",\"permission_mode\":\"ask\",\"workspace\":\"/tmp/fx\",\"history_turns\":0,\"session_permission_grants\":0,\"agent_step_limit\":24}",
+        "{\"kind\":\"status\",\"model\":\"alpha\",\"auth\":\"missing\",\"auth_refreshable\":false,\"auth_help\":\"Fx needs a model credential. Set OPENAI_API_KEY for a Responses API, use fx login codex for ChatGPT Codex, or use fx login grok for Grok.\",\"permission_mode\":\"ask\",\"workspace\":\"/tmp/fx\",\"history_turns\":3,\"session_permission_grants\":1,\"agent_step_limit\":24}",
         json,
     );
 }
@@ -2251,12 +1944,12 @@ test "status distinguishes the selected model route from connected providers" {
     const text = try snapshot.renderText(std.testing.allocator);
     defer std.testing.allocator.free(text);
     try std.testing.expect(std.mem.find(u8, text, "model_source=Codex subscription") != null);
-    try std.testing.expect(std.mem.find(u8, text, "connected_providers=Vercel AI Gateway, Codex") != null);
+    try std.testing.expect(std.mem.find(u8, text, "connected_providers=BYOK Responses, Codex") != null);
 
     const json = try snapshot.renderJson(std.testing.allocator);
     defer std.testing.allocator.free(json);
     try std.testing.expect(std.mem.find(u8, json, "\"model_source\":\"Codex subscription\"") != null);
-    try std.testing.expect(std.mem.find(u8, json, "\"connected_providers\":[\"vercel-ai-gateway\",\"codex\"]") != null);
+    try std.testing.expect(std.mem.find(u8, json, "\"connected_providers\":[\"byok-responses\",\"codex\"]") != null);
 }
 
 test "MCP config diagnostic renders in status text and JSON but not interactive body" {
@@ -2322,10 +2015,9 @@ test "core permissions snapshot text and json stay stable" {
     );
 }
 
-test "model list explains public-only and rejected-credential catalogs" {
+test "model list explains public-only catalogs" {
     const alloc = std.testing.allocator;
     const ids = [_][]const u8{"alpha"};
-    const rejected = ModelListSnapshot{ .ids = &ids, .private_models_hidden = true, .public_only_reason = .authenticated_credential_rejected };
     const shown = ModelListSnapshot{ .ids = &ids };
     const cases = [_]struct {
         snapshot: ModelListSnapshot,
@@ -2334,23 +2026,13 @@ test "model list explains public-only and rejected-credential catalogs" {
     }{
         .{
             .snapshot = .{ .ids = &ids, .private_models_hidden = true, .public_only_reason = .no_credential },
-            .text = "[models] 1 available\n - alpha\n[models] Using the public model catalog; set AI_GATEWAY_API_KEY for private Gateway models.\n",
-            .body = "1 available\n - alpha\nUsing the public model catalog; set AI_GATEWAY_API_KEY for private Gateway models.",
-        },
-        .{
-            .snapshot = rejected,
-            .text = "[models] 1 available\n - alpha\n[models] Your Gateway credential was rejected; using the public model catalog.\n",
-            .body = "1 available\n - alpha\nYour Gateway credential was rejected; using the public model catalog.",
+            .text = "[models] 1 available\n - alpha\n[models] Using the public model catalog; set OPENAI_API_KEY for authenticated BYOK models.\n",
+            .body = "1 available\n - alpha\nUsing the public model catalog; set OPENAI_API_KEY for authenticated BYOK models.",
         },
         .{
             .snapshot = .{ .ids = &.{}, .private_models_hidden = true, .public_only_reason = .no_credential },
-            .text = "[models] no models returned by gateway\n[models] Using the public model catalog; set AI_GATEWAY_API_KEY for private Gateway models.\n",
-            .body = "no models returned by gateway\nUsing the public model catalog; set AI_GATEWAY_API_KEY for private Gateway models.",
-        },
-        .{
-            .snapshot = .{ .ids = &.{}, .private_models_hidden = true, .public_only_reason = .authenticated_credential_rejected },
-            .text = "[models] no models returned by gateway\n[models] Your Gateway credential was rejected; using the public model catalog.\n",
-            .body = "no models returned by gateway\nYour Gateway credential was rejected; using the public model catalog.",
+            .text = "[models] no models returned by gateway\n[models] Using the public model catalog; set OPENAI_API_KEY for authenticated BYOK models.\n",
+            .body = "no models returned by gateway\nUsing the public model catalog; set OPENAI_API_KEY for authenticated BYOK models.",
         },
         .{
             .snapshot = .{ .ids = &.{}, .provider = .codex },
@@ -2369,7 +2051,7 @@ test "model list explains public-only and rejected-credential catalogs" {
         try std.testing.expectEqualStrings(case.body, body);
     }
 
-    const json = try rejected.renderJson(alloc);
+    const json = try cases[0].snapshot.renderJson(alloc);
     defer alloc.free(json);
     try std.testing.expectEqualStrings(
         "{\"kind\":\"models\",\"count\":1,\"shown_count\":1,\"more_count\":0,\"private_models_hidden\":true,\"ids\":[\"alpha\"]}",
@@ -2379,10 +2061,10 @@ test "model list explains public-only and rejected-credential catalogs" {
     // An API key hides nothing, so the note must stay absent.
     const quiet_text = try shown.renderText(alloc);
     defer alloc.free(quiet_text);
-    try std.testing.expect(std.mem.find(u8, quiet_text, "team-private") == null);
+    try std.testing.expect(std.mem.find(u8, quiet_text, "authenticated models") == null);
     const quiet_body = try shown.renderInteractiveBody(alloc);
     defer alloc.free(quiet_body);
-    try std.testing.expect(std.mem.find(u8, quiet_body, "team-private") == null);
+    try std.testing.expect(std.mem.find(u8, quiet_body, "authenticated models") == null);
 }
 
 test "core model list snapshot handles limits and empty lists" {
@@ -2909,13 +2591,13 @@ test "core session recovery snapshot text and json stay stable" {
 
 test "core doctor snapshot text and json stay stable" {
     const checks = [_]doctor_runtime.Check{
-        .{ .name = @constCast("auth"), .status = .ok, .detail = @constCast("AI_GATEWAY_API_KEY is configured") },
+        .{ .name = @constCast("auth"), .status = .ok, .detail = @constCast("OPENAI_API_KEY is configured") },
         .{ .name = @constCast("gh"), .status = .warn, .detail = @constCast("GitHub CLI not found in PATH") },
     };
     const snapshot = DoctorSnapshot{
         .workspace_root = "/tmp/fx",
         .model = "alpha",
-        .auth = .{ .active_source = .ai_gateway_api_key },
+        .auth = .{ .active_source = .openai_api_key },
         .permission_mode = .ask,
         .agent_step_limit = 24,
         .checks = &checks,
@@ -2924,14 +2606,14 @@ test "core doctor snapshot text and json stay stable" {
     const text = try snapshot.renderText(std.testing.allocator);
     defer std.testing.allocator.free(text);
     try std.testing.expectEqualStrings(
-        "[doctor] ok=1 warn=1 fail=0\n[doctor] workspace=/tmp/fx\n[doctor] model=alpha\n[doctor] auth=AI_GATEWAY_API_KEY\n[doctor] auth_refreshable=false\n[doctor] permission_mode=ask\n[doctor] agent_step_limit=24\n[ok] auth: AI_GATEWAY_API_KEY is configured\n[warn] gh: GitHub CLI not found in PATH\n",
+        "[doctor] ok=1 warn=1 fail=0\n[doctor] workspace=/tmp/fx\n[doctor] model=alpha\n[doctor] auth=OPENAI_API_KEY\n[doctor] auth_refreshable=false\n[doctor] permission_mode=ask\n[doctor] agent_step_limit=24\n[ok] auth: OPENAI_API_KEY is configured\n[warn] gh: GitHub CLI not found in PATH\n",
         text,
     );
 
     const json = try snapshot.renderJson(std.testing.allocator);
     defer std.testing.allocator.free(json);
     try std.testing.expectEqualStrings(
-        "{\"kind\":\"doctor\",\"ok_count\":1,\"warn_count\":1,\"fail_count\":0,\"workspace\":\"/tmp/fx\",\"model\":\"alpha\",\"auth\":\"AI_GATEWAY_API_KEY\",\"auth_refreshable\":false,\"permission_mode\":\"ask\",\"agent_step_limit\":24,\"checks\":[{\"name\":\"auth\",\"status\":\"ok\",\"detail\":\"AI_GATEWAY_API_KEY is configured\"},{\"name\":\"gh\",\"status\":\"warn\",\"detail\":\"GitHub CLI not found in PATH\"}]}",
+        "{\"kind\":\"doctor\",\"ok_count\":1,\"warn_count\":1,\"fail_count\":0,\"workspace\":\"/tmp/fx\",\"model\":\"alpha\",\"auth\":\"OPENAI_API_KEY\",\"auth_refreshable\":false,\"permission_mode\":\"ask\",\"agent_step_limit\":24,\"checks\":[{\"name\":\"auth\",\"status\":\"ok\",\"detail\":\"OPENAI_API_KEY is configured\"},{\"name\":\"gh\",\"status\":\"warn\",\"detail\":\"GitHub CLI not found in PATH\"}]}",
         json,
     );
 }
@@ -2975,21 +2657,6 @@ test "core background list and detail snapshots preserve persisted fields" {
     try std.testing.expectEqualStrings(
         "{\"kind\":\"background_detail\",\"id\":7,\"started_at_ms\":1,\"updated_at_ms\":2,\"pid\":\"100\",\"command\":\"npm run dev\",\"cwd\":\"/tmp/fx\",\"log_path\":\"/tmp/fx.log\",\"state\":\"running\",\"expect_url\":false,\"server_url\":\"http://localhost:3000\",\"diagnostic\":null,\"exit_code\":null}",
         detail_json,
-    );
-}
-
-test "core credits snapshot renders error output" {
-    const snapshot = CreditsSnapshot{ .err_message = "gateway unavailable" };
-
-    const text = try snapshot.renderText(std.testing.allocator);
-    defer std.testing.allocator.free(text);
-    try std.testing.expectEqualStrings("[credits] error: gateway unavailable\n", text);
-
-    const json = try snapshot.renderJson(std.testing.allocator);
-    defer std.testing.allocator.free(json);
-    try std.testing.expectEqualStrings(
-        "{\"kind\":\"credits\",\"error\":\"gateway unavailable\"}",
-        json,
     );
 }
 
@@ -3044,163 +2711,6 @@ test "Codex account usage text visibly escapes provider controls" {
     }) |escaped| {
         try std.testing.expect(std.mem.find(u8, text_output, escaped) != null);
     }
-}
-
-test "core credits snapshot renders parsed, raw, and empty fallbacks" {
-    const parsed = CreditsSnapshot{ .balance = "10", .used = "2", .plan = "pro" };
-
-    const parsed_text = try parsed.renderText(std.testing.allocator);
-    defer std.testing.allocator.free(parsed_text);
-    try std.testing.expectEqualStrings(
-        "[credits] balance=10\n[credits] used=2\n[credits] plan=pro\n",
-        parsed_text,
-    );
-
-    const parsed_json = try parsed.renderJson(std.testing.allocator);
-    defer std.testing.allocator.free(parsed_json);
-    try std.testing.expectEqualStrings(
-        "{\"kind\":\"credits\",\"balance\":\"10\",\"used\":\"2\",\"plan\":\"pro\"}",
-        parsed_json,
-    );
-
-    const raw = CreditsSnapshot{ .raw_json = "{\"raw\":true}" };
-
-    const raw_text = try raw.renderText(std.testing.allocator);
-    defer std.testing.allocator.free(raw_text);
-    try std.testing.expectEqualStrings("[credits] {\"raw\":true}\n", raw_text);
-
-    const raw_json = try raw.renderJson(std.testing.allocator);
-    defer std.testing.allocator.free(raw_json);
-    try std.testing.expectEqualStrings(
-        "{\"kind\":\"credits\",\"balance\":null,\"used\":null,\"plan\":null}",
-        raw_json,
-    );
-
-    const empty_text = try (CreditsSnapshot{}).renderText(std.testing.allocator);
-    defer std.testing.allocator.free(empty_text);
-    try std.testing.expectEqualStrings("[credits] no data returned by gateway\n", empty_text);
-
-    const hostile = CreditsSnapshot{
-        .balance = "1\x1b",
-        .used = "2\n",
-        .plan = "pro\r",
-    };
-    const hostile_text = try hostile.renderText(std.testing.allocator);
-    defer std.testing.allocator.free(hostile_text);
-    try std.testing.expectEqualStrings(
-        "[credits] balance=1\\x1b\n[credits] used=2\\x0a\n[credits] plan=pro\\x0d\n",
-        hostile_text,
-    );
-    const hostile_interactive = try hostile.renderInteractiveBody(std.testing.allocator);
-    defer std.testing.allocator.free(hostile_interactive);
-    try std.testing.expectEqualStrings(
-        "balance=1\\x1b\nused=2\\x0a\nplan=pro\\x0d",
-        hostile_interactive,
-    );
-
-    const hostile_raw = CreditsSnapshot{ .raw_json = "{\"raw\":\"\x1b\n\"}" };
-    const hostile_raw_text = try hostile_raw.renderText(std.testing.allocator);
-    defer std.testing.allocator.free(hostile_raw_text);
-    try std.testing.expectEqualStrings(
-        "[credits] {\"raw\":\"\\x1b\\x0a\"}\n",
-        hostile_raw_text,
-    );
-}
-
-test "core upgrade snapshot renders errors and statuses" {
-    const error_snapshot = UpgradeSnapshot{
-        .current = "0.2.9",
-        .latest = "0.2.10",
-        .status = .failed,
-        .err_message = "download failed",
-    };
-
-    const error_text = try error_snapshot.renderText(std.testing.allocator);
-    defer std.testing.allocator.free(error_text);
-    try std.testing.expectEqualStrings("error: download failed\n", error_text);
-
-    const error_json = try error_snapshot.renderJson(std.testing.allocator);
-    defer std.testing.allocator.free(error_json);
-    try std.testing.expectEqualStrings(
-        "{\"kind\":\"upgrade\",\"error\":\"download failed\"}",
-        error_json,
-    );
-
-    const upgraded_text = try (UpgradeSnapshot{
-        .current = "0.2.9",
-        .latest = "0.2.10",
-        .status = .upgraded,
-    }).renderText(std.testing.allocator);
-    defer std.testing.allocator.free(upgraded_text);
-    try std.testing.expectEqualStrings("upgraded to v0.2.10\n", upgraded_text);
-
-    const upgraded_json = try (UpgradeSnapshot{
-        .current = "0.2.9",
-        .latest = "0.2.10",
-        .current_revision = "0123456789ab",
-        .status = .upgraded,
-    }).renderJson(std.testing.allocator);
-    defer std.testing.allocator.free(upgraded_json);
-    try std.testing.expectEqualStrings(
-        "{\"kind\":\"upgrade\",\"current\":\"0.2.9\",\"latest\":\"0.2.10\",\"status\":\"upgraded\"}",
-        upgraded_json,
-    );
-
-    const prefixed_text = try (UpgradeSnapshot{
-        .current = "0.2.9",
-        .latest = "v0.2.10",
-        .status = .upgraded,
-    }).renderText(std.testing.allocator);
-    defer std.testing.allocator.free(prefixed_text);
-    try std.testing.expectEqualStrings("upgraded to v0.2.10\n", prefixed_text);
-
-    const up_to_date = UpgradeSnapshot{
-        .current = "0.2.9",
-        .latest = "0.2.10",
-        .status = .up_to_date,
-    };
-
-    const up_to_date_text = try up_to_date.renderText(std.testing.allocator);
-    defer std.testing.allocator.free(up_to_date_text);
-    try std.testing.expectEqualStrings("fx is already up to date (v0.2.10)\n", up_to_date_text);
-
-    const failed_text = try (UpgradeSnapshot{
-        .current = "0.2.9",
-        .latest = "0.2.10",
-        .status = .failed,
-    }).renderText(std.testing.allocator);
-    defer std.testing.allocator.free(failed_text);
-    try std.testing.expectEqualStrings("upgrade failed\n", failed_text);
-
-    const up_to_date_json = try up_to_date.renderJson(std.testing.allocator);
-    defer std.testing.allocator.free(up_to_date_json);
-    try std.testing.expectEqualStrings(
-        "{\"kind\":\"upgrade\",\"current\":\"0.2.9\",\"latest\":\"0.2.10\",\"status\":\"up_to_date\"}",
-        up_to_date_json,
-    );
-}
-
-test "core upgrade snapshot identifies dev revisions" {
-    const snapshot = UpgradeSnapshot{
-        .current = "0.3.66",
-        .latest = "0.3.66",
-        .channel = "dev",
-        .current_channel = "stable",
-        .current_revision = "111111111111",
-        .latest_revision = "abcdef0123456789abcdef0123456789abcdef01",
-        .status = .upgraded,
-    };
-
-    const text = try snapshot.renderText(std.testing.allocator);
-    defer std.testing.allocator.free(text);
-    try std.testing.expectEqualStrings("upgraded to dev abcdef012345 (v0.3.66)\n", text);
-
-    const json = try snapshot.renderJson(std.testing.allocator);
-    defer std.testing.allocator.free(json);
-    try std.testing.expectEqualStrings(
-        "{\"kind\":\"upgrade\",\"current\":\"0.3.66\",\"latest\":\"0.3.66\",\"channel\":\"dev\",\"current_channel\":\"stable\",\"current_revision\":\"111111111111\",\"latest_revision\":\"abcdef0123456789abcdef0123456789abcdef01\",\"status\":\"upgraded\"}",
-        json,
-    );
 }
 
 test "workspace snapshot renders source availability and mutation in text and json" {

@@ -68,7 +68,6 @@ const web_fetch_artifacts = @import("../session/web_fetch_artifacts.zig");
 const types = @import("../shared/types.zig");
 const model_provider = @import("../config/model_provider.zig");
 const provider_set = @import("../gateway/provider_set.zig");
-const credential_authority = @import("../auth/credential_authority.zig");
 const worker_runtime = @import("../agent/worker_runtime.zig");
 const context_contract = @import("../workspace/context_contract.zig");
 const test_builtin_tools = if (builtin.is_test)
@@ -76,7 +75,7 @@ const test_builtin_tools = if (builtin.is_test)
 else
     struct {};
 const test_builtin_gateway = if (builtin.is_test)
-    @import("../../builtins/gateway.zig")
+    @import("../../builtins/responses.zig")
 else
     struct {};
 const test_browser_workspace_tools = if (builtin.is_test)
@@ -137,7 +136,6 @@ pub const Context = struct {
     api_key: []const u8,
     agent_stream_provider: agent_stream_provider.Provider = agent_stream_provider.unavailable_provider,
     responses_compaction_provider: ?responses_compaction_provider.Provider = null,
-    gateway_team: ?[]const u8 = null,
     credential_source: ?types.CredentialSource = null,
     account_id: ?[]const u8 = null,
     provider: model_provider.ProviderId = .gateway,
@@ -285,7 +283,6 @@ pub const Context = struct {
         return permission_auto_classifier.Classifier.withProvider(provider, .{
             .credential = self.api_key,
             .account_id = self.account_id,
-            .tenant = self.gateway_team,
             .credential_source = self.credential_source,
             .model = self.model,
             .session_id = self.lifecycle_scope.session_id,
@@ -1038,7 +1035,6 @@ fn executeVisionRequest(
         .stream_provider = state.runtime.agent_stream_provider,
         .api_key = state.runtime.api_key,
         .credential_source = state.runtime.credential_source,
-        .gateway_team = state.runtime.gateway_team,
         .session_id = state.runtime.lifecycle_scope.session_id,
         .retry_count = state.runtime.gateway_retry_count,
         .cancel_flag = state.runtime.cancel_flag,
@@ -2095,7 +2091,6 @@ const TestRuntime = struct {
         .fx_search = true,
         .vision_fallback = true,
     },
-    gateway_team: ?[]const u8 = null,
     gateway_retry_count: usize = 0,
     gateway_chat_url: []const u8 = "",
     context_limits: context_limits.Values = .{},
@@ -2143,7 +2138,6 @@ const TestRuntime = struct {
             .max_tool_result_bytes = self.max_tool_result_bytes,
             .api_key = self.api_key,
             .agent_stream_provider = self.agent_stream_provider,
-            .gateway_team = self.gateway_team,
             .provider = self.provider,
             .provider_capabilities = self.provider_capabilities,
             .model = self.model,
@@ -5645,7 +5639,7 @@ test "web_fetch permits valid public hosts by default" {
     try std.testing.expectEqual(ToolPermissionDecision.once, (try tool_admission.requestPermissionOutcome(rt.context().admissionInput(), arena, .{
         .id = "fetch",
         .name = "web_fetch",
-        .arguments_json = "{\"url\":\"https://docs.vercel.com/frameworks/nextjs\"}",
+        .arguments_json = "{\"url\":\"https://example.com/frameworks/sample\"}",
     }, .auto, &.{})).decision);
 }
 
@@ -7912,7 +7906,6 @@ const VisionGatewayFixture = struct {
     call_count: usize = 0,
     cancel_after_call: ?usize = null,
     last_api_key: []const u8 = "",
-    last_team: ?[]const u8 = null,
     last_model: []const u8 = "",
     last_retry_count: usize = 0,
 
@@ -7943,7 +7936,6 @@ const VisionGatewayFixture = struct {
         defer self.alloc.free(payload);
         try self.payloads.append(self.alloc, try self.alloc.dupe(u8, payload));
         self.last_api_key = request.credential.secret;
-        self.last_team = request.credential.tenant;
         self.last_model = request.model;
         self.last_retry_count = request.retry_count;
         if (self.cancel_after_call == self.call_count) request.cancel_flag.store(true, .seq_cst);
@@ -7959,17 +7951,7 @@ const VisionGatewayFixture = struct {
                 .finish_reason = .stop,
                 .usage = response.usage,
             },
-            .usage = .{ .deferred = .{
-                .provider = .gateway,
-                .generation_id = response.generation_id orelse "gen_test",
-                .scope = "https://ai-gateway.vercel.sh",
-                .tenant = request.credential.tenant,
-                .credential_source = request.credential.source orelse .ai_gateway_api_key,
-                .credential_identity = credential_authority.derive(
-                    request.credential.source orelse .ai_gateway_api_key,
-                    request.credential.account_id,
-                ),
-            } },
+            .usage = .immediate,
         } };
     }
 };
@@ -8500,7 +8482,6 @@ test "vision runtime resolves historical authorized images and batches twenty as
         .agent_stream_provider = fixture.provider(),
         .tool_registry = .{ .tools = vision_test_registry_tools[0..] },
         .api_key = "gateway-key",
-        .gateway_team = "team_vision",
         .gateway_retry_count = 2,
         .gateway_chat_url = "https://gateway.invalid/chat",
         .session_allocator = alloc,
@@ -8518,15 +8499,14 @@ test "vision runtime resolves historical authorized images and batches twenty as
 
     try std.testing.expectEqual(tool_contracts.ToolExecutionStatus.success, result.status);
     try std.testing.expectEqual(@as(usize, 3), fixture.call_count);
-    try std.testing.expectEqual(@as(usize, 8), std.mem.count(u8, fixture.payloads.items[0], "\"type\":\"file\""));
-    try std.testing.expectEqual(@as(usize, 8), std.mem.count(u8, fixture.payloads.items[1], "\"type\":\"file\""));
-    try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, fixture.payloads.items[2], "\"type\":\"file\""));
+    try std.testing.expectEqual(@as(usize, 8), std.mem.count(u8, fixture.payloads.items[0], "\"type\":\"input_image\""));
+    try std.testing.expectEqual(@as(usize, 8), std.mem.count(u8, fixture.payloads.items[1], "\"type\":\"input_image\""));
+    try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, fixture.payloads.items[2], "\"type\":\"input_image\""));
     try std.testing.expectEqualStrings("google/gemini-2.5-flash", fixture.last_model);
     try std.testing.expectEqualStrings("gateway-key", fixture.last_api_key);
-    try std.testing.expectEqualStrings("team_vision", fixture.last_team.?);
     try std.testing.expectEqual(@as(usize, 2), fixture.last_retry_count);
     try expectContains(fixture.payloads.items[0], "Read the build state");
-    try expectContains(fixture.payloads.items[0], "\"mediaType\":\"image/png\"");
+    try expectContains(fixture.payloads.items[0], "\"image_url\":\"data:image/png;base64,");
     for (fixture.payloads.items) |payload| {
         for (catalog) |image| try expectNotContains(payload, image.path);
     }
@@ -8541,7 +8521,7 @@ test "vision runtime resolves historical authorized images and batches twenty as
     try std.testing.expectEqual(@as(u64, 23), result.inner_usage.?.output_tokens);
     var usage_snapshot = try rt.session.usage.snapshot(alloc);
     defer usage_snapshot.deinit(alloc);
-    try std.testing.expectEqual(@as(usize, 3), usage_snapshot.pending.len);
+    try std.testing.expectEqual(@as(?u64, 3), usage_snapshot.request_count);
 }
 
 test "vision runtime rejects unauthorized ids before filesystem or provider access" {
@@ -8625,7 +8605,7 @@ test "vision runtime loads approved paths into a transient authorized catalog" {
     try std.testing.expectEqual(tool_contracts.ToolExecutionStatus.success, result.status);
     try expectContains(result.model_output, "\"image_id\":1");
     try std.testing.expectEqual(@as(usize, 1), fixture.call_count);
-    try expectContains(fixture.payloads.items[0], "\"type\":\"file\"");
+    try expectContains(fixture.payloads.items[0], "\"type\":\"input_image\"");
     try expectNotContains(fixture.payloads.items[0], source_path);
 }
 

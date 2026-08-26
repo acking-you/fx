@@ -497,6 +497,7 @@ pub const ChildMessage = struct {
 pub const ChildChat = struct {
     child_id: []u8,
     parent_id: ?[]u8,
+    through_sequence: u64,
     mode: domain.Mode,
     state: domain.State,
     generation: u64,
@@ -875,7 +876,7 @@ pub fn loadChildChat(
             live = null;
         }
     }
-    const activity = projectChildActivity(
+    const child_activity = projectChildActivity(
         alloc,
         &capability,
         child_id,
@@ -889,7 +890,7 @@ pub fn loadChildChat(
         history.deinit(alloc);
         return .{ .unavailable = .unreadable };
     };
-    errdefer freeActivity(alloc, activity);
+    errdefer freeActivity(alloc, child_activity.items);
 
     const owned_child_id = try alloc.dupe(u8, record.child_id);
     errdefer alloc.free(owned_child_id);
@@ -910,6 +911,7 @@ pub fn loadChildChat(
     return .{ .chat = .{
         .child_id = owned_child_id,
         .parent_id = parent_id,
+        .through_sequence = child_activity.through_sequence,
         .mode = record.mode,
         .state = record.state,
         .generation = record.generation,
@@ -917,7 +919,7 @@ pub fn loadChildChat(
         .external_busy = external_busy,
         .failure_reason = failure_reason,
         .messages = messages,
-        .activity = activity,
+        .activity = child_activity.items,
         .live = live,
         .page = .{
             .history = history,
@@ -1027,19 +1029,27 @@ fn freeChildMessages(alloc: Allocator, messages: []ChildMessage) void {
     alloc.free(messages);
 }
 
+const ChildActivityProjection = struct {
+    items: []Activity,
+    through_sequence: u64,
+};
+
 fn projectChildActivity(
     alloc: Allocator,
     capability: *session_child_store.SessionChildCapability,
     child_id: []const u8,
     target_id: []const u8,
     live_work_id: ?[]const u8,
-) communication_store.LoadError![]Activity {
+) communication_store.LoadError!ChildActivityProjection {
     const store = communication_store.Store{
         .capability = capability,
         .expected_session_id = child_id,
     };
     const maybe_ledger = try store.loadOptional(alloc);
-    if (maybe_ledger == null) return alloc.alloc(Activity, 0);
+    if (maybe_ledger == null) return .{
+        .items = try alloc.alloc(Activity, 0),
+        .through_sequence = 0,
+    };
     var ledger = maybe_ledger.?;
     defer ledger.deinit(alloc);
     var relevant: usize = 0;
@@ -1071,7 +1081,10 @@ fn projectChildActivity(
         };
         built += 1;
     }
-    return activity;
+    return .{
+        .items = activity,
+        .through_sequence = humanThroughSequence(ledger, target_id),
+    };
 }
 
 fn deliveryMatchesWork(
@@ -1366,19 +1379,14 @@ fn projectLedger(
 
     var relevant_count: usize = 0;
     var unread_count: usize = 0;
-    var latest_sequence: u64 = 0;
     for (ledger.deliveries) |delivery| {
         if (!std.mem.eql(u8, delivery.target_id, target_id)) continue;
         relevant_count += 1;
-        latest_sequence = delivery.sequence;
         if (delivery.sequence > acknowledged) unread_count += 1;
     }
     node.unread_count = @min(unread_count, max_activity);
     node.unread_truncated = unread_count > max_activity;
-    node.through_sequence = @max(
-        latest_sequence,
-        communication.retentionGapThrough(ledger, target_id, .human),
-    );
+    node.through_sequence = humanThroughSequence(ledger, target_id);
 
     const activity_count = @min(relevant_count, max_activity);
     const activity = try alloc.alloc(Activity, activity_count);
@@ -1432,6 +1440,15 @@ fn projectLedger(
     alloc.free(node.approvals);
     node.activity = activity;
     node.approvals = approvals;
+}
+
+fn humanThroughSequence(ledger: communication.Ledger, target_id: []const u8) u64 {
+    var latest_sequence = communication.retentionGapThrough(ledger, target_id, .human);
+    for (ledger.deliveries) |delivery| {
+        if (!std.mem.eql(u8, delivery.target_id, target_id)) continue;
+        latest_sequence = @max(latest_sequence, delivery.sequence);
+    }
+    return latest_sequence;
 }
 
 fn acknowledgedSequence(ledger: communication.Ledger, target_id: []const u8) u64 {
@@ -1819,6 +1836,7 @@ test "bounded ledger projection exposes unread activity approvals and stale stat
     defer node.deinit(alloc);
     try projectLedger(alloc, &node, ledger, "root");
     try std.testing.expectEqual(@as(usize, 1), node.unread_count);
+    try std.testing.expectEqual(@as(u64, 1), node.through_sequence);
     try std.testing.expectEqual(@as(usize, 1), node.activity.len);
     try std.testing.expectEqual(ActivityKind.tool_activity, node.activity[0].kind);
     try std.testing.expectEqual(@as(usize, 1), node.approvals.len);
@@ -2652,6 +2670,18 @@ test "child chat loads bounded authoritative pages and reports stale cursors" {
     defer created.deinit(alloc);
     try std.testing.expect(created == .receipt);
 
+    var communications = communication_manager.Manager{ .sessions = &env.store };
+    const published = try communications.publish(alloc, child_id, .{
+        .id = "history-visible-delivery",
+        .source_id = child_id,
+        .target_id = root_id,
+        .work_id = "history-visible-work",
+        .timestamp_ms = 2,
+        .payload = .{ .message = "visible response" },
+    });
+    try std.testing.expect(published == .appended);
+    try std.testing.expectEqual(@as(u64, 1), published.appended);
+
     for (0..25) |index| {
         var work_buf: [32]u8 = undefined;
         const work_id = try std.fmt.bufPrint(&work_buf, "work-{d:0>2}", .{index});
@@ -2679,6 +2709,7 @@ test "child chat loads bounded authoritative pages and reports stale cursors" {
     var newest = try loadChildChat(alloc, source, child_id, null);
     defer newest.deinit(alloc);
     try std.testing.expect(newest == .chat);
+    try std.testing.expectEqual(@as(u64, 1), newest.chat.through_sequence);
     try std.testing.expectEqual(child_history_page_limit, newest.chat.page.?.history.turns.len);
     try std.testing.expectEqualStrings(
         "work-05",

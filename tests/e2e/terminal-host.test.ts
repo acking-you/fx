@@ -3067,7 +3067,9 @@ test.skipIf(!tmuxAvailable())(
       const first = await handshake(paths.socket, { minimum: 4, current: 5 });
       const pending = startCommand(first.client, first.revision!, 144, {
         cwd: home,
-        command: `printf 'release-recovered-${pass}\n'; sleep 30`,
+        command:
+          `printf 'release-recovered-${pass}\n'; ` +
+          "while :; do sleep 0.05; done",
         shell: { executable: { path: "/bin/zsh", clean_start: true } },
         backend: "tmux",
         returnWhen: { match: `release-recovered-${pass}` },

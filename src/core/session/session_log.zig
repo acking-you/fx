@@ -2959,6 +2959,31 @@ fn validateLivePosition(
     return validateCommitPosition(alloc, dir, session_id, expected);
 }
 
+/// Replays the exact live boundary once after a publication while the caller
+/// holds the commit lock. The watermark is checked before the replay, and the
+/// replay itself validates every frame from the same opened event-log inode.
+fn replayPublishedPositionUnderCommitLock(
+    alloc: Allocator,
+    dir: *io_mod.VerifiedDir,
+    session_id: []const u8,
+    expected: CommitPosition,
+) !session_codec.DurableSessionState {
+    var log = try openManagedFile(dir, events_file, .read_only);
+    defer log.close(io_mod.getIo());
+    const generation = try session_replay.readFirstGeneration(alloc, log);
+    if (!std.mem.eql(u8, &generation, &expected.log_generation)) {
+        return error.InvalidSessionFormat;
+    }
+    const watermark = try loadWatermarkPosition(
+        alloc,
+        dir,
+        session_id,
+        generation,
+    );
+    if (!positionsEqual(watermark, expected)) return error.InvalidSessionFormat;
+    return session_replay.replayBoundary(alloc, log, expected);
+}
+
 fn loadAndValidateWatermark(
     alloc: Allocator,
     dir: *io_mod.VerifiedDir,
@@ -3357,6 +3382,8 @@ fn publishFrames(
         options,
     );
     loaded.resume_view_stale = true;
+    var replayed_state: ?session_codec.DurableSessionState = null;
+    errdefer if (replayed_state) |*state| state.deinit(alloc);
     switch (prepared.kind) {
         .event => {
             const published = loadCurrentPositionReference(
@@ -3398,7 +3425,7 @@ fn publishFrames(
             }
         },
         .state_replacement => {
-            _ = validateLivePosition(
+            replayed_state = replayPublishedPositionUnderCommitLock(
                 alloc,
                 &loaded.log.dir,
                 loaded.log.session_id,
@@ -3417,7 +3444,6 @@ fn publishFrames(
     options.test_controls.boundary(.after_target_namespace_sync) catch
         return error.SessionCommitIndeterminate;
 
-    var replayed_state: ?session_codec.DurableSessionState = null;
     switch (prepared.kind) {
         .event => |event_id| {
             _ = session_event.applyEventFrame(
@@ -3448,21 +3474,7 @@ fn publishFrames(
                 options,
             );
         },
-        .state_replacement => {
-            replayed_state = session_replay.replayBoundary(
-                alloc,
-                log,
-                proposed,
-            ) catch |err| return handlePublishedTailFailure(
-                loaded,
-                alloc,
-                log,
-                prior,
-                failed_tail,
-                err,
-                options,
-            );
-        },
+        .state_replacement => {},
     }
 
     var cleanup_pending = false;
@@ -3478,6 +3490,7 @@ fn publishFrames(
     if (replayed_state) |next_state| {
         loaded.state.deinit(alloc);
         loaded.state = next_state;
+        replayed_state = null;
     }
     if (usage_sidecar_bytes) |bytes| {
         if (write_usage_sidecar) {
@@ -4253,12 +4266,14 @@ fn compactCanonicalLog(
         return error.SessionLogCompactionIndeterminate;
     options.test_controls.boundary(.after_compaction_namespace_sync) catch
         return error.SessionLogCompactionIndeterminate;
-    _ = validateLivePosition(
+    var compacted_state = replayPublishedPositionUnderCommitLock(
         alloc,
         &loaded.log.dir,
         loaded.log.session_id,
         proposed,
     ) catch return error.SessionLogCompactionIndeterminate;
+    var compacted_state_owned = true;
+    errdefer if (compacted_state_owned) compacted_state.deinit(alloc);
     options.test_controls.boundary(.after_compaction_live_confirmation) catch
         return error.SessionLogCompactionIndeterminate;
     var cleanup_pending = false;
@@ -4279,11 +4294,9 @@ fn compactCanonicalLog(
     loaded.generation_base_bytes = proposed.through_event_log_bytes;
     loaded.checkpoint_seq = null;
     loaded.checkpoint_sha256 = null;
-    var live = try openManagedFile(&loaded.log.dir, events_file, .read_only);
-    defer live.close(io_mod.getIo());
-    const compacted_state = try session_replay.replayBoundary(alloc, live, proposed);
     loaded.state.deinit(alloc);
     loaded.state = compacted_state;
+    compacted_state_owned = false;
     writeCheckpointProjection(alloc, loaded) catch {};
     writeManifestProjection(alloc, loaded) catch {
         loaded.projection_status = .stale;
@@ -4910,27 +4923,13 @@ test "usage sidecar restores exact optional metrics after read-only and writable
 
     var usage = session_usage.Usage.initFresh();
     defer usage.deinit(alloc);
-    const sequence = try usage.reserveInvocation();
-    try usage.finishObservedInvocation(
+    const observation = try session_usage.InvocationObservation.begin(&usage);
+    try observation.completeDirect(
         alloc,
-        sequence,
-        7,
-        .observed_generation,
-        "gen_01ARZ3NDEKTSV4RRFFQ69G5FAV",
-        "https://ai-gateway.vercel.sh",
-        null,
+        "provider/model",
+        .{ .input_tokens = 20, .output_tokens = 5, .cached_input_tokens = 4, .cache_write_input_tokens = 1, .reasoning_output_tokens = 3 },
+        .{ .http_ok = true, .terminal_finish_reason = .stop },
     );
-    try usage.applyGeneration(alloc, .{
-        .id = "gen_01ARZ3NDEKTSV4RRFFQ69G5FAV",
-        .model = "provider/model",
-        .total_cost = 0.02,
-        .input_tokens = 20,
-        .output_tokens = 5,
-        .cache_read_tokens = 4,
-        .cache_write_tokens = 1,
-        .reasoning_tokens = 3,
-        .billable_web_search_calls = 0,
-    });
     var snapshot = try usage.snapshot(alloc);
     defer snapshot.deinit(alloc);
     _ = try loaded.appendEvent(
@@ -5088,27 +5087,13 @@ test "indeterminate canonical usage retry repairs the rich sidecar" {
 
     var usage = session_usage.Usage.initFresh();
     defer usage.deinit(alloc);
-    const sequence = try usage.reserveInvocation();
-    try usage.finishObservedInvocation(
+    const observation = try session_usage.InvocationObservation.begin(&usage);
+    try observation.completeDirect(
         alloc,
-        sequence,
-        7,
-        .observed_generation,
-        "gen_01ARZ3NDEKTSV4RRFFQ69G5FAV",
-        "https://ai-gateway.vercel.sh",
-        null,
+        "provider/model",
+        .{ .input_tokens = 20, .output_tokens = 5, .cached_input_tokens = 4, .cache_write_input_tokens = 1, .reasoning_output_tokens = 3 },
+        .{ .http_ok = true, .terminal_finish_reason = .stop },
     );
-    try usage.applyGeneration(alloc, .{
-        .id = "gen_01ARZ3NDEKTSV4RRFFQ69G5FAV",
-        .model = "provider/model",
-        .total_cost = 0.02,
-        .input_tokens = 20,
-        .output_tokens = 5,
-        .cache_read_tokens = 4,
-        .cache_write_tokens = 1,
-        .reasoning_tokens = 3,
-        .billable_web_search_calls = 0,
-    });
     var snapshot = try usage.snapshot(alloc);
     defer snapshot.deinit(alloc);
     var current = try loaded.state.dupe(alloc);
@@ -5160,27 +5145,13 @@ test "unwritable usage sidecar keeps canonical usage resumable and incomplete" {
 
     var usage = session_usage.Usage.initFresh();
     defer usage.deinit(alloc);
-    const sequence = try usage.reserveInvocation();
-    try usage.finishObservedInvocation(
+    const observation = try session_usage.InvocationObservation.begin(&usage);
+    try observation.completeDirect(
         alloc,
-        sequence,
-        7,
-        .observed_generation,
-        "gen_01ARZ3NDEKTSV4RRFFQ69G5FAV",
-        "https://ai-gateway.vercel.sh",
-        null,
+        "provider/model",
+        .{ .input_tokens = 20, .output_tokens = 5, .cached_input_tokens = 4, .cache_write_input_tokens = 1, .reasoning_output_tokens = 3 },
+        .{ .http_ok = true, .terminal_finish_reason = .stop },
     );
-    try usage.applyGeneration(alloc, .{
-        .id = "gen_01ARZ3NDEKTSV4RRFFQ69G5FAV",
-        .model = "provider/model",
-        .total_cost = 0.02,
-        .input_tokens = 20,
-        .output_tokens = 5,
-        .cache_read_tokens = 4,
-        .cache_write_tokens = 1,
-        .reasoning_tokens = 3,
-        .billable_web_search_calls = 0,
-    });
     var snapshot = try usage.snapshot(alloc);
     defer snapshot.deinit(alloc);
     _ = try loaded.appendEvent(
@@ -5195,7 +5166,7 @@ test "unwritable usage sidecar keeps canonical usage resumable and incomplete" {
     var resumed = try temp.root.resumeForWrite(alloc, initial.id, .{});
     defer resumed.deinit(alloc);
     try std.testing.expectApproxEqAbs(
-        @as(f64, 0.02),
+        @as(f64, 0),
         resumed.state.usage.?.total_cost,
         1e-12,
     );

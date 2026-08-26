@@ -31,6 +31,7 @@ const ProcessSnapshot = struct {
     identity: Identity,
     parent_pid: std.posix.pid_t,
     parent_unique_id: ?u64 = null,
+    is_zombie: bool = false,
 };
 
 pub const DeliverySummary = struct {
@@ -256,6 +257,7 @@ pub const Tracker = struct {
             return;
         };
         if (!process.identity.eql(actual.identity)) return;
+        if (!snapshotRepresentsRunningProcess(actual)) return;
         const process_group = switch (Effects.processGroup(process.pid)) {
             .found => |value| value,
             .vanished => return,
@@ -279,12 +281,14 @@ pub const Tracker = struct {
         if (self.root) |root| {
             const actual: ?ProcessSnapshot = captureSnapshot(self.alloc, root.pid) catch null;
             if (actual) |snapshot| {
-                if (root.identity.eql(snapshot.identity)) return true;
+                if (root.identity.eql(snapshot.identity) and
+                    snapshotRepresentsRunningProcess(snapshot)) return true;
             }
         }
         for (self.processes.items) |process| {
             const actual = captureSnapshot(self.alloc, process.pid) catch continue;
-            if (process.identity.eql(actual.identity)) return true;
+            if (process.identity.eql(actual.identity) and
+                snapshotRepresentsRunningProcess(actual)) return true;
         }
         return false;
     }
@@ -444,6 +448,10 @@ fn identityHasMacOSUniqueId(identity: Identity, unique_id: u64) bool {
     };
 }
 
+fn snapshotRepresentsRunningProcess(snapshot: ProcessSnapshot) bool {
+    return !snapshot.is_zombie;
+}
+
 fn shouldTraverseParent(expected: Identity, actual: Identity) bool {
     return expected.eql(actual);
 }
@@ -580,6 +588,53 @@ test "macOS lineage identity matches only the same unique process" {
     ));
 }
 
+test "zombie snapshots are not running processes" {
+    try std.testing.expect(snapshotRepresentsRunningProcess(.{
+        .identity = .{ .linux_start_ticks = 42 },
+        .parent_pid = 1,
+    }));
+    try std.testing.expect(!snapshotRepresentsRunningProcess(.{
+        .identity = .{ .macos_unique_id = 42 },
+        .parent_pid = 1,
+        .is_zombie = true,
+    }));
+}
+
+test "checked signal delivery skips zombie processes" {
+    const ZombieEffects = struct {
+        fn capture(_: Allocator, pid: std.posix.pid_t) !ProcessSnapshot {
+            return .{
+                .identity = .{ .linux_start_ticks = @intCast(pid) },
+                .parent_pid = 1,
+                .is_zombie = true,
+            };
+        }
+
+        fn processGroup(pid: std.posix.pid_t) ProcessGroupState {
+            return .{ .found = pid };
+        }
+
+        fn send(_: std.posix.pid_t, _: std.posix.SIG) std.posix.KillError!void {
+            return error.PermissionDenied;
+        }
+    };
+
+    var tracker = Tracker{ .alloc = std.testing.allocator };
+    defer tracker.deinit();
+    try tracker.processes.append(std.testing.allocator, .{
+        .pid = 42,
+        .identity = .{ .linux_start_ticks = 42 },
+    });
+
+    const summary = tracker.signalProcessesWith(
+        std.posix.SIG.KILL,
+        null,
+        ZombieEffects,
+    );
+    try std.testing.expectEqual(@as(usize, 0), summary.delivered);
+    try std.testing.expect(!summary.incomplete);
+}
+
 test "checked signal delivery distinguishes vanished stale and failed targets" {
     const FakeEffects = struct {
         fn capture(_: Allocator, pid: std.posix.pid_t) !ProcessSnapshot {
@@ -695,7 +750,11 @@ fn captureLinuxSnapshot(alloc: Allocator, pid: std.posix.pid_t) !ProcessSnapshot
     var fields = std.mem.tokenizeScalar(u8, stat[close_paren + 1 ..], ' ');
     var field_number: usize = 3;
     var parent_pid: ?std.posix.pid_t = null;
+    var is_zombie = false;
     while (fields.next()) |field| : (field_number += 1) {
+        if (field_number == 3) {
+            is_zombie = field.len == 1 and field[0] == 'Z';
+        }
         if (field_number == 4) {
             parent_pid = std.fmt.parseInt(std.posix.pid_t, field, 10) catch
                 return error.ProcessIdentityUnavailable;
@@ -707,6 +766,7 @@ fn captureLinuxSnapshot(alloc: Allocator, pid: std.posix.pid_t) !ProcessSnapshot
                 .identity = .{ .linux_start_ticks = start_ticks },
                 .parent_pid = parent_pid orelse
                     return error.ProcessIdentityUnavailable,
+                .is_zombie = is_zombie,
             };
         }
     }
@@ -760,10 +820,14 @@ fn captureMacOSSnapshot(pid: std.posix.pid_t) !ProcessSnapshot {
         .identity = .{ .macos_unique_id = unique.p_uniqueid },
         .parent_pid = @intCast(info.pbi_ppid),
         .parent_unique_id = unique.p_puniqueid,
+        .is_zombie = info.pbi_status == Darwin.process_status_zombie,
     };
 }
 
 const Darwin = struct {
+    // sys/proc.h: a zombie is awaiting collection and cannot execute again.
+    const process_status_zombie: u32 = 5;
+
     // Stable libproc process-identity flavor; the SDK omits this constant from
     // its public header, but XNU defines the record as API with a fixed size.
     const proc_pid_unique_identifier_info: c_int = 17;

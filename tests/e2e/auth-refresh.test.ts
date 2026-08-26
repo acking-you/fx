@@ -50,14 +50,11 @@ test(
         {
           env: {
             HOME: home,
-            AI_GATEWAY_API_KEY: SELECTED_API_KEY,
-            VERCEL_OIDC_TOKEN: undefined,
+            OPENAI_API_KEY: SELECTED_API_KEY,
             FX_DISABLE_KEYCHAIN: "1",
             FX_SKIP_ONBOARDING: "1",
-            FX_AUTO_UPGRADE: "0",
             FX_TRACE_LOG: tracePath,
-            FX_GATEWAY_BASE_URL: gateway.baseUrl,
-            FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+                        FX_RESPONSES_BASE_URL: gateway.baseUrl,
             FX_MODEL: FAKE_GATEWAY_MODEL,
           },
           timeoutMs: TIMEOUT,
@@ -66,15 +63,15 @@ test(
 
       expect(result.code).toBe(1);
       expect(result.stderr).toContain(
-        "AI_GATEWAY_API_KEY authentication failed · HTTP 401",
+        "OPENAI_API_KEY authentication failed · HTTP 401",
       );
       const output = JSON.parse(result.stdout);
       expect(output.exit_code).toBe(1);
       expect(output.output).toBe(
-        "AI_GATEWAY_API_KEY authentication failed · HTTP 401\n",
+        "OPENAI_API_KEY authentication failed · HTTP 401\n",
       );
       expect(output.auth_failure).toEqual({
-        source: "AI_GATEWAY_API_KEY",
+        source: "OPENAI_API_KEY",
         reason: "http_unauthorized",
         http_status: 401,
       });
@@ -111,13 +108,10 @@ test(
     ]);
     const env = {
       HOME: home,
-      AI_GATEWAY_API_KEY: SELECTED_API_KEY,
-      VERCEL_OIDC_TOKEN: undefined,
+      OPENAI_API_KEY: SELECTED_API_KEY,
       FX_DISABLE_KEYCHAIN: "1",
       FX_SKIP_ONBOARDING: "1",
-      FX_AUTO_UPGRADE: "0",
-      FX_GATEWAY_BASE_URL: gateway.baseUrl,
-      FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+            FX_RESPONSES_BASE_URL: gateway.baseUrl,
       FX_MODEL: FAKE_GATEWAY_MODEL,
     };
 
@@ -140,7 +134,7 @@ test(
       );
       expect(rejected.code).toBe(1);
       expect(rejected.stderr).toBe(
-        "fx ask: AI_GATEWAY_API_KEY authentication failed · HTTP 401\n",
+        "fx ask: OPENAI_API_KEY authentication failed · HTTP 401\n",
       );
       const rejectedJson = JSON.parse(rejected.stdout);
       expect(rejectedJson).toMatchObject({

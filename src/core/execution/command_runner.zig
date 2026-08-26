@@ -3392,13 +3392,13 @@ test "timeout terminates foreground process group descendants" {
     }
 }
 
-fn expectProcessGone(pid: std.posix.pid_t) !void {
+fn expectProcessStopped(pid: std.posix.pid_t) !void {
+    var process = try process_tree.Tracker.init(std.testing.allocator);
+    defer process.deinit();
     const started_ms = io_mod.milliTimestamp();
     while (true) {
-        std.posix.kill(pid, @enumFromInt(0)) catch |err| switch (err) {
-            error.ProcessNotFound => return,
-            else => return err,
-        };
+        try process.refresh(pid);
+        if (!process.anyAlive()) return;
         if (io_mod.milliTimestamp() - started_ms > 1000) {
             std.posix.kill(pid, std.posix.SIG.KILL) catch {};
             return error.TestUnexpectedResult;
@@ -3440,7 +3440,7 @@ test "natural command completion terminates background child inheriting pipes" {
         std.mem.trim(u8, pid_text, " \t\r\n"),
         10,
     );
-    try expectProcessGone(pid);
+    try expectProcessStopped(pid);
 }
 
 test "natural command completion terminates background child with redirected streams" {
@@ -3476,7 +3476,7 @@ test "natural command completion terminates background child with redirected str
         std.mem.trim(u8, pid_text, " \t\r\n"),
         10,
     );
-    try expectProcessGone(pid);
+    try expectProcessStopped(pid);
 }
 
 test "natural command completion terminates redirected descendant after setsid" {
@@ -3522,7 +3522,7 @@ test "natural command completion terminates redirected descendant after setsid" 
         std.mem.trim(u8, pid_text, " \t\r\n"),
         10,
     );
-    try expectProcessGone(pid);
+    try expectProcessStopped(pid);
 }
 
 test "cancellation preserves grace and removes an escaped descendant" {
@@ -3585,7 +3585,7 @@ test "cancellation preserves grace and removes an escaped descendant" {
         std.mem.trim(u8, pid_text, " \t\r\n"),
         10,
     );
-    try expectProcessGone(pid);
+    try expectProcessStopped(pid);
 }
 
 test "execution control reuses configured timeout start time" {

@@ -64,8 +64,6 @@ const allowlist: AllowRule[] = [
   rule("src/terminal_client_fixture.zig", "(?:writeCompletionJson|writeJson)", /stdio_acquisition_write/, "tests", "private test-fixture output"),
   rule("src/core/shared/darwin_process_spawn.zig", "process_spawn", /fixed_descriptor/, "subprocess_protocol_transport", "child stdio file-action mapping"),
   rule("src/core/app/app_entry_runtime.zig", "(?:writeRealStdout|writeRealStderr)", /stdio_acquisition_write/, "noninteractive_output", "post-terminal handoff or failure output"),
-  rule("src/core/app/app_upgrade_runtime.zig", "writeStderrDefault", /stdio_acquisition_write/, "noninteractive_output", "post-terminal upgrade relaunch failure output"),
-  rule("src/core/upgrade/upgrade_runtime.zig", "progressWait", /stdio_(?:acquisition|write)/, "noninteractive_output", "upgrade progress output"),
   rule("src/core/cli/cli_ask.zig", "(?:writeRealStdout|writeRealStderr)", /stdio_acquisition_write/, "noninteractive_output", "workflow CLI output"),
   rule("src/core/cli/cli_ask.zig", "realStdoutIsTty", /stdio_acquisition/, "terminal_probe", "ask presentation TTY capability probe"),
   rule("src/core/cli/cli_ask.zig", "realStderrIsTty", /stdio_acquisition/, "terminal_probe", "notification fallback TTY capability probe"),

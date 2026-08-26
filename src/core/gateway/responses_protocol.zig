@@ -4,7 +4,7 @@ const responses_compaction_provider = @import("responses_compaction_provider.zig
 const image_attachments = @import("../images/image_attachments.zig");
 const responses_output_items = @import("../shared/responses_output_items.zig");
 const types = @import("../shared/types.zig");
-const gateway_json = @import("../../gateway/vercel_protocol.zig");
+const message_history = @import("message_history.zig");
 const gateway_schema = @import("../tooling/model_tool_schema.zig");
 const compaction_binding = @import("responses_compaction_binding.zig");
 
@@ -124,7 +124,7 @@ pub fn buildRequest(
     options: RequestOptions,
 ) ![]u8 {
     try checkBudget(request.budget);
-    try gateway_json.validateToolMessageHistory(alloc, request.messages);
+    try message_history.validateToolMessageHistory(alloc, request.messages);
     try validateCompactionCheckpointProjection(request);
     const replay_web_namespace = try declaresWebRunNamespace(
         alloc,

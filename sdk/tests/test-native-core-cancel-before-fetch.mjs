@@ -13,7 +13,7 @@ const core = addon.createCore({
   model: "native/test-model",
   home: "/tmp",
   workspaceRoot: "/tmp",
-  gatewayChatUrl: "http://127.0.0.1:31337/chat",
+  responsesBaseUrl: "http://127.0.0.1:31337/v1",
 });
 
 let nextId = 1;
@@ -23,6 +23,17 @@ async function request(method, params = {}) {
   addon.writeCore(core, Buffer.from(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`));
   const deadline = Date.now() + 5000;
   while (Date.now() < deadline) {
+    const fetchBytes = addon.takeCoreFetch(core);
+    if (fetchBytes) {
+      const fetch = JSON.parse(fetchBytes.toString("utf8"));
+      assert.match(fetch.url, /\/v1\/models$/);
+      assert.equal(addon.startCoreFetchResponse(core, fetch.handle, 200), 1);
+      assert.equal(addon.pushCoreFetchResponse(core, fetch.handle, Buffer.from(JSON.stringify({
+        object: "list",
+        data: [{ id: "native/test-model", object: "model", created: 1, owned_by: "test" }],
+      }))), 1);
+      assert.equal(addon.finishCoreFetch(core, fetch.handle), 1);
+    }
     buffered += addon.drainCore(core).toString("utf8");
     const lines = buffered.split("\n");
     buffered = lines.pop();

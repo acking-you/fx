@@ -5,7 +5,6 @@ const gateway_provider = @import("../core/gateway/gateway_provider.zig");
 const model_catalog = @import("../core/gateway/model_catalog.zig");
 const provider_route = @import("../core/gateway/provider_route.zig");
 const io_mod = @import("../core/shared/io.zig");
-const builtin_gateway = @import("../builtins/gateway.zig");
 const host_stream_provider = @import("host_stream_provider.zig");
 const openai_models = @import("openai_models.zig");
 
@@ -35,7 +34,7 @@ fn fetchCli(
     input: gateway_provider.CliModelCatalogInput,
 ) gateway_provider.CliModelCatalogResult {
     const context: *ProviderContext = @ptrCast(@alignCast(raw.?));
-    const result = model_catalog.fetchWithPublicFallback(provider(context), alloc, .{
+    const result = model_catalog.fetchCatalog(provider(context), alloc, .{
         .access = input.access,
         .endpoint = input.endpoint,
         .cancel_flag = input.cancel_flag,
@@ -47,7 +46,6 @@ fn fetchCli(
             defer model_catalog.freeModelCatalog(alloc, &catalog);
             const ids = model_catalog.projectModelIds(alloc, catalog.items) catch return .{ .failure = .{
                 .access = loaded.provenance.access,
-                .anonymous_fallback_used = loaded.provenance.anonymous_fallback_used,
                 .failure = .{ .category = .resource_exhausted },
             } };
             break :project .{ .loaded = .{
@@ -88,9 +86,6 @@ fn fetch(
     defer if (authorization) |value| secret.zeroAndFree(alloc, value);
     if (authorization) |value| try headers.append(alloc, .{ .name = "authorization", .value = value });
     switch (plan.route) {
-        .vercel_gateway => if (input.access.teamContext()) |team| {
-            try headers.append(alloc, .{ .name = "x-vercel-ai-gateway-team", .value = team });
-        },
         .openai_responses_byok => {
             try headers.append(alloc, .{ .name = "accept", .value = "application/json" });
             if (io_mod.getenv("OPENAI_ORG_ID")) |organization| {
@@ -148,7 +143,6 @@ fn fetch(
     }
 
     const catalog = (switch (plan.route) {
-        .vercel_gateway => builtin_gateway.parseModelCatalogForView(alloc, body.items, input.view),
         .openai_responses_byok => openai_models.parse(alloc, body.items, input.view),
         .codex_responses_oauth => unreachable,
     }) catch |err| return .{ .failure = .{
@@ -176,18 +170,14 @@ const RequestPlan = struct {
 fn prepareRequest(
     alloc: Allocator,
     access: credentials.CatalogAccess,
-    endpoint: []const u8,
+    _: []const u8,
     endpoint_overrides: provider_route.EndpointOverrides,
 ) !RequestPlan {
     const route = if (access.credentialSource()) |source|
         provider_route.fromCredentialSource(source) orelse return error.UnsupportedCredentialSource
     else
-        provider_route.ProviderRoute.vercel_gateway;
+        provider_route.ProviderRoute.openai_responses_byok;
     const url = switch (route) {
-        .vercel_gateway => try std.fmt.allocPrint(alloc, "{s}{s}", .{
-            builtin_gateway.default_model_catalog_base_url,
-            endpoint,
-        }),
         .openai_responses_byok => direct: {
             const base_url = try provider_route.resolveBaseUrlAlloc(alloc, route, endpoint_overrides);
             defer alloc.free(base_url);
@@ -262,7 +252,7 @@ test "host catalog scopes OpenAI credentials to its models endpoint and parser" 
         .transport = fixture.transport(),
         .endpoint_overrides = .{ .responses_base_url = "http://127.0.0.1:43123/v1/responses" },
     };
-    const access = credentials.catalogAccessForCredential(.openai_api_key, "openai-secret", "must-not-cross-provider");
+    const access = credentials.catalogAccessForCredential(.openai_api_key, "openai-secret");
     const result = try provider(&context).fetch(std.testing.allocator, .{
         .access = access,
         .endpoint = "/v1/models",
@@ -277,7 +267,6 @@ test "host catalog scopes OpenAI credentials to its models endpoint and parser" 
     try std.testing.expectEqualStrings("http://127.0.0.1:43123/v1/models", fixture.url());
     try std.testing.expect(std.mem.find(u8, fixture.headers(), "Bearer openai-secret") != null);
     try std.testing.expect(std.mem.find(u8, fixture.headers(), "must-not-cross-provider") == null);
-    try std.testing.expect(std.mem.find(u8, fixture.headers(), "x-vercel-ai-gateway-team") == null);
     try std.testing.expectEqual(@as(usize, 1), catalog.items.len);
     try std.testing.expectEqualStrings("gpt-5.4", catalog.items[0].id);
 }
@@ -286,7 +275,7 @@ test "host catalog rejects Codex OAuth before opening its transport" {
     var fixture: CatalogFixture = .{};
     var context = initContext(fixture.transport());
     const result = try provider(&context).fetch(std.testing.allocator, .{
-        .access = credentials.catalogAccessForCredential(.chatgpt_subscription, "codex-secret-must-not-leave", null),
+        .access = credentials.catalogAccessForCredential(.chatgpt_subscription, "codex-secret-must-not-leave"),
         .endpoint = "/v1/models",
     });
     switch (result) {

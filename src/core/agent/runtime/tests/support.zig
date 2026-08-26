@@ -9,7 +9,7 @@ const permissions = @import("../../../permissions/permissions.zig");
 const worker_runtime = @import("../../worker_runtime.zig");
 const background_runtime = @import("../../../background/background_runtime.zig");
 const builtin_context = @import("../../../../builtins/context.zig");
-const builtin_gateway = @import("../../../../builtins/gateway.zig");
+const builtin_gateway = @import("../../../../builtins/responses.zig");
 const builtin_tools = @import("../../../../builtins/tools.zig");
 const session_runtime = @import("../../../session/session.zig");
 const session_codec = @import("../../../session/session_codec.zig");
@@ -200,8 +200,6 @@ fn testExecutionAuthority(call: ToolCall) command_admission.ToolExecutionAuthori
 pub const FakeCompletion = struct {
     status: std.http.Status = .ok,
     err_body: ?[]const u8 = null,
-    failure_schema: ?[]const u8 = null,
-    failure_request_shape: ?[]const u8 = null,
     retry_after_seconds: ?u64 = null,
     pre_send_error: ?anyerror = null,
     stream_error: ?anyerror = null,
@@ -328,17 +326,10 @@ pub const FakeGateway = struct {
         if (completion.status != .ok) {
             const err_body = if (completion.err_body) |body| try alloc.dupe(u8, body) else null;
             errdefer if (err_body) |value| alloc.free(value);
-            const failure_schema = if (completion.failure_schema) |value| try alloc.dupe(u8, value) else null;
-            errdefer if (failure_schema) |value| alloc.free(value);
-            const failure_request_shape = if (completion.failure_request_shape) |value| try alloc.dupe(u8, value) else null;
             return .{ .failed = .{
                 .kind = failureKind(completion.status),
                 .detail = err_body,
                 .retry_after_seconds = completion.retry_after_seconds,
-                .diagnostics = .{
-                    .schema = failure_schema,
-                    .request_shape = failure_request_shape,
-                },
                 .ownership = .owned,
             } };
         }
@@ -1708,7 +1699,7 @@ pub const PromptFixture = struct {
             .images = self.images[0..],
             .model = @constCast("anthropic/claude-opus-4.6"),
             .api_key = @constCast("key"),
-            .credential_source = .ai_gateway_api_key,
+            .credential_source = .openai_api_key,
             .permission_mode = .ask,
             .history = self.history[0..],
             .grants = self.grants[0..],
@@ -2005,8 +1996,11 @@ fn countPromptContentText(value: std.json.Value, needle: []const u8) usize {
 
 pub fn countPromptEntryText(entry: std.json.Value, needle: []const u8) usize {
     if (entry != .object) return 0;
-    const content = entry.object.get("content") orelse return 0;
-    return countPromptContentText(content, needle);
+    var count: usize = 0;
+    if (entry.object.get("content")) |content| count += countPromptContentText(content, needle);
+    if (entry.object.get("output")) |output| count += countPromptContentText(output, needle);
+    if (entry.object.get("arguments")) |arguments| count += countPromptContentText(arguments, needle);
+    return count;
 }
 pub fn expectGatewayPromptFinalUserText(gateway: *const FakeGateway, index: usize, expected_text: []const u8) !void {
     const alloc = std.testing.allocator;
@@ -2015,12 +2009,12 @@ pub fn expectGatewayPromptFinalUserText(gateway: *const FakeGateway, index: usiz
     var parsed = try std.json.parseFromSlice(std.json.Value, alloc, gateway.request_bodies.items[index], .{});
     defer parsed.deinit();
 
-    const prompt = parsed.value.object.get("prompt").?.array.items;
-    try std.testing.expect(prompt.len > 0);
-    var i = prompt.len;
+    const input = parsed.value.object.get("input") orelse return error.TestExpectedPromptMessageMissing;
+    try std.testing.expect(input == .array and input.array.items.len > 0);
+    var i = input.array.items.len;
     while (i > 0) {
         i -= 1;
-        const entry = prompt[i];
+        const entry = input.array.items[i];
         if (entry != .object) continue;
         const role = entry.object.get("role") orelse continue;
         if (role != .string or !std.mem.eql(u8, role.string, @tagName(types.ChatRole.user))) continue;
