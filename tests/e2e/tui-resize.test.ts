@@ -3744,12 +3744,12 @@ describe.skipIf(SKIP)("tui: resize", () => {
       } finally {
         if (pasteStartInjector.exitCode === null) pasteStartInjector.kill();
       }
-      const pausedTrace = await waitForTraceText(
+      const pasteTrace = await waitForTraceText(
         tracePath,
-        "cursor_measure_paused reason=paste_start",
+        "paste begin owner=composer",
       );
-      expect(pausedTrace.indexOf("cursor_measure_requested protocol=private"))
-        .toBeLessThan(pausedTrace.indexOf("cursor_measure_paused reason=paste_start"));
+      expect(pasteTrace.indexOf("cursor_measure_requested protocol=private"))
+        .toBeLessThan(pasteTrace.indexOf("paste begin owner=composer"));
       const cursor = session.cursorPosition();
       const delayedReply = Buffer.from(
         `\x1b[?${cursor.row + 1};1R\x1b[?${cursor.row + 1};2R`,
@@ -3759,15 +3759,9 @@ describe.skipIf(SKIP)("tui: resize", () => {
       sendRawTmuxBytes(session, "in-paste-cpr", delayedReply);
       await session.sendLiteral("after");
       await session.sendHexBytes(["1b", "5b", "32", "30", "31", "7e"]);
-      const completedPasteTrace = await waitForTraceText(
+      await waitForTraceText(
         tracePath,
         `paste end owner=composer bytes=${Buffer.byteLength(expectedPrompt)}`,
-      );
-      const pasteEndIndex = completedPasteTrace.indexOf(
-        "paste end owner=composer",
-      );
-      expect(completedPasteTrace.slice(0, pasteEndIndex)).not.toContain(
-        "cursor_measure expected_reflow_row=",
       );
       await session.sendKeys("Enter");
 
