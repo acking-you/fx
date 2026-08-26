@@ -5308,7 +5308,6 @@ describe("acp: model-independent", () => {
           env: {
             HOME: root.home,
             OPENAI_API_KEY: "",
-            OPENAI_API_KEY: "",
             FX_DISABLE_KEYCHAIN: "1",
           },
         });

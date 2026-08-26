@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import {
   chmodSync,
+  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -26,12 +27,6 @@ import {
   isEmptyComposerLine,
   isVolatileTokenStatusRow,
   paneExitMatches,
-  responseCompleted,
-  responseFunctionCall,
-  responseFunctionCallDelta,
-  responseFunctionCallDone,
-  responseFunctionCallStart,
-  responseTextDelta,
   startFakeGateway,
   TmuxSession,
   tmuxAvailable,
@@ -39,6 +34,7 @@ import {
 import { readTapeFrames } from "./render-lab/tape";
 
 const TIMEOUT = 30_000;
+const UPGRADE_TIMEOUT = TIMEOUT * 2;
 const SESSION_PICKER_META_RE = /\bturns?\b/;
 const SELECTED_COMPLETION_SGR = "\x1b[1m\x1b[38;5;255m";
 
@@ -55,6 +51,50 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
+function startUpgradeServer(
+  root: string,
+  argvLogPath: string,
+): { baseUrl: string; stop: () => void } {
+  const artifactDir = join(root, "release-artifact");
+  const wrapperPath = join(artifactDir, "fx");
+  const archivePath = join(root, "fx.tar.gz");
+  mkdirSync(artifactDir);
+  const script = `#!/bin/sh
+{
+  printf '%s' "$0"
+  for arg in "$@"; do
+    printf '\\t%s' "$arg"
+  done
+  printf '\\n'
+} >> ${shellQuote(argvLogPath)}
+exec ${shellQuote(FX_BIN)} "$@"
+`;
+  writeFileSync(wrapperPath, script);
+  chmodSync(wrapperPath, 0o755);
+  const tar = Bun.spawnSync(["tar", "-czf", archivePath, "-C", artifactDir, "fx"]);
+  if (tar.exitCode !== 0) throw new Error(tar.stderr.toString());
+
+  const archive = readFileSync(archivePath);
+  const checksum = createHash("sha256").update(archive).digest("hex");
+  const platform = `${process.platform === "darwin" ? "macos" : "linux"}-${process.arch === "arm64" ? "aarch64" : "x86_64"}`;
+  const archiveRoute = `/v9.9.9/fx-${platform}.tar.gz`;
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch(request) {
+      const path = new URL(request.url).pathname;
+      if (path === "/latest.txt") return new Response("v9.9.9\n");
+      if (path === archiveRoute) return new Response(archive);
+      if (path === `${archiveRoute}.sha256`) return new Response(`${checksum}\n`);
+      return new Response("not found", { status: 404 });
+    },
+  });
+  return {
+    baseUrl: `http://127.0.0.1:${server.port}`,
+    stop: () => server.stop(true),
+  };
+}
+
 function gatewayEnv(
   home: string,
   gateway: ReturnType<typeof startFakeGateway>,
@@ -62,8 +102,10 @@ function gatewayEnv(
   return {
     HOME: home,
     OPENAI_API_KEY: "fake-tui-resume-key",
-        FX_RESPONSES_BASE_URL: gateway.baseUrl,
+    FX_GATEWAY_BASE_URL: gateway.baseUrl,
+    FX_GATEWAY_CHAT_URL: gateway.chatUrl,
     FX_MODEL: FAKE_GATEWAY_MODEL,
+    FX_AUTO_UPGRADE: "0",
     NO_COLOR: "1",
   };
 }
@@ -136,7 +178,7 @@ function heldGatewayResponse(state: HoldState): Response {
         state.started = true;
         controller.enqueue(
           encoder.encode(
-            `data: ${JSON.stringify(responseTextDelta("SESSION_PICKER_ACTIVE_STREAM", "held"))}\n\n`,
+            `data: ${JSON.stringify({ type: "text-delta", id: "held", delta: "SESSION_PICKER_ACTIVE_STREAM" })}\n\n`,
           ),
         );
         timer = setInterval(() => {
@@ -161,14 +203,21 @@ function streamedTextResponse(text: string): Response {
           const delta = text.slice(offset, offset + 24);
           controller.enqueue(
             encoder.encode(
-              `data: ${JSON.stringify(responseTextDelta(delta))}\n\n`,
+              `data: ${JSON.stringify({ type: "text-delta", id: "answer_1", delta })}\n\n`,
             ),
           );
           await Bun.sleep(10);
         }
         controller.enqueue(
           encoder.encode(
-            `data: ${JSON.stringify(responseCompleted(3, 5))}\n\ndata: [DONE]\n\n`,
+            `data: ${JSON.stringify({
+              type: "finish",
+              finishReason: { unified: "stop", raw: "stop" },
+              usage: {
+                inputTokens: { total: 3 },
+                outputTokens: { total: 5 },
+              },
+            })}\n\ndata: [DONE]\n\n`,
           ),
         );
         controller.close();
@@ -245,7 +294,8 @@ async function waitForSessionPicker(session: TmuxSession): Promise<string> {
   return session.waitForPane(
     (pane) => {
       const plain = stripAnsi(pane);
-      return plain.includes("Sessions") && SESSION_PICKER_META_RE.test(plain);
+      return plain.includes("Sessions") &&
+        (plain.includes("[Current workspace]") || plain.includes("[All workspaces]"));
     },
     TIMEOUT,
   );
@@ -834,6 +884,7 @@ printf '${trailingMarker}   '
     const gateway = startFakeGateway([
       fakeGatewayToolCall("terminal-safety-command", "terminal", {
         action: "exec",
+        timeout_ms: 600_000,
         command: "./command-output-controls.sh",
       }),
       fakeGatewayFinalText(doneMarker),
@@ -1023,7 +1074,7 @@ test.skipIf(!tmuxAvailable())(
       "awk 'BEGIN { for (i = 1; i <= 3000; i++) printf \"FULL_CTRL_O_LINE_%04d\\n\", i }'" +
       ` # ${"argument-padding-".repeat(8)}${commandArgumentTail}`;
     const gateway = startFakeGateway([
-      fakeGatewayToolCall("ctrl-o-command", "terminal", { action: "exec", command }),
+      fakeGatewayToolCall("ctrl-o-command", "terminal", { action: "exec", timeout_ms: 600_000, command }),
       fakeGatewayFinalText("FULL_CTRL_O_DONE"),
     ]);
     let active: TmuxSession | null = null;
@@ -1162,7 +1213,7 @@ test.skipIf(!tmuxAvailable())(
       `printf '${stdoutTail}\\n'; sleep 0.05; printf '${stderrTail}\\n' >&2`;
     const finalMarker = "CAP_CROSSING_DONE";
     const gateway = startFakeGateway([
-      fakeGatewayToolCall("cap-crossing-command", "terminal", { action: "exec", command }),
+      fakeGatewayToolCall("cap-crossing-command", "terminal", { action: "exec", timeout_ms: 600_000, command }),
       fakeGatewayFinalText(finalMarker),
     ]);
     let active: TmuxSession | null = null;
@@ -1296,6 +1347,7 @@ printf '${tailMarker}\\n'
       fakeGatewayFinalText(historicalRows.join("\n")),
       fakeGatewayToolCall("active-overflow-command", "terminal", {
         action: "exec",
+        timeout_ms: 600_000,
         command: "./active-overflow.sh",
       }),
       fakeGatewayFinalText(doneMarker),
@@ -1498,7 +1550,7 @@ while :; do :; done
       );
     });
     const gateway = startFakeGateway([
-      fakeGatewayToolCall(callId, "terminal", { action: "exec", command: "./cancel-cap.sh" }),
+      fakeGatewayToolCall(callId, "terminal", { action: "exec", timeout_ms: 600_000, command: "./cancel-cap.sh" }),
       () => nextResponse,
     ]);
     let active: TmuxSession | null = null;
@@ -1619,17 +1671,20 @@ while :; do :; done
       );
 
       const followRequest = JSON.parse(gateway.requests[1]!.body) as {
-        input: Array<Record<string, unknown>>;
+        prompt: Array<{ role: string; content: unknown }>;
       };
-      const parts = followRequest.input;
+      const parts = followRequest.prompt.flatMap((message) =>
+        Array.isArray(message.content) ? message.content : []
+      ) as Array<Record<string, unknown>>;
       const calls = parts.filter((part) =>
-        part.type === "function_call" &&
-        part.call_id === callId &&
-        part.name === "terminal"
+        part.type === "tool-call" &&
+        part.toolCallId === callId &&
+        part.toolName === "terminal"
       );
       const results = parts.filter((part) =>
-        part.type === "function_call_output" &&
-        part.call_id === callId
+        part.type === "tool-result" &&
+        part.toolCallId === callId &&
+        part.toolName === "terminal"
       );
       expect(calls).toHaveLength(1);
       expect(results).toHaveLength(1);
@@ -1746,6 +1801,7 @@ while :; do :; done
     const gateway = startFakeGateway([
       fakeGatewayToolCall("cancelled-below-cap-command", "terminal", {
         action: "exec",
+        timeout_ms: 600_000,
         command: "./cancel-below.sh",
       }),
     ]);
@@ -1905,7 +1961,7 @@ test.skipIf(!tmuxAvailable())(
       expect(countOccurrences(transcriptRegion, outputLine)).toBe(0);
     };
     const gateway = startFakeGateway([
-      fakeGatewayToolCall("order-repro-pwd", "terminal", { action: "exec", command: "pwd" }),
+      fakeGatewayToolCall("order-repro-pwd", "terminal", { action: "exec", timeout_ms: 600_000, command: "pwd" }),
       fakeGatewayFinalText(finalMarker),
     ]);
     let active: TmuxSession | null = null;
@@ -2085,6 +2141,7 @@ test.skipIf(!tmuxAvailable())(
         env: {
           HOME: home,
           OPENAI_API_KEY: undefined,
+          FX_AUTO_UPGRADE: "0",
           FX_RECORD: tapePath,
           NO_COLOR: "1",
         },
@@ -2256,13 +2313,13 @@ test.skipIf(!tmuxAvailable())(
       await active.sendKeys("Enter");
       await active.waitForText(followUpDone, TIMEOUT);
       const followUpBody = gateway.requests[1]?.body ?? "";
-      const messages = JSON.parse(followUpBody).input as Array<{
+      const messages = JSON.parse(followUpBody).prompt as Array<{
         role: string;
-        content?: Array<{ type: string; text?: string }>;
+        content: Array<{ type: string; text?: string }>;
       }>;
       const finalUser = messages[messages.length - 1];
       expect(finalUser?.role).toBe("user");
-      expect(finalUser?.content?.[0]?.text).toBe(fullViewDraft);
+      expect(finalUser?.content[0]?.text).toBe(fullViewDraft);
       const afterSubmit = await active.capturePane();
       expect(afterSubmit).toContain(firstDone);
       expect(afterSubmit).toContain(followUpDone);
@@ -2307,7 +2364,7 @@ test.skipIf(!tmuxAvailable())(
 
     const command = `sh -c 'while :; do printf "${streamMarker}\\n"; sleep 0.1; done'`;
     const gateway = startFakeGateway([
-      fakeGatewayToolCall("ctrl-o-cancel-command", "terminal", { action: "exec", command }),
+      fakeGatewayToolCall("ctrl-o-cancel-command", "terminal", { action: "exec", timeout_ms: 600_000, command }),
     ]);
     let active: TmuxSession | null = null;
     try {
@@ -2373,7 +2430,7 @@ test.skipIf(!tmuxAvailable())(
     const tailMarker = "CTRL_O_LIVE_TAIL";
     const command = "sh -c 'printf \"CTRL_O_LIVE_HEAD\\n\"; sleep 1; printf \"CTRL_O_LIVE_TAIL\\n\"'";
     const gateway = startFakeGateway([
-      fakeGatewayToolCall("ctrl-o-live-command", "terminal", { action: "exec", command }),
+      fakeGatewayToolCall("ctrl-o-live-command", "terminal", { action: "exec", timeout_ms: 600_000, command }),
       fakeGatewayFinalText("CTRL_O_LIVE_DONE"),
     ]);
     let active: TmuxSession | null = null;
@@ -2439,7 +2496,7 @@ test.skipIf(!tmuxAvailable())(
     const doneMarker = "STREAM_SCROLL_INLINE_DONE";
     const command = `zsh -lc 'for i in {1..80}; do printf "${lineMarker} %03d\\n" "$i"; done; sleep 2; for i in {81..160}; do printf "${lineMarker} %03d\\n" "$i"; done; : > ${shellQuote(phaseTwoComplete)}'`;
     const gateway = startFakeGateway([
-      fakeGatewayToolCall("stream-scroll-handoff", "terminal", { action: "exec", command }),
+      fakeGatewayToolCall("stream-scroll-handoff", "terminal", { action: "exec", timeout_ms: 600_000, command }),
       fakeGatewayFinalText(doneMarker),
     ]);
     let active: TmuxSession | null = null;
@@ -2584,6 +2641,7 @@ test.skipIf(!tmuxAvailable())(
     const gateway = startFakeGateway([
       fakeGatewayToolCall("ctrl-o-navigation-command", "terminal", {
         action: "exec",
+        timeout_ms: 600_000,
         command: `zsh -lc 'for i in {1..100}; do printf "${commandMarker} %05d\\n" "$i"; done; sleep 2; for i in {101..${lineCount}}; do printf "${commandMarker} %05d\\n" "$i"; done'`,
       }),
       fakeGatewayFinalText(doneMarker),
@@ -2663,6 +2721,7 @@ test.skipIf(!tmuxAvailable())(
     const gateway = startFakeGateway([
       fakeGatewayToolCall("ctrl-o-question-command", "terminal", {
         action: "exec",
+        timeout_ms: 600_000,
         command: `sh -c 'printf "${commandMarker}\\n"; sleep 1'`,
       }),
       fakeGatewayToolCall("ctrl-o-question", "ask_user_question", {
@@ -2744,7 +2803,7 @@ test.skipIf(!tmuxAvailable())(
       fakeGatewaySerializedToolCall(
         "ctrl-o-spacing-command",
         "terminal",
-        JSON.stringify({ action: "exec", command }),
+        JSON.stringify({ action: "exec", timeout_ms: 600_000, command }),
         beforeMarker,
       ),
       fakeGatewayFinalText(afterMarker),
@@ -2974,9 +3033,9 @@ test.skipIf(!tmuxAvailable())(
 
     const gateway = startFakeGateway([
       fakeGatewaySse([
-        ...responseFunctionCall("parallel-list", "list_files", { path: "." }),
-        ...responseFunctionCall("parallel-read", "read_file", { path: "README.md" }, 1),
-        responseCompleted(),
+        { type: "tool-call", toolCallId: "parallel-list", toolName: "list_files", input: { path: "." } },
+        { type: "tool-call", toolCallId: "parallel-read", toolName: "read_file", input: { path: "README.md" } },
+        { type: "finish", finishReason: { unified: "tool-calls", raw: "tool-calls" } },
       ]),
       fakeGatewayFinalText("PARALLEL_DETAIL_DONE"),
     ]);
@@ -3051,18 +3110,29 @@ test.skipIf(!tmuxAvailable())(
       () => "The denied write remains visible while this streamed assistant response advances the compact transcript window.",
     ).join(" ")} CTRL_O_HANDOFF_DONE`;
     const gateway = startFakeGateway([
-      fakeGatewayToolCall("ctrl-o-handoff-prior", "terminal", { action: "exec", command: priorCommand }),
+      fakeGatewayToolCall("ctrl-o-handoff-prior", "terminal", { action: "exec", timeout_ms: 600_000, command: priorCommand }),
       fakeGatewayFinalText(priorSummary),
       fakeGatewaySse([
-        ...responseFunctionCall("ctrl-o-handoff-command", "terminal", {
+        {
+          type: "tool-call",
+          toolCallId: "ctrl-o-handoff-command",
+          toolName: "terminal",
+          input: {
             action: "exec",
+            timeout_ms: 600_000,
             command: "sh -c 'sleep 5; printf \"CTRL_O_HANDOFF_READY\\n\"'",
-          }),
-        ...responseFunctionCall("ctrl-o-handoff-write", "write_file", {
+          },
+        },
+        {
+          type: "tool-call",
+          toolCallId: "ctrl-o-handoff-write",
+          toolName: "write_file",
+          input: {
             path: "ctrl-o-handoff.txt",
             content: fileContent,
-          }, 1),
-        responseCompleted(),
+          },
+        },
+        { type: "finish", finishReason: { unified: "tool-calls", raw: "tool-calls" } },
       ]),
       fakeGatewayFinalText(finalReply),
     ]);
@@ -3107,7 +3177,12 @@ test.skipIf(!tmuxAvailable())(
       await active.sendKeys("3");
       await active.sendKeys("Enter");
       await active.waitForText("CTRL_O_HANDOFF_DONE", TIMEOUT);
-      const scrollback = await active.captureFullScrollback();
+      const scrollback = await active.waitForStableScrollback(
+        (value) =>
+          value.includes("CTRL_O_HANDOFF_DONE") &&
+          countOccurrences(value, priorSummary) === 1,
+        TIMEOUT,
+      );
       const inline = await active.capturePane();
       expect(inline).toContain("CTRL_O_HANDOFF_DONE");
       expect(inline).not.toContain("Apply this change?");
@@ -3160,6 +3235,7 @@ test.skipIf(!tmuxAvailable())(
         await Bun.sleep(300);
         return fakeGatewayToolCall("ctrl-o-shell-approval", "terminal", {
           action: "exec",
+          timeout_ms: 600_000,
           command: "sh -c 'printf \"CTRL_O_SHELL_APPROVAL_RAN\\n\"'",
         });
       },
@@ -3260,10 +3336,14 @@ test.skipIf(!tmuxAvailable())(
         new ReadableStream<Uint8Array>({
           async start(controller) {
             for (const chunk of chunks) {
-              controller.enqueue(encoder.encode(`data: ${JSON.stringify(responseTextDelta(chunk))}\n\n`));
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "text-delta", id: "answer_1", delta: chunk })}\n\n`));
               await Bun.sleep(10);
             }
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify(responseCompleted(3, 5))}\n\n`));
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify({
+              type: "finish",
+              finishReason: { unified: "stop", raw: "stop" },
+              usage: { inputTokens: { total: 3 }, outputTokens: { total: 5 } },
+            })}\n\n`));
             controller.enqueue(encoder.encode("data: [DONE]\n\n"));
             controller.close();
           },
@@ -3274,15 +3354,27 @@ test.skipIf(!tmuxAvailable())(
     const gateway = startFakeGateway([
       streamedMarkdown,
       fakeGatewaySse([
-        ...responseFunctionCall("ctrl-o-handoff-first", "terminal", {
+        {
+          type: "tool-call",
+          toolCallId: "ctrl-o-handoff-first",
+          toolName: "terminal",
+          input: {
             action: "exec",
+            timeout_ms: 600_000,
             command: "sh -c 'touch ctrl-o-handoff-first; printf \"CTRL_O_HANDOFF_FIRST_RUNNING\\n\"; sleep 1; printf \"CTRL_O_HANDOFF_FIRST_DONE\\n\"'",
-          }),
-        ...responseFunctionCall("ctrl-o-handoff-second", "terminal", {
+          },
+        },
+        {
+          type: "tool-call",
+          toolCallId: "ctrl-o-handoff-second",
+          toolName: "terminal",
+          input: {
             action: "exec",
+            timeout_ms: 600_000,
             command: "touch ctrl-o-handoff-second && printf 'CTRL_O_HANDOFF_SECOND_DONE\\n'",
-          }, 1),
-        responseCompleted(),
+          },
+        },
+        { type: "finish", finishReason: { unified: "tool-calls", raw: "tool-calls" } },
       ]),
       fakeGatewayFinalText("CTRL_O_HANDOFF_SCROLLBACK_DONE"),
     ]);
@@ -3430,19 +3522,24 @@ test.skipIf(!tmuxAvailable())(
     const gateway = startFakeGateway([
       fakeGatewayToolCall("ctrl-o-pressure-setup", "terminal", {
         action: "exec",
+        timeout_ms: 600_000,
         command: setupCommand,
       }),
       fakeGatewayFinalText(`${assistantHistory}\n${setupSentinel}`),
       fakeGatewaySse([
-        ...responseFunctionCall("ctrl-o-pressure-command", "terminal", {
-          action: "exec",
-          command: activeCommand,
-        }),
-        ...responseFunctionCall("ctrl-o-pressure-write", "write_file", {
-          path: "ctrl-o-pressure.txt",
-          content: fileContent,
-        }, 1),
-        responseCompleted(),
+        {
+          type: "tool-call",
+          toolCallId: "ctrl-o-pressure-command",
+          toolName: "terminal",
+          input: { action: "exec", timeout_ms: 600_000, command: activeCommand },
+        },
+        {
+          type: "tool-call",
+          toolCallId: "ctrl-o-pressure-write",
+          toolName: "write_file",
+          input: { path: "ctrl-o-pressure.txt", content: fileContent },
+        },
+        { type: "finish", finishReason: { unified: "tool-calls", raw: "tool-calls" } },
       ]),
       gatedQuestion,
       fakeGatewayFinalText(finalSentinel),
@@ -3993,37 +4090,54 @@ test.skipIf(!tmuxAvailable())(
     const finalMarker = "DEFERRED_TOOL_RESUME_COMPLETE";
     const gateway = startFakeGateway([
       fakeGatewaySse([
-        responseFunctionCallStart("deferred-read", "read_file"),
-        responseFunctionCallDelta(
-          "deferred-read",
-          JSON.stringify({ path: "nested/input.txt" }),
-        ),
-        responseFunctionCallStart("deferred-command", "terminal", 1),
-        responseFunctionCallDelta(
-          "deferred-command",
-          JSON.stringify({ action: "exec", command, cwd: "nested" }),
-          1,
-        ),
-        responseFunctionCallDone("deferred-read", { path: "nested/input.txt" }),
-        responseFunctionCallDone(
-          "deferred-command",
-          { action: "exec", command, cwd: "nested" },
-          1,
-        ),
-        responseCompleted(),
+        { type: "tool-input-start", id: "deferred-read", toolName: "read_file" },
+        {
+          type: "tool-input-delta",
+          id: "deferred-read",
+          delta: JSON.stringify({ path: "nested/input.txt" }),
+        },
+        { type: "tool-input-end", id: "deferred-read" },
+        { type: "tool-input-start", id: "deferred-command", toolName: "terminal" },
+        {
+          type: "tool-input-delta",
+          id: "deferred-command",
+          delta: JSON.stringify({ action: "exec", timeout_ms: 600_000, command, cwd: "nested" }),
+        },
+        { type: "tool-input-end", id: "deferred-command" },
+        {
+          type: "tool-call",
+          toolCallId: "deferred-read",
+          toolName: "read_file",
+          input: { path: "nested/input.txt" },
+        },
+        {
+          type: "tool-call",
+          toolCallId: "deferred-command",
+          toolName: "terminal",
+          input: { action: "exec", timeout_ms: 600_000, command, cwd: "nested" },
+        },
+        { type: "finish", finishReason: { unified: "tool-calls", raw: "tool-calls" } },
       ]),
       fakeGatewaySse([
-        ...responseFunctionCall("reissued-read", "read_file", { path: "nested/input.txt" }),
-        ...responseFunctionCall("reissued-command", "terminal", {
-          action: "exec",
-          command,
-          cwd: "nested",
-        }, 1),
-        ...responseFunctionCall("ordinary-failure", "terminal", {
-          action: "exec",
-          command: failureCommand,
-        }, 2),
-        responseCompleted(),
+        {
+          type: "tool-call",
+          toolCallId: "reissued-read",
+          toolName: "read_file",
+          input: { path: "nested/input.txt" },
+        },
+        {
+          type: "tool-call",
+          toolCallId: "reissued-command",
+          toolName: "terminal",
+          input: { action: "exec", timeout_ms: 600_000, command, cwd: "nested" },
+        },
+        {
+          type: "tool-call",
+          toolCallId: "ordinary-failure",
+          toolName: "terminal",
+          input: { action: "exec", timeout_ms: 600_000, command: failureCommand },
+        },
+        { type: "finish", finishReason: { unified: "tool-calls", raw: "tool-calls" } },
       ]),
       fakeGatewayFinalText(finalMarker),
     ]);
@@ -4043,7 +4157,7 @@ test.skipIf(!tmuxAvailable())(
       expect(scrollback).not.toContain(`● Failed ${command}`);
       expect(scrollback).toContain("Read nested/input.txt");
       expect(scrollback).toContain(`Ran ${command}`);
-      expect(scrollback).toContain(`Ran ${failureCommand}`);
+      expect(scrollback).toContain(`Exited 7 ${failureCommand}`);
       expect(scrollback).not.toContain("│ exit code 7");
     }
 
@@ -4647,7 +4761,7 @@ test.skipIf(!tmuxAvailable())(
       const toolWorkspaceRoot = realpathSync(toolWorkspace);
       const toolReply = "TOOL_RESUME_FINAL_REPLY";
       const toolGateway = startFakeGateway([
-        fakeGatewayToolCall("resume_pwd", "terminal", { action: "exec", command: "pwd" }),
+        fakeGatewayToolCall("resume_pwd", "terminal", { action: "exec", timeout_ms: 600_000, command: "pwd" }),
         fakeGatewayFinalText(toolReply),
       ]);
       gateways.push(toolGateway);
@@ -4724,6 +4838,209 @@ test.skipIf(!tmuxAvailable())(
     }
   },
   TIMEOUT * 5,
+);
+
+test.skipIf(!tmuxAvailable())(
+  "upgrade ctrl-g reloads the background-installed binary and resumes",
+  async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "fx-tui-upgrade-ctrl-g-")));
+    const home = join(root, "home");
+    const freshHome = join(root, "fresh-home");
+    const workspace = join(root, "workspace");
+    const installDir = join(root, "install");
+    const stderrPath = join(root, "stderr.log");
+    const freshStderrPath = join(root, "fresh-stderr.log");
+    const argvLogPath = join(root, "upgrade-argv.log");
+    mkdirSync(home);
+    mkdirSync(freshHome);
+    mkdirSync(workspace);
+    mkdirSync(installDir);
+    const workspaceRoot = realpathSync(workspace);
+    const installedFx = join(installDir, "fx");
+    copyFileSync(FX_BIN, installedFx);
+    chmodSync(installedFx, 0o755);
+
+    let active: TmuxSession | null = null;
+    let fresh: TmuxSession | null = null;
+    const gateway = startFakeGateway([
+      fakeGatewayFinalText("UPGRADE_CTRL_G_INITIAL_DONE"),
+      fakeGatewayFinalText("UPGRADE_CTRL_G_FOLLOWUP_DONE"),
+    ]);
+    const release = startUpgradeServer(root, argvLogPath);
+
+    try {
+      writeFileSync(stderrPath, "");
+      writeFileSync(freshStderrPath, "");
+      active = await TmuxSession.create({
+        cmd: shellQuote(installedFx),
+        cwd: workspaceRoot,
+        env: {
+          ...gatewayEnv(home, gateway),
+          FX_AUTO_UPGRADE: "1",
+          FX_E2E_UPGRADE_BASE_URL: release.baseUrl,
+        },
+        stderrPath,
+        width: 110,
+        height: 32,
+      });
+      await active.waitForComposer(TIMEOUT);
+      await active.sendText("Save a turn before upgrade handoff.");
+      await active.waitForText("UPGRADE_CTRL_G_INITIAL_DONE", TIMEOUT);
+      await active.waitForComposer(TIMEOUT);
+      const sessionId = sessionIdFromHome(home);
+
+      await active.waitForText(
+        "update ready: ctrl+g to reload",
+        UPGRADE_TIMEOUT,
+      );
+      expect(readFileSync(installedFx, "utf8")).toContain(argvLogPath);
+
+      fresh = await TmuxSession.create({
+        cmd: shellQuote(installedFx),
+        cwd: workspaceRoot,
+        env: gatewayEnv(freshHome, gateway),
+        stderrPath: freshStderrPath,
+        width: 110,
+        height: 32,
+      });
+      await fresh.waitForComposer(TIMEOUT);
+      expect(readFileSync(argvLogPath, "utf8").trim().split("\n")).toEqual([
+        installedFx,
+      ]);
+      expect(await fresh.capturePane()).not.toContain("update ready: ctrl+g to reload");
+      await fresh.sendText("/quit");
+      expect(await fresh.waitForSessionEnd()).toBe(true);
+      await fresh.kill();
+      fresh = null;
+
+      const version = (await runFx(["--version"])).stdout.trim();
+      await active.sendHexBytes(["07"]);
+
+      const updatedNotice = `● fx has been updated to v${version}`;
+      await active.waitForText(updatedNotice, TIMEOUT);
+      const resumed = await waitForScrollback(active, "UPGRADE_CTRL_G_INITIAL_DONE");
+      expect(resumed).toContain("UPGRADE_CTRL_G_INITIAL_DONE");
+      expect(resumed).toContain(updatedNotice);
+      expect(resumed).not.toContain("● Session resumed:");
+      expect(resumed).not.toContain("● Session: resumed:");
+
+      const argvLines = readFileSync(argvLogPath, "utf8").trim().split("\n");
+      expect(argvLines).toEqual([
+        installedFx,
+        `${installedFx}\tresume\t${sessionId}\t--upgrade-relaunch`,
+      ]);
+
+      await active.sendText("Continue after upgrade handoff.");
+      await active.waitForText("UPGRADE_CTRL_G_FOLLOWUP_DONE", TIMEOUT);
+      const stderr = readFileSync(stderrPath, "utf8");
+      expect(stderr).not.toContain("relaunch failed");
+      expect(stderr).not.toContain("AnsiBandOverflow");
+      expect(readFileSync(freshStderrPath, "utf8")).toBe("");
+
+      await active.sendText("/quit");
+      expect(await active.waitForSessionEnd()).toBe(true);
+      await active.kill();
+      active = null;
+    } finally {
+      if (fresh) await fresh.kill();
+      if (active) {
+        try {
+          await active.sendText("/quit");
+        } catch {}
+        await active.kill();
+      }
+      release.stop();
+      gateway.stop();
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+  UPGRADE_TIMEOUT * 2,
+);
+
+test.skipIf(!tmuxAvailable())(
+  "upgrade ctrl-g repairs an exact corrupt boundary and resumes",
+  async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "fx-tui-upgrade-corrupt-")));
+    const home = join(root, "home");
+    const workspace = join(root, "workspace");
+    const installDir = join(root, "install");
+    const stderrPath = join(root, "stderr.log");
+    const argvLogPath = join(root, "upgrade-argv.log");
+    mkdirSync(home);
+    mkdirSync(workspace);
+    mkdirSync(installDir);
+    const workspaceRoot = realpathSync(workspace);
+    const installedFx = join(installDir, "fx");
+    copyFileSync(FX_BIN, installedFx);
+    chmodSync(installedFx, 0o755);
+
+    let active: TmuxSession | null = null;
+    const gateway = startFakeGateway([
+      fakeGatewayFinalText("UPGRADE_CORRUPT_INITIAL_DONE"),
+      fakeGatewayFinalText("UPGRADE_CORRUPT_FOLLOWUP_DONE"),
+    ]);
+    const release = startUpgradeServer(root, argvLogPath);
+
+    try {
+      writeFileSync(stderrPath, "");
+      active = await TmuxSession.create({
+        cmd: shellQuote(installedFx),
+        cwd: workspaceRoot,
+        env: {
+          ...gatewayEnv(home, gateway),
+          FX_AUTO_UPGRADE: "1",
+          FX_E2E_UPGRADE_BASE_URL: release.baseUrl,
+        },
+        stderrPath,
+        width: 110,
+        height: 32,
+      });
+      await active.waitForComposer(TIMEOUT);
+      await active.sendText("Save this turn before the corrupt upgrade boundary.");
+      await active.waitForText("UPGRADE_CORRUPT_INITIAL_DONE", TIMEOUT);
+      await active.waitForComposer(TIMEOUT);
+      await waitForCommittedSessionMarker(home, "UPGRADE_CORRUPT_INITIAL_DONE");
+      const sessionId = sessionIdFromHome(home);
+      await active.waitForText(
+        "update ready: ctrl+g to reload",
+        UPGRADE_TIMEOUT,
+      );
+
+      const sessionDir = join(home, ".fx", "sessions", sessionId);
+      const watermarkName = readdirSync(sessionDir).find(
+        (name) => name.startsWith("commit.") && name.endsWith(".json"),
+      )!;
+      writeFileSync(join(sessionDir, watermarkName), "{}\n", { mode: 0o600 });
+      const version = (await runFx(["--version"])).stdout.trim();
+      await active.sendHexBytes(["07"]);
+
+      await active.waitForText(`● fx has been updated to v${version}`, TIMEOUT);
+      const resumed = await waitForScrollback(
+        active,
+        "UPGRADE_CORRUPT_INITIAL_DONE",
+      );
+      expect(resumed).toContain("UPGRADE_CORRUPT_INITIAL_DONE");
+      expect(active.isPaneAlive()).toBe(true);
+      const argvLines = readFileSync(argvLogPath, "utf8").trim().split("\n");
+      expect(argvLines).toEqual([
+        `${installedFx}\tresume\t${sessionId}\t--upgrade-relaunch`,
+      ]);
+
+      await active.sendText("Continue after repaired upgrade handoff.");
+      await active.waitForText("UPGRADE_CORRUPT_FOLLOWUP_DONE", TIMEOUT);
+
+      await active.sendText("/quit");
+      expect(await active.waitForSessionEnd()).toBe(true);
+      await active.kill();
+      active = null;
+    } finally {
+      if (active) await active.kill();
+      release.stop();
+      gateway.stop();
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+  UPGRADE_TIMEOUT * 2,
 );
 
 test.skipIf(!tmuxAvailable())(
@@ -5126,7 +5443,7 @@ printf '${stdoutTail2}\\n'
 
     try {
       const initialGateway = startFakeGateway([
-        fakeGatewayToolCall("resume_long_command", "terminal", { action: "exec", command: fixtureCommand }),
+        fakeGatewayToolCall("resume_long_command", "terminal", { action: "exec", timeout_ms: 600_000, command: fixtureCommand }),
         fakeGatewayFinalText(completion),
       ]);
       gateways.push(initialGateway);
@@ -5285,7 +5602,7 @@ test.skipIf(!tmuxAvailable())(
       const currentPicker = stripAnsi(await active.capturePane());
       expect(currentPicker).toContain("Sessions 1");
       expect(currentPicker).toContain("[Current workspace]");
-      expect(currentPicker).not.toContain("𝒇x");
+      expect(currentPicker).toContain("𝒇x");
       expect(currentPicker).toContain("Save the workspace A transcript.");
       expect(currentPicker).not.toContain("Save the workspace B transcript.");
 
@@ -5403,7 +5720,7 @@ test.skipIf(!tmuxAvailable())(
       }
       const rows = pane
         .split("\n")
-        .filter((line) => /(?:alpha|beta|gamma)\b.*\bturns?\b/.test(line))
+        .filter((line) => /(?:alpha|beta|gamma)\b/.test(line))
         .map((line) => line.trim());
       expect(new Set(rows).size).toBe(titles.length);
       expect(active.isPaneAlive()).toBe(true);
@@ -5483,7 +5800,7 @@ test.skipIf(!tmuxAvailable())(
       await waitForSessionPicker(active);
 
       let sessionEntries = visibleSessionPickerEntries(await active.capturePaneEscapes());
-      expect(sessionEntries.length).toBeGreaterThanOrEqual(7);
+      expect(sessionEntries).toHaveLength(2);
       expect(sessionEntries.findIndex((entry) => entry.selected)).toBe(0);
       const firstVisibleRow = sessionEntries[0]!.row;
       const firstVisibleTitle = sessionEntries[0]!.title;
@@ -5523,8 +5840,9 @@ test.skipIf(!tmuxAvailable())(
       expect(hintRow).toBeGreaterThan(loadMoreRow);
       const firstEntryRow = visibleSessionPickerEntries(await active.capturePaneEscapes())[0]!.row;
 
-      await active.sendKeys("Down");
-      await active.sendKeys("Down");
+      for (let index = 0; index < 10 - visibleCount; index += 1) {
+        await active.sendKeys("Down");
+      }
       await active.waitForPane((pane) => {
         const plain = stripAnsi(pane);
         return /Sessions 1[12]\b/.test(plain) && !plain.includes("Load more");
@@ -5873,7 +6191,7 @@ while :; do sleep 1; done
       fakeGatewaySerializedToolCall(
         "resume-cancelled-command",
         "terminal",
-        JSON.stringify({ action: "exec", command: "./resume-cancel.sh" }),
+        JSON.stringify({ action: "exec", timeout_ms: 600_000, command: "./resume-cancel.sh" }),
         assistantMarker,
       ),
       fakeGatewayFinalText(followUpMarker),
@@ -6036,7 +6354,7 @@ test.skipIf(!tmuxAvailable())(
     chmodSync(scriptPath, 0o755);
 
     const initialGateway = startFakeGateway([
-      fakeGatewayToolCall("resume-zero-output-command", "terminal", { action: "exec", command: "./z.sh" }),
+      fakeGatewayToolCall("resume-zero-output-command", "terminal", { action: "exec", timeout_ms: 600_000, command: "./z.sh" }),
     ]);
     const resumedGateway = startFakeGateway([]);
     let active: TmuxSession | null = null;

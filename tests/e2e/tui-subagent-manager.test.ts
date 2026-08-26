@@ -875,6 +875,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         if (body.includes(childPrompt)) {
           return fakeGatewayToolCall(callId, "terminal", {
             action: "exec",
+            timeout_ms: 600_000,
             command: `printf yolo > ${JSON.stringify(marker)}`,
           });
         }
@@ -1673,6 +1674,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
           }
           return fakeGatewayToolCall(`command_stream_${next}`, "terminal", {
             action: "exec",
+            timeout_ms: 600_000,
             command:
               `printf COMMAND_${next}_START; sleep 0.35; printf COMMAND_${next}_END`,
           });
@@ -1680,6 +1682,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         if (body.includes(childPrompt)) {
           return fakeGatewayToolCall("command_stream_1", "terminal", {
             action: "exec",
+            timeout_ms: 600_000,
             command:
               "printf COMMAND_1_START; sleep 0.35; printf COMMAND_1_END",
           });
@@ -3765,6 +3768,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         await active.waitForText("Full detail · ←/→ switch · ctrl o close", TIMEOUT);
         releaseChildApproval(fakeGatewayToolCall(callId, "terminal", {
           action: "exec",
+          timeout_ms: 600_000,
           command: "printf approved > child-approval-effect.txt",
         }));
         const childApproval = await active.waitForPane(
@@ -4228,7 +4232,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
   );
 
   test(
-    "persistent child executes models locally and configures the selected model",
+    "persistent child executes model browse locally and configures the selected model",
     async () => {
       const fixture = createFixture();
       const childName = "child-local-models";
@@ -4240,7 +4244,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
       });
       const gateway = startDynamicFakeGateway((body) =>
         fakeGatewayFinalText(
-          body.includes("/models")
+          body.includes("/model")
             ? "CHILD_MODELS_REACHED_MODEL"
             : "CHILD_LOCAL_MODELS_READY",
         ), {
@@ -4288,7 +4292,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         await active.waitForText("CHILD_LOCAL_MODELS_READY", TIMEOUT);
 
         const requestCountBeforeModels = gateway.requestCount();
-        await active.sendText("/models");
+        await active.sendText("/model");
         await active.waitForText("Loading models", TIMEOUT);
         await active.sendKeys("C-x");
         const mainWhileModelsLoad = await active.waitForPane(
@@ -4305,12 +4309,12 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         await active.waitForText("Agents & processes", TIMEOUT);
         await active.sendKeys("Enter");
         await active.waitForText("CHILD_LOCAL_MODELS_READY", TIMEOUT);
-        await active.sendText("/models");
+        await active.sendText("/model");
         const models = await active.waitForText(selectedModel, TIMEOUT);
         expect(models).toContain("Models 2");
         expect(gateway.requestCount()).toBe(requestCountBeforeModels);
         expect(
-          gateway.requests.some((request) => request.body.includes("/models")),
+          gateway.requests.some((request) => request.body.includes("/model")),
         ).toBe(false);
 
         await active.sendLiteralText("missing-child-model-filter");
@@ -4325,7 +4329,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
           TIMEOUT,
         );
         expect(escapedModels).not.toContain("Navigate     Tab Provider");
-        await active.sendText("/models");
+        await active.sendText("/model");
         await active.waitForText(selectedModel, TIMEOUT);
 
         await active.sendKeys("C-x");
@@ -4340,7 +4344,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         await active.waitForText("Agents & processes", TIMEOUT);
         await active.sendKeys("Enter");
         await active.waitForText("CHILD_LOCAL_MODELS_READY", TIMEOUT);
-        await active.sendText("/models");
+        await active.sendText("/model");
         await active.waitForText(selectedModel, TIMEOUT);
         expect(gateway.requestCount()).toBe(requestCountBeforeModels);
 
@@ -5630,12 +5634,14 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         if (body.includes(firstPrompt)) {
           return fakeGatewayToolCall(firstCallId, "terminal", {
             action: "exec",
+            timeout_ms: 600_000,
             command: `printf first > ${JSON.stringify(firstMarker)}`,
           });
         }
         if (body.includes(secondPrompt)) {
           return fakeGatewayToolCall(secondCallId, "terminal", {
             action: "exec",
+            timeout_ms: 600_000,
             command: `printf second > ${JSON.stringify(secondMarker)}`,
           });
         }
@@ -6125,6 +6131,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         if (body.includes(childPrompt)) {
           return fakeGatewayToolCall(childCallId, "terminal", {
             action: "exec",
+            timeout_ms: 600_000,
             command: "printf denied > cancelled-approval-effect.txt",
           });
         }

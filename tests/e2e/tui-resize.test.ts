@@ -24,8 +24,6 @@ import {
   fakeGatewayToolCall,
   hasEmptyComposer,
   paneExitMatches,
-  responseCompleted,
-  responseTextDelta,
   startFakeGateway,
   TmuxSession,
   tmuxAvailable,
@@ -135,6 +133,7 @@ async function launchRecordedSurfaceSession(
     env: {
       HOME: home,
       OPENAI_API_KEY: undefined,
+      FX_AUTO_UPGRADE: "0",
       FX_RECORD: join(root, "session.fxtape"),
       FX_RECORD_INPUT: "1",
       NO_COLOR: "1",
@@ -192,13 +191,22 @@ function gatedResizeResponse(
   });
   const event = (delta: string) =>
     encoder.encode(
-      `data: ${JSON.stringify(responseTextDelta(delta, "resize-stream"))}\n\n`,
+      `data: ${JSON.stringify({
+        type: "text-delta",
+        id: "resize-stream",
+        delta,
+      })}\n\n`,
     );
+  const sendJson = (controller: ReadableStreamDefaultController<Uint8Array>, value: object) => {
+    controller.enqueue(encoder.encode(`data: ${JSON.stringify(value)}\n\n`));
+  };
+
   return {
     response: () =>
       new Response(
         new ReadableStream<Uint8Array>({
           start(controller) {
+            sendJson(controller, { type: "text-start", id: "resize-stream" });
             controller.enqueue(event(first));
             timer = setInterval(() => {
               if (!closed) controller.enqueue(encoder.encode(": gated-resize-hold\n\n"));
@@ -210,9 +218,17 @@ function gatedResizeResponse(
               closed = true;
               if (timer) clearInterval(timer);
               controller.enqueue(event(final));
+              sendJson(controller, { type: "text-end", id: "resize-stream" });
               controller.enqueue(
                 encoder.encode(
-                  `data: ${JSON.stringify(responseCompleted(1, 3))}\n\ndata: [DONE]\n\n`,
+                  `data: ${JSON.stringify({
+                    type: "finish",
+                    finishReason: { unified: "stop", raw: "stop" },
+                    usage: {
+                      inputTokens: { total: 1 },
+                      outputTokens: { total: 3 },
+                    },
+                  })}\n\ndata: [DONE]\n\n`,
                 ),
               );
               controller.close();
@@ -614,7 +630,7 @@ async function waitForSkillsMenuGrid(
   while (Date.now() < deadline) {
     last = await s.capturePaneGrid();
     const text = last.join("\n");
-    if (text.includes(`Skills ${count}`) && findSkillsScreen(last) !== null) {
+    if (text.includes(`Skills ${count}`) && findInlineSkillsPicker(last) !== null) {
       return last;
     }
     await new Promise((resolve) => setTimeout(resolve, 100));
@@ -632,14 +648,14 @@ function expectSkillsMenuGrid(
   const text = grid.join("\n");
   expect(text).toContain(`Skills ${count}`);
   expect(text).toContain("[All]");
-  expect(text).toContain("Fx");
+  expect(text).toContain("fx");
+  expect(text).not.toContain("[Fx]");
   expect(text).toContain("Workspace");
   expect(text).toContain("Codex");
-  expect(text).toContain("Fx · Global");
+  expect(text).toContain("fx · Global");
   expect(names.some((name) => text.includes(name))).toBe(true);
   expect(text).not.toContain("Visible skills (");
-  expect(text).not.toContain("Run /help for commands");
-  expect(findSkillsScreen(grid)).not.toBeNull();
+  expect(findInlineSkillsPicker(grid)).not.toBeNull();
   expect(grid.filter(isInputRow)).toHaveLength(1);
 }
 
@@ -831,15 +847,15 @@ async function waitForSubmittedUserText(
   }
 
   const request = JSON.parse(gatewayRequest.body) as {
-    input: Array<{
+    prompt: Array<{
       role: string;
       content?: Array<{ type: string; text?: string }>;
     }>;
   };
-  return [...request.input]
+  return [...request.prompt]
     .reverse()
     .find((message) => message.role === "user")
-    ?.content?.find((part) => part.type === "input_text")?.text;
+    ?.content?.find((part) => part.type === "text")?.text;
 }
 
 async function waitForGatewayRequestCount(
@@ -1022,14 +1038,18 @@ function findFooter(grid: string[]): FooterBlock | null {
   return findFooterBlocks(grid).at(-1) ?? null;
 }
 
-function findSkillsScreen(grid: string[]): { topDivider: number; header: number; bottomDivider: number; hint: number } | null {
+function findInlineSkillsPicker(
+  grid: string[],
+): { input: number; topDivider: number; header: number; bottomDivider: number; hint: number } | null {
   const header = grid.findIndex((line) => line.includes("Skills "));
-  if (header <= 0 || !isDividerRow(grid[header - 1]!)) return null;
-  if (!isInputRow(grid[0]!)) return null;
+  if (header <= 1 || !isDividerRow(grid[header - 1]!)) return null;
+  const input = header - 2;
+  if (!isInputRow(grid[input]!)) return null;
   const bottomDivider = grid.findLastIndex((line) => isDividerRow(line));
   if (bottomDivider <= header || bottomDivider + 1 >= grid.length) return null;
   if (!grid[bottomDivider + 1]!.includes("Esc Close")) return null;
   return {
+    input,
     topDivider: header - 1,
     header,
     bottomDivider,
@@ -1037,14 +1057,18 @@ function findSkillsScreen(grid: string[]): { topDivider: number; header: number;
   };
 }
 
-function findHelpScreen(grid: string[]): { topDivider: number; header: number; bottomDivider: number; hint: number } | null {
+function findInlineHelpPicker(
+  grid: string[],
+): { input: number; topDivider: number; header: number; bottomDivider: number; hint: number } | null {
   const header = grid.findIndex((line) => line.includes("Commands "));
-  if (header <= 0 || !isDividerRow(grid[header - 1]!)) return null;
-  if (!isInputRow(grid[0]!)) return null;
+  if (header <= 1 || !isDividerRow(grid[header - 1]!)) return null;
+  const input = header - 2;
+  if (!isInputRow(grid[input]!)) return null;
   const bottomDivider = grid.findLastIndex((line) => isDividerRow(line));
   if (bottomDivider <= header || bottomDivider + 1 >= grid.length) return null;
   if (!grid[bottomDivider + 1]!.includes("Enter Open")) return null;
   return {
+    input,
     topDivider: header - 1,
     header,
     bottomDivider,
@@ -1098,6 +1122,7 @@ async function runLargeSkillResizeAttempt(attempt: number): Promise<string> {
       env: {
         HOME: fixture.home,
         OPENAI_API_KEY: undefined,
+        FX_AUTO_UPGRADE: "0",
         FX_RECORD: tapePath,
         FX_RECORD_INPUT: "1",
         FX_TRACE_LOG: tracePath,
@@ -1146,8 +1171,12 @@ async function runLargeSkillResizeAttempt(attempt: number): Promise<string> {
       cycle.newSize.rows === shrinkRows
     );
     expect(shrinkCycle.historyRowDelta).toBeGreaterThanOrEqual(0);
-    expect(attemptLine(shrinkAttempt, "attempt_result ")).toBeUndefined();
-    expect(attemptLine(shrinkAttempt, "transcript_transition_finalize ")).toBeUndefined();
+    expect(attemptLine(shrinkAttempt, "attempt_result ")).toContain(
+      "shadow_state=committed",
+    );
+    expect(attemptLine(shrinkAttempt, "transcript_transition_finalize ")).toContain(
+      "body_disposition=paint",
+    );
     expect(attemptLine(shrinkAttempt, "tmux_clear_history_complete")).toBeUndefined();
     const shrinkGrid = await waitForSkillsMenuGrid(s, LARGE_SKILL_COUNT);
     expectSkillsMenuGrid(shrinkGrid, LARGE_SKILL_COUNT, fixture.names);
@@ -1167,8 +1196,12 @@ async function runLargeSkillResizeAttempt(attempt: number): Promise<string> {
       (candidate) => attemptHasReason(candidate, "resize"),
     );
     expect(s.paneSize()).toEqual({ cols: 120, rows: 34 });
-    expect(attemptLine(growAttempt, "attempt_result ")).toBeUndefined();
-    expect(attemptLine(growAttempt, "transcript_transition_commit ")).toBeUndefined();
+    expect(attemptLine(growAttempt, "attempt_result ")).toContain(
+      "shadow_state=committed",
+    );
+    expect(attemptLine(growAttempt, "transcript_transition_commit ")).toContain(
+      "state=stable",
+    );
     const growGrid = await waitForSkillsMenuGrid(s, LARGE_SKILL_COUNT);
     expectSkillsMenuGrid(growGrid, LARGE_SKILL_COUNT, fixture.names);
     const growScrollback = await s.captureFullScrollback();
@@ -1193,7 +1226,7 @@ async function runLargeSkillResizeAttempt(attempt: number): Promise<string> {
     const scrollbackLines = scrollback.replace(/\n$/, "").split("\n").length;
     expect(scrollbackLines).toBeLessThan(historyLimit / 2);
     expect(finalGrid.filter(isInputRow)).toHaveLength(1);
-    expect(findSkillsScreen(finalGrid)).not.toBeNull();
+    expect(findInlineSkillsPicker(finalGrid)).not.toBeNull();
     expect(s.paneStatus()).toEqual({ dead: false, status: null });
     expect(s.isPaneAlive()).toBe(true);
     expect(readFileSync(stderrPath, "utf8")).toBe("");
@@ -1289,6 +1322,7 @@ async function runRapidSkillResizeAttempt(
       env: {
         HOME: fixture.home,
         OPENAI_API_KEY: undefined,
+        FX_AUTO_UPGRADE: "0",
         FX_RECORD: tapePath,
         FX_RECORD_INPUT: "1",
         FX_TRACE_LOG: tracePath,
@@ -1323,19 +1357,31 @@ async function runRapidSkillResizeAttempt(
     expect(s.paneSize()).toEqual({ cols: 120, rows: 34 });
 
     const growCommit = attemptLine(grow.attempt, "transcript_transition_commit ");
-    expect(growCommit).toBeUndefined();
+    expect(growCommit).toContain("state=stable");
     const growGrid = await waitForSkillsMenuGrid(s, RAPID_SKILL_COUNT);
     expectSkillsMenuGrid(growGrid, RAPID_SKILL_COUNT, fixture.names);
     const growScrollback = await s.captureFullScrollback();
     expectNoTranscriptSkillInventory(growScrollback);
     writeFileSync(join(fixture.root, "scrollback-after-grow.txt"), growScrollback);
 
-    expect(attemptLine(shrink.attempt, "transcript_transition_finalize ")).toBeUndefined();
-    expect(attemptLine(grow.attempt, "transcript_transition_finalize ")).toBeUndefined();
-    expect(attemptLine(shrink.attempt, "attempt_result ")).toBeUndefined();
-    expect(attemptLine(grow.attempt, "attempt_result ")).toBeUndefined();
-    expect(attemptLine(shrink.attempt, "tmux_clear_history_complete")).toBeUndefined();
-    expect(attemptLine(grow.attempt, "tmux_clear_history_complete")).toBeUndefined();
+    expect(attemptLine(shrink.attempt, "transcript_transition_finalize ")).toContain(
+      "body_disposition=paint",
+    );
+    expect(attemptLine(grow.attempt, "transcript_transition_finalize ")).toContain(
+      "body_disposition=paint",
+    );
+    expect(attemptLine(shrink.attempt, "attempt_result ")).toContain(
+      "shadow_state=committed",
+    );
+    expect(attemptLine(grow.attempt, "attempt_result ")).toContain(
+      "shadow_state=committed",
+    );
+    expect(attemptLine(shrink.attempt, "tmux_clear_history_complete")).toContain(
+      "tmux_clear_history_complete",
+    );
+    expect(attemptLine(grow.attempt, "tmux_clear_history_complete")).toContain(
+      "tmux_clear_history_complete",
+    );
 
     await s.sendKeys("C-[");
     const dismissed = await s.waitForPane(
@@ -1354,7 +1400,7 @@ async function runRapidSkillResizeAttempt(
     const finalScrollback = await s.captureFullScrollback();
     expectNoTranscriptSkillInventory(finalScrollback);
     expect(finalGrid.filter(isInputRow)).toHaveLength(1);
-    expect(findSkillsScreen(finalGrid)).not.toBeNull();
+    expect(findInlineSkillsPicker(finalGrid)).not.toBeNull();
     expect(s.paneStatus()).toEqual({ dead: false, status: null });
     expect(s.isPaneAlive()).toBe(true);
     expect(readFileSync(stderrPath, "utf8")).toBe("");
@@ -1510,8 +1556,10 @@ describe.skipIf(SKIP)("tui: resize", () => {
         env: {
           HOME: home,
           OPENAI_API_KEY: "fake-long-resize-key",
-                    FX_RESPONSES_BASE_URL: gateway.baseUrl,
+          FX_GATEWAY_BASE_URL: gateway.baseUrl,
+          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
           FX_MODEL: FAKE_GATEWAY_MODEL,
+          FX_AUTO_UPGRADE: "0",
           FX_TRACE_LOG: tracePath,
           FX_TRACE_SCOPES: "frame_schedule,frame_diff,frame_commit,scroll,resize",
           NO_COLOR: "1",
@@ -1574,7 +1622,7 @@ describe.skipIf(SKIP)("tui: resize", () => {
       const command =
         "for i in $(seq 1 96); do printf 'resize-stream-marker %03d\\n' \"$i\"; sleep 0.03; done";
       const gateway = startFakeGateway([
-        fakeGatewayToolCall("resize-live-command", "terminal", { action: "exec", command }),
+        fakeGatewayToolCall("resize-live-command", "terminal", { action: "exec", timeout_ms: 600_000, command }),
         fakeGatewayFinalText(finalResponse),
       ]);
       gateways.push(gateway);
@@ -1586,7 +1634,10 @@ describe.skipIf(SKIP)("tui: resize", () => {
         env: {
           HOME: home,
           OPENAI_API_KEY: "fake-resize-command-key",
-          FX_RESPONSES_BASE_URL: gateway.baseUrl,
+          FX_AUTO_UPGRADE: "0",
+          FX_GATEWAY_BASE_URL: gateway.baseUrl,
+          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+          FX_E2E_GATEWAY_CHAT_URL: gateway.chatUrl,
           FX_MODEL: FAKE_GATEWAY_MODEL,
           FX_RECORD: tapePath,
           FX_RECORD_INPUT: "1",
@@ -1666,36 +1717,45 @@ describe.skipIf(SKIP)("tui: resize", () => {
         end,
       ];
       const response = fakeGatewaySse([
-        responseTextDelta(
-          `${begin}\n${beforeMarkers.map((marker) =>
+        {
+          type: "text-delta",
+          id: "retention-text-a",
+          delta: `${begin}\n${beforeMarkers.map((marker) =>
             `${marker} retained before semantic code block`
           ).join("\n")}\n`,
-          "retention-text-a",
-        ),
-        responseTextDelta(
-          "```zig\nconst retained_scrollback = true;\n```\n",
-          "retention-code",
-          1,
-        ),
-        responseTextDelta(
-          `${afterMarkers.map((marker) =>
+        },
+        {
+          type: "text-delta",
+          id: "retention-code",
+          delta: "```zig\nconst retained_scrollback = true;\n```\n",
+        },
+        {
+          type: "text-delta",
+          id: "retention-text-b",
+          delta: `${afterMarkers.map((marker) =>
             `${marker} retained after semantic code block`
           ).join("\n")}\n`,
-          "retention-text-b",
-          2,
-        ),
-        responseTextDelta(
+        },
+        {
+          type: "text-delta",
+          id: "retention-tail",
+          delta:
             "| phase | state |\n| --- | --- |\n| middle | retained |\n\n---\n" +
             `${end}\n`,
-          "retention-tail",
-          3,
-        ),
-        responseCompleted(3, 5_000),
+        },
+        {
+          type: "finish",
+          finishReason: { unified: "stop", raw: "stop" },
+          usage: {
+            inputTokens: { total: 3 },
+            outputTokens: { total: 5_000 },
+          },
+        },
       ]);
       const command =
         `awk 'BEGIN { for (i = 0; i < 13500; i++) printf "RETENTION_SEED_%05d alpha beta gamma delta epsilon zeta eta theta iota kappa lambda\\n", i }'`;
       const gateway = startFakeGateway([
-        fakeGatewayToolCall("retention-seed", "terminal", { action: "exec", command }),
+        fakeGatewayToolCall("retention-seed", "terminal", { action: "exec", timeout_ms: 600_000, command }),
         response,
       ]);
       gateways.push(gateway);
@@ -1706,9 +1766,12 @@ describe.skipIf(SKIP)("tui: resize", () => {
         env: {
           HOME: home,
           OPENAI_API_KEY: "fake-retention-scrollback-key",
-          FX_RESPONSES_BASE_URL: gateway.baseUrl,
+          FX_GATEWAY_BASE_URL: gateway.baseUrl,
+          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+          FX_E2E_GATEWAY_CHAT_URL: gateway.chatUrl,
           FX_MODEL: FAKE_GATEWAY_MODEL,
           FX_MAX_AGENT_STEPS: "4",
+          FX_AUTO_UPGRADE: "0",
           NO_COLOR: "1",
         },
         width: 120,
@@ -1794,6 +1857,7 @@ describe.skipIf(SKIP)("tui: resize", () => {
         fakeGatewayFinalText(seedMarker),
         fakeGatewayToolCall("approval-cancel-resize", "terminal", {
           action: "exec",
+          timeout_ms: 600_000,
           command,
         }),
       ]);
@@ -1804,8 +1868,10 @@ describe.skipIf(SKIP)("tui: resize", () => {
         env: {
           HOME: home,
           OPENAI_API_KEY: "fake-approval-cancel-resize-key",
-                    FX_RESPONSES_BASE_URL: gateway.baseUrl,
+          FX_GATEWAY_BASE_URL: gateway.baseUrl,
+          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
           FX_MODEL: FAKE_GATEWAY_MODEL,
+          FX_AUTO_UPGRADE: "0",
           FX_RECORD: tapePath,
           FX_RECORD_INPUT: "1",
           FX_TRACE_LOG: tracePath,
@@ -1956,8 +2022,10 @@ describe.skipIf(SKIP)("tui: resize", () => {
         env: {
           HOME: home,
           OPENAI_API_KEY: "fake-thematic-rule-key",
-                    FX_RESPONSES_BASE_URL: gateway.baseUrl,
+          FX_GATEWAY_BASE_URL: gateway.baseUrl,
+          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
           FX_MODEL: FAKE_GATEWAY_MODEL,
+          FX_AUTO_UPGRADE: "0",
           NO_COLOR: "1",
         },
         width: 120,
@@ -2041,8 +2109,10 @@ describe.skipIf(SKIP)("tui: resize", () => {
         env: {
           HOME: home,
           OPENAI_API_KEY: "fake-nested-blockquote-key",
-                    FX_RESPONSES_BASE_URL: gateway.baseUrl,
+          FX_GATEWAY_BASE_URL: gateway.baseUrl,
+          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
           FX_MODEL: FAKE_GATEWAY_MODEL,
+          FX_AUTO_UPGRADE: "0",
           FX_TRACE_LOG: tracePath,
           FX_TRACE_SCOPES: "resize,frame_schedule,scroll",
           NO_COLOR: "1",
@@ -2184,7 +2254,10 @@ describe.skipIf(SKIP)("tui: resize", () => {
         env: {
           HOME: home,
           OPENAI_API_KEY: "fake-gated-resize-key",
-          FX_RESPONSES_BASE_URL: gateway.baseUrl,
+          FX_AUTO_UPGRADE: "0",
+          FX_GATEWAY_BASE_URL: gateway.baseUrl,
+          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+          FX_E2E_GATEWAY_CHAT_URL: gateway.chatUrl,
           FX_MODEL: FAKE_GATEWAY_MODEL,
           FX_RECORD: tapePath,
           FX_RECORD_INPUT: "1",
@@ -2310,6 +2383,7 @@ describe.skipIf(SKIP)("tui: resize", () => {
         env: {
           HOME: home,
           OPENAI_API_KEY: undefined,
+          FX_AUTO_UPGRADE: "0",
           FX_RECORD: tapePath,
           FX_RECORD_INPUT: "1",
           FX_TRACE_LOG: tracePath,
@@ -2344,7 +2418,7 @@ describe.skipIf(SKIP)("tui: resize", () => {
       await session.waitForText("/help", 10_000);
       await waitForSelectedSlashLabel(session, "/help");
       const shrinkStage = await session.captureFullScrollback();
-      expect(shrinkStage).toContain("Commands 35 · Type to filter");
+      expect(shrinkStage).toContain("Type to filter");
       expect(shrinkStage).toContain("1–4");
       writeFileSync(join(root, "scrollback-after-shrink.txt"), shrinkStage);
 
@@ -2439,6 +2513,7 @@ describe.skipIf(SKIP)("tui: resize", () => {
         env: {
           HOME: home,
           OPENAI_API_KEY: undefined,
+          FX_AUTO_UPGRADE: "0",
           NO_COLOR: "1",
         },
         width: 72,
@@ -2455,10 +2530,10 @@ describe.skipIf(SKIP)("tui: resize", () => {
       const baselineFooter = findFooter(baseline)!;
 
       await session.sendLiteral("/mod");
-      await session.waitForText("/models", 10_000);
+      await session.waitForText("/model", 10_000);
       await session.sendKeys("Escape");
       await session.waitForPane(
-        (pane) => !pane.includes("/models"),
+        (pane) => !pane.includes("/model"),
         10_000,
       );
       await Bun.sleep(250);
@@ -2511,12 +2586,12 @@ describe.skipIf(SKIP)("tui: resize", () => {
       label: "help",
       width: 72,
       height: 16,
-      surfaceMarker: "Commands ",
+      surfaceMarker: "Enter Open",
       editedInput: "x",
       async openSurface(active) {
         await active.resizeWindow(60, 12, 500);
         await active.sendText("/help");
-        await active.waitForText("Commands ", TIMEOUT);
+        await active.waitForText("Enter Open", TIMEOUT);
       },
     },
     {
@@ -2538,7 +2613,7 @@ describe.skipIf(SKIP)("tui: resize", () => {
       width: 120,
       height: 36,
       surfaceMarker: "provider/model-a",
-      editedInput: "/model x",
+      editedInput: "x",
       fakeModels: true,
       async openSurface(active) {
         await active.sendText("/model");
@@ -2582,8 +2657,9 @@ describe.skipIf(SKIP)("tui: resize", () => {
           ? startFakeGateway([], {
               models: [{
                 id: "provider/model-a",
-                object: "model",
-                created: 1,
+                type: "language",
+                released: 1,
+                tags: ["tool-use"],
               }],
             })
           : null;
@@ -2594,9 +2670,8 @@ describe.skipIf(SKIP)("tui: resize", () => {
           surfaceCase.height,
           gateway
             ? {
-                OPENAI_API_KEY: "fake-footer-model-key",
-                FX_RESPONSES_BASE_URL: gateway.baseUrl,
-                FX_MODEL: "provider/model-a",
+                FX_E2E_GATEWAY_MODELS_URL:
+                  `${gateway.baseUrl}/coding-agent/v1/models`,
               }
             : {},
         );
@@ -2723,8 +2798,10 @@ describe.skipIf(SKIP)("tui: resize", () => {
         env: {
           HOME: home,
           OPENAI_API_KEY: "fake-wide-user-key",
-                    FX_RESPONSES_BASE_URL: gateway.baseUrl,
+          FX_GATEWAY_BASE_URL: gateway.baseUrl,
+          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
           FX_MODEL: FAKE_GATEWAY_MODEL,
+          FX_AUTO_UPGRADE: "0",
           FX_RECORD: tapePath,
           FX_RECORD_INPUT: "1",
           FX_TRACE_LOG: tracePath,
@@ -2934,8 +3011,10 @@ describe.skipIf(SKIP)("tui: resize", () => {
         env: {
           HOME: root.home,
           OPENAI_API_KEY: "fake-resize-file-approval-key",
-                    FX_RESPONSES_BASE_URL: gateway.baseUrl,
+          FX_GATEWAY_BASE_URL: gateway.baseUrl,
+          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
           FX_MODEL: FAKE_GATEWAY_MODEL,
+          FX_AUTO_UPGRADE: "0",
           FX_RECORD: tapePath,
           NO_COLOR: "1",
         },
@@ -3072,8 +3151,10 @@ describe.skipIf(SKIP)("tui: resize", () => {
         env: {
           HOME: root.home,
           OPENAI_API_KEY: "fake-resize-gate-key",
-                    FX_RESPONSES_BASE_URL: gateway.baseUrl,
+          FX_GATEWAY_BASE_URL: gateway.baseUrl,
+          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
           FX_MODEL: FAKE_GATEWAY_MODEL,
+          FX_AUTO_UPGRADE: "0",
           NO_COLOR: "1",
         },
         stderrPath,
@@ -3155,8 +3236,10 @@ describe.skipIf(SKIP)("tui: resize", () => {
         env: {
           HOME: root.home,
           OPENAI_API_KEY: "fake-post-approval-resize-key",
-                    FX_RESPONSES_BASE_URL: gateway.baseUrl,
+          FX_GATEWAY_BASE_URL: gateway.baseUrl,
+          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
           FX_MODEL: FAKE_GATEWAY_MODEL,
+          FX_AUTO_UPGRADE: "0",
           FX_TRACE_LOG: tracePath,
           FX_TRACE_SCOPES: "frame_schedule",
           NO_COLOR: "1",
@@ -3209,7 +3292,11 @@ describe.skipIf(SKIP)("tui: resize", () => {
         40,
         {
           OPENAI_API_KEY: "fake-resize-activity-key",
-          FX_RESPONSES_BASE_URL: gateway.baseUrl,
+          FX_GATEWAY_BASE_URL: gateway.baseUrl,
+          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+          FX_E2E_GATEWAY_CHAT_URL: gateway.chatUrl,
+          FX_E2E_GATEWAY_MODELS_URL: `${gateway.baseUrl}/coding-agent/v1/models`,
+          FX_E2E_GATEWAY_CREDITS_URL: undefined,
           FX_MODEL: FAKE_GATEWAY_MODEL,
         },
       );
@@ -3303,12 +3390,12 @@ describe.skipIf(SKIP)("tui: resize", () => {
     async () => {
       session = await launchAt(120, 40);
       await session.sendText("/help");
-      await session.waitForText("Commands 35", 5_000);
+      await session.waitForText("Tab Category", 5_000);
       await session.resizeWindow(76, 24, 400);
 
       const grid = await session.capturePaneGrid();
-      expect(grid.join("\n")).toContain("Commands 35");
-      expect(findHelpScreen(grid)).not.toBeNull();
+      expect(grid.join("\n")).toContain("Commands");
+      expect(findInlineHelpPicker(grid)).not.toBeNull();
 
       await session.sendKeys("Escape");
       await session.waitForPane((pane) => !pane.includes("Enter Open"), 5_000);
@@ -3325,7 +3412,7 @@ describe.skipIf(SKIP)("tui: resize", () => {
     async () => {
       session = await launchAt(120, 40);
       await session.sendText("/help");
-      await session.waitForText("Commands 35", 5_000);
+      await session.waitForText("Tab Category", 5_000);
 
       const captureScrollback = () =>
         execSync(`tmux capture-pane -t ${session!.name} -p -S -`, {
@@ -3333,9 +3420,8 @@ describe.skipIf(SKIP)("tui: resize", () => {
           stdio: "pipe",
         });
       const expectHelpCatalog = (grid: string[]) => {
-        expect(grid.join("\n")).toContain("Commands 35");
-        expect(grid.join("\n")).not.toContain("Run /help for commands");
-        expect(findHelpScreen(grid)).not.toBeNull();
+        expect(grid.join("\n")).toContain("Commands");
+        expect(findInlineHelpPicker(grid)).not.toBeNull();
       };
 
       await session.resizeWindow(72, 20, 500);
@@ -3345,11 +3431,14 @@ describe.skipIf(SKIP)("tui: resize", () => {
       expectHelpCatalog(await session.capturePaneGrid());
 
       await session.sendKeys("Escape");
-      await session.waitForText("Run /help for commands", 5_000);
+      await session.waitForPane(
+        (pane) => hasEmptyComposer(pane) && !pane.includes("Enter Open"),
+        5_000,
+      );
       const restored = captureScrollback();
       expect(restored.match(/𝒇x v\d+\.\d+\.\d+\b/g)).toHaveLength(1);
       expect(restored.match(/Run \/help for commands/g)).toHaveLength(1);
-      expect(restored).not.toContain("Commands 35");
+      expect(restored).not.toContain("Commands");
       expect(findFooter(await session.capturePaneGrid())).not.toBeNull();
     },
     TIMEOUT,
@@ -3394,7 +3483,8 @@ describe.skipIf(SKIP)("tui: resize", () => {
         env: {
           HOME: home,
           OPENAI_API_KEY: "test-key",
-          FX_RESPONSES_BASE_URL: gateway.baseUrl,
+          FX_AUTO_UPGRADE: "0",
+          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
           FX_RECORD: tapePath,
           FX_RECORD_INPUT: "1",
           FX_TRACE_LOG: tracePath,
@@ -3551,7 +3641,7 @@ describe.skipIf(SKIP)("tui: resize", () => {
         stderrPath,
         env: {
           OPENAI_API_KEY: "test-key",
-          FX_RESPONSES_BASE_URL: gateway.baseUrl,
+          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
           FX_TRACE_LOG: tracePath,
           FX_TRACE_SCOPES: "input,worker,resize",
         },
@@ -3610,7 +3700,7 @@ describe.skipIf(SKIP)("tui: resize", () => {
         stderrPath,
         env: {
           OPENAI_API_KEY: "test-key",
-          FX_RESPONSES_BASE_URL: gateway.baseUrl,
+          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
           FX_TRACE_LOG: tracePath,
           FX_TRACE_SCOPES: "input,worker,resize",
         },
@@ -3691,7 +3781,7 @@ describe.skipIf(SKIP)("tui: resize", () => {
         stderrPath,
         env: {
           OPENAI_API_KEY: "test-key",
-          FX_RESPONSES_BASE_URL: gateway.baseUrl,
+          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
           FX_TRACE_LOG: tracePath,
           FX_TRACE_SCOPES: "input,worker,resize",
           TMUX: undefined,
@@ -3744,12 +3834,12 @@ describe.skipIf(SKIP)("tui: resize", () => {
       } finally {
         if (pasteStartInjector.exitCode === null) pasteStartInjector.kill();
       }
-      const pasteTrace = await waitForTraceText(
+      const pausedTrace = await waitForTraceText(
         tracePath,
-        "paste begin owner=composer",
+        "cursor_measure_paused reason=paste_start",
       );
-      expect(pasteTrace.indexOf("cursor_measure_requested protocol=private"))
-        .toBeLessThan(pasteTrace.indexOf("paste begin owner=composer"));
+      expect(pausedTrace.indexOf("cursor_measure_requested protocol=private"))
+        .toBeLessThan(pausedTrace.indexOf("cursor_measure_paused reason=paste_start"));
       const cursor = session.cursorPosition();
       const delayedReply = Buffer.from(
         `\x1b[?${cursor.row + 1};1R\x1b[?${cursor.row + 1};2R`,
@@ -3759,9 +3849,15 @@ describe.skipIf(SKIP)("tui: resize", () => {
       sendRawTmuxBytes(session, "in-paste-cpr", delayedReply);
       await session.sendLiteral("after");
       await session.sendHexBytes(["1b", "5b", "32", "30", "31", "7e"]);
-      await waitForTraceText(
+      const completedPasteTrace = await waitForTraceText(
         tracePath,
         `paste end owner=composer bytes=${Buffer.byteLength(expectedPrompt)}`,
+      );
+      const pasteEndIndex = completedPasteTrace.indexOf(
+        "paste end owner=composer",
+      );
+      expect(completedPasteTrace.slice(0, pasteEndIndex)).not.toContain(
+        "cursor_measure expected_reflow_row=",
       );
       await session.sendKeys("Enter");
 
@@ -3795,7 +3891,7 @@ describe.skipIf(SKIP)("tui: resize", () => {
         stderrPath,
         env: {
           OPENAI_API_KEY: "test-key",
-          FX_RESPONSES_BASE_URL: gateway.baseUrl,
+          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
           FX_TRACE_LOG: tracePath,
           FX_TRACE_SCOPES: "input,worker,resize",
           TMUX: undefined,
@@ -3851,22 +3947,21 @@ describe.skipIf(SKIP)("tui: resize", () => {
         expect(await session.captureFullScrollback()).toContain(marker);
 
         await session.sendText("/help");
-        await session.waitForText("Commands 35", 5_000);
+        await session.waitForText("Tab Category", 5_000);
         await session.resizeWindow(84, 28, 500);
 
         const catalog = await session.capturePaneGrid();
         expect(catalog.join("\n")).not.toContain(marker);
-        expect(catalog.join("\n")).not.toContain("Run /help for commands");
-        expect(findHelpScreen(catalog)).not.toBeNull();
+        expect(findInlineHelpPicker(catalog)).not.toBeNull();
 
         await session.sendKeys("Escape");
-        await session.waitForText("Run /help for commands", 5_000);
+        await session.waitForPane(
+          (pane) => hasEmptyComposer(pane) && !pane.includes("Enter Open"),
+          5_000,
+        );
         const scrollback = await session.captureFullScrollback();
         expect(scrollback).not.toContain(marker);
-        expect(scrollback.match(/𝒇x v\d+\.\d+\.\d+\b/g)).toHaveLength(1);
-        expect(scrollback.match(/Run \/help for commands/g)).toHaveLength(1);
-        expect(scrollback.split("\n")[0]).toMatch(/𝒇x v\d+\.\d+\.\d+\b/);
-        expect(scrollback).not.toContain("Commands 35");
+        expect(scrollback).not.toContain("Commands");
         const finalGrid = await session.capturePaneGrid();
         expect(findFooter(finalGrid), finalGrid.join("\n")).not.toBeNull();
 
@@ -3910,8 +4005,10 @@ describe.skipIf(SKIP)("tui: resize", () => {
         env: {
           HOME: home,
           OPENAI_API_KEY: "fake-theme-reset-key",
-                    FX_RESPONSES_BASE_URL: gateway.baseUrl,
+          FX_GATEWAY_BASE_URL: gateway.baseUrl,
+          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
           FX_MODEL: FAKE_GATEWAY_MODEL,
+          FX_AUTO_UPGRADE: "0",
           FX_RECORD: tapePath,
           FX_TRACE_LOG: tracePath,
           FX_TRACE_SCOPES: "theme,frame_schedule,frame_commit,resize",

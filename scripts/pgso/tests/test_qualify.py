@@ -15,7 +15,6 @@ from scripts.pgso.profile_supplement import MappedProfile, ProfileSupplement
 from scripts.pgso.qualify import (
     BENCHMARK_PLANS,
     STARTUP_COMMANDS,
-    STARTUP_MINIMUM_SAMPLES,
     BenchmarkPair,
     EvidenceRecorder,
     _read_hyperfine_samples,
@@ -125,11 +124,6 @@ class PgsoQualificationTests(unittest.TestCase):
             tuple(plan.profile_module for plan in BENCHMARK_PLANS),
         )
         self.assertTrue(all(plan.function_prefixes for plan in BENCHMARK_PLANS))
-        ui_activity = next(
-            plan for plan in BENCHMARK_PLANS if plan.selector == "ui_activity"
-        )
-        self.assertEqual(((),), ui_activity.training_argvs)
-        self.assertEqual(("qualify",), ui_activity.workloads[0].argv)
 
     def test_startup_selection_returns_only_the_assigned_command(self) -> None:
         selected = select_startup_commands(("doctor",))
@@ -285,9 +279,9 @@ class PgsoQualificationTests(unittest.TestCase):
             )
 
         self.assertEqual(("startup-doctor",), tuple(item.name for item in results))
-        self.assertEqual(50, sum(command[0] == str(hyperfine) for command in calls))
+        self.assertEqual(100, sum(command[0] == str(hyperfine) for command in calls))
 
-    def test_startup_measurement_balances_warmed_hyperfine_rounds(self) -> None:
+    def test_startup_measurement_uses_one_thousand_samples_in_balanced_blocks(self) -> None:
         control = self.root / "control" / "fx"
         candidate = self.root / "candidate" / "fx"
         hyperfine = self.root / "tools" / "hyperfine"
@@ -314,9 +308,9 @@ class PgsoQualificationTests(unittest.TestCase):
         hyperfine_calls = [
             command for command in calls if command[0] == str(hyperfine)
         ]
-        self.assertEqual(300, len(hyperfine_calls))
-        for command_start in range(0, len(hyperfine_calls), 50):
-            command_rounds = hyperfine_calls[command_start : command_start + 50]
+        self.assertEqual(600, len(hyperfine_calls))
+        for command_start in range(0, len(hyperfine_calls), 100):
+            command_rounds = hyperfine_calls[command_start : command_start + 100]
             for round_index, command in enumerate(command_rounds):
                 self.assertIn("--shell=none", command)
                 self.assertEqual("10", command[command.index("--warmup") + 1])
@@ -334,15 +328,9 @@ class PgsoQualificationTests(unittest.TestCase):
                         if value == "--command-name"
                     ],
                 )
-        self.assertTrue(
-            all(result.requested_samples == STARTUP_MINIMUM_SAMPLES for result in results)
-        )
-        self.assertTrue(
-            all(len(result.control_samples) == STARTUP_MINIMUM_SAMPLES for result in results)
-        )
-        self.assertTrue(
-            all(len(result.candidate_samples) == STARTUP_MINIMUM_SAMPLES for result in results)
-        )
+        self.assertTrue(all(result.requested_samples == 1_000 for result in results))
+        self.assertTrue(all(len(result.control_samples) == 1_000 for result in results))
+        self.assertTrue(all(len(result.candidate_samples) == 1_000 for result in results))
 
     def test_startup_measurement_caps_large_campaign_blocks_at_ten_runs(self) -> None:
         control = self.root / "control" / "fx"

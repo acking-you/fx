@@ -27,7 +27,10 @@ pub const SignInState = enum {
 pub const SignInSnapshot = struct {
     state: SignInState = .idle,
     authorization_url: []const u8 = "",
+    accepts_manual_code: bool = false,
 };
+
+pub const max_manual_code_bytes: usize = 4096;
 
 pub const SignInCompletion = union(enum) {
     none,
@@ -77,6 +80,7 @@ pub const CompleteSignInFn = *const fn (
 ) anyerror!SignInCompletion;
 pub const SaveSignInFn = *const fn (?*anyopaque, Allocator, SignInCompletion) anyerror!void;
 pub const DeinitSignInContextFn = *const fn (?*anyopaque, Allocator) void;
+pub const SubmitManualCodeFn = *const fn (?*anyopaque, Allocator, []const u8) anyerror!void;
 
 pub const SignInRuntimeDeps = struct {
     ctx: ?*anyopaque = null,
@@ -85,6 +89,7 @@ pub const SignInRuntimeDeps = struct {
     poll: LoginPollDeps = .{},
     complete: CompleteSignInFn = unavailableCompleteSignIn,
     save: SaveSignInFn = unavailableSaveSignIn,
+    submit_manual_code: ?SubmitManualCodeFn = null,
 };
 
 fn unavailableCompleteSignIn(
@@ -206,7 +211,17 @@ pub const SignInRuntime = struct {
         return .{
             .state = self.state,
             .authorization_url = flow.authorization_url,
+            .accepts_manual_code = self.deps.submit_manual_code != null,
         };
+    }
+
+    pub fn submitManualCode(self: *Self, alloc: Allocator, code: []const u8) !bool {
+        self.mutex.lockUncancelable(io_mod.getIo());
+        defer self.mutex.unlock(io_mod.getIo());
+        if (self.state != .polling) return false;
+        const submit = self.deps.submit_manual_code orelse return false;
+        try submit(self.deps.ctx, alloc, code);
+        return true;
     }
 
     pub fn browserUrlAlloc(self: *Self, alloc: Allocator) !?[]u8 {

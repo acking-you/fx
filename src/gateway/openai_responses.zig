@@ -370,7 +370,7 @@ fn streamPreparedWithBinding(
     result.completion = .{};
     return .{ .completed = .{
         .completion = completion,
-        .usage = .immediate,
+        .usage = .{ .exact = .gateway },
         .ownership = .owned,
     } };
 }

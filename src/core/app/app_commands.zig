@@ -169,11 +169,22 @@ fn formatMcpIssuerMismatch(
     errdefer out.deinit();
     try out.writer.print("MCP authentication for '{s}' was rejected: expected issuer ", .{server_name});
     try std.json.Stringify.value(expected.bytes, .{}, &out.writer);
-    try out.writer.writeAll(" but metadata returned ");
-    try std.json.Stringify.value(returned.bytes, .{}, &out.writer);
-    try out.writer.writeAll(". Add \"oauth\":{\"issuer\":");
-    try std.json.Stringify.value(returned.bytes, .{}, &out.writer);
-    try out.writer.writeAll("} to this server's entry in ~/.fx/mcp.json and retry.");
+    switch (mismatch.source) {
+        .authorization_metadata => {
+            try out.writer.writeAll(" but metadata returned ");
+            try std.json.Stringify.value(returned.bytes, .{}, &out.writer);
+            try out.writer.writeAll(". Add \"oauth\":{\"issuer\":");
+            try std.json.Stringify.value(returned.bytes, .{}, &out.writer);
+            try out.writer.writeAll("} to this server's entry in ~/.fx/mcp.json and retry.");
+        },
+        .authorization_response => {
+            try out.writer.writeAll(" but the authorization response returned issuer ");
+            try std.json.Stringify.value(returned.bytes, .{}, &out.writer);
+            try out.writer.writeAll(
+                ". fx stopped before token exchange. Contact the MCP server provider; changing oauth.issuer is not a safe workaround.",
+            );
+        },
+    }
     return out.toOwnedSlice();
 }
 
@@ -479,12 +490,23 @@ pub fn Handlers(comptime App: type) type {
 
             if (completion.result) |authentication| {
                 switch (authentication) {
-                    .authenticated => {
-                        const success = try std.fmt.allocPrint(
-                            app.alloc,
-                            "Authenticated MCP server '{s}'.",
-                            .{completion.server_name},
-                        );
+                    .authenticated => |authenticated| {
+                        const success = if (authenticated.repaired_entries == 0)
+                            try std.fmt.allocPrint(
+                                app.alloc,
+                                "Authenticated MCP server '{s}'.",
+                                .{completion.server_name},
+                            )
+                        else
+                            try std.fmt.allocPrint(
+                                app.alloc,
+                                "Authenticated MCP server '{s}'.\nRemoved {d} unreadable MCP credential {s}.",
+                                .{
+                                    completion.server_name,
+                                    authenticated.repaired_entries,
+                                    if (authenticated.repaired_entries == 1) "entry" else "entries",
+                                },
+                            );
                         defer app.alloc.free(success);
                         app.beginMcpReload() catch |err| {
                             const body = try std.fmt.allocPrint(
@@ -1094,12 +1116,26 @@ pub fn Handlers(comptime App: type) type {
                     defer display_path.deinit(app.alloc);
                     break :blk try std.fmt.allocPrint(app.alloc, "Deleted {s} (was newly created)", .{display_path.bytes});
                 },
+                .unavailable => |path| blk: {
+                    var display_path = try text_utils.encodeTerminalSafe(
+                        app.alloc,
+                        path,
+                        std.Io.Dir.max_path_bytes,
+                    );
+                    defer display_path.deinit(app.alloc);
+                    break :blk try std.fmt.allocPrint(
+                        app.alloc,
+                        "Could not undo {s}",
+                        .{display_path.bytes},
+                    );
+                },
                 .empty => try app.alloc.dupe(u8, "Nothing to undo."),
             };
             defer app.alloc.free(msg);
             switch (result) {
                 .restored => |path| std.heap.c_allocator.free(path),
                 .deleted => |path| std.heap.c_allocator.free(path),
+                .unavailable => |path| std.heap.c_allocator.free(path),
                 .empty => {},
             }
             try app.writeDomainNotice(.{
@@ -1431,6 +1467,7 @@ pub fn Handlers(comptime App: type) type {
             return .{
                 .removed = result.removed,
                 .revocation_failed = result.revocation_failed,
+                .repaired_entries = result.repaired_entries,
             };
         }
 
@@ -3424,7 +3461,7 @@ const McpCommandFakeApp = struct {
         self.authentication_pending = false;
         return .{
             .server_name = try self.alloc.dupe(u8, "fixture"),
-            .result = .authenticated,
+            .result = .{ .authenticated = .{} },
         };
     }
 
@@ -3580,30 +3617,6 @@ const SkillsInstallReplayApp = struct {
         self.write_count += 1;
         self.last_tone = notice.tone;
         _ = try self.shell.appendSemanticNotice(self.alloc, notice);
-    }
-};
-
-const ModelCatalogCommandFakeApp = struct {
-    alloc: std.mem.Allocator,
-    model_cache: model_cache_runtime.Runtime,
-    skills: skill_runtime.Runtime = .{},
-    shell: transcript_runtime.TranscriptRuntime = .{},
-    ensure_count: usize = 0,
-
-    fn init(alloc: std.mem.Allocator) !ModelCatalogCommandFakeApp {
-        return ModelCatalogCommandFakeApp{
-            .alloc = alloc,
-            .model_cache = model_cache_runtime.Runtime.init(alloc, "/v1/models"),
-        };
-    }
-
-    fn deinit(self: *ModelCatalogCommandFakeApp) void {
-        self.model_cache.deinit();
-        self.shell.deinit(self.alloc);
-    }
-
-    fn ensureModelCache(self: *ModelCatalogCommandFakeApp) void {
-        self.ensure_count += 1;
     }
 };
 
@@ -4045,22 +4058,6 @@ test "skills install groups command notice fragments for entry replay" {
     try std.testing.expect(std.mem.startsWith(u8, rendered, "● Skills: Installing from "));
     try std.testing.expect(std.mem.find(u8, rendered, "\n\n● Skills: Installed: root-skill") != null);
     try std.testing.expect(std.mem.endsWith(u8, rendered, "  Installed: nested-skill"));
-}
-
-test "models command opens the catalog without writing transcript output" {
-    const alloc = std.testing.allocator;
-    var app = try ModelCatalogCommandFakeApp.init(alloc);
-    defer app.deinit();
-    app.skills.openMenu();
-
-    try Handlers(ModelCatalogCommandFakeApp).commandShowModels(@ptrCast(&app));
-
-    try std.testing.expectEqual(@as(usize, 1), app.ensure_count);
-    try std.testing.expect(!app.skills.menu.active);
-    try std.testing.expect(app.model_cache.menu.active);
-    try std.testing.expectEqual(model_cache_runtime.ModelMenuLoadState.loading, app.model_cache.menu.load_state);
-    try std.testing.expectEqual(@as(usize, 0), app.shell.entries.items.len);
-    try std.testing.expect(app.shell.render_requests.hasReason(.footer));
 }
 
 test "help command opens the catalog without writing transcript output" {

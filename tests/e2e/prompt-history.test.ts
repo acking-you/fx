@@ -35,7 +35,8 @@ function rejectedGatewayEnv(
   return {
     ...REJECTED_GATEWAY_AUTH,
     HOME: home,
-        FX_RESPONSES_BASE_URL: gateway.baseUrl,
+    FX_GATEWAY_BASE_URL: gateway.baseUrl,
+    FX_GATEWAY_CHAT_URL: gateway.chatUrl,
     FX_MODEL: FAKE_GATEWAY_MODEL,
   };
 }
@@ -107,7 +108,7 @@ describe.skipIf(!tmuxAvailable())("prompt history", () => {
         await session.sendText("PLAN10_PROMPT_HISTORY_SENTINEL");
         await session.waitForText("HTTP 401", TIMEOUT);
         await session.sendText("/help");
-        await session.waitForText("Commands 35", TIMEOUT);
+        await session.waitForText("Tab Category", TIMEOUT);
         await session.sendKeys("Escape");
         await session.waitForPane((pane) => !pane.includes("Enter Open"), TIMEOUT);
         await session.sendText("/quit");

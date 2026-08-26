@@ -1,6 +1,7 @@
 const std = @import("std");
 const image_attachments = @import("../core/images/image_attachments.zig");
 const stream_provider = @import("../core/agent/stream_provider.zig");
+const responses_protocol = @import("responses_protocol.zig");
 const responses_compaction_binding = @import("../core/gateway/responses_compaction_binding.zig");
 const responses_compaction_provider = @import("../core/gateway/responses_compaction_provider.zig");
 const responses_request_protocol = @import("../core/gateway/responses_protocol.zig");
@@ -225,11 +226,31 @@ fn streamPreparedWithBinding(
             .ownership = .owned,
         } };
     }
-    const completion = result.completion;
+    var completion = result.completion;
     result.completion = .{};
+    errdefer {
+        var owned = stream_provider.Result{ .completed = .{
+            .completion = completion,
+            .ownership = .owned,
+        } };
+        owned.deinit(alloc);
+    }
+    const usage_outcome: stream_provider.UsageOutcome = usage: {
+        if (completion.generation_id == null) {
+            break :usage .{ .unavailable = .possibly_billed };
+        }
+        completion.billing = try responses_protocol.buildSubscriptionBilling(
+            alloc,
+            .codex,
+            request.model,
+            @max(io_mod.milliTimestamp(), 0),
+            completion.usage,
+        ) orelse break :usage .{ .unavailable = .possibly_billed };
+        break :usage .{ .exact = .codex };
+    };
     return .{ .completed = .{
         .completion = completion,
-        .usage = .immediate,
+        .usage = usage_outcome,
         .ownership = .owned,
     } };
 }

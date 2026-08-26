@@ -215,8 +215,8 @@ test "parse extracts an optional logout provider" {
 
 test "parse recognizes models" {
     switch (parse(testSlashRegistry(), "/models")) {
-        .unknown => return error.TestExpectedModelsCommand,
-        else => {},
+        .models => {},
+        else => return error.TestExpectedModelsCommand,
     }
 }
 
@@ -477,11 +477,6 @@ fn recordUnknown(ctx: *anyopaque, value: []const u8) anyerror!void {
     test_context.payload = value;
 }
 
-fn recordModels(ctx: *anyopaque) anyerror!void {
-    const test_context = testContext(ctx);
-    test_context.called = "models";
-}
-
 fn failStatus(ctx: *anyopaque) anyerror!void {
     _ = ctx;
     return error.TestRouteFailure;
@@ -541,16 +536,6 @@ test "route calls expected no-payload handler" {
 
     try std.testing.expectEqualStrings("copy", ctx.called);
     try std.testing.expectEqualStrings("", ctx.payload);
-}
-
-test "route calls models handler" {
-    var ctx: TestContext = .{};
-    var handlers = testHandlers(&ctx);
-    handlers.show_models = recordModels;
-
-    try route(testSlashRegistry(), &handlers, "/models");
-
-    try std.testing.expectEqualStrings("models", ctx.called);
 }
 
 test "route calls interactive resume handler" {

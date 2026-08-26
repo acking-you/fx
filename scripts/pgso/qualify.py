@@ -35,7 +35,7 @@ from scripts.pgso.toolchain import Toolchain
 
 
 MINIMUM_SAMPLES = 50
-STARTUP_MINIMUM_SAMPLES = 500
+STARTUP_MINIMUM_SAMPLES = 1_000
 STARTUP_WARMUP_RUNS = 10
 STARTUP_MINIMUM_ROUNDS = 10
 STARTUP_MAX_RUNS_PER_ROUND = 10
@@ -114,7 +114,7 @@ BENCHMARK_PLANS = (
             "ui.render_engine.",
         ),
         training_argvs=((),),
-        workloads=(Workload("ui-activity", ("qualify",)),),
+        workloads=(Workload("ui-activity", ()),),
     ),
     BenchmarkPlan(
         selector="approval_review",

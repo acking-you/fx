@@ -5,6 +5,7 @@ const identity = @import("../../core/terminal/identity.zig");
 const operation = @import("../../core/terminal/operation.zig");
 const store = @import("../../core/terminal/store.zig");
 const debug_trace = @import("../../core/shared/debug_trace.zig");
+const types = @import("../../core/shared/types.zig");
 const sort_utils = @import("../../core/shared/sort_utils.zig");
 const command_environment = @import("../../core/execution/command_environment.zig");
 const io_mod = @import("../../core/shared/io.zig");
@@ -16,6 +17,9 @@ const workspace_access = @import("../../core/workspace/workspace_access.zig");
 const shell_resolver = @import("../../core/terminal/shell_resolver.zig");
 
 const Allocator = std.mem.Allocator;
+
+pub const exec_timeout_min_ms: u64 = 1;
+pub const exec_timeout_max_ms: u64 = 600_000;
 
 const ShellKind = enum { user_login, executable };
 pub const Action = enum {
@@ -139,10 +143,7 @@ pub const Input = struct {
     cwd: ?[]const u8 = null,
     command: ?[]const u8 = null,
     profile: ?command_environment.Profile = null,
-    /// Foreground budget for exec before a durable terminal session is yielded.
-    /// When durable terminal ownership is unavailable, exec falls back to the
-    /// captured foreground backend and this value has no effect.
-    yield_time_ms: ?u64 = null,
+    timeout_ms: ?u64 = null,
     shell: ?ShellInput = null,
     backend: ?contracts.Backend = null,
     return_when: ?ReturnInput = null,
@@ -184,8 +185,8 @@ pub const ActionFieldContract = struct {
 pub fn actionFieldContract(action: Action) ActionFieldContract {
     return switch (action) {
         .exec => .{
-            .allowed = &.{ "action", "command", "cwd", "profile", "yield_time_ms" },
-            .required = &.{ "action", "command" },
+            .allowed = &.{ "action", "command", "cwd", "profile", "timeout_ms" },
+            .required = &.{ "action", "command", "timeout_ms" },
         },
         .start => .{
             .allowed = &.{ "action", "cwd", "command", "profile", "shell", "backend", "return_when", "wait_ceiling_ms", "dimensions", "initial_monitors" },
@@ -346,10 +347,12 @@ fn actionFieldCorrection(
 }
 
 const OwnedInput = struct {
-    parsed: std.json.Parsed(Input),
+    arena_state: std.heap.ArenaAllocator.State,
+    value: Input,
+    lease_explicit: bool,
 
-    fn deinit(self: *OwnedInput) void {
-        self.parsed.deinit();
+    fn deinit(self: *OwnedInput, alloc: Allocator) void {
+        self.arena_state.promote(alloc).deinit();
         self.* = undefined;
     }
 };
@@ -396,7 +399,18 @@ pub fn decode(
             "terminal arguments must match the advertised action schema",
         ) };
     };
+    if (action == .exec) {
+        if (raw.object.get("timeout_ms")) |timeout_value| {
+            if (timeout_value != .integer) {
+                return .{ .failure = try ctx.allocator.dupe(
+                    u8,
+                    "terminal exec field \"timeout_ms\" must be an integer between 1 and 600000",
+                ) };
+            }
+        }
+    }
     elideKnownNullFields(&raw.object);
+    const lease_explicit = raw.object.get("lease") != null;
     var correction_scratch: ActionFieldCorrectionScratch = .{};
     defer correction_scratch.deinit(ctx.allocator);
     if (try actionFieldCorrection(ctx.allocator, action, raw.object, &correction_scratch)) |correction| {
@@ -416,18 +430,11 @@ pub fn decode(
         },
     };
 
-    var normalized: std.Io.Writer.Allocating = .init(ctx.allocator);
-    defer normalized.deinit();
-    std.json.Stringify.value(raw, .{}, &normalized.writer) catch
-        return error.OutOfMemory;
-    const normalized_json = try normalized.toOwnedSlice();
-    defer ctx.allocator.free(normalized_json);
-
-    const parsed = std.json.parseFromSlice(
+    const input = std.json.parseFromValueLeaky(
         Input,
-        ctx.allocator,
-        normalized_json,
-        .{ .allocate = .alloc_always },
+        arena,
+        raw,
+        .{},
     ) catch {
         return .{ .failure = try ctx.allocator.dupe(
             u8,
@@ -435,7 +442,12 @@ pub fn decode(
         ) };
     };
     const owned = try ctx.allocator.create(OwnedInput);
-    owned.* = .{ .parsed = parsed };
+    owned.* = .{
+        .arena_state = arena_state.state,
+        .value = input,
+        .lease_explicit = lease_explicit,
+    };
+    arena_state.state = .init;
     return .{ .input = .{
         .ptr = owned,
         .deinit_fn = inputDeinit,
@@ -477,7 +489,7 @@ fn normalizeCompositeArguments(
 
 fn inputDeinit(ptr: *anyopaque, alloc: Allocator) void {
     const input: *OwnedInput = @ptrCast(@alignCast(ptr));
-    input.deinit();
+    input.deinit(alloc);
     alloc.destroy(input);
 }
 
@@ -485,7 +497,7 @@ pub fn validate(
     ctx: tool_dispatch.DispatchContext,
     erased: tool_dispatch.ToolInput,
 ) tool_dispatch.DispatchError!?[]u8 {
-    const input = &erased.as(OwnedInput).parsed.value;
+    const input = &erased.as(OwnedInput).value;
     var arena_state = std.heap.ArenaAllocator.init(ctx.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -496,10 +508,11 @@ pub fn validate(
         if (input.command.?.len > contracts.max_command_bytes) {
             return try ctx.allocator.dupe(u8, "terminal exec arguments are invalid: InvalidCommand");
         }
-        if (input.yield_time_ms) |yield_time_ms| {
-            if (yield_time_ms == 0 or yield_time_ms > max_exec_yield_time_ms) {
-                return try ctx.allocator.dupe(u8, "terminal exec arguments are invalid: InvalidYieldTime");
-            }
+        const timeout_ms = input.timeout_ms orelse {
+            return try ctx.allocator.dupe(u8, "terminal exec arguments are invalid: MissingTimeout");
+        };
+        if (timeout_ms < exec_timeout_min_ms or timeout_ms > exec_timeout_max_ms) {
+            return try ctx.allocator.dupe(u8, "terminal exec arguments are invalid: InvalidTimeout");
         }
         _ = resolveCwd(arena, ctx, input.cwd) catch |err| {
             return try std.fmt.allocPrint(
@@ -541,41 +554,13 @@ pub fn call(
     ctx: tool_dispatch.DispatchContext,
     erased: tool_dispatch.ToolInput,
 ) tool_dispatch.DispatchError!tool_dispatch.ToolResult {
-    const input = &erased.as(OwnedInput).parsed.value;
-    if (input.action == .exec) {
-        if (canYieldExec(ctx)) return callYieldingExec(ctx, input);
-        return callExec(ctx, input);
+    const owned = erased.as(OwnedInput);
+    const input = &owned.value;
+    if (input.action == .exec) return callExec(ctx, input);
+    if (input.action == .write and input.write != null and !owned.lease_explicit) {
+        return call_atomic_write(ctx, input);
     }
-    return callDurable(ctx, input, durableAction(input.action).?);
-}
-
-pub const max_exec_yield_time_ms: u64 = 60_000;
-const default_exec_yield_time_ms: u64 = 10_000;
-
-fn canYieldExec(ctx: tool_dispatch.DispatchContext) bool {
-    return ctx.terminal_transport_role == .acp and
-        ctx.captured_command_host != .workspace_clean and
-        ctx.terminal_client != null and
-        ctx.session_child_capability != null and
-        ctx.terminal_owner_session_id != null;
-}
-
-fn yieldingExecInput(input: Input) Input {
-    var start_input = input;
-    start_input.action = .start;
-    start_input.return_when = .{ .kind = .exit };
-    start_input.wait_ceiling_ms = input.yield_time_ms orelse
-        default_exec_yield_time_ms;
-    start_input.yield_time_ms = null;
-    return start_input;
-}
-
-fn callYieldingExec(
-    ctx: tool_dispatch.DispatchContext,
-    input: *const Input,
-) tool_dispatch.DispatchError!tool_dispatch.ToolResult {
-    const start_input = yieldingExecInput(input.*);
-    return callDurable(ctx, &start_input, .start);
+    return callDurable(ctx, input);
 }
 
 /// Refreshes the caller's terminal projection from the authoritative owner
@@ -584,33 +569,155 @@ pub fn refreshListProjection(
     ctx: tool_dispatch.DispatchContext,
 ) tool_dispatch.DispatchError!void {
     var input: Input = .{ .action = .list };
-    var result = try callDurable(ctx, &input, .list);
+    var result = try callDurable(ctx, &input);
     result.deinit(ctx.allocator);
+}
+
+fn call_atomic_write(
+    ctx: tool_dispatch.DispatchContext,
+    input: *const Input,
+) tool_dispatch.DispatchError!tool_dispatch.ToolResult {
+    var acquire = input.*;
+    acquire.lease = .acquire;
+    acquire.write = null;
+    var acquired = try callDurable(ctx, &acquire);
+    switch (acquired) {
+        .failure => return acquired,
+        .success => {},
+    }
+    defer acquired.deinit(ctx.allocator);
+
+    var use = input.*;
+    use.lease = .use;
+    var used = callDurable(ctx, &use) catch |err| {
+        release_atomic_write_after_failure(ctx, input);
+        return err;
+    };
+    switch (used) {
+        .failure => {
+            release_atomic_write_after_failure(ctx, input);
+            return used;
+        },
+        .success => {},
+    }
+    defer used.deinit(ctx.allocator);
+
+    var released = try release_atomic_write(ctx, input);
+    switch (released) {
+        .failure => return released,
+        .success => {},
+    }
+    defer released.deinit(ctx.allocator);
+
+    return merge_atomic_write_results(ctx.allocator, used, released);
+}
+
+fn release_atomic_write(
+    ctx: tool_dispatch.DispatchContext,
+    input: *const Input,
+) tool_dispatch.DispatchError!tool_dispatch.ToolResult {
+    var release = input.*;
+    release.lease = .release;
+    release.write = null;
+    var cleanup_ctx = ctx;
+    cleanup_ctx.cancel_flag = null;
+    return callDurable(cleanup_ctx, &release);
+}
+
+fn release_atomic_write_after_failure(
+    ctx: tool_dispatch.DispatchContext,
+    input: *const Input,
+) void {
+    var released = release_atomic_write(ctx, input) catch |err| {
+        debug_trace.logf(
+            "terminal",
+            "atomic write cleanup failed session_id={s} err={s}",
+            .{ input.session_id orelse "", @errorName(err) },
+        );
+        return;
+    };
+    defer released.deinit(ctx.allocator);
+    switch (released) {
+        .success => {},
+        .failure => debug_trace.logf(
+            "terminal",
+            "atomic write cleanup was rejected session_id={s}",
+            .{input.session_id orelse ""},
+        ),
+    }
+}
+
+fn merge_atomic_write_results(
+    alloc: Allocator,
+    used: tool_dispatch.ToolResult,
+    released: tool_dispatch.ToolResult,
+) tool_dispatch.DispatchError!tool_dispatch.ToolResult {
+    const used_body = switch (used) {
+        .success => |value| value,
+        .failure => return error.InvalidToolArguments,
+    };
+    var parsed_used = try std.json.parseFromSlice(
+        contracts.Result,
+        alloc,
+        used_body,
+        .{},
+    );
+    defer parsed_used.deinit();
+    const accepted_bytes = switch (parsed_used.value) {
+        .success => |success| switch (success) {
+            .write => |write| write.accepted_bytes,
+            else => return error.InvalidToolArguments,
+        },
+        .failure => return error.InvalidToolArguments,
+    };
+
+    const released_body = switch (released) {
+        .success => |value| value,
+        .failure => return error.InvalidToolArguments,
+    };
+    var parsed_released = try std.json.parseFromSlice(
+        contracts.Result,
+        alloc,
+        released_body,
+        .{},
+    );
+    defer parsed_released.deinit();
+    return switch (parsed_released.value) {
+        .success => |success| switch (success) {
+            .write => |write| stringifyResult(alloc, .{ .success = .{
+                .write = .{
+                    .session = write.session,
+                    .accepted_bytes = accepted_bytes,
+                },
+            } }),
+            else => error.InvalidToolArguments,
+        },
+        .failure => error.InvalidToolArguments,
+    };
 }
 
 fn callDurable(
     ctx: tool_dispatch.DispatchContext,
     input: *const Input,
-    action: contracts.Action,
 ) tool_dispatch.DispatchError!tool_dispatch.ToolResult {
     const runtime = ctx.terminal_client orelse return structuredFailure(
-        ctx.allocator,
-        action,
+        ctx,
+        durableAction(input.action).?,
         null,
         .unsupported_host,
         false,
     );
     const owner = ctx.session_child_capability orelse return structuredFailure(
-        ctx.allocator,
-        action,
+        ctx,
+        durableAction(input.action).?,
         null,
         .authority_denied,
         false,
     );
     const durable_session_id = ctx.terminal_owner_session_id orelse
         return structuredFailure(
-            ctx.allocator,
-            action,
+            ctx,
+            durableAction(input.action).?,
             null,
             .authority_denied,
             false,
@@ -620,8 +727,8 @@ fn callDurable(
     const arena = arena_state.allocator();
     var profile_user_buffer: [64]u8 = undefined;
     const profile_user = identity.profileUser(&profile_user_buffer) orelse return structuredFailure(
-        ctx.allocator,
-        action,
+        ctx,
+        durableAction(input.action).?,
         input.session_id,
         .unsupported_host,
         false,
@@ -643,13 +750,13 @@ fn callDurable(
         if (err == error.TerminalSessionNotFound and
             input.action == .list and input.session_id == null)
         {
-            return stringifyResult(ctx.allocator, .{ .success = .{
+            return projectResult(ctx, .{ .success = .{
                 .list = .{ .sessions = &.{} },
             } });
         }
         return structuredFailure(
-            ctx.allocator,
-            action,
+            ctx,
+            durableAction(input.action).?,
             input.session_id,
             mapErrorCode(err),
             false,
@@ -669,8 +776,8 @@ fn callDurable(
             .{ @tagName(input.action), @errorName(err) },
         );
         return structuredFailure(
-            ctx.allocator,
-            action,
+            ctx,
+            durableAction(input.action).?,
             request.sessionId(),
             mapErrorCode(err),
             err == error.QueueFull,
@@ -683,8 +790,8 @@ fn callDurable(
             var completion = completion_value;
             defer completion.deinit();
             return resultFromCompletion(
-                ctx.allocator,
-                action,
+                ctx,
+                durableAction(input.action).?,
                 request.sessionId(),
                 completion,
             );
@@ -701,6 +808,43 @@ fn callDurable(
     }
 }
 
+pub fn release_agent_write_lease(
+    ctx: tool_dispatch.DispatchContext,
+    session_id: []const u8,
+) !void {
+    const input = Input{
+        .action = .write,
+        .session_id = session_id,
+        .lease = .release,
+    };
+    const result = try callDurable(ctx, &input);
+    defer result.deinit(ctx.allocator);
+    const body = switch (result) {
+        .success => |value| value,
+        .failure => |value| value,
+    };
+    var parsed = std.json.parseFromSlice(
+        contracts.Result,
+        ctx.allocator,
+        body,
+        .{},
+    ) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => error.InvalidTerminalLeaseCleanupResult,
+    };
+    defer parsed.deinit();
+    return switch (parsed.value) {
+        .success => |success| switch (success) {
+            .write => {},
+            else => error.InvalidTerminalLeaseCleanupResult,
+        },
+        .failure => |failure| switch (failure.code) {
+            .session_not_found, .lease_conflict => {},
+            else => error.TerminalLeaseCleanupFailed,
+        },
+    };
+}
+
 fn callExec(
     ctx: tool_dispatch.DispatchContext,
     input: *const Input,
@@ -710,6 +854,9 @@ fn callExec(
     };
     const command = input.command orelse return .{
         .failure = try ctx.allocator.dupe(u8, "terminal exec requires string field \"command\""),
+    };
+    const timeout_ms = input.timeout_ms orelse return .{
+        .failure = try ctx.allocator.dupe(u8, "terminal exec requires integer field \"timeout_ms\""),
     };
     const cwd = resolveCwd(ctx.allocator, ctx, input.cwd) catch |err| {
         if (err == error.OutOfMemory) return error.OutOfMemory;
@@ -737,6 +884,7 @@ fn callExec(
         .command = command,
         .resolved_cwd = cwd,
         .environment = environment_value,
+        .timeout_ms = timeout_ms,
     });
 }
 
@@ -772,7 +920,7 @@ fn durableAction(action: Action) ?contracts.Action {
 }
 
 pub fn isCapturedCommand(erased: tool_dispatch.ToolInput) bool {
-    return erased.as(OwnedInput).parsed.value.action == .exec;
+    return erased.as(OwnedInput).value.action == .exec;
 }
 
 const PreparedRequest = struct {
@@ -1215,16 +1363,16 @@ fn repeatedProbeAuthority(
 }
 
 fn resultFromCompletion(
-    alloc: Allocator,
+    ctx: tool_dispatch.DispatchContext,
     action: contracts.Action,
     session_id: ?[]const u8,
     completion: client.Completion,
 ) tool_dispatch.DispatchError!tool_dispatch.ToolResult {
     if (completion.frame) |*frame| {
         return switch (frame.message().payload) {
-            .response => |response| stringifyResult(alloc, response),
+            .response => |response| projectResult(ctx, response),
             else => structuredFailure(
-                alloc,
+                ctx,
                 action,
                 session_id,
                 .protocol_incompatible,
@@ -1233,7 +1381,7 @@ fn resultFromCompletion(
         };
     }
     return structuredFailure(
-        alloc,
+        ctx,
         action,
         session_id,
         switch (completion.kind) {
@@ -1266,6 +1414,20 @@ fn stringifyResult(
     };
 }
 
+fn projectResult(
+    ctx: tool_dispatch.DispatchContext,
+    result: contracts.Result,
+) tool_dispatch.DispatchError!tool_dispatch.ToolResult {
+    const projected = terminalActionPresentation(result);
+    const tool_result = try stringifyResult(ctx.allocator, result);
+    if (projected) |presentation_value| {
+        tool_dispatch.reportToolResultMemory(ctx, .{
+            .terminal_action_presentation = presentation_value,
+        });
+    }
+    return tool_result;
+}
+
 pub fn mapAuthorizedResult(
     alloc: Allocator,
     result: tool_dispatch.DispatchResult,
@@ -1286,30 +1448,78 @@ pub fn mapAuthorizedResult(
         .failure => |failure| failure.code,
     };
     var mapped = result;
-    mapped.status_detail = switch (code) {
-        .path_outside_workspace => try alloc.dupe(u8, "path is outside the workspace"),
-        .authority_retired => try alloc.dupe(
-            u8,
-            "saved terminal authority is from an older fx version; start a new terminal",
-        ),
-        else => return result,
-    };
+    mapped.status_detail = try alloc.dupe(
+        u8,
+        terminalFailurePresentation(code).detail(),
+    );
     return mapped;
 }
 
 fn structuredFailure(
-    alloc: Allocator,
+    ctx: tool_dispatch.DispatchContext,
     action: contracts.Action,
     session_id: ?[]const u8,
     code: contracts.StructuredErrorCode,
     retryable: bool,
 ) tool_dispatch.DispatchError!tool_dispatch.ToolResult {
-    return stringifyResult(alloc, .{ .failure = .{
+    return projectResult(ctx, .{ .failure = .{
         .action = action,
         .code = code,
         .session_id = session_id,
         .retryable = retryable,
     } });
+}
+
+fn terminalActionPresentation(
+    result: contracts.Result,
+) ?types.TerminalActionPresentation {
+    return switch (result) {
+        .success => |success| switch (success) {
+            .start => |value| .{ .returned = terminalReturnPresentation(value.outcome) },
+            .wait => |value| .{ .returned = terminalReturnPresentation(value.outcome) },
+            .read, .screen, .write, .monitor, .inspect, .list, .resize, .signal, .close => null,
+        },
+        .failure => |failure| .{ .failed = terminalFailurePresentation(failure.code) },
+    };
+}
+
+fn terminalReturnPresentation(
+    outcome: contracts.ReturnOutcome,
+) types.TerminalReturnPresentation {
+    return switch (outcome) {
+        .started => .started,
+        .condition_met => .condition_met,
+        .safety_ceiling => .safety_ceiling,
+        .cancelled => .cancelled,
+        .exited => |code| .{ .exited = code },
+        .signal => |signal| .{ .signal = signal },
+    };
+}
+
+fn terminalFailurePresentation(
+    code: contracts.StructuredErrorCode,
+) types.TerminalFailurePresentation {
+    return switch (code) {
+        .invalid_request => .invalid_request,
+        .path_outside_workspace => .path_outside_workspace,
+        .unsupported_host => .unsupported_host,
+        .shell_unavailable => .shell_unavailable,
+        .pty_unavailable => .pty_unavailable,
+        .startup_failed => .startup_failed,
+        .process_identity_unavailable => .process_identity_unavailable,
+        .session_lost => .session_lost,
+        .session_not_found => .session_not_found,
+        .invalid_lifecycle => .invalid_lifecycle,
+        .authority_denied => .authority_denied,
+        .authority_retired => .authority_retired,
+        .lease_conflict => .lease_conflict,
+        .cursor_gap => .cursor_gap,
+        .screen_unavailable => .screen_unavailable,
+        .monitor_unavailable => .monitor_unavailable,
+        .protocol_incompatible => .protocol_incompatible,
+        .capacity_exceeded => .capacity_exceeded,
+        .cancelled => .cancelled,
+    };
 }
 
 fn mapErrorCode(err: anyerror) contracts.StructuredErrorCode {
@@ -1333,7 +1543,7 @@ fn mapErrorCode(err: anyerror) contracts.StructuredErrorCode {
 }
 
 pub fn readsOnly(erased: tool_dispatch.ToolInput) bool {
-    const input = erased.as(OwnedInput).parsed.value;
+    const input = erased.as(OwnedInput).value;
     return switch (input.action) {
         .read, .screen, .list => true,
         .inspect => input.acknowledge_event_id == null,
@@ -1448,7 +1658,7 @@ pub fn isIrreversible(_: tool_dispatch.ToolInput) bool {
 test "terminal decoder accepts every public action and owns its input" {
     const alloc = std.testing.allocator;
     const cases = [_]struct { Action, []const u8 }{
-        .{ .exec, "{\"action\":\"exec\",\"command\":\"true\"}" },
+        .{ .exec, "{\"action\":\"exec\",\"command\":\"true\",\"timeout_ms\":600000}" },
         .{ .start, "{\"action\":\"start\"}" },
         .{ .read, "{\"action\":\"read\",\"session_id\":\"terminal-a\",\"cursor_segment\":1}" },
         .{ .screen, "{\"action\":\"screen\",\"session_id\":\"terminal-a\"}" },
@@ -1472,11 +1682,75 @@ test "terminal decoder accepts every public action and owns its input" {
                 defer input.deinit(alloc);
                 try std.testing.expectEqual(
                     case[0],
-                    input.as(OwnedInput).parsed.value.action,
+                    input.as(OwnedInput).value.action,
                 );
             },
         }
     }
+}
+
+test "terminal atomic write selection preserves explicit legacy lease calls" {
+    const alloc = std.testing.allocator;
+    const cases = [_]struct {
+        arguments_json: []const u8,
+        lease_explicit: bool,
+    }{
+        .{
+            .arguments_json = "{\"action\":\"write\",\"session_id\":\"terminal-a\",\"write\":{\"kind\":\"text\",\"text\":\"input\"}}",
+            .lease_explicit = false,
+        },
+        .{
+            .arguments_json = "{\"action\":\"write\",\"session_id\":\"terminal-a\",\"lease\":\"use\",\"write\":{\"kind\":\"text\",\"text\":\"input\"}}",
+            .lease_explicit = true,
+        },
+        .{
+            .arguments_json = "{\"action\":\"write\",\"session_id\":\"terminal-a\",\"lease\":\"acquire\"}",
+            .lease_explicit = true,
+        },
+        .{
+            .arguments_json = "{\"action\":\"write\",\"session_id\":\"terminal-a\",\"lease\":null,\"write\":{\"kind\":\"text\",\"text\":\"input\"}}",
+            .lease_explicit = false,
+        },
+        .{
+            .arguments_json = "{\"action\":\"write\",\"session_id\":\"terminal-a\",\"lease\":\"null\",\"write\":{\"kind\":\"text\",\"text\":\"input\"}}",
+            .lease_explicit = false,
+        },
+    };
+    for (cases) |case| {
+        const decoded = try decode(.{ .allocator = alloc }, case.arguments_json);
+        switch (decoded) {
+            .failure => |message| {
+                defer alloc.free(message);
+                return error.TestUnexpectedResult;
+            },
+            .input => |input| {
+                defer input.deinit(alloc);
+                try std.testing.expectEqual(
+                    case.lease_explicit,
+                    input.as(OwnedInput).lease_explicit,
+                );
+            },
+        }
+    }
+}
+
+test "terminal decoder keeps complex decode within allocation budget" {
+    var counted = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const alloc = counted.allocator();
+    const args =
+        "{\"action\":\"start\",\"cwd\":\"/workspace\",\"backend\":\"native\",\"command\":\"printf SHOULD_NOT_RUN\",\"return_when\":\"{\\\"kind\\\":\\\"started\\\"}\",\"initial_monitors\":\"[{\\\"condition\\\":{\\\"kind\\\":\\\"path_exists\\\",\\\"path\\\":\\\"/private/tmp/fx-monitor-outside-ready\\\",\\\"check_interval_ms\\\":1000},\\\"notify\\\":{\\\"kind\\\":\\\"on_match\\\"},\\\"lifetime\\\":{\\\"kind\\\":\\\"until_match\\\"}}]\"}";
+    const decoded = try decode(.{ .allocator = alloc }, args);
+    switch (decoded) {
+        .failure => |message| {
+            defer alloc.free(message);
+            return error.TestUnexpectedResult;
+        },
+        .input => |input| input.deinit(alloc),
+    }
+
+    try std.testing.expectEqual(counted.allocations, counted.deallocations);
+    try std.testing.expectEqual(counted.allocated_bytes, counted.freed_bytes);
+    try std.testing.expect(counted.allocations <= 6);
 }
 
 test "terminal presentation maps every action to operation-first labels" {
@@ -1534,7 +1808,7 @@ test "terminal action field ownership is exact for every public action" {
         required: []const []const u8,
         conflicts: []const tool_result_errors.TerminalActionFieldConflict = &.{},
     }{
-        .{ .action = .exec, .fields = &.{ "action", "command", "cwd", "profile", "yield_time_ms" }, .required = &.{ "action", "command" } },
+        .{ .action = .exec, .fields = &.{ "action", "command", "cwd", "profile", "timeout_ms" }, .required = &.{ "action", "command", "timeout_ms" } },
         .{ .action = .start, .fields = &.{ "action", "cwd", "command", "profile", "shell", "backend", "return_when", "wait_ceiling_ms", "dimensions", "initial_monitors" }, .required = &.{"action"}, .conflicts = &.{.{ "profile", "shell" }} },
         .{ .action = .read, .fields = &.{ "action", "session_id", "cursor_segment", "cursor_offset" }, .required = &.{ "action", "session_id", "cursor_segment" } },
         .{ .action = .screen, .fields = &.{ "action", "session_id" }, .required = &.{ "action", "session_id" } },
@@ -1578,39 +1852,57 @@ test "terminal action field ownership is exact for every public action" {
     }
 }
 
-test "exec durable projection is restricted to ACP transports" {
-    var ctx: tool_dispatch.DispatchContext = .{
-        .allocator = std.testing.allocator,
-        .terminal_client = @ptrFromInt(4096),
-        .session_child_capability = @ptrFromInt(4096),
-        .terminal_owner_session_id = "owner",
+test "terminal exec requires a strict bounded integer timeout" {
+    const alloc = std.testing.allocator;
+    const ctx = tool_dispatch.DispatchContext{
+        .allocator = alloc,
+        .workspace_root = "/tmp",
     };
-    try std.testing.expect(!canYieldExec(ctx));
-    ctx.terminal_transport_role = .headless;
-    try std.testing.expect(!canYieldExec(ctx));
-    ctx.terminal_transport_role = .acp;
-    try std.testing.expect(canYieldExec(ctx));
-}
 
-test "exec durable projection waits for exit up to the requested yield budget" {
-    const default_projected = yieldingExecInput(.{
-        .action = .exec,
-        .command = "zig build",
-    });
-    try std.testing.expectEqual(Action.start, default_projected.action);
-    try std.testing.expectEqual(ReturnKind.exit, default_projected.return_when.?.kind);
-    try std.testing.expectEqual(
-        @as(?u64, default_exec_yield_time_ms),
-        default_projected.wait_ceiling_ms,
-    );
-    try std.testing.expectEqual(@as(?u64, null), default_projected.yield_time_ms);
+    for ([_][]const u8{
+        "{\"action\":\"exec\",\"command\":\"pwd\",\"timeout_ms\":1}",
+        "{\"action\":\"exec\",\"command\":\"pwd\",\"timeout_ms\":1000}",
+        "{\"action\":\"exec\",\"command\":\"pwd\",\"timeout_ms\":600000}",
+    }) |arguments_json| {
+        const accepted = try decode(ctx, arguments_json);
+        switch (accepted) {
+            .failure => |message| {
+                defer alloc.free(message);
+                return error.TestUnexpectedResult;
+            },
+            .input => |input| {
+                defer input.deinit(alloc);
+                const validation = try validate(ctx, input);
+                defer if (validation) |message| alloc.free(message);
+                try std.testing.expect(validation == null);
+            },
+        }
+    }
 
-    const custom_projected = yieldingExecInput(.{
-        .action = .exec,
-        .command = "zig build test",
-        .yield_time_ms = 2_500,
-    });
-    try std.testing.expectEqual(@as(?u64, 2_500), custom_projected.wait_ceiling_ms);
+    for ([_][]const u8{
+        "{\"action\":\"exec\",\"command\":\"pwd\"}",
+        "{\"action\":\"exec\",\"command\":\"pwd\",\"timeout_ms\":null}",
+        "{\"action\":\"exec\",\"command\":\"pwd\",\"timeout_ms\":\"1000\"}",
+        "{\"action\":\"exec\",\"command\":\"pwd\",\"timeout_ms\":1.5}",
+        "{\"action\":\"exec\",\"command\":\"pwd\",\"timeout_ms\":true}",
+        "{\"action\":\"exec\",\"command\":\"pwd\",\"timeout_ms\":{}}",
+        "{\"action\":\"exec\",\"command\":\"pwd\",\"timeout_ms\":[]}",
+        "{\"action\":\"exec\",\"command\":\"pwd\",\"timeout_ms\":-1}",
+        "{\"action\":\"exec\",\"command\":\"pwd\",\"timeout_ms\":0}",
+        "{\"action\":\"exec\",\"command\":\"pwd\",\"timeout_ms\":600001}",
+        "{\"action\":\"exec\",\"command\":\"pwd\",\"timeout_ms\":18446744073709551616}",
+    }) |arguments_json| {
+        const rejected = try decode(ctx, arguments_json);
+        switch (rejected) {
+            .failure => |message| alloc.free(message),
+            .input => |input| {
+                defer input.deinit(alloc);
+                const validation = try validate(ctx, input);
+                defer if (validation) |message| alloc.free(message);
+                try std.testing.expect(validation != null);
+            },
+        }
+    }
 }
 
 test "terminal decoder elides known null placeholders but structures unknown null fields" {
@@ -1626,7 +1918,7 @@ test "terminal decoder elides known null placeholders but structures unknown nul
         },
         .input => |input| {
             defer input.deinit(alloc);
-            const value = input.as(OwnedInput).parsed.value;
+            const value = input.as(OwnedInput).value;
             try std.testing.expectEqual(Action.start, value.action);
             try std.testing.expect(value.session_id == null);
         },
@@ -1658,7 +1950,7 @@ test "terminal decoder elides textual null placeholders like real nulls" {
     const alloc = std.testing.allocator;
     const exec_call = try decode(
         .{ .allocator = alloc },
-        "{\"action\":\"exec\",\"command\":\"echo ONE\",\"cwd\":\".\",\"profile\":\"NULL\"," ++
+        "{\"action\":\"exec\",\"command\":\"echo ONE\",\"cwd\":\".\",\"profile\":\"NULL\",\"timeout_ms\":600000," ++
             "\"session_id\":\"null\",\"task_id\":\"null\",\"workspace_root\":\" null \"," ++
             "\"shell\":null,\"backend\":\"null\",\"return_when\":\"null\",\"lease\":\"null\"}",
     );
@@ -1669,7 +1961,7 @@ test "terminal decoder elides textual null placeholders like real nulls" {
         },
         .input => |input| {
             defer input.deinit(alloc);
-            const value = input.as(OwnedInput).parsed.value;
+            const value = input.as(OwnedInput).value;
             try std.testing.expectEqual(Action.exec, value.action);
             try std.testing.expectEqualStrings("echo ONE", value.command.?);
             try std.testing.expectEqualStrings(".", value.cwd.?);
@@ -1692,7 +1984,7 @@ test "terminal decoder elides textual null placeholders like real nulls" {
         },
         .input => |input| {
             defer input.deinit(alloc);
-            const value = input.as(OwnedInput).parsed.value;
+            const value = input.as(OwnedInput).value;
             try std.testing.expectEqual(Action.start, value.action);
             try std.testing.expect(value.shell == null);
             try std.testing.expect(value.write == null);
@@ -1705,7 +1997,7 @@ test "terminal decoder keeps command text that merely contains a null placeholde
     const alloc = std.testing.allocator;
     const accepted = try decode(
         .{ .allocator = alloc },
-        "{\"action\":\"exec\",\"command\":\"echo null\"}",
+        "{\"action\":\"exec\",\"command\":\"echo null\",\"timeout_ms\":600000}",
     );
     switch (accepted) {
         .failure => |message| {
@@ -1716,7 +2008,7 @@ test "terminal decoder keeps command text that merely contains a null placeholde
             defer input.deinit(alloc);
             try std.testing.expectEqualStrings(
                 "echo null",
-                input.as(OwnedInput).parsed.value.command.?,
+                input.as(OwnedInput).value.command.?,
             );
         },
     }
@@ -1726,7 +2018,7 @@ test "terminal decoder reports a textual null placeholder on a required field as
     const alloc = std.testing.allocator;
     const rejected = try decode(
         .{ .allocator = alloc },
-        "{\"action\":\"exec\",\"command\":\"null\"}",
+        "{\"action\":\"exec\",\"command\":\"null\",\"timeout_ms\":600000}",
     );
     switch (rejected) {
         .failure => |message| {
@@ -1994,7 +2286,7 @@ test "terminal decoder normalizes gateway stringified start composites" {
         },
         .input => |input| {
             defer input.deinit(alloc);
-            const parsed = input.as(OwnedInput).parsed.value;
+            const parsed = input.as(OwnedInput).value;
             try std.testing.expectEqual(ReturnKind.started, parsed.return_when.?.kind);
             try std.testing.expectEqual(@as(usize, 1), parsed.initial_monitors.len);
             const monitor = parsed.initial_monitors[0];
@@ -2211,7 +2503,7 @@ test "registered terminal validation enforces action-specific input before execu
     @memset(oversized_command, 'x');
     const oversized_json = try std.fmt.allocPrint(
         std.testing.allocator,
-        "{{\"action\":\"exec\",\"command\":\"{s}\"}}",
+        "{{\"action\":\"exec\",\"command\":\"{s}\",\"timeout_ms\":600000}}",
         .{oversized_command},
     );
     defer std.testing.allocator.free(oversized_json);
@@ -2247,7 +2539,17 @@ test "terminal result mapper adds detail for actionable failures" {
         .{
             .status = .failure,
             .body = "{\"failure\":{\"action\":\"start\",\"code\":\"invalid_request\",\"session_id\":null,\"retryable\":false}}",
-            .expected_detail = null,
+            .expected_detail = "invalid request",
+        },
+        .{
+            .status = .failure,
+            .body = "{\"failure\":{\"action\":\"wait\",\"code\":\"session_not_found\",\"session_id\":\"terminal-missing\",\"retryable\":false}}",
+            .expected_detail = "terminal session not found",
+        },
+        .{
+            .status = .failure,
+            .body = "{\"failure\":{\"action\":\"start\",\"code\":\"capacity_exceeded\",\"session_id\":null,\"retryable\":true}}",
+            .expected_detail = "terminal capacity exceeded",
         },
         .{
             .status = .failure,
@@ -2271,10 +2573,59 @@ test "terminal result mapper adds detail for actionable failures" {
         defer mapped.deinit(alloc);
         try std.testing.expectEqualStrings(case.body, mapped.body);
         if (case.expected_detail) |expected| {
-            try std.testing.expectEqualStrings(expected, mapped.status_detail.?);
+            try std.testing.expectEqualStrings(
+                expected,
+                mapped.status_detail orelse return error.TestExpectedDetail,
+            );
         } else {
             try std.testing.expect(mapped.status_detail == null);
         }
+    }
+}
+
+test "terminal atomic write result combines use bytes with released session facts" {
+    const alloc = std.testing.allocator;
+    const base_facts = contracts.SessionFacts{
+        .session_id = "terminal-a",
+        .lifecycle = .running,
+        .attention = .{ .write_lease = .agent },
+        .backend = .native,
+        .output_cursor = .{ .segment = 1, .offset = 0 },
+        .screen_recovery = .{ .unavailable = .missing },
+    };
+    var used = try stringifyResult(alloc, .{ .success = .{ .write = .{
+        .session = base_facts,
+        .accepted_bytes = 19,
+    } } });
+    defer used.deinit(alloc);
+    var released_facts = base_facts;
+    released_facts.attention.write_lease = .none;
+    var released = try stringifyResult(alloc, .{ .success = .{ .write = .{
+        .session = released_facts,
+        .accepted_bytes = 0,
+    } } });
+    defer released.deinit(alloc);
+
+    var merged = try merge_atomic_write_results(alloc, used, released);
+    defer merged.deinit(alloc);
+    const body = switch (merged) {
+        .success => |value| value,
+        .failure => return error.TestUnexpectedResult,
+    };
+    var parsed = try std.json.parseFromSlice(contracts.Result, alloc, body, .{});
+    defer parsed.deinit();
+    switch (parsed.value) {
+        .success => |success| switch (success) {
+            .write => |write| {
+                try std.testing.expectEqual(@as(u32, 19), write.accepted_bytes);
+                try std.testing.expectEqual(
+                    contracts.WriteLease.none,
+                    write.session.attention.write_lease,
+                );
+            },
+            else => return error.TestUnexpectedResult,
+        },
+        .failure => return error.TestUnexpectedResult,
     }
 }
 
@@ -2303,7 +2654,7 @@ test "terminal completion maps only complete signal capability misses to unsuppo
 
     for (cases) |case| {
         const result = try resultFromCompletion(
-            alloc,
+            .{ .allocator = alloc },
             .start,
             null,
             case.completion,
@@ -2343,7 +2694,7 @@ test "terminal public wait ceiling maps to action-specific Core requests" {
             const request = try semanticRequest(
                 arena,
                 ctx,
-                &input.as(OwnedInput).parsed.value,
+                &input.as(OwnedInput).value,
             );
             switch (request) {
                 .start => |value| try std.testing.expectEqual(
@@ -2369,7 +2720,7 @@ test "terminal public wait ceiling maps to action-specific Core requests" {
             const request = try semanticRequest(
                 arena,
                 ctx,
-                &input.as(OwnedInput).parsed.value,
+                &input.as(OwnedInput).value,
             );
             switch (request) {
                 .wait => |value| try std.testing.expectEqual(
@@ -2536,7 +2887,7 @@ test "terminal public list rejects lifecycle and projects supported filters" {
             const request = try semanticRequest(
                 arena,
                 ctx,
-                &input.as(OwnedInput).parsed.value,
+                &input.as(OwnedInput).value,
             );
             try request.validate();
             switch (request) {
@@ -2568,7 +2919,7 @@ test "terminal public list rejects lifecycle and projects supported filters" {
             const request = try semanticRequest(
                 arena,
                 ctx,
-                &input.as(OwnedInput).parsed.value,
+                &input.as(OwnedInput).value,
             );
             try request.validate();
             switch (request) {
@@ -2598,7 +2949,7 @@ test "terminal public list rejects lifecycle and projects supported filters" {
             const request = try semanticRequest(
                 arena,
                 ctx,
-                &input.as(OwnedInput).parsed.value,
+                &input.as(OwnedInput).value,
             );
             try request.validate();
             switch (request) {
@@ -2630,37 +2981,10 @@ test "terminal public list rejects lifecycle and projects supported filters" {
                 semanticRequest(
                     arena,
                     ctx,
-                    &input.as(OwnedInput).parsed.value,
+                    &input.as(OwnedInput).value,
                 ),
             );
         },
-    }
-}
-
-test "terminal exec validation bounds the durable yield budget" {
-    const alloc = std.testing.allocator;
-    inline for (.{
-        "{\"action\":\"exec\",\"command\":\"zig build\",\"yield_time_ms\":0}",
-        "{\"action\":\"exec\",\"command\":\"zig build\",\"yield_time_ms\":60001}",
-    }) |arguments_json| {
-        const decoded = try decode(.{ .allocator = alloc }, arguments_json);
-        switch (decoded) {
-            .failure => |message| {
-                defer alloc.free(message);
-                return error.TestUnexpectedResult;
-            },
-            .input => |input| {
-                defer input.deinit(alloc);
-                const reason = (try validate(.{
-                    .allocator = alloc,
-                    .workspace_root = "/tmp",
-                }, input)) orelse return error.TestUnexpectedResult;
-                defer alloc.free(reason);
-                try std.testing.expect(
-                    std.mem.find(u8, reason, "InvalidYieldTime") != null,
-                );
-            },
-        }
     }
 }
 

@@ -3,6 +3,7 @@ const debug_trace = @import("../shared/debug_trace.zig");
 const generation_fact_codec = @import("generation_fact_codec.zig");
 const io_mod = @import("../shared/io.zig");
 const types = @import("../shared/types.zig");
+const stream_provider = @import("../agent/stream_provider.zig");
 pub const usage_report = @import("usage_report.zig");
 
 const Allocator = std.mem.Allocator;
@@ -131,6 +132,41 @@ pub const InvocationObservation = struct {
                 .{ self.sequence, terminal_label },
             );
         }
+    }
+
+    /// Adapts the shared stream outcome to BYOK's direct-provider ledger.
+    /// Deferred Gateway reconciliation is intentionally unsupported in this fork.
+    pub fn complete(
+        self: InvocationObservation,
+        alloc: Allocator,
+        model: []const u8,
+        completion: types.ModelCompletion,
+        outcome: stream_provider.UsageOutcome,
+    ) !void {
+        if (completion.delivery_ambiguous) {
+            return self.fail(.ambiguous_delivery);
+        }
+        switch (outcome) {
+            .unavailable => |availability| return self.fail(switch (availability) {
+                .unbilled => .unbilled,
+                .possibly_billed => .possibly_billed_without_usage,
+            }),
+            .exact => {},
+        }
+        const direct_model, const direct_usage = if (completion.billing) |billing| .{
+            billing.model,
+            types.Usage{
+                .input_tokens = billing.input_tokens,
+                .output_tokens = billing.output_tokens,
+                .cached_input_tokens = billing.cache_read_tokens,
+                .cache_write_input_tokens = billing.cache_write_tokens,
+                .reasoning_output_tokens = billing.reasoning_tokens,
+            },
+        } else .{ model, completion.usage };
+        return self.completeDirect(alloc, direct_model, direct_usage, .{
+            .http_ok = true,
+            .terminal_finish_reason = completion.finish_reason,
+        });
     }
 
     fn elapsedMs(self: InvocationObservation) u64 {

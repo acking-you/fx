@@ -13,6 +13,7 @@ const permission_gate = @import("../permissions/permission_gate.zig");
 const change_tracker = @import("../workspace/change_tracker.zig");
 const read_tracker_mod = @import("../workspace/read_tracker.zig");
 const session_child_store = @import("../session/session_child_store.zig");
+const command_replay_store = @import("../session/command_replay_store.zig");
 const command_runner = @import("../execution/command_runner.zig");
 const subagent_tool_provider = @import("../subagent/tool_provider.zig");
 const text_utils = @import("../shared/text_utils.zig");
@@ -171,6 +172,7 @@ pub const RunCommandRequest = struct {
     command: []const u8,
     resolved_cwd: []const u8,
     environment: command_environment.Environment,
+    timeout_ms: u64,
 };
 
 pub const RunCommandBackendFn = *const fn (
@@ -227,6 +229,7 @@ pub const DispatchContext = struct {
     command_artifact_dir: ?[]const u8 = null,
     tool_result_dir: ?[]const u8 = null,
     session_child_capability: ?*session_child_store.SessionChildCapability = null,
+    ephemeral_command_replay: ?*command_replay_store.EphemeralStore = null,
     terminal_client: ?*terminal_client_runtime.Runtime = null,
     terminal_owner_session_id: ?[]const u8 = null,
     terminal_transport_role: terminal_contracts.TransportRole = .interactive,
@@ -439,6 +442,7 @@ pub const Tool = struct {
     name: []const u8,
     description: []const u8,
     model_schema: model_tool_schema.FunctionSchema,
+    model_visible: bool = true,
     write_provider_advertisement_fn: ?WriteProviderAdvertisementFn = null,
     /// Set when the provider runs the tool instead of fx dispatch. Such a tool
     /// never reaches a call-time permission check, so advertisement is its only
