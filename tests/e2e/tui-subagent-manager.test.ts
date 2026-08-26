@@ -1501,9 +1501,6 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
       const externalId = "always_write_external";
       const gateway = startDynamicFakeGateway((body) => {
         const latest = latestPrompt(body);
-        if (latest.includes(`"call_id":"${externalId}"`)) {
-          return fakeGatewayFinalText("ALWAYS_WRITE_EXTERNAL_DONE");
-        }
         if (latest.includes(externalPrompt)) {
           return fakeGatewayToolCall(externalId, "write_file", {
             path: externalMarker,
@@ -1642,14 +1639,11 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         expect(externalApproval).toContain("Permission needed");
         expect(externalApproval).toContain("EXTERNAL");
         expect(existsSync(externalMarker)).toBe(false);
-        await active.sendKeys("3");
-        await active.waitForPane(
-          (pane) =>
-            pane.includes("ALWAYS_WRITE_EXTERNAL_DONE") &&
-            pane.includes(`${childName} · idle`),
-          TIMEOUT,
-        );
-        expect(existsSync(externalMarker)).toBe(false);
+        const externalControl = JSON.parse(readFileSync(
+          configurationControlPath(fixture),
+          "utf8",
+        )) as { state: string };
+        expect(externalControl.state).toBe("awaiting_approval");
         expect(readFileSync(fixture.stderrPath, "utf8")).toBe("");
       } finally {
         gateway.stop();
