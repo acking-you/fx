@@ -387,13 +387,14 @@ test "direct review settles every post-admission outcome before projection" {
         outcome: std.meta.Tag(permission_auto_classifier.TransportOutcome),
         billing: session_usage.Availability,
         request_count: ?u64,
+        publication_backlog: usize,
     }{
-        .{ .payload = "cancelled", .outcome = .cancelled, .billing = .incomplete, .request_count = 0 },
-        .{ .payload = "timed_out", .outcome = .timed_out, .billing = .incomplete, .request_count = 0 },
-        .{ .payload = "provider_failure", .outcome = .permanent_failure, .billing = .complete, .request_count = 0 },
-        .{ .payload = "malformed", .outcome = .completion, .billing = .incomplete, .request_count = 0 },
-        .{ .payload = "cancel_after_completion", .outcome = .cancelled, .billing = .complete, .request_count = 1 },
-        .{ .payload = "provider_error", .outcome = .transient_failure, .billing = .complete, .request_count = 1 },
+        .{ .payload = "cancelled", .outcome = .cancelled, .billing = .incomplete, .request_count = 0, .publication_backlog = 0 },
+        .{ .payload = "timed_out", .outcome = .timed_out, .billing = .incomplete, .request_count = 0, .publication_backlog = 0 },
+        .{ .payload = "provider_failure", .outcome = .permanent_failure, .billing = .complete, .request_count = 0, .publication_backlog = 0 },
+        .{ .payload = "malformed", .outcome = .completion, .billing = .incomplete, .request_count = 0, .publication_backlog = 0 },
+        .{ .payload = "cancel_after_completion", .outcome = .cancelled, .billing = .complete, .request_count = 1, .publication_backlog = 1 },
+        .{ .payload = "provider_error", .outcome = .transient_failure, .billing = .complete, .request_count = 1, .publication_backlog = 1 },
     };
 
     for (cases) |case| {
@@ -430,6 +431,9 @@ test "direct review settles every post-admission outcome before projection" {
         try std.testing.expectEqual(case.request_count, snapshot.request_count);
         try std.testing.expectEqual(@as(u64, 2), snapshot.next_sequence);
         try std.testing.expectEqual(@as(u64, 1), snapshot.settled_through_sequence);
-        try std.testing.expectEqual(@as(usize, 1), snapshot.publication_backlog.len);
+        try std.testing.expectEqual(
+            case.publication_backlog,
+            snapshot.publication_backlog.len,
+        );
     }
 }

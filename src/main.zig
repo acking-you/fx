@@ -3901,6 +3901,7 @@ test {
     _ = @import("gateway/openai_codex_models.zig");
     _ = @import("gateway/openai_codex.zig");
     _ = @import("gateway/openai_codex_permission_reviewer.zig");
+    _ = @import("gateway/responses_permission_reviewer.zig");
     _ = @import("gateway/openai_codex_search.zig");
     _ = @import("gateway/openai_codex_usage.zig");
     _ = @import("core/auth/grok_session.zig");
