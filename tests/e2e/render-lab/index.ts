@@ -15,6 +15,14 @@ import {
 import { dirname, join, resolve } from "node:path";
 import { FX_BIN, REPO_ROOT } from "../../evals/eval-helpers";
 import {
+  fakeGatewayFinalText,
+  fakeGatewayPermissionDecision,
+  fakeGatewaySse,
+  responseCompleted,
+  responseFunctionCall,
+  responseTextDelta,
+} from "../tmux-helpers";
+import {
   ACTIVE_TOOL_MARKER,
   analyzeRun,
   commandMoreCount,
@@ -77,43 +85,23 @@ type ScenarioContext = {
 type FxLaunchOptions = {
   stderrPath?: string;
   gatewayApiKey?: string;
-  gatewayChatUrl?: string;
-  gatewayModelsUrl?: string;
+  responsesBaseUrl?: string;
   permissionMode?: "ask" | "auto" | "yolo";
 };
 
 type LocalGatewayFixture = {
-  chatUrl: string;
-  modelsUrl: string;
+  baseUrl: string;
   requests: string[];
   releaseResponse(): void;
   stop(): void;
 };
 
-function gatewaySse(events: object[]): Response {
-  return new Response(
-    `${events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("")}data: [DONE]\n\n`,
-    { headers: { "content-type": "text/event-stream" } },
-  );
-}
-
 function permissionDecisionResponse(): Response {
-  return gatewaySse([
-    {
-      type: "tool-call",
-      toolCallId: "render_lab_permission_decision_1",
-      toolName: "permission_decision",
-      input: {
-        risk: "low",
-        decision: "clear",
-        rationale: "deterministic render-lab decision",
-      },
-    },
-    {
-      type: "finish",
-      finishReason: { unified: "tool-calls", raw: "tool-calls" },
-    },
-  ]);
+  return fakeGatewayPermissionDecision(
+    "clear",
+    "render_lab_permission_decision_1",
+    "deterministic render-lab decision",
+  );
 }
 
 const SCENARIO = "same-shell-relaunch";
@@ -130,8 +118,8 @@ const OBSERVABILITY_FINAL_MARKER = "OBSERVABILITY_FINAL_RESPONSE";
 const OBSERVABILITY_PERMISSION_PROMPT = "Would you like to run the following command?";
 const OBSERVABILITY_PERMISSION_REVIEW = "Permission needed";
 const OBSERVABILITY_TOOL_COMMAND = "touch render-lab-observability-approved.txt";
-const LOCAL_GATEWAY_CHAT_PATH = "/v3/ai/language-model";
-const LOCAL_GATEWAY_MODELS_PATH = "/coding-agent/v1/models";
+const LOCAL_GATEWAY_RESPONSES_PATH = "/v1/responses";
+const LOCAL_GATEWAY_MODELS_PATH = "/v1/models";
 const DEFAULT_BENCH_SIZES: RenderLabTerminalSize[] = [
   { cols: 80, rows: 24 },
   { cols: 120, rows: 40 },
@@ -448,8 +436,7 @@ async function runActiveToolPlacement(
     await launchFx(context, session, "active-tool", {
       stderrPath: join(artifactDir, "stderr.log"),
       gatewayApiKey: "render-lab-local-gateway-key",
-      gatewayChatUrl: gateway.chatUrl,
-      gatewayModelsUrl: gateway.modelsUrl,
+      responsesBaseUrl: gateway.baseUrl,
     });
     await submitSlashCommand(
       context,
@@ -462,7 +449,7 @@ async function runActiveToolPlacement(
     await session.sendText("exercise one active command placement");
     await waitForLocalGatewayRequest(
       gateway.requests,
-      `POST ${LOCAL_GATEWAY_CHAT_PATH}`,
+      `POST ${LOCAL_GATEWAY_RESPONSES_PATH}`,
       10_000,
     );
     await session.waitForPane(
@@ -504,7 +491,7 @@ async function runActiveToolPlacement(
 
     await waitForLocalGatewayRequestCount(
       gateway.requests,
-      `POST ${LOCAL_GATEWAY_CHAT_PATH}`,
+      `POST ${LOCAL_GATEWAY_RESPONSES_PATH}`,
       2,
       30_000,
     );
@@ -583,10 +570,10 @@ async function runActiveToolPlacement(
     session = null;
 
     const postRequests = gateway.requests.filter(
-      (request) => request === `POST ${LOCAL_GATEWAY_CHAT_PATH}`,
+      (request) => request === `POST ${LOCAL_GATEWAY_RESPONSES_PATH}`,
     );
     if (postRequests.length !== 2) {
-      throw new Error(`expected two gateway chat requests, found ${postRequests.length}`);
+      throw new Error(`expected two Responses requests, found ${postRequests.length}`);
     }
 
     await writeReplaySummary(manifest);
@@ -692,13 +679,12 @@ async function runUserCardResizeReplayScrollback(
     await launchFx(context, session, "user-card", {
       stderrPath: join(artifactDir, "stderr.log"),
       gatewayApiKey: "render-lab-local-gateway-key",
-      gatewayChatUrl: gateway.chatUrl,
-      gatewayModelsUrl: gateway.modelsUrl,
+      responsesBaseUrl: gateway.baseUrl,
     });
     await session.sendText(prompt);
     await waitForLocalGatewayRequest(
       gateway.requests,
-      `POST ${LOCAL_GATEWAY_CHAT_PATH}`,
+      `POST ${LOCAL_GATEWAY_RESPONSES_PATH}`,
       10_000,
     );
     gateway.releaseResponse();
@@ -844,14 +830,13 @@ async function runTuiObservabilityGauntlet(
     await launchFx(context, session, "observability", {
       stderrPath: join(artifactDir, "stderr.log"),
       gatewayApiKey: "render-lab-local-gateway-key",
-      gatewayChatUrl: gateway.chatUrl,
-      gatewayModelsUrl: gateway.modelsUrl,
+      responsesBaseUrl: gateway.baseUrl,
       permissionMode: "ask",
     });
     await session.sendText(prompt);
     await waitForLocalGatewayRequest(
       gateway.requests,
-      `POST ${LOCAL_GATEWAY_CHAT_PATH}`,
+      `POST ${LOCAL_GATEWAY_RESPONSES_PATH}`,
       10_000,
     );
     await session.waitForPane(
@@ -879,7 +864,7 @@ async function runTuiObservabilityGauntlet(
     await session.sendLiteral("1");
     await waitForLocalGatewayRequestCount(
       gateway.requests,
-      `POST ${LOCAL_GATEWAY_CHAT_PATH}`,
+      `POST ${LOCAL_GATEWAY_RESPONSES_PATH}`,
       2,
       20_000,
     );
@@ -929,10 +914,10 @@ async function runTuiObservabilityGauntlet(
     session = null;
 
     const postRequests = gateway.requests.filter(
-      (request) => request === `POST ${LOCAL_GATEWAY_CHAT_PATH}`,
+      (request) => request === `POST ${LOCAL_GATEWAY_RESPONSES_PATH}`,
     );
     if (postRequests.length !== 2) {
-      throw new Error(`expected two gateway chat requests, found ${postRequests.length}`);
+      throw new Error(`expected two Responses requests, found ${postRequests.length}`);
     }
 
     await writeReplaySummary(manifest);
@@ -1123,8 +1108,7 @@ async function runStartupScrollbackOverflow(
     await launchFx(context, session, "overflow", {
       stderrPath: join(artifactDir, "stderr.log"),
       gatewayApiKey: "render-lab-local-gateway-key",
-      gatewayChatUrl: gateway.chatUrl,
-      gatewayModelsUrl: gateway.modelsUrl,
+      responsesBaseUrl: gateway.baseUrl,
     });
     await capture(context, session, "overflow-initial-bottom-anchored-frame");
 
@@ -1142,7 +1126,11 @@ async function runStartupScrollbackOverflow(
     await capture(context, session, "overflow-long-prompt-editor-tail-visible");
 
     await session.sendKeys("Enter");
-    await waitForLocalGatewayRequest(gateway.requests, `POST ${LOCAL_GATEWAY_CHAT_PATH}`, 10_000);
+    await waitForLocalGatewayRequest(
+      gateway.requests,
+      `POST ${LOCAL_GATEWAY_RESPONSES_PATH}`,
+      10_000,
+    );
     await session.waitForPane(
       (pane) =>
         pane.includes(promptTail) &&
@@ -1628,8 +1616,9 @@ async function launchFx(
 ): Promise<void> {
   const environment = [
     options.gatewayApiKey ? `OPENAI_API_KEY=${shQuote(options.gatewayApiKey)}` : null,
-    options.gatewayChatUrl ? `FX_E2E_GATEWAY_CHAT_URL=${shQuote(options.gatewayChatUrl)}` : null,
-    options.gatewayModelsUrl ? `FX_E2E_GATEWAY_MODELS_URL=${shQuote(options.gatewayModelsUrl)}` : null,
+    options.responsesBaseUrl
+      ? `FX_RESPONSES_BASE_URL=${shQuote(options.responsesBaseUrl)}`
+      : null,
     options.permissionMode ? `FX_PERMISSION_MODE=${shQuote(options.permissionMode)}` : null,
   ].filter((entry): entry is string => entry !== null).join(" ");
   const environmentPrefix = environment.length > 0 ? `${environment} ` : "";
@@ -1661,50 +1650,29 @@ function startLocalGatewayFixture(expectedPromptTail: string): LocalGatewayFixtu
         return Response.json({
           data: [
             {
-              id: "anthropic/claude-opus-4.7",
-              type: "language",
-              released: 1,
-              tags: ["tool-use"],
+              id: "gpt-5.4",
+              object: "model",
+              owned_by: "openai",
             },
           ],
         });
       }
 
-      if (request.method === "POST" && url.pathname === LOCAL_GATEWAY_CHAT_PATH) {
+      if (request.method === "POST" && url.pathname === LOCAL_GATEWAY_RESPONSES_PATH) {
         const body = await request.text();
         if (!body.includes(expectedPromptTail)) {
           return new Response("prompt tail missing", { status: 422 });
         }
         await responseGate;
-        const sse = [
-          `data: ${JSON.stringify({ type: "text-delta", id: "render-lab", delta: LOCAL_GATEWAY_COMPLETION })}`,
-          "",
-          `data: ${JSON.stringify({
-            type: "finish",
-            finishReason: { unified: "stop", raw: "stop" },
-            usage: {
-              inputTokens: { total: 1 },
-              outputTokens: { total: 1 },
-            },
-          })}`,
-          "",
-          "data: [DONE]",
-          "",
-        ].join("\n");
-        return new Response(sse, {
-          headers: {
-            "content-type": "text/event-stream",
-          },
-        });
+        return fakeGatewayFinalText(LOCAL_GATEWAY_COMPLETION);
       }
 
       return new Response("not found", { status: 404 });
     },
   });
-  const baseUrl = `http://127.0.0.1:${server.port}`;
+  const baseUrl = `http://127.0.0.1:${server.port}/v1`;
   return {
-    chatUrl: `${baseUrl}${LOCAL_GATEWAY_CHAT_PATH}`,
-    modelsUrl: `${baseUrl}${LOCAL_GATEWAY_MODELS_PATH}`,
+    baseUrl,
     requests,
     releaseResponse() {
       if (responseReleased) return;
@@ -1719,7 +1687,7 @@ function startLocalGatewayFixture(expectedPromptTail: string): LocalGatewayFixtu
 
 function startActiveToolGatewayFixture(): LocalGatewayFixture {
   const requests: string[] = [];
-  let chatRequestCount = 0;
+  let responsesRequestCount = 0;
   let responseReleased = false;
   let releaseResponseGate!: () => void;
   const responseGate = new Promise<void>((resolve) => {
@@ -1732,44 +1700,37 @@ function startActiveToolGatewayFixture(): LocalGatewayFixture {
       const url = new URL(request.url);
       if (request.method === "GET" && url.pathname === LOCAL_GATEWAY_MODELS_PATH) {
         requests.push(`${request.method} ${url.pathname}`);
-        return Response.json({ data: [{ id: "anthropic/claude-opus-4.7", type: "language", released: 1, tags: ["tool-use"] }] });
+        return Response.json({
+          data: [{ id: "gpt-5.4", object: "model", owned_by: "openai" }],
+        });
       }
-      if (request.method === "POST" && url.pathname === LOCAL_GATEWAY_CHAT_PATH) {
+      if (request.method === "POST" && url.pathname === LOCAL_GATEWAY_RESPONSES_PATH) {
         const body = await request.text();
         if (body.includes("\"permission_decision\"")) {
           return permissionDecisionResponse();
         }
         requests.push(`${request.method} ${url.pathname}`);
-        chatRequestCount += 1;
-        if (chatRequestCount === 2) await responseGate;
-        const sse = chatRequestCount === 1
-          ? [
-              `data: ${JSON.stringify({ type: "tool-input-start", id: "active_tool_1", toolName: "terminal" })}`,
-              "",
-              `data: ${JSON.stringify({ type: "tool-call", toolCallId: "active_tool_1", toolName: "terminal", input: { action: "exec", command: "sleep 1; i=1; while [ \"$i\" -le 32 ]; do printf 'ACTIVE_TOOL_LINE_%02d\\n' \"$i\"; i=$((i+1)); sleep 0.03; done; while [ ! -f .active-tool-release ]; do sleep 0.05; done", timeout_ms: 600_000 } })}`,
-              "",
-              `data: ${JSON.stringify({ type: "finish", finishReason: { unified: "tool-calls", raw: "tool-calls" }, usage: { inputTokens: { total: 1 }, outputTokens: { total: 1 } } })}`,
-              "",
-              "data: [DONE]",
-              "",
-            ].join("\n")
-          : [
-              `data: ${JSON.stringify({ type: "text-delta", id: "render-lab", delta: LOCAL_GATEWAY_COMPLETION })}`,
-              "",
-              `data: ${JSON.stringify({ type: "finish", finishReason: { unified: "stop", raw: "stop" }, usage: { inputTokens: { total: 1 }, outputTokens: { total: 1 } } })}`,
-              "",
-              "data: [DONE]",
-              "",
-            ].join("\n");
-        return new Response(sse, { headers: { "content-type": "text/event-stream" } });
+        responsesRequestCount += 1;
+        if (responsesRequestCount === 2) await responseGate;
+        if (responsesRequestCount === 1) {
+          return fakeGatewaySse([
+            ...responseFunctionCall("active_tool_1", "terminal", {
+              action: "exec",
+              command:
+                "sleep 1; i=1; while [ \"$i\" -le 32 ]; do printf 'ACTIVE_TOOL_LINE_%02d\\n' \"$i\"; i=$((i+1)); sleep 0.03; done; while [ ! -f .active-tool-release ]; do sleep 0.05; done",
+              timeout_ms: 600_000,
+            }),
+            responseCompleted(1, 1),
+          ]);
+        }
+        return fakeGatewayFinalText(LOCAL_GATEWAY_COMPLETION);
       }
       return new Response("not found", { status: 404 });
     },
   });
-  const baseUrl = `http://127.0.0.1:${server.port}`;
+  const baseUrl = `http://127.0.0.1:${server.port}/v1`;
   return {
-    chatUrl: `${baseUrl}${LOCAL_GATEWAY_CHAT_PATH}`,
-    modelsUrl: `${baseUrl}${LOCAL_GATEWAY_MODELS_PATH}`,
+    baseUrl,
     requests,
     releaseResponse() {
       if (responseReleased) return;
@@ -1784,7 +1745,7 @@ function startObservabilityGatewayFixture(
   expectedPromptTail: string,
 ): LocalGatewayFixture {
   const requests: string[] = [];
-  let chatRequestCount = 0;
+  let responsesRequestCount = 0;
   let responseReleased = false;
   let releaseResponseGate!: () => void;
   const responseGate = new Promise<void>((resolve) => {
@@ -1812,73 +1773,47 @@ function startObservabilityGatewayFixture(
         return Response.json({
           data: [
             {
-              id: "anthropic/claude-opus-4.7",
-              type: "language",
-              released: 1,
-              tags: ["tool-use"],
+              id: "gpt-5.4",
+              object: "model",
+              owned_by: "openai",
             },
           ],
         });
       }
-      if (request.method === "POST" && url.pathname === LOCAL_GATEWAY_CHAT_PATH) {
+      if (request.method === "POST" && url.pathname === LOCAL_GATEWAY_RESPONSES_PATH) {
         const body = await request.text();
         requests.push(`${request.method} ${url.pathname}`);
-        chatRequestCount += 1;
-        if (chatRequestCount === 1 && !body.includes(expectedPromptTail)) {
+        responsesRequestCount += 1;
+        if (responsesRequestCount === 1 && !body.includes(expectedPromptTail)) {
           return new Response("prompt tail missing", { status: 422 });
         }
-        if (chatRequestCount === 2) await responseGate;
-        const events = chatRequestCount === 1
+        if (responsesRequestCount === 2) await responseGate;
+        const events = responsesRequestCount === 1
           ? [
-              {
-                type: "text-delta",
-                id: "observability-transcript",
-                delta: transcript,
-              },
-              {
-                type: "tool-input-start",
-                id: "observability-tool-1",
-                toolName: "terminal",
-              },
-              {
-                type: "tool-call",
-                toolCallId: "observability-tool-1",
-                toolName: "terminal",
-                input: { action: "exec", command, timeout_ms: 600_000 },
-              },
-              {
-                type: "finish",
-                finishReason: { unified: "tool-calls", raw: "tool-calls" },
-                usage: {
-                  inputTokens: { total: 1 },
-                  outputTokens: { total: 1 },
-                },
-              },
+              responseTextDelta(transcript, "observability-transcript"),
+              ...responseFunctionCall(
+                "observability-tool-1",
+                "terminal",
+                { action: "exec", command, timeout_ms: 600_000 },
+                1,
+              ),
+              responseCompleted(1, 1),
             ]
           : [
-              {
-                type: "text-delta",
-                id: "observability-final",
-                delta: OBSERVABILITY_FINAL_MARKER,
-              },
-              {
-                type: "finish",
-                finishReason: { unified: "stop", raw: "stop" },
-                usage: {
-                  inputTokens: { total: 1 },
-                  outputTokens: { total: 1 },
-                },
-              },
+              responseTextDelta(
+                OBSERVABILITY_FINAL_MARKER,
+                "observability-final",
+              ),
+              responseCompleted(1, 1),
             ];
-        return gatewaySse(events);
+        return fakeGatewaySse(events);
       }
       return new Response("not found", { status: 404 });
     },
   });
-  const baseUrl = `http://127.0.0.1:${server.port}`;
+  const baseUrl = `http://127.0.0.1:${server.port}/v1`;
   return {
-    chatUrl: `${baseUrl}${LOCAL_GATEWAY_CHAT_PATH}`,
-    modelsUrl: `${baseUrl}${LOCAL_GATEWAY_MODELS_PATH}`,
+    baseUrl,
     requests,
     releaseResponse() {
       if (responseReleased) return;
@@ -1892,7 +1827,10 @@ function startObservabilityGatewayFixture(
 }
 
 function assertLocalGatewayRequests(requests: string[]): void {
-  for (const expected of [`GET ${LOCAL_GATEWAY_MODELS_PATH}`, `POST ${LOCAL_GATEWAY_CHAT_PATH}`]) {
+  for (const expected of [
+    `GET ${LOCAL_GATEWAY_MODELS_PATH}`,
+    `POST ${LOCAL_GATEWAY_RESPONSES_PATH}`,
+  ]) {
     if (!requests.includes(expected)) {
       throw new Error(`local gateway request missing: ${expected}\n${requests.join("\n")}`);
     }

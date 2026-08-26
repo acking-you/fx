@@ -88,8 +88,7 @@ async function startFx(
       ...(gateway
         ? {
           OPENAI_API_KEY: "fake-input-navigation-key",
-          FX_GATEWAY_BASE_URL: gateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+          FX_RESPONSES_BASE_URL: gateway.baseUrl,
           FX_MODEL: FAKE_GATEWAY_MODEL,
           FX_AUTO_UPGRADE: "0",
         }
@@ -131,6 +130,29 @@ function largeTabbedPaste(): string {
 function expectCleanStderr(): void {
   if (!stderrPath) throw new Error("stderrPath was not initialized");
   expect(readFileSync(stderrPath, "utf8")).toBe("");
+}
+
+function nestedText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) return content.map(nestedText).join("");
+  if (content && typeof content === "object") {
+    const value = content as Record<string, unknown>;
+    return [
+      nestedText(value.text),
+      nestedText(value.value),
+      nestedText(value.content),
+    ].join("");
+  }
+  return "";
+}
+
+function latestUserText(body: string): string {
+  const request = JSON.parse(body) as {
+    input: Array<{ role?: string; content?: unknown }>;
+  };
+  return nestedText(
+    request.input.findLast((message) => message.role === "user")?.content,
+  );
 }
 
 async function typeLiteral(active: TmuxSession, text: string): Promise<void> {
@@ -581,13 +603,7 @@ tmuxTest(
     expectCleanStderr();
     expect(gateway?.requests).toHaveLength(1);
 
-    const messages = JSON.parse(gateway!.requests[0]!.body).prompt as Array<{
-      role: string;
-      content: Array<{ type: string; text?: string }>;
-    }>;
-    const finalUser = messages[messages.length - 1];
-    expect(finalUser?.role).toBe("user");
-    expect(finalUser?.content[0]?.text).toBe(prompt);
+    expect(latestUserText(gateway!.requests[0]!.body)).toBe(prompt);
 
     const scrollback = await active.captureFullScrollback();
     const promptTail = scrollback.indexOf("TAB_START_0085");
@@ -1029,9 +1045,9 @@ tmuxTest(
       ],
       {
         models: [{
-          id: FAKE_GATEWAY_MODEL,
-          type: "language",
-          tags: ["vision", "file-input", "tool-use"],
+          id: "gpt-5",
+          object: "model",
+          owned_by: "openai",
         }],
       },
     );
@@ -1042,9 +1058,7 @@ tmuxTest(
       env: {
         HOME: testHome,
         OPENAI_API_KEY: "fake-image-input-key",
-        FX_GATEWAY_BASE_URL: localGateway.baseUrl,
-        FX_GATEWAY_CHAT_URL: localGateway.chatUrl,
-        FX_E2E_GATEWAY_MODELS_URL: `${localGateway.baseUrl}/coding-agent/v1/models`,
+        FX_RESPONSES_BASE_URL: localGateway.baseUrl,
         FX_MODEL: FAKE_GATEWAY_MODEL,
         FX_AUTO_UPGRADE: "0",
       },
@@ -1062,7 +1076,7 @@ tmuxTest(
       READY_TIMEOUT,
     );
     expect(localGateway.requests).toHaveLength(1);
-    expect(localGateway.requests[0]?.body).toContain('"type":"file"');
+    expect(localGateway.requests[0]?.body).toContain('"type":"input_image"');
     expect(localGateway.requests[0]?.body).not.toContain(scopedImage);
     expectScopedContext(localGateway.requests[0]!.body);
 
@@ -1077,7 +1091,7 @@ tmuxTest(
       READY_TIMEOUT,
     );
     expect(localGateway.requests).toHaveLength(2);
-    expect(localGateway.requests[1]?.body).toContain('"type":"file"');
+    expect(localGateway.requests[1]?.body).toContain('"type":"input_image"');
     expect(localGateway.requests[1]?.body).not.toContain(scopedImage);
     expectScopedContext(localGateway.requests[1]!.body);
 
@@ -1095,7 +1109,7 @@ tmuxTest(
       READY_TIMEOUT,
     );
     expect(localGateway.requests).toHaveLength(3);
-    expect(localGateway.requests[2]?.body).toContain('"type":"file"');
+    expect(localGateway.requests[2]?.body).toContain('"type":"input_image"');
     expect(localGateway.requests[2]?.body).not.toContain(scopedImage);
     expectScopedContext(localGateway.requests[2]!.body);
 
@@ -1194,9 +1208,9 @@ tmuxTest(
       [fakeGatewayFinalText("Both images received.")],
       {
         models: [{
-          id: FAKE_GATEWAY_MODEL,
-          type: "language",
-          tags: ["vision", "file-input", "tool-use"],
+          id: "gpt-5",
+          object: "model",
+          owned_by: "openai",
         }],
       },
     );
@@ -1206,9 +1220,7 @@ tmuxTest(
       env: {
         HOME: testHome,
         OPENAI_API_KEY: "fake-repeated-image-key",
-        FX_GATEWAY_BASE_URL: localGateway.baseUrl,
-        FX_GATEWAY_CHAT_URL: localGateway.chatUrl,
-        FX_E2E_GATEWAY_MODELS_URL: `${localGateway.baseUrl}/coding-agent/v1/models`,
+        FX_RESPONSES_BASE_URL: localGateway.baseUrl,
         FX_MODEL: FAKE_GATEWAY_MODEL,
         FX_AUTO_UPGRADE: "0",
       },
@@ -1254,14 +1266,14 @@ tmuxTest(
 
     expect(localGateway.requests).toHaveLength(1);
     const body = localGateway.requests[0]!.body;
-    const fileParts = body.match(/"type":"file"/g) ?? [];
-    expect(fileParts).toHaveLength(2);
+    const imageParts = body.match(/"type":"input_image"/g) ?? [];
+    expect(imageParts).toHaveLength(2);
     expect(body).not.toContain("/image ");
     expect(body).not.toContain(first);
     expect(body).not.toContain(second);
     expect(body).not.toContain(workspace);
     expect(body).not.toContain("file://");
-    expect(body).not.toContain("data:image");
+    expect(body).toContain("data:image/png;base64,");
     expect(body).toContain("describe both");
 
     const fullScrollback = await active.captureFullScrollback();
@@ -1304,9 +1316,9 @@ tmuxTest(
       ],
       {
         models: [{
-          id: FAKE_GATEWAY_MODEL,
-          type: "language",
-          tags: ["vision", "file-input", "tool-use"],
+          id: "gpt-5",
+          object: "model",
+          owned_by: "openai",
         }],
       },
     );
@@ -1316,9 +1328,7 @@ tmuxTest(
       env: {
         HOME: testHome,
         OPENAI_API_KEY: "fake-image-id-key",
-        FX_GATEWAY_BASE_URL: localGateway.baseUrl,
-        FX_GATEWAY_CHAT_URL: localGateway.chatUrl,
-        FX_E2E_GATEWAY_MODELS_URL: `${localGateway.baseUrl}/coding-agent/v1/models`,
+        FX_RESPONSES_BASE_URL: localGateway.baseUrl,
         FX_MODEL: FAKE_GATEWAY_MODEL,
         FX_AUTO_UPGRADE: "0",
       },
@@ -1369,7 +1379,7 @@ tmuxTest(
     for (const body of [firstBody, secondBody]) {
       expect(body).not.toContain(workspace);
       expect(body).not.toContain("file://");
-      expect(body).not.toContain("data:image");
+      expect(body).toContain("data:image/png;base64,");
     }
 
     expectCleanStderr();
@@ -1395,9 +1405,9 @@ tmuxTest(
       [fakeGatewayFinalText("YANKED_IMAGES_OK")],
       {
         models: [{
-          id: FAKE_GATEWAY_MODEL,
-          type: "language",
-          tags: ["vision", "file-input", "tool-use"],
+          id: "gpt-5",
+          object: "model",
+          owned_by: "openai",
         }],
       },
     );
@@ -1407,9 +1417,7 @@ tmuxTest(
       env: {
         HOME: testHome,
         OPENAI_API_KEY: "fake-image-yank-key",
-        FX_GATEWAY_BASE_URL: localGateway.baseUrl,
-        FX_GATEWAY_CHAT_URL: localGateway.chatUrl,
-        FX_E2E_GATEWAY_MODELS_URL: `${localGateway.baseUrl}/coding-agent/v1/models`,
+        FX_RESPONSES_BASE_URL: localGateway.baseUrl,
         FX_MODEL: FAKE_GATEWAY_MODEL,
         FX_AUTO_UPGRADE: "0",
       },
@@ -1441,7 +1449,7 @@ tmuxTest(
 
     expect(localGateway.requests).toHaveLength(1);
     const body = localGateway.requests[0]!.body;
-    expect(body.match(/"type":"file"/g) ?? []).toHaveLength(2);
+    expect(body.match(/"type":"input_image"/g) ?? []).toHaveLength(2);
     expect(body.split(originalBase64).length - 1).toBe(2);
     expect(body).toContain("[Image #2][Image #3] inspect both yanks");
     expect(body).not.toContain(source);
@@ -1464,9 +1472,9 @@ tmuxTest(
       [],
       {
         models: [{
-          id: FAKE_GATEWAY_MODEL,
-          type: "language",
-          tags: ["vision", "file-input", "tool-use"],
+          id: "gpt-5",
+          object: "model",
+          owned_by: "openai",
         }],
       },
     );
@@ -1476,9 +1484,7 @@ tmuxTest(
       env: {
         HOME: testHome,
         OPENAI_API_KEY: "fake-pending-image-key",
-        FX_GATEWAY_BASE_URL: localGateway.baseUrl,
-        FX_GATEWAY_CHAT_URL: localGateway.chatUrl,
-        FX_E2E_GATEWAY_MODELS_URL: `${localGateway.baseUrl}/coding-agent/v1/models`,
+        FX_RESPONSES_BASE_URL: localGateway.baseUrl,
         FX_MODEL: FAKE_GATEWAY_MODEL,
         FX_AUTO_UPGRADE: "0",
       },
@@ -1593,8 +1599,7 @@ tmuxTest(
       env: {
         HOME: testHome,
         OPENAI_API_KEY: "fake-current-rail-key",
-        FX_GATEWAY_BASE_URL: localGateway.baseUrl,
-        FX_GATEWAY_CHAT_URL: localGateway.chatUrl,
+        FX_RESPONSES_BASE_URL: localGateway.baseUrl,
         FX_MODEL: FAKE_GATEWAY_MODEL,
         FX_AUTO_UPGRADE: "0",
       },
@@ -1630,12 +1635,7 @@ tmuxTest(
       20_000,
     );
     expect(localGateway.requests.length).toBe(1);
-    const request = JSON.parse(localGateway.requests[0]!.body).prompt as Array<{
-      role: string;
-      content: Array<{ type: string; text?: string }>;
-    }>;
-    const user = request.findLast((message) => message.role === "user");
-    expect(user?.content[0]?.text).toBe(submission);
+    expect(latestUserText(localGateway.requests[0]!.body)).toBe(submission);
 
     const transcript = await active.capturePaneEscapes();
     const first = rowWithVisiblePredicate(
