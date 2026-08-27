@@ -1435,15 +1435,15 @@ fn writeExecutionMemory(writer: *std.Io.Writer, execution: session.ExecutionMemo
         for (execution.tool_steps) |step| {
             if (step.responses_message_output_index != null or
                 step.responses_provider_output_items.len > 0 or
-                step.responses_output_sequence_complete) break :blk 6;
-            if (step.reasoning_items.len > 0) break :blk 5;
+                step.responses_output_sequence_complete) break :blk 7;
+            if (step.reasoning_items.len > 0) break :blk 7;
             if (step.reasoning != null or step.reasoning_item_id != null or
                 step.reasoning_encrypted_content != null)
             {
-                break :blk 4;
+                break :blk 7;
             }
         }
-        break :blk 3;
+        break :blk 7;
     };
     try writer.print("{{\"schema_version\":{d},\"tool_steps\":[", .{schema_version});
     for (execution.tool_steps, 0..) |step, i| {
@@ -1554,6 +1554,11 @@ fn writePersistedToolResult(writer: *std.Io.Writer, result: session.PersistedToo
         writer,
         result.command_process_presentation,
     );
+    try writer.writeAll(",\"terminal_action_presentation\":");
+    try writeOptionalTerminalActionPresentation(
+        writer,
+        result.terminal_action_presentation,
+    );
     try writer.writeByte('}');
 }
 
@@ -1620,6 +1625,51 @@ fn writeOptionalCommandProcessPresentation(
         .exit_code => |exit_code| try writer.print(
             "{{\"kind\":\"exit_code\",\"value\":{d}}}",
             .{exit_code},
+        ),
+        .signal => |signal| try writer.print(
+            "{{\"kind\":\"signal\",\"value\":{d}}}",
+            .{signal},
+        ),
+        .timed_out => try writer.writeAll("{\"kind\":\"timed_out\",\"value\":null}"),
+        .output_capture_failed => try writer.writeAll("{\"kind\":\"output_capture_failed\",\"value\":null}"),
+    }
+}
+
+fn writeOptionalTerminalActionPresentation(
+    writer: *std.Io.Writer,
+    presentation: ?types.TerminalActionPresentation,
+) !void {
+    const value = presentation orelse {
+        try writer.writeAll("null");
+        return;
+    };
+    switch (value) {
+        .returned => |returned| {
+            try writer.writeAll("{\"kind\":\"returned\",\"outcome\":");
+            try writeTerminalReturnPresentation(writer, returned);
+            try writer.writeByte('}');
+        },
+        .failed => |failed| {
+            try writer.writeAll("{\"kind\":\"failed\",\"code\":");
+            try writeJsonString(writer, @tagName(failed));
+            try writer.writeByte('}');
+        },
+    }
+}
+
+fn writeTerminalReturnPresentation(
+    writer: *std.Io.Writer,
+    outcome: types.TerminalReturnPresentation,
+) !void {
+    switch (outcome) {
+        .started, .condition_met, .safety_ceiling, .cancelled => {
+            try writer.writeAll("{\"kind\":");
+            try writeJsonString(writer, @tagName(outcome));
+            try writer.writeAll(",\"value\":null}");
+        },
+        .exited => |code| try writer.print(
+            "{{\"kind\":\"exited\",\"value\":{d}}}",
+            .{code},
         ),
         .signal => |signal| try writer.print(
             "{{\"kind\":\"signal\",\"value\":{d}}}",
@@ -1775,7 +1825,8 @@ fn parseExecutionMemory(alloc: Allocator, value: std.json.Value) !session.Execut
     const object = try exactObject(value, &.{ "schema_version", "tool_steps", "files" });
     const schema_version = try requireU64(object, "schema_version");
     if (schema_version != 1 and schema_version != 2 and schema_version != 3 and
-        schema_version != 4 and schema_version != 5 and schema_version != 6)
+        schema_version != 4 and schema_version != 5 and schema_version != 6 and
+        schema_version != 7)
     {
         return error.InvalidSessionFormat;
     }
@@ -2122,10 +2173,30 @@ fn parseToolResult(
         "command_output_replay",
         "command_process_presentation",
     };
+    const v4_keys = &.{
+        "tool_call_id",
+        "tool_name",
+        "status",
+        "output",
+        "output_handle",
+        "preview",
+        "output_bytes",
+        "stored_output_bytes",
+        "truncated",
+        "provider_native",
+        "created_at_ms",
+        "permission_feedback",
+        "committed_file_presentation",
+        "command_output_replay",
+        "command_process_presentation",
+        "terminal_action_presentation",
+    };
     const result_shape: ExactVariantObject = switch (schema_version) {
         1 => .{ .object = try exactObject(value, v1_keys), .extended = false },
         2 => try exactVariantObject(value, v2_keys, v2_extended_keys),
-        3, 4, 5, 6 => .{ .object = try exactObject(value, v3_keys), .extended = true },
+        3 => .{ .object = try exactObject(value, v3_keys), .extended = true },
+        4, 5, 6 => try exactVariantObject(value, v3_keys, v4_keys),
+        7 => .{ .object = try exactObject(value, v4_keys), .extended = true },
         else => return error.InvalidSessionFormat,
     };
     const object = result_shape.object;
@@ -2179,6 +2250,12 @@ fn parseToolResult(
         )
     else
         null;
+    const terminal_action_presentation = if (schema_version >= 4)
+        try parseOptionalTerminalActionPresentation(
+            object.get("terminal_action_presentation") orelse return error.InvalidSessionFormat,
+        )
+    else
+        null;
     return .{
         .tool_call_id = tool_call_id,
         .tool_name = tool_name,
@@ -2198,6 +2275,7 @@ fn parseToolResult(
         .committed_file_presentation = committed_file_presentation,
         .command_output_replay = command_output_replay,
         .command_process_presentation = command_process_presentation,
+        .terminal_action_presentation = terminal_action_presentation,
     };
 }
 
@@ -2237,6 +2315,67 @@ fn parseOptionalCommandProcessPresentation(
     if (std.mem.eql(u8, kind, "signal")) {
         const signal = try requireU64(object, "value");
         return .{ .signal = std.math.cast(u32, signal) orelse
+            return error.InvalidSessionFormat };
+    }
+    if (std.mem.eql(u8, kind, "timed_out")) {
+        if (object.get("value").? != .null) return error.InvalidSessionFormat;
+        return .timed_out;
+    }
+    if (std.mem.eql(u8, kind, "output_capture_failed")) {
+        if (object.get("value").? != .null) return error.InvalidSessionFormat;
+        return .output_capture_failed;
+    }
+    return error.InvalidSessionFormat;
+}
+
+fn parseOptionalTerminalActionPresentation(
+    value: std.json.Value,
+) !?types.TerminalActionPresentation {
+    if (value == .null) return null;
+    const object = switch (value) {
+        .object => |object| object,
+        else => return error.InvalidSessionFormat,
+    };
+    const kind = try requireString(object, "kind");
+    if (std.mem.eql(u8, kind, "returned")) {
+        _ = try exactObject(value, &.{ "kind", "outcome" });
+        return .{ .returned = try parseTerminalReturnPresentation(
+            object.get("outcome") orelse return error.InvalidSessionFormat,
+        ) };
+    }
+    if (std.mem.eql(u8, kind, "failed")) {
+        _ = try exactObject(value, &.{ "kind", "code" });
+        const code = std.meta.stringToEnum(
+            types.TerminalFailurePresentation,
+            try requireString(object, "code"),
+        ) orelse return error.InvalidSessionFormat;
+        return .{ .failed = code };
+    }
+    return error.InvalidSessionFormat;
+}
+
+fn parseTerminalReturnPresentation(
+    value: std.json.Value,
+) !types.TerminalReturnPresentation {
+    const object = try exactObject(value, &.{ "kind", "value" });
+    const kind = try requireString(object, "kind");
+    if (std.mem.eql(u8, kind, "started") or
+        std.mem.eql(u8, kind, "condition_met") or
+        std.mem.eql(u8, kind, "safety_ceiling") or
+        std.mem.eql(u8, kind, "cancelled"))
+    {
+        if (object.get("value").? != .null) return error.InvalidSessionFormat;
+        if (std.mem.eql(u8, kind, "started")) return .started;
+        if (std.mem.eql(u8, kind, "condition_met")) return .condition_met;
+        if (std.mem.eql(u8, kind, "safety_ceiling")) return .safety_ceiling;
+        return .cancelled;
+    }
+    if (std.mem.eql(u8, kind, "exited")) {
+        return .{ .exited = std.math.cast(i32, try requireI64(object, "value")) orelse
+            return error.InvalidSessionFormat };
+    }
+    if (std.mem.eql(u8, kind, "signal")) {
+        return .{ .signal = std.math.cast(u32, try requireU64(object, "value")) orelse
             return error.InvalidSessionFormat };
     }
     return error.InvalidSessionFormat;
@@ -3377,7 +3516,7 @@ test "execution memory codec preserves feedback and reads v1 results without it"
     var encoded: std.Io.Writer.Allocating = .init(alloc);
     defer encoded.deinit();
     try writeHistoryTurn(&encoded.writer, turn);
-    try std.testing.expect(std.mem.find(u8, encoded.written(), "\"schema_version\":3") != null);
+    try std.testing.expect(std.mem.find(u8, encoded.written(), "\"schema_version\":7") != null);
     try std.testing.expect(std.mem.find(u8, encoded.written(), "\"permission_feedback\"") != null);
     try std.testing.expect(std.mem.find(u8, encoded.written(), "\"committed_file_presentation\"") != null);
     try std.testing.expect(std.mem.find(u8, encoded.written(), "\"command_output_replay\"") != null);
@@ -3545,7 +3684,7 @@ test "assistant history codec round trips Responses reasoning identity and accep
     var encoded: std.Io.Writer.Allocating = .init(alloc);
     defer encoded.deinit();
     try writeHistoryTurn(&encoded.writer, turn);
-    try std.testing.expect(std.mem.find(u8, encoded.written(), "\"schema_version\":6") != null);
+    try std.testing.expect(std.mem.find(u8, encoded.written(), "\"schema_version\":7") != null);
 
     var parsed = try std.json.parseFromSlice(std.json.Value, alloc, encoded.written(), .{});
     defer parsed.deinit();
@@ -3633,6 +3772,54 @@ test "compacted history codec round trips a bound opaque Responses checkpoint" {
         error.InvalidSessionFormat,
         parseHistoryTurn(alloc, invalid.value),
     );
+}
+
+test "command process presentation codec preserves every terminal cause" {
+    const alloc = std.testing.allocator;
+    const cases = [_]types.CommandProcessPresentation{
+        .{ .exit_code = 7 },
+        .{ .signal = 9 },
+        .timed_out,
+        .output_capture_failed,
+    };
+    for (cases) |case| {
+        var encoded: std.Io.Writer.Allocating = .init(alloc);
+        defer encoded.deinit();
+        try writeOptionalCommandProcessPresentation(&encoded.writer, case);
+
+        var parsed = try std.json.parseFromSlice(std.json.Value, alloc, encoded.written(), .{});
+        defer parsed.deinit();
+        try std.testing.expectEqual(
+            case,
+            (try parseOptionalCommandProcessPresentation(parsed.value)).?,
+        );
+    }
+}
+
+test "terminal action presentation codec preserves return and failure causes" {
+    const alloc = std.testing.allocator;
+    const cases = [_]types.TerminalActionPresentation{
+        .{ .returned = .started },
+        .{ .returned = .condition_met },
+        .{ .returned = .safety_ceiling },
+        .{ .returned = .cancelled },
+        .{ .returned = .{ .exited = 7 } },
+        .{ .returned = .{ .signal = 9 } },
+        .{ .failed = .session_not_found },
+        .{ .failed = .capacity_exceeded },
+    };
+    for (cases) |case| {
+        var encoded: std.Io.Writer.Allocating = .init(alloc);
+        defer encoded.deinit();
+        try writeOptionalTerminalActionPresentation(&encoded.writer, case);
+
+        var parsed = try std.json.parseFromSlice(std.json.Value, alloc, encoded.written(), .{});
+        defer parsed.deinit();
+        try std.testing.expectEqual(
+            case,
+            (try parseOptionalTerminalActionPresentation(parsed.value)).?,
+        );
+    }
 }
 
 test "durable history rejects unknown fields instead of silently dropping bytes" {

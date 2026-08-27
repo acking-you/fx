@@ -15,6 +15,14 @@ import {
 import { dirname, join, resolve } from "node:path";
 import { FX_BIN, REPO_ROOT } from "../../evals/eval-helpers";
 import {
+  fakeGatewayFinalText,
+  fakeGatewayPermissionDecision,
+  fakeGatewaySse,
+  responseCompleted,
+  responseFunctionCall,
+  responseTextDelta,
+} from "../tmux-helpers";
+import {
   ACTIVE_TOOL_MARKER,
   analyzeRun,
   commandMoreCount,
@@ -76,7 +84,7 @@ type ScenarioContext = {
 
 type FxLaunchOptions = {
   stderrPath?: string;
-  apiKey?: string;
+  gatewayApiKey?: string;
   responsesBaseUrl?: string;
   permissionMode?: "ask" | "auto" | "yolo";
 };
@@ -88,66 +96,12 @@ type LocalGatewayFixture = {
   stop(): void;
 };
 
-function gatewaySse(events: object[]): Response {
-  return new Response(
-    `${events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("")}data: [DONE]\n\n`,
-    { headers: { "content-type": "text/event-stream" } },
-  );
-}
-
 function permissionDecisionResponse(): Response {
-  return gatewaySse([
-    {
-      type: "response.output_item.added",
-      output_index: 0,
-      item: { type: "function_call", call_id: "render_lab_permission_decision_1", name: "permission_decision" },
-    },
-    {
-      type: "response.function_call_arguments.done",
-      output_index: 0,
-      arguments: JSON.stringify({
-        risk: "low",
-        decision: "clear",
-        rationale: "deterministic render-lab decision",
-      }),
-    },
-    completedResponseEvent(),
-  ]);
-}
-
-function completedResponseEvent() {
-  return {
-    type: "response.completed",
-    response: {
-      status: "completed",
-      usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
-    },
-  };
-}
-
-function responseTextEvent(id: string, text: string) {
-  return {
-    type: "response.output_text.delta",
-    item_id: id,
-    output_index: 0,
-    content_index: 0,
-    delta: text,
-  };
-}
-
-function responseToolCallEvents(id: string, name: string, input: object) {
-  return [
-    {
-      type: "response.output_item.added",
-      output_index: 1,
-      item: { type: "function_call", call_id: id, name },
-    },
-    {
-      type: "response.function_call_arguments.done",
-      output_index: 1,
-      arguments: JSON.stringify(input),
-    },
-  ];
+  return fakeGatewayPermissionDecision(
+    "clear",
+    "render_lab_permission_decision_1",
+    "deterministic render-lab decision",
+  );
 }
 
 const SCENARIO = "same-shell-relaunch";
@@ -164,7 +118,7 @@ const OBSERVABILITY_FINAL_MARKER = "OBSERVABILITY_FINAL_RESPONSE";
 const OBSERVABILITY_PERMISSION_PROMPT = "Would you like to run the following command?";
 const OBSERVABILITY_PERMISSION_REVIEW = "Permission needed";
 const OBSERVABILITY_TOOL_COMMAND = "touch render-lab-observability-approved.txt";
-const LOCAL_GATEWAY_CHAT_PATH = "/v1/responses";
+const LOCAL_GATEWAY_RESPONSES_PATH = "/v1/responses";
 const LOCAL_GATEWAY_MODELS_PATH = "/v1/models";
 const DEFAULT_BENCH_SIZES: RenderLabTerminalSize[] = [
   { cols: 80, rows: 24 },
@@ -481,7 +435,7 @@ async function runActiveToolPlacement(
 
     await launchFx(context, session, "active-tool", {
       stderrPath: join(artifactDir, "stderr.log"),
-      apiKey: "render-lab-local-responses-key",
+      gatewayApiKey: "render-lab-local-gateway-key",
       responsesBaseUrl: gateway.baseUrl,
     });
     await submitSlashCommand(
@@ -495,7 +449,7 @@ async function runActiveToolPlacement(
     await session.sendText("exercise one active command placement");
     await waitForLocalGatewayRequest(
       gateway.requests,
-      `POST ${LOCAL_GATEWAY_CHAT_PATH}`,
+      `POST ${LOCAL_GATEWAY_RESPONSES_PATH}`,
       10_000,
     );
     await session.waitForPane(
@@ -537,7 +491,7 @@ async function runActiveToolPlacement(
 
     await waitForLocalGatewayRequestCount(
       gateway.requests,
-      `POST ${LOCAL_GATEWAY_CHAT_PATH}`,
+      `POST ${LOCAL_GATEWAY_RESPONSES_PATH}`,
       2,
       30_000,
     );
@@ -616,10 +570,10 @@ async function runActiveToolPlacement(
     session = null;
 
     const postRequests = gateway.requests.filter(
-      (request) => request === `POST ${LOCAL_GATEWAY_CHAT_PATH}`,
+      (request) => request === `POST ${LOCAL_GATEWAY_RESPONSES_PATH}`,
     );
     if (postRequests.length !== 2) {
-      throw new Error(`expected two gateway chat requests, found ${postRequests.length}`);
+      throw new Error(`expected two Responses requests, found ${postRequests.length}`);
     }
 
     await writeReplaySummary(manifest);
@@ -724,13 +678,13 @@ async function runUserCardResizeReplayScrollback(
 
     await launchFx(context, session, "user-card", {
       stderrPath: join(artifactDir, "stderr.log"),
-      apiKey: "render-lab-local-responses-key",
+      gatewayApiKey: "render-lab-local-gateway-key",
       responsesBaseUrl: gateway.baseUrl,
     });
     await session.sendText(prompt);
     await waitForLocalGatewayRequest(
       gateway.requests,
-      `POST ${LOCAL_GATEWAY_CHAT_PATH}`,
+      `POST ${LOCAL_GATEWAY_RESPONSES_PATH}`,
       10_000,
     );
     gateway.releaseResponse();
@@ -875,14 +829,14 @@ async function runTuiObservabilityGauntlet(
 
     await launchFx(context, session, "observability", {
       stderrPath: join(artifactDir, "stderr.log"),
-      apiKey: "render-lab-local-responses-key",
+      gatewayApiKey: "render-lab-local-gateway-key",
       responsesBaseUrl: gateway.baseUrl,
       permissionMode: "ask",
     });
     await session.sendText(prompt);
     await waitForLocalGatewayRequest(
       gateway.requests,
-      `POST ${LOCAL_GATEWAY_CHAT_PATH}`,
+      `POST ${LOCAL_GATEWAY_RESPONSES_PATH}`,
       10_000,
     );
     await session.waitForPane(
@@ -910,7 +864,7 @@ async function runTuiObservabilityGauntlet(
     await session.sendLiteral("1");
     await waitForLocalGatewayRequestCount(
       gateway.requests,
-      `POST ${LOCAL_GATEWAY_CHAT_PATH}`,
+      `POST ${LOCAL_GATEWAY_RESPONSES_PATH}`,
       2,
       20_000,
     );
@@ -960,10 +914,10 @@ async function runTuiObservabilityGauntlet(
     session = null;
 
     const postRequests = gateway.requests.filter(
-      (request) => request === `POST ${LOCAL_GATEWAY_CHAT_PATH}`,
+      (request) => request === `POST ${LOCAL_GATEWAY_RESPONSES_PATH}`,
     );
     if (postRequests.length !== 2) {
-      throw new Error(`expected two gateway chat requests, found ${postRequests.length}`);
+      throw new Error(`expected two Responses requests, found ${postRequests.length}`);
     }
 
     await writeReplaySummary(manifest);
@@ -1153,7 +1107,7 @@ async function runStartupScrollbackOverflow(
 
     await launchFx(context, session, "overflow", {
       stderrPath: join(artifactDir, "stderr.log"),
-      apiKey: "render-lab-local-responses-key",
+      gatewayApiKey: "render-lab-local-gateway-key",
       responsesBaseUrl: gateway.baseUrl,
     });
     await capture(context, session, "overflow-initial-bottom-anchored-frame");
@@ -1172,7 +1126,11 @@ async function runStartupScrollbackOverflow(
     await capture(context, session, "overflow-long-prompt-editor-tail-visible");
 
     await session.sendKeys("Enter");
-    await waitForLocalGatewayRequest(gateway.requests, `POST ${LOCAL_GATEWAY_CHAT_PATH}`, 10_000);
+    await waitForLocalGatewayRequest(
+      gateway.requests,
+      `POST ${LOCAL_GATEWAY_RESPONSES_PATH}`,
+      10_000,
+    );
     await session.waitForPane(
       (pane) =>
         pane.includes(promptTail) &&
@@ -1657,8 +1615,10 @@ async function launchFx(
   options: FxLaunchOptions = {},
 ): Promise<void> {
   const environment = [
-    options.apiKey ? `OPENAI_API_KEY=${shQuote(options.apiKey)}` : null,
-    options.responsesBaseUrl ? `FX_RESPONSES_BASE_URL=${shQuote(options.responsesBaseUrl)}` : null,
+    options.gatewayApiKey ? `OPENAI_API_KEY=${shQuote(options.gatewayApiKey)}` : null,
+    options.responsesBaseUrl
+      ? `FX_RESPONSES_BASE_URL=${shQuote(options.responsesBaseUrl)}`
+      : null,
     options.permissionMode ? `FX_PERMISSION_MODE=${shQuote(options.permissionMode)}` : null,
   ].filter((entry): entry is string => entry !== null).join(" ");
   const environmentPrefix = environment.length > 0 ? `${environment} ` : "";
@@ -1666,6 +1626,7 @@ async function launchFx(
   await session.sendText(
     `${environmentPrefix}FX_RECORD=${shQuote(context.manifest.tapePath)} FX_RECORD_INPUT=1 ${shQuote(FX_BIN)}${stderrRedirect}`,
   );
+  await capture(context, session, `${label}-fx-launch-requested`);
   await session.waitForPane((pane) => pane.includes("Run /help for commands"), 25_000);
   await capture(context, session, `${label}-fx-prompt-visible`);
 }
@@ -1689,24 +1650,21 @@ function startLocalGatewayFixture(expectedPromptTail: string): LocalGatewayFixtu
         return Response.json({
           data: [
             {
-              id: "anthropic/claude-opus-4.7",
+              id: "gpt-5.4",
               object: "model",
-              created: 1,
+              owned_by: "openai",
             },
           ],
         });
       }
 
-      if (request.method === "POST" && url.pathname === LOCAL_GATEWAY_CHAT_PATH) {
+      if (request.method === "POST" && url.pathname === LOCAL_GATEWAY_RESPONSES_PATH) {
         const body = await request.text();
         if (!body.includes(expectedPromptTail)) {
           return new Response("prompt tail missing", { status: 422 });
         }
         await responseGate;
-        return gatewaySse([
-          responseTextEvent("render-lab", LOCAL_GATEWAY_COMPLETION),
-          completedResponseEvent(),
-        ]);
+        return fakeGatewayFinalText(LOCAL_GATEWAY_COMPLETION);
       }
 
       return new Response("not found", { status: 404 });
@@ -1729,7 +1687,7 @@ function startLocalGatewayFixture(expectedPromptTail: string): LocalGatewayFixtu
 
 function startActiveToolGatewayFixture(): LocalGatewayFixture {
   const requests: string[] = [];
-  let chatRequestCount = 0;
+  let responsesRequestCount = 0;
   let responseReleased = false;
   let releaseResponseGate!: () => void;
   const responseGate = new Promise<void>((resolve) => {
@@ -1742,28 +1700,30 @@ function startActiveToolGatewayFixture(): LocalGatewayFixture {
       const url = new URL(request.url);
       if (request.method === "GET" && url.pathname === LOCAL_GATEWAY_MODELS_PATH) {
         requests.push(`${request.method} ${url.pathname}`);
-        return Response.json({ data: [{ id: "anthropic/claude-opus-4.7", object: "model", created: 1 }] });
+        return Response.json({
+          data: [{ id: "gpt-5.4", object: "model", owned_by: "openai" }],
+        });
       }
-      if (request.method === "POST" && url.pathname === LOCAL_GATEWAY_CHAT_PATH) {
+      if (request.method === "POST" && url.pathname === LOCAL_GATEWAY_RESPONSES_PATH) {
         const body = await request.text();
         if (body.includes("\"permission_decision\"")) {
           return permissionDecisionResponse();
         }
         requests.push(`${request.method} ${url.pathname}`);
-        chatRequestCount += 1;
-        if (chatRequestCount === 2) await responseGate;
-        return chatRequestCount === 1
-          ? gatewaySse([
-              ...responseToolCallEvents("active_tool_1", "terminal", {
-                action: "exec",
-                command: "sleep 1; i=1; while [ \"$i\" -le 32 ]; do printf 'ACTIVE_TOOL_LINE_%02d\\n' \"$i\"; i=$((i+1)); sleep 0.03; done; while [ ! -f .active-tool-release ]; do sleep 0.05; done",
-              }),
-              completedResponseEvent(),
-            ])
-          : gatewaySse([
-              responseTextEvent("render-lab", LOCAL_GATEWAY_COMPLETION),
-              completedResponseEvent(),
-            ]);
+        responsesRequestCount += 1;
+        if (responsesRequestCount === 2) await responseGate;
+        if (responsesRequestCount === 1) {
+          return fakeGatewaySse([
+            ...responseFunctionCall("active_tool_1", "terminal", {
+              action: "exec",
+              command:
+                "sleep 1; i=1; while [ \"$i\" -le 32 ]; do printf 'ACTIVE_TOOL_LINE_%02d\\n' \"$i\"; i=$((i+1)); sleep 0.03; done; while [ ! -f .active-tool-release ]; do sleep 0.05; done",
+              timeout_ms: 600_000,
+            }),
+            responseCompleted(1, 1),
+          ]);
+        }
+        return fakeGatewayFinalText(LOCAL_GATEWAY_COMPLETION);
       }
       return new Response("not found", { status: 404 });
     },
@@ -1785,7 +1745,7 @@ function startObservabilityGatewayFixture(
   expectedPromptTail: string,
 ): LocalGatewayFixture {
   const requests: string[] = [];
-  let chatRequestCount = 0;
+  let responsesRequestCount = 0;
   let responseReleased = false;
   let releaseResponseGate!: () => void;
   const responseGate = new Promise<void>((resolve) => {
@@ -1813,32 +1773,40 @@ function startObservabilityGatewayFixture(
         return Response.json({
           data: [
             {
-              id: "anthropic/claude-opus-4.7",
+              id: "gpt-5.4",
               object: "model",
-              created: 1,
+              owned_by: "openai",
             },
           ],
         });
       }
-      if (request.method === "POST" && url.pathname === LOCAL_GATEWAY_CHAT_PATH) {
+      if (request.method === "POST" && url.pathname === LOCAL_GATEWAY_RESPONSES_PATH) {
         const body = await request.text();
         requests.push(`${request.method} ${url.pathname}`);
-        chatRequestCount += 1;
-        if (chatRequestCount === 1 && !body.includes(expectedPromptTail)) {
+        responsesRequestCount += 1;
+        if (responsesRequestCount === 1 && !body.includes(expectedPromptTail)) {
           return new Response("prompt tail missing", { status: 422 });
         }
-        if (chatRequestCount === 2) await responseGate;
-        const events = chatRequestCount === 1
+        if (responsesRequestCount === 2) await responseGate;
+        const events = responsesRequestCount === 1
           ? [
-              responseTextEvent("observability-transcript", transcript),
-              ...responseToolCallEvents("observability-tool-1", "terminal", { action: "exec", command }),
-              completedResponseEvent(),
+              responseTextDelta(transcript, "observability-transcript"),
+              ...responseFunctionCall(
+                "observability-tool-1",
+                "terminal",
+                { action: "exec", command, timeout_ms: 600_000 },
+                1,
+              ),
+              responseCompleted(1, 1),
             ]
           : [
-              responseTextEvent("observability-final", OBSERVABILITY_FINAL_MARKER),
-              completedResponseEvent(),
+              responseTextDelta(
+                OBSERVABILITY_FINAL_MARKER,
+                "observability-final",
+              ),
+              responseCompleted(1, 1),
             ];
-        return gatewaySse(events);
+        return fakeGatewaySse(events);
       }
       return new Response("not found", { status: 404 });
     },
@@ -1859,7 +1827,10 @@ function startObservabilityGatewayFixture(
 }
 
 function assertLocalGatewayRequests(requests: string[]): void {
-  for (const expected of [`GET ${LOCAL_GATEWAY_MODELS_PATH}`, `POST ${LOCAL_GATEWAY_CHAT_PATH}`]) {
+  for (const expected of [
+    `GET ${LOCAL_GATEWAY_MODELS_PATH}`,
+    `POST ${LOCAL_GATEWAY_RESPONSES_PATH}`,
+  ]) {
     if (!requests.includes(expected)) {
       throw new Error(`local gateway request missing: ${expected}\n${requests.join("\n")}`);
     }

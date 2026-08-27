@@ -156,7 +156,7 @@ fn stream(raw: ?*anyopaque, alloc: Allocator, request: stream_provider.ModelRequ
     };
     return .{ .completed = .{
         .completion = completion,
-        .usage = .immediate,
+        .usage = .{ .exact = .gateway },
         .ownership = .owned,
     } };
 }

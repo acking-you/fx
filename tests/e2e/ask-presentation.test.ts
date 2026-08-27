@@ -148,10 +148,12 @@ describe("fx ask presentation", () => {
       fakeGatewaySse([
         ...responseFunctionCall("no-final-newline", "terminal", {
           action: "exec",
+          timeout_ms: 600_000,
           command: "printf no-final-newline",
         }),
         ...responseFunctionCall("next-command", "terminal", {
           action: "exec",
+          timeout_ms: 600_000,
           command: "printf 'next-output\\n'",
         }, 1),
         responseCompleted(),
@@ -214,15 +216,18 @@ describe("fx ask presentation", () => {
     const gateway = startFakeGateway([
       fakeGatewayToolCall("terminal-omitted", "terminal", {
         action: "exec",
+        timeout_ms: 600_000,
         command: profileCommand,
       }),
       fakeGatewayToolCall("terminal-clean", "terminal", {
         action: "exec",
+        timeout_ms: 600_000,
         command: profileCommand,
         profile: "clean",
       }),
       fakeGatewayToolCall("terminal-user", "terminal", {
         action: "exec",
+        timeout_ms: 600_000,
         command: profileCommand,
         profile: "user",
       }),
@@ -235,11 +240,13 @@ describe("fx ask presentation", () => {
       fakeGatewayToolCall("terminal-nested-exec", "terminal", {
         request: {
           action: "exec",
+          timeout_ms: 600_000,
           command: `printf nested > ${JSON.stringify(nestedExecMarker)}`,
         },
       }),
       fakeGatewayToolCall("terminal-neighbor-exec", "terminal", {
         action: "exec",
+        timeout_ms: 600_000,
         command: "printf neighbor-exec",
       }),
       fakeGatewayFinalText("Terminal no-save profiles verified.\n"),
@@ -287,7 +294,7 @@ describe("fx ask presentation", () => {
     };
     const terminalTool = firstRequest.tools.find(({ name }) => name === "terminal");
     expect(terminalTool?.description).toBe(
-      "Run one captured command and return its result.",
+      "Run one captured command with a required finite timeout_ms and return its result. Timeout cleanup covers the process group and tracked descendants; fully detached descendant cleanup is best effort on macOS.",
     );
     const terminalSchema = terminalTool?.parameters;
     expect(terminalSchema?.properties?.action?.enum).toEqual(["exec"]);
@@ -296,8 +303,15 @@ describe("fx ask presentation", () => {
       "command",
       "cwd",
       "profile",
+      "timeout_ms",
     ]);
-    expect(terminalSchema?.required).toEqual(["action", "command", "cwd", "profile"]);
+    expect(terminalSchema?.required).toEqual([
+      "action",
+      "command",
+      "cwd",
+      "profile",
+      "timeout_ms",
+    ]);
     expect(terminalSchema?.additionalProperties).toBe(false);
     expect(terminalSchema?.properties?.command?.description).toBe(
       "Command to run. Set null when the selected action does not use this field.",
@@ -307,6 +321,9 @@ describe("fx ask presentation", () => {
     );
     expect(terminalSchema?.properties?.profile?.description).toBe(
       "Profile for exec; omission defaults to user, while clean skips user initialization files. User execution supports the configured Bash or zsh login shell. Bash login execution reads login initialization files; .bashrc is available only when sourced by the login profile. Set null when the selected action does not use this field.",
+    );
+    expect(terminalSchema?.properties?.timeout_ms?.description).toBe(
+      "Maximum foreground runtime in milliseconds. Choose the shortest realistic finite budget; use terminal start for work that must remain alive.",
     );
     const serializedTerminalTool = JSON.stringify(terminalTool);
     expect(serializedTerminalTool).not.toContain("Use start");
@@ -807,6 +824,7 @@ describe("fx ask presentation", () => {
         [
           fakeGatewayToolCall("write_fixture", "terminal", {
             action: "exec",
+            timeout_ms: 600_000,
             command: "printf notice-test > ask-notice.txt",
           }),
           fakeGatewayFinalText("Notice filtering complete.\n"),

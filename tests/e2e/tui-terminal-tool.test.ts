@@ -21,6 +21,7 @@ import {
   fakeGatewayFinalText,
   fakeGatewaySse,
   fakeGatewayToolCall,
+  heldFakeGatewayFinalText,
   responseCompleted,
   responseFunctionCall,
   startFakeGateway,
@@ -357,6 +358,9 @@ function createFixture(prefix: string, endpointBytes?: number) {
   const stderrPath = join(root, "stderr.log");
   mkdirSync(join(home, ".fx"), { recursive: true });
   mkdirSync(workspace);
+  if (TERMINAL_FIXTURE_SHELL.endsWith("/zsh")) {
+    writeFileSync(join(home, ".zshrc"), "");
+  }
   writeFileSync(
     join(home, ".fx", "settings.json"),
     JSON.stringify({
@@ -437,7 +441,7 @@ async function launch(
       OPENAI_API_KEY: "fake-terminal-tool-key",
       FX_PERMISSION_MODE: "yolo",
       FX_MODEL: FAKE_GATEWAY_MODEL,
-            FX_RESPONSES_BASE_URL: gateway.baseUrl,
+      FX_RESPONSES_BASE_URL: gateway.baseUrl,
       FX_TRACE_LOG: fixture.tracePath,
       FX_TRACE_SCOPES:
         "input,terminal,terminal_client,terminal_store,terminal_host,agent,worker,gateway",
@@ -514,47 +518,31 @@ function countOccurrences(text: string, needle: string): number {
   return text.split(needle).length - 1;
 }
 
-function contentText(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) return content.map(contentText).join("");
-  if (content && typeof content === "object") {
-    const value = content as Record<string, unknown>;
-    return [
-      contentText(value.text),
-      contentText(value.value),
-      contentText(value.content),
-    ].join("");
-  }
-  return "";
-}
-
 function toolResultText(body: string, callId: string): string {
   const request = JSON.parse(body) as {
-    input: Array<Record<string, unknown>>;
+    input?: Array<Record<string, unknown>>;
   };
-  const result = request.input.find((part) =>
+  const result = (request.input ?? []).find((part) =>
     part.type === "function_call_output" && part.call_id === callId
   );
-  return result ? contentText(result.output) : `<missing ${callId}>`;
+  return typeof result?.output === "string"
+    ? result.output
+    : `<missing ${callId}>`;
 }
 
 function toolCallInput(body: string, callId: string): Record<string, unknown> {
   const request = JSON.parse(body) as {
-    input: Array<Record<string, unknown>>;
+    input?: Array<Record<string, unknown>>;
   };
-  const call = request.input.find((part) =>
+  const call = (request.input ?? []).find((part) =>
     part.type === "function_call" && part.call_id === callId
   );
-  const input = typeof call?.arguments === "string"
-    ? JSON.parse(call.arguments)
-    : null;
+  if (typeof call?.arguments !== "string") {
+    throw new Error(`missing tool call input for ${callId}`);
+  }
+  const input = JSON.parse(call.arguments);
   if (!input || typeof input !== "object" || Array.isArray(input)) {
-    const available = request.input
-      .filter((part) => part.type === "function_call")
-      .map((part) => String(part.call_id ?? "<missing>"));
-    throw new Error(
-      `missing tool call input for ${callId}; available: ${available.join(", ")}`,
-    );
+    throw new Error(`invalid tool call input for ${callId}`);
   }
   return input as Record<string, unknown>;
 }
@@ -1396,20 +1384,49 @@ test.skipIf(!tmuxAvailable())(
     expect(Object.keys(properties)).toEqual(["request"]);
     expect(terminalSchema!.required).toEqual(["request"]);
     const branches = properties.request!.oneOf ?? [];
-    expect(branches).toHaveLength(12);
+    expect(branches).toHaveLength(13);
     const branchByAction = new Map(branches.map((branch) => [
       branch.properties?.action?.enum?.[0],
       branch,
     ]));
     expect([...branchByAction.keys()]).toEqual([
-      "exec", "start", "read", "screen", "write", "wait",
+      "start", "exec", "read", "screen", "write", "wait",
       "monitor", "inspect", "list", "resize", "signal", "close",
     ]);
     for (const branch of branches) {
       expect(branch.type).toBe("object");
       expect(branch.additionalProperties).toBe(false);
     }
-    const startProperties = branchByAction.get("start")!.properties!;
+    const writeBranches = branches.filter(
+      (branch) => branch.properties?.action?.enum?.[0] === "write",
+    );
+    expect(writeBranches).toHaveLength(1);
+    expect(writeBranches[0]!.required).toEqual([
+      "action", "session_id", "input",
+    ]);
+    expect(writeBranches[0]!.properties?.lease).toBeUndefined();
+    expect(writeBranches[0]!.properties?.write).toBeUndefined();
+    const writeInputs = writeBranches[0]!.properties?.input?.oneOf ?? [];
+    expect(writeInputs).toHaveLength(4);
+    expect(writeInputs.map((input) => input.required?.[0])).toEqual([
+      "text", "keys", "controls", "paste",
+    ]);
+    for (const input of writeInputs) {
+      expect(input.type).toBe("object");
+      expect(input.additionalProperties).toBe(false);
+      expect(input.properties?.kind).toBeUndefined();
+    }
+    const startBranches = branches.filter(
+      (branch) => branch.properties?.action?.enum?.[0] === "start",
+    );
+    expect(startBranches).toHaveLength(2);
+    const shellStart = startBranches[0]!.properties!;
+    const profileStart = startBranches[1]!.properties!;
+    expect(shellStart.shell).toBeDefined();
+    expect(shellStart.profile).toBeUndefined();
+    expect(profileStart.profile).toBeDefined();
+    expect(profileStart.shell).toBeUndefined();
+    const startProperties = shellStart;
     expect(startProperties.wait_ceiling_ms!.anyOf![0]!.type).toBe("integer");
     expect(startProperties.shell!.anyOf![0]!.type).toBe("object");
     expect(startProperties.initial_monitors!.anyOf![0]!.type).toBe("array");
@@ -1464,7 +1481,7 @@ test.skipIf(!tmuxAvailable())(
     const scrollback = await active.captureFullScrollback();
     expect(scrollback).toContain("Failed printf SHOULD_NOT_RUN");
     expect(scrollback).toContain("17 inv");
-    expect(countOccurrences(scrollback, "Started printf ACTION_SCHEMA_OK")).toBe(1);
+    expect(countOccurrences(scrollback, "Exited 0 printf ACTION_SCHEMA_OK")).toBe(1);
     expect(scrollback).toContain("Killed printf ACTION_SCHEMA_OK");
     expect(scrollback).not.toContain("Using terminal");
     expect(scrollback).not.toContain("Used terminal");
@@ -1497,6 +1514,7 @@ test.skipIf(!tmuxAvailable())(
     const gateway = startFakeGateway([
       fakeGatewayToolCall("terminal_null_placeholder_exec", "terminal", {
         action: "exec",
+        timeout_ms: 600_000,
         command: `printf NULL_PLACEHOLDER_OK > ${JSON.stringify(marker)}`,
         cwd: "null",
         profile: "null",
@@ -1876,7 +1894,7 @@ test.skipIf(!tmuxAvailable())(
 );
 
 test.skipIf(!tmuxAvailable())(
-  "TUI auto mode reviews terminal start but not owner-scoped list",
+  "TUI auto mode reports terminal start exit and skips owner-scoped list review",
   async () => {
     const fixture = createFixture("fx-tui-terminal-public-");
     let startedSessionId = "";
@@ -1926,7 +1944,7 @@ test.skipIf(!tmuxAvailable())(
           `TRACE\n${readFileSync(fixture.tracePath, "utf8")}`,
       );
     }
-    expect(pane).toContain("Started printf TUI_PUBLIC_TERMINAL_NATIVE");
+    expect(pane).toContain("Exited 0 printf TUI_PUBLIC_TERMINAL_NATIVE");
     expect(pane).toContain("Listed terminal sessions");
     expect(gateway.requests).toHaveLength(3);
     expect(gateway.requests[1]!.body).toContain("tui_terminal_start");
@@ -1947,6 +1965,313 @@ test.skipIf(!tmuxAvailable())(
     expect(gateway.classifierRequests).toHaveLength(1);
     expect(classifierEvidenceFromRequest(gateway.classifierRequests[0]!.body))
       .toContain('"action":"start"');
+    expect(readFileSync(fixture.stderrPath, "utf8")).toBe("");
+  },
+  TIMEOUT,
+);
+
+test.skipIf(!tmuxAvailable())(
+  "TUI terminal wait reports its safety ceiling without implying completion",
+  async () => {
+    const fixture = createFixture("fx-tui-terminal-wait-ceiling-");
+    let terminalSessionId = "";
+    const command = "printf WAIT_CEILING_READY; sleep 30";
+    const gateway = startFakeGateway([
+      fakeGatewayToolCall("wait_ceiling_start", "terminal", {
+        action: "start",
+        cwd: fixture.workspace,
+        command,
+        shell: {
+          kind: "executable",
+          path: TERMINAL_FIXTURE_SHELL,
+          clean_start: true,
+        },
+        backend: "native",
+        return_when: { kind: "started" },
+        wait_ceiling_ms: 5_000,
+      }),
+      (body) => {
+        const result = JSON.parse(
+          toolResultText(body, "wait_ceiling_start"),
+        ) as {
+          success: { start: { session: { session_id: string } } };
+        };
+        terminalSessionId = result.success.start.session.session_id;
+        return fakeGatewayToolCall("wait_ceiling_wait", "terminal", {
+          action: "wait",
+          session_id: terminalSessionId,
+          return_when: { kind: "match", pattern: "NEVER_MATCH_THIS" },
+          wait_ceiling_ms: 100,
+        });
+      },
+      (body) => {
+        expect(toolResultText(body, "wait_ceiling_wait"))
+          .toContain('"outcome":{"safety_ceiling":{}}');
+        return fakeGatewayToolCall("wait_ceiling_close", "terminal", {
+          action: "close",
+          session_id: terminalSessionId,
+          close_policy: "force",
+        });
+      },
+      fakeGatewayFinalText("TUI terminal wait ceiling complete"),
+    ]);
+    gateways.push(gateway);
+    const active = await launch(fixture, gateway);
+
+    await active.sendText("Exercise the bounded terminal wait.");
+    const pane = await active.waitForText(
+      "TUI terminal wait ceiling complete",
+      TIMEOUT,
+    );
+    expect(pane).toContain(`Started ${command}`);
+    expect(pane).toContain("Wait limit reached for");
+    expect(pane).not.toContain("Finished waiting for");
+    expect(pane).toContain("Killed");
+    expect(readFileSync(fixture.stderrPath, "utf8")).toBe("");
+  },
+  TIMEOUT,
+);
+
+test.skipIf(!tmuxAvailable())(
+  "TUI terminal exec reports timeout instead of blaming the command",
+  async () => {
+    const fixture = createFixture("fx-tui-terminal-exec-timeout-");
+    const command = "printf TUI_TIMEOUT_STARTED; sleep 5";
+    const gateway = startFakeGateway([
+      fakeGatewayToolCall("terminal_exec_timeout", "terminal", {
+        action: "exec",
+        timeout_ms: 250,
+        command,
+      }),
+      (body) => {
+        const result = toolResultText(body, "terminal_exec_timeout");
+        expect(result).toContain("timeout=true");
+        expect(result).toContain("timeout_ms=250");
+        return fakeGatewayFinalText("TUI terminal timeout presentation complete");
+      },
+    ]);
+    gateways.push(gateway);
+    const active = await launch(fixture, gateway);
+
+    await active.sendText("Run the bounded timeout fixture.");
+    const pane = await active.waitForText(
+      "TUI terminal timeout presentation complete",
+      TIMEOUT,
+    );
+    const header = "● 1 tool call · 1 command · 1 timed out";
+    expect(pane).toContain(header);
+    expect(pane).toContain(`${header}\n└ Timed out ${command}`);
+    expect(pane).not.toContain(`Failed ${command}`);
+    const requestCount = gateway.requests.length;
+    await active.sendText("/quit");
+    expect(await active.waitForSessionEnd(TIMEOUT)).toBe(true);
+    sessions.splice(sessions.indexOf(active), 1);
+
+    const resumed = await launch(
+      fixture,
+      gateway,
+      {},
+      `${FX_BIN} --resume-last`,
+    );
+    const resumedPane = await resumed.waitForText(`Timed out ${command}`, TIMEOUT);
+    expect(resumedPane).toContain(header);
+    expect(resumedPane).toContain(`${header}\n└ Timed out ${command}`);
+    expect(resumedPane).not.toContain(`Failed ${command}`);
+    expect(gateway.requests).toHaveLength(requestCount);
+    expect(readFileSync(fixture.stderrPath, "utf8")).toBe("");
+  },
+  TIMEOUT,
+);
+
+test.skipIf(!tmuxAvailable())(
+  "TUI terminal exec reports and resumes natural SIGTERM",
+  async () => {
+    const fixture = createFixture("fx-tui-terminal-exec-sigterm-");
+    const command = "kill -TERM $$";
+    const callId = "terminal_exec_sigterm";
+    const gateway = startFakeGateway([
+      fakeGatewayToolCall(callId, "terminal", {
+        action: "exec",
+        timeout_ms: 30_000,
+        command,
+      }),
+      (body) => {
+        const result = JSON.parse(toolResultText(body, callId)) as {
+          error: {
+            type: string;
+            details: { signal?: number; exit_code?: number };
+          };
+        };
+        expect(result.error.type).toBe("tool_execution_failed");
+        expect(result.error.details.signal).toBe(15);
+        expect(result.error.details.exit_code).toBeUndefined();
+        return fakeGatewayFinalText("TUI terminal SIGTERM presentation complete");
+      },
+    ]);
+    gateways.push(gateway);
+    const active = await launch(fixture, gateway);
+
+    await active.sendText("Run the SIGTERM fixture.");
+    const pane = await active.waitForText(
+      "TUI terminal SIGTERM presentation complete",
+      TIMEOUT,
+    );
+    const header = "● 1 tool call · 1 command · 1 failed";
+    expect(pane).toContain(header);
+    expect(pane).toContain(`${header}\n└ Signaled 15 ${command}`);
+    expect(pane).not.toContain(`Ran ${command}`);
+    const requestCount = gateway.requests.length;
+    await active.sendText("/quit");
+    expect(await active.waitForSessionEnd(TIMEOUT)).toBe(true);
+    sessions.splice(sessions.indexOf(active), 1);
+
+    const resumed = await launch(
+      fixture,
+      gateway,
+      {},
+      `${FX_BIN} --resume-last`,
+    );
+    const resumedPane = await resumed.waitForText(`Signaled 15 ${command}`, TIMEOUT);
+    expect(resumedPane).toContain(header);
+    expect(resumedPane).toContain(`${header}\n└ Signaled 15 ${command}`);
+    expect(resumedPane).not.toContain(`Ran ${command}`);
+    expect(gateway.requests).toHaveLength(requestCount);
+    expect(readFileSync(fixture.stderrPath, "utf8")).toBe("");
+  },
+  TIMEOUT,
+);
+
+test.skipIf(!tmuxAvailable())(
+  "TUI terminal failure names the structured session error",
+  async () => {
+    const fixture = createFixture("fx-tui-terminal-structured-error-");
+    const gateway = startFakeGateway([
+      fakeGatewayToolCall("terminal_missing_session", "terminal", {
+        action: "wait",
+        session_id: "terminal-1",
+        return_when: { kind: "exit" },
+        wait_ceiling_ms: 100,
+      }),
+      (body) => {
+        expect(toolResultText(body, "terminal_missing_session"))
+          .toContain('"code":"invalid_request"');
+        return fakeGatewayFinalText("TUI terminal structured error complete");
+      },
+    ]);
+    gateways.push(gateway);
+    const active = await launch(fixture, gateway);
+
+    await active.sendText("Inspect the missing terminal session.");
+    const pane = await active.waitForText(
+      "TUI terminal structured error complete",
+      TIMEOUT,
+    );
+    expect(pane).toContain(
+      "Failed session terminal-1: invalid request",
+    );
+    expect(readFileSync(fixture.stderrPath, "utf8")).toBe("");
+  },
+  TIMEOUT,
+);
+
+test.skipIf(!tmuxAvailable())(
+  "TUI terminal model write acquires and releases control atomically",
+  async () => {
+    const fixture = createFixture("fx-tui-terminal-atomic-write-");
+    const payload = "ATOMIC_WRITE_INPUT";
+    let terminalSessionId = "";
+    let atomicTextResult = "";
+    let atomicKeyResult = "";
+    const gateway = startFakeGateway([
+      fakeGatewayToolCall("atomic_write_start", "terminal", {
+        action: "start",
+        cwd: fixture.workspace,
+        command:
+          "printf 'ATOMIC_WRITE_READY\\n'; " +
+          "while IFS= read -r line; do " +
+          "printf 'ATOMIC_WRITE_ECHO:%s\\n' \"$line\"; done",
+        shell: {
+          kind: "executable",
+          path: TERMINAL_FIXTURE_SHELL,
+          clean_start: true,
+        },
+        backend: "native",
+        return_when: { kind: "match", pattern: "ATOMIC_WRITE_READY" },
+        wait_ceiling_ms: 20_000,
+        dimensions: { rows: 24, columns: 80 },
+      }),
+      (body) => {
+        const result = JSON.parse(toolResultText(body, "atomic_write_start")) as {
+          success: { start: { session: { session_id: string } } };
+        };
+        terminalSessionId = result.success.start.session.session_id;
+        return fakeGatewayToolCall("atomic_write_send", "terminal", {
+          request: {
+            action: "write",
+            session_id: terminalSessionId,
+            input: { text: payload },
+          },
+        });
+      },
+      (body) => {
+        atomicTextResult = toolResultText(body, "atomic_write_send");
+        if (!atomicTextResult.includes('"accepted_bytes":18')) {
+          return fakeGatewayFinalText("TUI terminal atomic write complete");
+        }
+        return fakeGatewayToolCall("atomic_write_enter", "terminal", {
+          request: {
+            action: "write",
+            session_id: terminalSessionId,
+            input: { keys: ["enter"] },
+          },
+        });
+      },
+      (body) => {
+        atomicKeyResult = toolResultText(body, "atomic_write_enter");
+        if (!atomicKeyResult.includes('"accepted_bytes":1')) {
+          return fakeGatewayFinalText("TUI terminal atomic write complete");
+        }
+        return fakeGatewayToolCall("atomic_write_wait", "terminal", {
+          action: "wait",
+          session_id: terminalSessionId,
+          return_when: {
+            kind: "match",
+            pattern: "ATOMIC_WRITE_ECHO:ATOMIC_WRITE_INPUT",
+          },
+          wait_ceiling_ms: 20_000,
+        });
+      },
+      (body) => {
+        expect(toolResultText(body, "atomic_write_wait"))
+          .toContain('"outcome":{"condition_met":{}}');
+        return fakeGatewayToolCall("atomic_write_close", "terminal", {
+          action: "close",
+          session_id: terminalSessionId,
+          close_policy: "force",
+        });
+      },
+      (body) => {
+        expect(toolResultText(body, "atomic_write_close"))
+          .toContain('"lifecycle":"closed"');
+        return fakeGatewayFinalText("TUI terminal atomic write complete");
+      },
+    ]);
+    gateways.push(gateway);
+    const active = await launch(fixture, gateway);
+
+    await active.sendText("Write to a persistent terminal and confirm its output.");
+    const pane = await active.waitForText(
+      "TUI terminal atomic write complete",
+      TIMEOUT,
+    );
+    expect(atomicTextResult).toContain('"accepted_bytes":18');
+    expect(atomicTextResult).toContain('"write_lease":"none"');
+    expect(atomicKeyResult).toContain('"accepted_bytes":1');
+    expect(atomicKeyResult).toContain('"write_lease":"none"');
+    expect(pane).toContain("Sent input to");
+    expect(pane).toContain("Condition met for");
+    expect(pane).toContain("Killed printf 'ATOMIC_WRITE_READY");
+    expect(gateway.requests).toHaveLength(6);
     expect(readFileSync(fixture.stderrPath, "utf8")).toBe("");
   },
   TIMEOUT,
@@ -2001,20 +2326,6 @@ test.skipIf(!tmuxAvailable())(
         expect(
           toolResultText(body, "tui_terminal_lease_invalid_acquire"),
         ).toContain("InvalidWritePayload");
-        return fakeGatewayToolCall(
-          "tui_terminal_lease_premature_use",
-          "terminal",
-          {
-            action: "write",
-            session_id: terminalSessionId,
-            lease: "use",
-            write: { kind: "text", text: payload },
-          },
-        );
-      },
-      (body) => {
-        expect(toolResultText(body, "tui_terminal_lease_premature_use"))
-          .toContain('"code":"lease_conflict"');
         return fakeGatewayToolCall("tui_terminal_lease_read_before", "terminal", {
           action: "read",
           session_id: terminalSessionId,
@@ -2082,12 +2393,209 @@ test.skipIf(!tmuxAvailable())(
     expect(pane).toContain("Failed printf 'TUI_PUBLIC_LEASE_PAYLOAD_READY");
     expect(pane).toContain("Acquired control of");
     expect(pane).toContain("Sent input to");
-    expect(pane).toContain("Finished waiting for");
+    expect(pane).toContain("Condition met for");
     expect(pane).toContain("Killed printf 'TUI_PUBLIC_LEASE_PAYLOAD_READY");
-    expect(gateway.requests).toHaveLength(9);
+    expect(gateway.requests).toHaveLength(8);
     expect(readFileSync(fixture.stderrPath, "utf8")).toBe("");
   },
   TIMEOUT,
+);
+
+test.skipIf(!tmuxAvailable())(
+  "TUI terminal agent lease ends with its turn before the process exits",
+  async () => {
+    const fixture = createFixture("fx-tui-terminal-turn-lease-");
+    let terminalSessionId = "";
+    const gateway = startFakeGateway([
+      fakeGatewayToolCall("turn_lease_start", "terminal", {
+        action: "start",
+        cwd: fixture.workspace,
+        command:
+          "printf 'TURN_LEASE_READY\\n'; IFS= read -r line; eval \"$line\"",
+        shell: {
+          kind: "executable",
+          path: TERMINAL_FIXTURE_SHELL,
+          clean_start: true,
+        },
+        backend: "native",
+        return_when: { kind: "match", pattern: "TURN_LEASE_READY" },
+        wait_ceiling_ms: 20_000,
+        dimensions: { rows: 24, columns: 80 },
+      }),
+      (body) => {
+        const result = JSON.parse(toolResultText(body, "turn_lease_start")) as {
+          success: { start: { session: { session_id: string } } };
+        };
+        terminalSessionId = result.success.start.session.session_id;
+        return fakeGatewayToolCall("turn_lease_acquire", "terminal", {
+          action: "write",
+          session_id: terminalSessionId,
+          lease: "acquire",
+        });
+      },
+      (body) => {
+        expect(toolResultText(body, "turn_lease_acquire"))
+          .toContain('"write_lease":"agent"');
+        return fakeGatewayToolCall("turn_lease_use", "terminal", {
+          action: "write",
+          session_id: terminalSessionId,
+          lease: "use",
+          write: {
+            kind: "text",
+            text: "printf 'TURN_LEASE_MARKER\\n'; sleep 5; exit 0\n",
+          },
+        });
+      },
+      (body) => {
+        expect(toolResultText(body, "turn_lease_use"))
+          .toContain('"accepted_bytes":');
+        return fakeGatewayFinalText("TURN_LEASE_A_DONE");
+      },
+      () => fakeGatewayToolCall("turn_lease_read", "terminal", {
+        action: "read",
+        session_id: terminalSessionId,
+        cursor_segment: 1,
+        cursor_offset: 0,
+      }),
+      (body) => {
+        const read = toolResultText(body, "turn_lease_read");
+        expect(read).toContain('"lifecycle":"running"');
+        expect(read).toContain('"write_lease":"none"');
+        expect(read).toContain("TURN_LEASE_MARKER");
+        return fakeGatewayToolCall("turn_lease_wait", "terminal", {
+          action: "wait",
+          session_id: terminalSessionId,
+          return_when: { kind: "exit" },
+          wait_ceiling_ms: 20_000,
+        });
+      },
+      (body) => {
+        const waited = toolResultText(body, "turn_lease_wait");
+        expect(waited).toContain('"outcome":{"exited":0}');
+        return fakeGatewayToolCall("turn_lease_close", "terminal", {
+          action: "close",
+          session_id: terminalSessionId,
+          close_policy: "force",
+        });
+      },
+      (body) => {
+        expect(toolResultText(body, "turn_lease_close"))
+          .toContain('"lifecycle":"closed"');
+        return fakeGatewayFinalText("TURN_LEASE_B_DONE");
+      },
+    ]);
+    gateways.push(gateway);
+    const active = await launch(fixture, gateway);
+
+    await active.sendText("Start the terminal lease fixture and send its command.");
+    await active.waitForText("TURN_LEASE_A_DONE", TIMEOUT);
+    await active.sendText("Read the running session, wait for exit, and close it.");
+    await active.waitForText("TURN_LEASE_B_DONE", TIMEOUT);
+
+    expect(gateway.requests).toHaveLength(8);
+    expect(terminalRecords(fixture.home)).toEqual([
+      expect.objectContaining({
+        session_id: terminalSessionId,
+        lifecycle: "closed",
+        attention: expect.objectContaining({ write_lease: "none" }),
+      }),
+    ]);
+    expect(readFileSync(fixture.stderrPath, "utf8")).toBe("");
+  },
+  45_000,
+);
+
+test.skipIf(!tmuxAvailable())(
+  "TUI terminal agent lease releases after an interrupted turn",
+  async () => {
+    const fixture = createFixture("fx-tui-terminal-interrupted-lease-");
+    const held = heldFakeGatewayFinalText();
+    let terminalSessionId = "";
+    try {
+      const gateway = startFakeGateway([
+        fakeGatewayToolCall("interrupted_lease_start", "terminal", {
+          action: "start",
+          cwd: fixture.workspace,
+          command: "printf 'INTERRUPTED_LEASE_READY\\n'; while :; do sleep 1; done",
+          shell: {
+            kind: "executable",
+            path: TERMINAL_FIXTURE_SHELL,
+            clean_start: true,
+          },
+          backend: "native",
+          return_when: { kind: "match", pattern: "INTERRUPTED_LEASE_READY" },
+          wait_ceiling_ms: 20_000,
+          dimensions: { rows: 24, columns: 80 },
+        }),
+        (body) => {
+          const result = JSON.parse(
+            toolResultText(body, "interrupted_lease_start"),
+          ) as {
+            success: { start: { session: { session_id: string } } };
+          };
+          terminalSessionId = result.success.start.session.session_id;
+          return fakeGatewayToolCall(
+            "interrupted_lease_acquire",
+            "terminal",
+            {
+              action: "write",
+              session_id: terminalSessionId,
+              lease: "acquire",
+            },
+          );
+        },
+        held.response,
+        () => fakeGatewayToolCall("interrupted_lease_read", "terminal", {
+          action: "read",
+          session_id: terminalSessionId,
+          cursor_segment: 1,
+          cursor_offset: 0,
+        }),
+        (body) => {
+          const read = toolResultText(body, "interrupted_lease_read");
+          expect(read).toContain('"write_lease":"none"');
+          return fakeGatewayToolCall("interrupted_lease_close", "terminal", {
+            action: "close",
+            session_id: terminalSessionId,
+            close_policy: "force",
+          });
+        },
+        (body) => {
+          expect(toolResultText(body, "interrupted_lease_close"))
+            .toContain('"lifecycle":"closed"');
+          return fakeGatewayFinalText("INTERRUPTED_LEASE_DONE");
+        },
+      ]);
+      gateways.push(gateway);
+      const active = await launch(fixture, gateway);
+
+      await active.sendText("Acquire terminal control and wait for instructions.");
+      await active.waitForText("Acquired control of", TIMEOUT);
+      const providerDeadline = Date.now() + TIMEOUT;
+      while (gateway.requests.length < 3 && Date.now() < providerDeadline) {
+        await Bun.sleep(25);
+      }
+      expect(gateway.requests).toHaveLength(3);
+      await active.sendKeys("Escape");
+      await active.waitForText("cancelled", TIMEOUT);
+      await active.waitForComposer(TIMEOUT);
+
+      await active.sendText("Read the session lease and close it.");
+      await active.waitForText("INTERRUPTED_LEASE_DONE", TIMEOUT);
+      expect(gateway.requests).toHaveLength(6);
+      expect(terminalRecords(fixture.home)).toEqual([
+        expect.objectContaining({
+          session_id: terminalSessionId,
+          lifecycle: "closed",
+          attention: expect.objectContaining({ write_lease: "none" }),
+        }),
+      ]);
+      expect(readFileSync(fixture.stderrPath, "utf8")).toBe("");
+    } finally {
+      held.dispose();
+    }
+  },
+  45_000,
 );
 
 test.skipIf(!tmuxAvailable())(
@@ -2279,7 +2787,7 @@ ${holdUntilCleanup(fixture.root)}
       "TUI public terminal signal complete",
       TIMEOUT,
     );
-    expect(pane).toContain("Started");
+    expect(pane).toContain("Condition met for");
     expect(pane).toContain("foreground-signal.sh");
     expect(pane).toContain("Sent terminate to");
     expect(gateway.requests).toHaveLength(3);
@@ -2412,19 +2920,12 @@ test.skipIf(!tmuxAvailable())(
     expect(waitProperties).not.toContain("safety_ceiling_ms");
     expect(waitProperties).not.toContain("authority");
     expect(waitProperties).not.toContain("proof");
-    const waitCall = gateway.requests
-      .flatMap(({ body }) => {
-        const request = JSON.parse(body) as { input?: Array<Record<string, unknown>> };
-        return request.input ?? [];
-      })
-      .find((part) =>
-        part.type === "function_call" &&
-        part.call_id === "tui_terminal_wait_wait"
-      );
-    const waitInput = JSON.parse(String(waitCall?.arguments ?? "null")) as {
-      request?: { wait_ceiling_ms?: number };
-    };
+    const waitInput = toolCallInput(
+      gateway.requests[4]!.body,
+      "tui_terminal_wait_wait",
+    ) as { request?: Record<string, unknown> };
     expect(waitInput.request?.wait_ceiling_ms).toBe(20_000);
+    expect(waitInput.request).not.toHaveProperty("safety_ceiling_ms");
     expect(readFileSync(fixture.stderrPath, "utf8")).toBe("");
   },
   TIMEOUT,
@@ -2595,28 +3096,34 @@ test.skipIf(!tmuxAvailable())(
       TIMEOUT,
     );
     for (const label of [
-      "Started",
+      "Condition met for",
       "Added monitor to",
       "Acquired control of",
       "Sent input to",
-      "Finished waiting for",
+      "Condition met for",
       "Inspected",
       "Killed",
     ]) {
       expect(pane).toContain(label);
     }
     expect(gateway.requests).toHaveLength(9);
-    expect(toolCallInput(gateway.requests[2]!.body, callIds[1]!)).toMatchObject({
-      request: {
-        action: "monitor",
-        monitor: {
-          definition: {
-            condition: { kind: "output_contains" },
-            check_interval_ms: 1,
-          },
-        },
-      },
-    });
+    const monitorInput = toolCallInput(
+      gateway.requests[2]!.body,
+      callIds[1]!,
+    ) as {
+      request?: {
+        monitor?: {
+          definition?: {
+            condition?: { kind?: string };
+            check_interval_ms?: number;
+          };
+        };
+      };
+    };
+    expect(monitorInput.request?.monitor?.definition?.condition?.kind).toBe(
+      "output_contains",
+    );
+    expect(monitorInput.request?.monitor?.definition?.check_interval_ms).toBe(1);
     for (const [index, callId] of callIds.entries()) {
       const result = toolResultText(gateway.requests[index + 1]!.body, callId);
       expect(result).not.toContain("owner_authority");
@@ -2693,7 +3200,7 @@ test.skipIf(!tmuxAvailable())(
       "LONG HOME public terminal complete",
       TIMEOUT,
     );
-    for (const label of ["Started", "Inspected", "Read output from", "Killed"]) {
+    for (const label of ["Condition met for", "Inspected", "Read output from", "Killed"]) {
       expect(pane).toContain(label);
     }
     expect(gateway.requests).toHaveLength(5);

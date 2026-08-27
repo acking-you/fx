@@ -170,7 +170,7 @@ function lengthLimitedCommandResponse(command: string) {
       item_id: "command_item",
       call_id: "command_final",
       output_index: 1,
-      arguments: JSON.stringify({ action: "exec", command }),
+      arguments: JSON.stringify({ action: "exec", timeout_ms: 600_000, command }),
     },
     {
       type: "response.incomplete",
@@ -1320,7 +1320,7 @@ async function runCanonicalLifecycleFixture(
     reachedFinal = settled.matched;
     if (reachedFinal) {
       await session.sendText("/help");
-      const help = await waitForPaneOrDone(session, "Commands 35", donePath);
+      const help = await waitForPaneOrDone(session, "Tab Category", donePath);
       helpVisible = help.matched;
       requestCountAfterHelp = queuedGateway.requests.length;
       if (helpVisible) {
@@ -1874,7 +1874,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       const narrowPane = await session.capturePane();
       expect(narrowPane).toContain("⚠ Provider unavailable");
       expect(narrowPane).toContain("provider_error:");
-      expect(narrowPane).toContain("attempt 1/10");
+      expect(narrowPane).toContain("attempt 2/10");
       expect(narrowPane).not.toContain("▲");
 
       await session.resizeWindow(72, 24);
@@ -4170,7 +4170,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
             ...responseFunctionCall(
               "queue_scrollback_command",
               "terminal",
-              { action: "exec", command: "sleep 30" },
+              { action: "exec", timeout_ms: 600_000, command: "sleep 30" },
               1,
             ),
             responseCompleted(),
@@ -4840,6 +4840,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
           "terminal",
           JSON.stringify({
             action: "exec",
+            timeout_ms: 600_000,
             command:
               "for i in $(seq -w 1 27); do printf 'docs/source-%s.md\\tWalter (1)\\n' \"$i\"; done",
           }),
@@ -5288,7 +5289,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       const unsupportedGateway = startFakeGateway([
         fakeGatewaySse([
           ...responseFunctionCall(unsupportedCallId, unsupportedToolName, { path: "README.md" }),
-          ...responseFunctionCall(supportedCallId, "terminal", { action: "exec", command: supportedCommand }, 1),
+          ...responseFunctionCall(supportedCallId, "terminal", { action: "exec", timeout_ms: 600_000, command: supportedCommand }, 1),
           responseCompleted(),
         ]),
         fakeGatewayFinalText(finalText),
@@ -5438,9 +5439,9 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       const finalText = "TOOL_SUMMARY_FINAL";
       const summaryGateway = startFakeGateway([
         fakeGatewaySse([
-          ...responseFunctionCall("tool_summary_first", "terminal", { action: "exec", command: firstCommand }),
-          ...responseFunctionCall("tool_summary_nested", "terminal", { action: "exec", command: nestedCommand }, 1),
-          ...responseFunctionCall("tool_summary_third", "terminal", { action: "exec", command: thirdCommand }, 2),
+          ...responseFunctionCall("tool_summary_first", "terminal", { action: "exec", timeout_ms: 600_000, command: firstCommand }),
+          ...responseFunctionCall("tool_summary_nested", "terminal", { action: "exec", timeout_ms: 600_000, command: nestedCommand }, 1),
+          ...responseFunctionCall("tool_summary_third", "terminal", { action: "exec", timeout_ms: 600_000, command: thirdCommand }, 2),
           responseCompleted(),
         ]),
         fakeGatewayFinalText(finalText),
@@ -5588,20 +5589,20 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
           ...responseFunctionCall("minimal_read_three", "read_file", { path: "three.txt" }, 2),
           ...responseFunctionCall("minimal_list_workspace", "list_files", { path: "." }, 3),
           ...responseFunctionCall("minimal_list_nested", "list_files", { path: "nested" }, 4),
-          ...responseFunctionCall("minimal_command_one", "terminal", { action: "exec", command: firstCommand }, 5),
+          ...responseFunctionCall("minimal_command_one", "terminal", { action: "exec", timeout_ms: 600_000, command: firstCommand }, 5),
           responseCompleted(),
         ]),
         fakeGatewaySse([
           ...responseFunctionCall("minimal_read_four", "read_file", { path: "four.txt" }),
           ...responseFunctionCall("minimal_read_five", "read_file", { path: "five.txt" }, 1),
           ...responseFunctionCall("minimal_read_six", "read_file", { path: "six.txt" }, 2),
-          ...responseFunctionCall("minimal_command_two", "terminal", { action: "exec", command: secondCommand }, 3),
+          ...responseFunctionCall("minimal_command_two", "terminal", { action: "exec", timeout_ms: 600_000, command: secondCommand }, 3),
           responseCompleted(),
         ]),
         fakeGatewaySse([
           responseTextDelta(secondStepText, "second_step"),
           ...responseFunctionCall("minimal_read_seven", "read_file", { path: "seven.txt" }, 1),
-          ...responseFunctionCall("minimal_command_live", "terminal", { action: "exec", command: liveCommand }, 2),
+          ...responseFunctionCall("minimal_command_live", "terminal", { action: "exec", timeout_ms: 600_000, command: liveCommand }, 2),
           responseCompleted(),
         ]),
         fakeGatewayFinalText(finalText),
@@ -5717,6 +5718,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       const cancelledGateway = startFakeGateway([
         fakeGatewayToolCall("minimal_cancelled_command", "terminal", {
           action: "exec",
+          timeout_ms: 600_000,
           command: "sleep 30",
         }),
       ]);
@@ -5965,7 +5967,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       const commandGateway = startFakeGateway([
         fakeGatewaySse([
           responseTextDelta("I will inspect the process list.", "before_command"),
-          ...responseFunctionCall("command_1", "terminal", { action: "exec", command: "seq 1 1" }, 1),
+          ...responseFunctionCall("command_1", "terminal", { action: "exec", timeout_ms: 600_000, command: "seq 1 1" }, 1),
           responseCompleted(),
         ]),
         fakeGatewayFinalText(finalText),
@@ -6120,7 +6122,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       writeFileSync(stderrPath, "");
 
       const commandGateway = startFakeGateway([
-        fakeGatewayToolCall("multiline_command", "terminal", { action: "exec", command }),
+        fakeGatewayToolCall("multiline_command", "terminal", { action: "exec", timeout_ms: 600_000, command }),
         fakeGatewayFinalText(finalText),
       ]);
       gateway = commandGateway;
@@ -6238,16 +6240,16 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
           responseFunctionCallStart("stream_cmd_one", "terminal"),
           responseFunctionCallDelta(
             "stream_cmd_one",
-            JSON.stringify({ action: "exec", command: firstCommand }),
+            JSON.stringify({ action: "exec", timeout_ms: 600_000, command: firstCommand }),
           ),
           responseFunctionCallStart("stream_cmd_two", "terminal", 1),
           responseFunctionCallDelta(
             "stream_cmd_two",
-            JSON.stringify({ action: "exec", command: secondCommand }),
+            JSON.stringify({ action: "exec", timeout_ms: 600_000, command: secondCommand }),
             1,
           ),
-          responseFunctionCallDone("stream_cmd_one", { action: "exec", command: firstCommand }),
-          responseFunctionCallDone("stream_cmd_two", { action: "exec", command: secondCommand }, 1),
+          responseFunctionCallDone("stream_cmd_one", { action: "exec", timeout_ms: 600_000, command: firstCommand }),
+          responseFunctionCallDone("stream_cmd_two", { action: "exec", timeout_ms: 600_000, command: secondCommand }, 1),
           responseCompleted(),
         ]),
         fakeGatewayFinalText(finalText),
@@ -6384,7 +6386,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       expect(gateway.requestCount()).toBe(1);
 
       await session.sendText("/help");
-      await session.waitForText("Commands 35", TIMEOUT);
+      await session.waitForText("Tab Category", TIMEOUT);
       expect(gateway.requestCount()).toBe(1);
       await session.sendKeys("Escape");
     },
@@ -6740,6 +6742,7 @@ describe.skipIf(!tmuxAvailable())("transcript scrollback release", () => {
               name: "terminal",
               input: {
                 action: "exec",
+                timeout_ms: 600_000,
                 command: "sleep 5; printf HELD_COMMAND_DONE",
               },
             },

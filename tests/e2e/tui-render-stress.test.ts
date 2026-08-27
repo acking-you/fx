@@ -114,7 +114,7 @@ describe.skipIf(SKIP)("tui: render stress", () => {
 
         await session.sendKeys("C-u");
         await session.sendText("/help");
-        await session.waitForText("Commands 35", 5_000);
+        await session.waitForText("Tab Category", 5_000);
         await session.sendKeys("Escape");
         await session.waitForPane((pane) => !pane.includes("Enter Open"), 5_000);
         await session.sendText("/status");
@@ -138,7 +138,9 @@ describe.skipIf(SKIP)("tui: render stress", () => {
         const trace = readTrace(launched.tracePath);
         assertTraceInvariants(trace, failures, `run ${run}`);
 
-        await session.kill();
+        await session.sendText("/quit");
+        const exited = await session.waitForSessionEnd();
+        if (!exited) failures.push(`run ${run}: /quit did not exit`);
         session = null;
       }
 

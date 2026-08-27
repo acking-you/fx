@@ -1,7 +1,6 @@
 const std = @import("std");
 const activity_status = @import("../../core/output/activity_status.zig");
 const command_specs = @import("../../core/slash_commands/command_specs.zig");
-const credentials = @import("../../core/auth/credentials.zig");
 const debug_trace = @import("../../core/shared/debug_trace.zig");
 const diff_mod = @import("../../core/output/diff.zig");
 const io_mod = @import("../../core/shared/io.zig");
@@ -16,6 +15,11 @@ const compact_command_menu_presentation = @import("compact_command_menu_presenta
 const input_presentation = @import("input_presentation.zig");
 const interaction_state = @import("interaction_state.zig");
 const picker_presentation = @import("picker_presentation.zig");
+const model_menu_presentation = @import("model_menu_presentation.zig");
+const skills_menu_presentation = @import("skills_menu_presentation.zig");
+const help_menu_presentation = @import("help_menu_presentation.zig");
+const settings_menu_presentation = @import("settings_menu_presentation.zig");
+const resume_menu_presentation = @import("resume_menu_presentation.zig");
 const question_ui = @import("question_ui.zig");
 const render_input = @import("render_input.zig");
 const surface_invalidation = @import("surface_invalidation.zig");
@@ -321,6 +325,22 @@ fn queuedBannerRowsForLayout(
     input_extra: u16,
 ) u16 {
     const requested = render_input.queuedBannerRows(ctx);
+    return clampQueuedBannerRows(
+        requested,
+        terminal_rows,
+        input_visible,
+        composer_top_chrome_rows,
+        input_extra,
+    );
+}
+
+pub fn clampQueuedBannerRows(
+    requested: u16,
+    terminal_rows: u16,
+    input_visible: bool,
+    composer_top_chrome_rows: u16,
+    input_extra: u16,
+) u16 {
     if (requested == 0) return 0;
     const non_banner_rows: u16 = if (input_visible)
         footer_layout.reservedBaseRows(true, composer_top_chrome_rows) +| 1 +| input_extra
@@ -357,9 +377,15 @@ fn buildFooterSurfaceProjection(
     const input_visible = ctx.composer_visible and !modal_active and !viewer_active;
     const composer_top_chrome_rows = footer_paint_plan.composerTopChromeRows();
     const show_auth_picker = !viewer_active and !modal_active and !ctx.stream.active and ctx.auth_picker.active;
+    const show_settings_menu = !viewer_active and !show_auth_picker and !modal_active and ctx.settings_menu.active;
+    const show_help_menu = !viewer_active and !show_auth_picker and !show_settings_menu and !modal_active and ctx.help_menu.active;
+    const show_session_menu = !viewer_active and !show_auth_picker and !show_settings_menu and !show_help_menu and !modal_active and ctx.session_menu.active;
+    const show_models_menu = !viewer_active and !show_auth_picker and !show_settings_menu and !show_help_menu and !show_session_menu and !modal_active and ctx.model_menu.active;
+    const show_inline_catalog = show_settings_menu or show_help_menu or show_session_menu or show_models_menu;
+    const show_skills_query = !viewer_active and !show_auth_picker and !show_inline_catalog and !modal_active and ctx.skills_menu.active;
     const stream_suppresses_file_query = ctx.stream.active and !ctx.queued_editor_active;
-    const show_model_query = !viewer_active and !show_auth_picker and !modal_active and !ctx.stream.active and ctx.model_query_active;
-    const show_file_query = !viewer_active and !modal_active and !stream_suppresses_file_query and ctx.file_query_active and !show_model_query;
+    const show_model_query = !viewer_active and !show_auth_picker and !show_inline_catalog and !show_skills_query and !modal_active and !ctx.stream.active and ctx.model_query_active;
+    const show_file_query = !viewer_active and !show_inline_catalog and !show_skills_query and !modal_active and !stream_suppresses_file_query and ctx.file_query_active and !show_model_query;
     const geometry = input_presentation.measureRawInputGeometry(
         ctx,
         shell.layout.cols,
@@ -369,11 +395,13 @@ fn buildFooterSurfaceProjection(
         show_model_query,
         show_file_query,
     );
-    const show_slash_query = !show_auth_picker and geometry.show_slash_query;
-    const show_picker = show_auth_picker or show_model_query or show_file_query or show_slash_query;
+    const show_slash_query = !show_auth_picker and !show_inline_catalog and !show_skills_query and geometry.show_slash_query;
+    const show_picker = show_auth_picker or show_inline_catalog or show_skills_query or show_model_query or show_file_query or show_slash_query;
     const picker_items: []const []const u8 = if (show_model_query) ctx.model_completions else &.{};
     const file_picker_items: []const file_index.SearchResult = if (show_file_query) ctx.file_completions else &.{};
-    const picker_selection_index: usize = if (show_slash_query)
+    const picker_selection_index: usize = if (show_skills_query)
+        ctx.skills_menu.selected_index
+    else if (show_slash_query)
         ctx.input.picker.slash_completion_index
     else if (show_auth_picker)
         ctx.auth_picker.selectedIndex()
@@ -383,7 +411,9 @@ fn buildFooterSurfaceProjection(
         ctx.file_completion_index
     else
         0;
-    const picker_window_start: usize = if (show_slash_query)
+    const picker_window_start: usize = if (show_skills_query)
+        ctx.skills_menu.window_start
+    else if (show_slash_query)
         ctx.input.picker.slash_completion_window_start
     else if (show_model_query)
         ctx.model_completion_window_start
@@ -403,7 +433,17 @@ fn buildFooterSurfaceProjection(
         ctx.file_completions_failed
     else
         false;
-    const picker_kind: PickerKind = if (show_slash_query)
+    const picker_kind: PickerKind = if (show_skills_query)
+        .skills
+    else if (show_settings_menu)
+        .settings
+    else if (show_help_menu)
+        .help
+    else if (show_session_menu)
+        .sessions
+    else if (show_models_menu)
+        .models
+    else if (show_slash_query)
         .slash
     else if (show_auth_picker)
         .auth
@@ -444,6 +484,29 @@ fn buildFooterSurfaceProjection(
         )
     else
         null;
+    const inline_picker_row_budget = picker_presentation.inlinePickerRowBudget(
+        shell.layout.rows,
+        geometry.input_extra,
+        banner_rows,
+    );
+    const expanded_picker_row_budget = picker_presentation.inlinePickerRowBudgetCapped(
+        shell.layout.rows,
+        geometry.input_extra,
+        banner_rows,
+        resume_menu_presentation.max_inline_rows,
+    );
+    const settings_picker_row_budget = picker_presentation.inlinePickerRowBudgetCapped(
+        shell.layout.rows,
+        geometry.input_extra,
+        banner_rows,
+        settings_menu_presentation.max_inline_rows,
+    );
+    const models_picker_row_budget = picker_presentation.inlinePickerRowBudgetCapped(
+        shell.layout.rows,
+        geometry.input_extra,
+        banner_rows,
+        model_menu_presentation.max_inline_rows,
+    );
     const picker_rows: u16 = if (sizing_request) |request|
         if (request.file) |request_file|
             approval_ui.fileApprovalPickerRows(request_file)
@@ -464,6 +527,35 @@ fn buildFooterSurfaceProjection(
             shell.layout.rows,
             geometry.input_extra,
             banner_rows,
+        )
+    else if (show_settings_menu)
+        settings_menu_presentation.menuRowCount(
+            ctx.settings_menu,
+            shell.layout.cols,
+            settings_picker_row_budget,
+        )
+    else if (show_help_menu)
+        help_menu_presentation.menuRowCount(
+            ctx.help_menu,
+            shell.layout.cols,
+            expanded_picker_row_budget,
+        )
+    else if (show_session_menu)
+        resume_menu_presentation.menuRowCount(
+            ctx.session_menu,
+            shell.layout.cols,
+            expanded_picker_row_budget,
+        )
+    else if (show_models_menu)
+        model_menu_presentation.menuRowCount(
+            ctx.model_menu,
+            shell.layout.cols,
+            models_picker_row_budget,
+        )
+    else if (show_skills_query)
+        skills_menu_presentation.inlineMenuRowCount(
+            ctx.skills_menu,
+            inline_picker_row_budget,
         )
     else if (slash_menu_layout) |layout|
         layout.row_count
@@ -1289,7 +1381,7 @@ fn footerGeometryForRows(rows: FooterRows, activity: ActivityPlacement) footer_v
 
 const surface_test_slash_specs = [_]command_specs.SlashSpec{
     .{ .kind = .help, .command = "/help", .help_entry = "/help", .completion_description = "show available slash commands", .presentation_category = .general },
-    .{ .kind = .trace, .command = "/trace", .help_entry = "/trace", .completion_description = "copy a private diagnostic trace", .presentation_category = .product },
+    .{ .kind = .clear_screen, .command = "/clear", .help_entry = "/clear", .completion_description = "clear the terminal transcript", .presentation_category = .general },
 };
 const surface_test_slash_registry = command_specs.SlashRegistry{ .commands = surface_test_slash_specs[0..] };
 
@@ -1578,6 +1670,39 @@ test "surface footer measurement reserves rows for vertical slash completions" {
     try std.testing.expect(measurement.footer_extra >= measurement.picker_rows + 1);
 }
 
+test "surface footer measurement reserves six inline skill choices" {
+    const alloc = std.testing.allocator;
+    const skills = [_]@import("../../core/skills/skill_runtime.zig").Skill{
+        .{ .name = "one", .description = "", .path = "/tmp/one", .source = .global_fx },
+        .{ .name = "two", .description = "", .path = "/tmp/two", .source = .global_fx },
+        .{ .name = "three", .description = "", .path = "/tmp/three", .source = .global_fx },
+        .{ .name = "four", .description = "", .path = "/tmp/four", .source = .global_fx },
+        .{ .name = "five", .description = "", .path = "/tmp/five", .source = .global_fx },
+        .{ .name = "six", .description = "", .path = "/tmp/six", .source = .global_fx },
+        .{ .name = "seven", .description = "", .path = "/tmp/seven", .source = .global_fx },
+    };
+    var input = InputRuntime{};
+    defer input.deinit(alloc);
+    try input.edit_state.input.appendSlice(alloc, "$");
+    input.edit_state.cursor = input.edit_state.input.items.len;
+
+    var approval = ApprovalPrompt{};
+    defer approval.deinit(alloc);
+    var shell = surfaceTestShell(24, 80);
+    defer shell.deinit(alloc);
+    var ctx = surfaceTestContext(&input);
+    ctx.skills_menu = .{
+        .active = true,
+        .items = &skills,
+    };
+
+    var measurement = try measureSurfaceFooter(alloc, &shell, approval.projection(), ctx);
+    defer measurement.deinit(alloc);
+    try std.testing.expect(measurement.show_picker);
+    try std.testing.expectEqual(PickerKind.skills, measurement.picker_kind);
+    try std.testing.expectEqual(@as(u16, 8), measurement.picker_rows);
+}
+
 test "surface footer reserves one non-selectable row for zero slash results" {
     const alloc = std.testing.allocator;
     var input = InputRuntime{};
@@ -1604,6 +1729,7 @@ test "surface footer measurement reserves capped picker rows for active list pic
     const alloc = std.testing.allocator;
     var approval = ApprovalPrompt{};
     defer approval.deinit(alloc);
+
     const expected_rows = input_presentation.max_model_picker_rows;
 
     var slash_input = InputRuntime{};
@@ -1697,9 +1823,9 @@ test "surface footer measurement reserves only the compact auth picker rows" {
     var ctx = surfaceTestContext(&input);
     ctx.auth_picker = auth_runtime.PickerView{
         .active = true,
-        .available_sources = auth_runtime.SourceSet.initOne(.openai_api_key),
-        .selected_choice = .{ .source = .openai_api_key },
-        .active_source = .openai_api_key,
+        .available_sources = auth_runtime.SourceSet.initMany(&.{ .openai_api_key, .grok_subscription }),
+        .selected_choice = .{ .source = .grok_subscription },
+        .active_source = .grok_subscription,
         .include_skip = false,
     };
 
@@ -1723,10 +1849,11 @@ test "surface footer keeps the selected auth source visible at minimum height" {
     var ctx = surfaceTestContext(&input);
     ctx.auth_picker = auth_runtime.PickerView{
         .active = true,
-        .available_sources = auth_runtime.SourceSet.initOne(.openai_api_key),
-        .selected_choice = .{ .source = .openai_api_key },
+        .available_sources = auth_runtime.SourceSet.initMany(&.{ .openai_api_key, .grok_subscription }),
+        .selected_choice = .{ .source = .grok_subscription },
         .active_source = .openai_api_key,
         .include_skip = false,
+        .stage = .switch_credential,
     };
 
     var shell = surfaceTestShell(5, 80);
@@ -1759,9 +1886,8 @@ test "surface footer keeps the selected auth source visible at minimum height" {
     );
     defer frame.deinit(alloc);
 
-    const source_label = credentials.sourceLabel(.openai_api_key);
     for (frame.composed.rows.items) |row| {
-        if (std.mem.find(u8, row.text.items, source_label) != null) return;
+        if (std.mem.find(u8, row.text.items, "Grok subscription") != null) return;
     }
     return error.SelectedAuthSourceNotVisible;
 }

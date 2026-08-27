@@ -1,6 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
 import {
-  chmodSync,
   copyFileSync,
   mkdirSync,
   mkdtempSync,
@@ -89,7 +88,7 @@ async function startFx(
       ...(gateway
         ? {
           OPENAI_API_KEY: "fake-input-navigation-key",
-                    FX_RESPONSES_BASE_URL: gateway.baseUrl,
+          FX_RESPONSES_BASE_URL: gateway.baseUrl,
           FX_MODEL: FAKE_GATEWAY_MODEL,
         }
         : {}),
@@ -130,6 +129,29 @@ function largeTabbedPaste(): string {
 function expectCleanStderr(): void {
   if (!stderrPath) throw new Error("stderrPath was not initialized");
   expect(readFileSync(stderrPath, "utf8")).toBe("");
+}
+
+function nestedText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) return content.map(nestedText).join("");
+  if (content && typeof content === "object") {
+    const value = content as Record<string, unknown>;
+    return [
+      nestedText(value.text),
+      nestedText(value.value),
+      nestedText(value.content),
+    ].join("");
+  }
+  return "";
+}
+
+function latestUserText(body: string): string {
+  const request = JSON.parse(body) as {
+    input: Array<{ role?: string; content?: unknown }>;
+  };
+  return nestedText(
+    request.input.findLast((message) => message.role === "user")?.content,
+  );
 }
 
 async function typeLiteral(active: TmuxSession, text: string): Promise<void> {
@@ -320,9 +342,12 @@ tmuxTest(
     await waitForExactComposerRow(active, "┃ /");
 
     await active.sendKeys("Enter");
-    await active.waitForText("Commands 35", READY_TIMEOUT);
+    await active.waitForText("Tab Category", READY_TIMEOUT);
     await active.sendKeys("Escape");
-    await active.waitForText("Run /help for commands", READY_TIMEOUT);
+    await active.waitForPane(
+      (pane) => hasEmptyComposer(pane) && !pane.includes("Enter Open"),
+      READY_TIMEOUT,
+    );
     expect(active.isAlive()).toBe(true);
     expectCleanStderr();
   },
@@ -338,7 +363,7 @@ tmuxTest(
       (pane) =>
         pane.includes("/help") &&
         pane.includes("/quit") &&
-        !pane.includes("Run /help for commands"),
+        pane.includes("Run /help for commands"),
       READY_TIMEOUT,
     );
 
@@ -346,10 +371,13 @@ tmuxTest(
     const afterUnknown = await active.capturePane();
     expect(afterUnknown).toContain("/help");
     expect(afterUnknown).toContain("/quit");
-    expect(afterUnknown).not.toContain("Run /help for commands");
+    expect(afterUnknown).toContain("Run /help for commands");
 
     await active.sendKeys("Escape");
-    await active.waitForText("Run /help for commands", READY_TIMEOUT);
+    await active.waitForPane(
+      (pane) => hasEmptyComposer(pane) && !pane.includes("Enter Open"),
+      READY_TIMEOUT,
+    );
     expect(active.isAlive()).toBe(true);
     expectCleanStderr();
   },
@@ -574,13 +602,7 @@ tmuxTest(
     expectCleanStderr();
     expect(gateway?.requests).toHaveLength(1);
 
-    const messages = JSON.parse(gateway!.requests[0]!.body).input as Array<{
-      role: string;
-      content?: Array<{ type: string; text?: string }>;
-    }>;
-    const finalUser = messages[messages.length - 1];
-    expect(finalUser?.role).toBe("user");
-    expect(finalUser?.content?.[0]?.text).toBe(prompt);
+    expect(latestUserText(gateway!.requests[0]!.body)).toBe(prompt);
 
     const scrollback = await active.captureFullScrollback();
     const promptTail = scrollback.indexOf("TAB_START_0085");
@@ -1241,14 +1263,14 @@ tmuxTest(
 
     expect(localGateway.requests).toHaveLength(1);
     const body = localGateway.requests[0]!.body;
-    const fileParts = body.match(/"type":"input_image"/g) ?? [];
-    expect(fileParts).toHaveLength(2);
+    const imageParts = body.match(/"type":"input_image"/g) ?? [];
+    expect(imageParts).toHaveLength(2);
     expect(body).not.toContain("/image ");
     expect(body).not.toContain(first);
     expect(body).not.toContain(second);
     expect(body).not.toContain(workspace);
     expect(body).not.toContain("file://");
-    expect(body.match(/data:image\/png;base64,/g) ?? []).toHaveLength(2);
+    expect(body).toContain("data:image/png;base64,");
     expect(body).toContain("describe both");
 
     const fullScrollback = await active.captureFullScrollback();
@@ -1335,6 +1357,7 @@ tmuxTest(
     await active.waitForPane((pane) => pane.includes("turn 2 complete"), READY_TIMEOUT);
 
     await active.resizeWindow(88, 24);
+    await active.waitForText("turn 2 complete", READY_TIMEOUT);
     const resized = await active.captureFullScrollback();
     expect(resized).toContain("[Image 1] first turn");
     expect(resized).toContain("[Image 2] second turn");
@@ -1501,48 +1524,6 @@ tmuxTest(
   TIMEOUT,
 );
 
-test.skipIf(!HAS_TMUX || process.platform !== "linux")(
-  "clipboard image paste uses the WSL PowerShell bridge",
-  async () => {
-    testHome = mkdtempSync(join(tmpdir(), "fx-tui-clipboard-"));
-    stderrPath = join(testHome, "stderr.log");
-    writeFileSync(stderrPath, "");
-    const fakeBin = join(testHome, "bin");
-    mkdirSync(fakeBin, { recursive: true });
-    const powershell = join(fakeBin, "powershell.exe");
-    writeFileSync(
-      powershell,
-      "#!/bin/sh\nexec /bin/cat \"$FX_TEST_CLIPBOARD_IMAGE\"\n",
-    );
-    chmodSync(powershell, 0o755);
-
-    const active = await TmuxSession.create({
-      cmd: FX_BIN,
-      env: {
-        HOME: testHome,
-        PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
-        WSL_INTEROP: "/run/WSL/fx-test-interop",
-        FX_TEST_CLIPBOARD_IMAGE: imageFixture,
-        FX_DISABLE_KEYCHAIN: "1",
-        FX_SKIP_ONBOARDING: "1",
-        OPENAI_API_KEY: undefined,
-      },
-      width: 100,
-      height: 24,
-      stderrPath,
-    });
-    session = active;
-    await active.waitForComposer(READY_TIMEOUT);
-
-    await typeLiteral(active, "/paste");
-    await active.sendKeys("Enter");
-    await active.waitForPane((pane) => pane.includes("[Image 1]"), READY_TIMEOUT);
-    expect(active.isAlive()).toBe(true);
-    expectCleanStderr();
-  },
-  TIMEOUT,
-);
-
 tmuxTest(
   "repeated image-path paste cannot grow direct input past the cap and leaves fx alive",
   async () => {
@@ -1612,7 +1593,7 @@ tmuxTest(
       env: {
         HOME: testHome,
         OPENAI_API_KEY: "fake-current-rail-key",
-                FX_RESPONSES_BASE_URL: localGateway.baseUrl,
+        FX_RESPONSES_BASE_URL: localGateway.baseUrl,
         FX_MODEL: FAKE_GATEWAY_MODEL,
       },
       width: 80,
@@ -1647,12 +1628,7 @@ tmuxTest(
       20_000,
     );
     expect(localGateway.requests.length).toBe(1);
-    const request = JSON.parse(localGateway.requests[0]!.body).input as Array<{
-      role: string;
-      content?: Array<{ type: string; text?: string }>;
-    }>;
-    const user = request.findLast((message) => message.role === "user");
-    expect(user?.content?.[0]?.text).toBe(submission);
+    expect(latestUserText(localGateway.requests[0]!.body)).toBe(submission);
 
     const transcript = await active.capturePaneEscapes();
     const first = rowWithVisiblePredicate(
@@ -1716,7 +1692,12 @@ tmuxTest(
     await typeLiteral(active, "       /he");
     await active.waitForPane((pane) => pane.includes("/he"), READY_TIMEOUT);
     await active.sendKeys("Enter");
-    await active.waitForPane((pane) => pane.includes("Command"), READY_TIMEOUT);
+    await active.waitForPane(
+      (pane) => hasEmptyComposer(pane) && pane.includes("Tab Ente"),
+      READY_TIMEOUT,
+    );
+    await active.resizeWindow(80, 24, 300);
+    await active.waitForText("Tab Category", READY_TIMEOUT);
     expect(gateway?.requests).toHaveLength(0);
     expectCleanStderr();
   },

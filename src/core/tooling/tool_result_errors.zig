@@ -237,19 +237,22 @@ pub fn toolPermissionDenialReason(output: []const u8) ?types.ToolPermissionDenia
         .string => |value| value,
         else => return null,
     };
-    const permission_denied = std.mem.eql(u8, type_value, "tool_permission_denied");
     const review_held = std.mem.eql(u8, type_value, "tool_review_held");
-    if (!permission_denied and !review_held) return null;
+    if (!review_held and !std.mem.eql(u8, type_value, "tool_permission_denied")) return null;
     const reason_value = switch (error_value.get("reason") orelse return null) {
         .string => |value| value,
         else => return null,
     };
-    const reason = std.meta.stringToEnum(types.ToolPermissionDenialReason, reason_value) orelse
-        return null;
-    return switch (reason) {
-        .user_denied, .auto_denied, .policy_denied, .permission_required => if (permission_denied) reason else null,
-        .review_caution, .review_unavailable => if (review_held) reason else null,
+    const reason = std.meta.stringToEnum(
+        types.ToolPermissionDenialReason,
+        reason_value,
+    ) orelse return null;
+    const review_reason = switch (reason) {
+        .review_caution, .review_unavailable => true,
+        .user_denied, .auto_denied, .policy_denied, .permission_required => false,
     };
+    if (review_held != review_reason) return null;
+    return reason;
 }
 
 pub fn toolExecutionFailureJson(alloc: Allocator, failure: ExecutionFailure) Allocator.Error![]u8 {
@@ -476,18 +479,21 @@ test "review hold JSON distinguishes caution and unavailable from permission den
     try std.testing.expect(isToolReviewHeldOutput(caution));
     try std.testing.expect(!isToolPermissionDeniedOutput(caution));
     try std.testing.expectEqual(
-        types.ToolPermissionDenialReason.review_caution,
-        toolPermissionDenialReason(caution).?,
+        @as(?types.ToolPermissionDenialReason, .review_caution),
+        toolPermissionDenialReason(caution),
     );
     try std.testing.expect(std.mem.find(u8, unavailable, "\"reason\":\"review_unavailable\"") != null);
     try std.testing.expect(std.mem.find(u8, unavailable, "\"advice\"") == null);
     try std.testing.expect(isToolReviewHeldOutput(unavailable));
     try std.testing.expectEqual(
-        types.ToolPermissionDenialReason.review_unavailable,
-        toolPermissionDenialReason(unavailable).?,
+        @as(?types.ToolPermissionDenialReason, .review_unavailable),
+        toolPermissionDenialReason(unavailable),
     );
     try std.testing.expect(toolPermissionDenialReason(
         "{\"error\":{\"type\":\"tool_review_held\",\"reason\":\"auto_denied\"}}",
+    ) == null);
+    try std.testing.expect(toolPermissionDenialReason(
+        "{\"error\":{\"type\":\"tool_permission_denied\",\"reason\":\"review_caution\"}}",
     ) == null);
 }
 

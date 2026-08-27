@@ -565,7 +565,7 @@ describe.skipIf(!tmuxAvailable())("config persistence", () => {
         });
         await session.waitForText("Run /help", TIMEOUT);
         await session.sendLiteral("/model");
-        await session.sendKeys("Enter");
+        await session.sendKeys("Tab");
         await session.waitForText("xai/grok-build-1", TIMEOUT);
 
         await session.sendKeys("Escape");
@@ -585,9 +585,10 @@ describe.skipIf(!tmuxAvailable())("config persistence", () => {
 
         await session.sendKeys("C-u");
         await session.sendLiteral("/model");
-        await session.sendKeys("Enter");
+        await session.sendKeys("Tab");
         await session.waitForText("xai/grok-build-1", TIMEOUT);
 
+        await session.sendKeys("Escape");
         await session.sendKeys("C-u");
         await session.sendText("/quit");
         await session.waitForSessionEnd(TIMEOUT);

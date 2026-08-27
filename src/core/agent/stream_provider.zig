@@ -1,5 +1,6 @@
 const std = @import("std");
 const model_capabilities = @import("../config/model_capabilities.zig");
+const model_provider = @import("../config/model_provider.zig");
 const image_attachments = @import("../images/image_attachments.zig");
 const debug_trace = @import("../shared/debug_trace.zig");
 const types = @import("../shared/types.zig");
@@ -241,7 +242,7 @@ pub const UsageUnavailable = enum {
 };
 
 pub const UsageOutcome = union(enum) {
-    immediate,
+    exact: model_provider.ProviderId,
     unavailable: UsageUnavailable,
 };
 
@@ -327,7 +328,7 @@ test "stream provider accepts one typed request and emits ordered neutral events
             request.events.emit(.{ .reasoning_delta = "second" });
             return .{ .completed = .{
                 .completion = .{ .content = "done" },
-                .usage = .immediate,
+                .usage = .{ .exact = .gateway },
             } };
         }
     };
@@ -392,7 +393,7 @@ test "stream provider accepts one typed request and emits ordered neutral events
     try std.testing.expect(!capture.failed);
     try std.testing.expectEqualStrings("firstsecond", capture.chunks.items);
     try std.testing.expectEqualStrings("done", result.completed.completion.content.?);
-    try std.testing.expect(std.meta.activeTag(result.completed.usage) == .immediate);
+    try std.testing.expect(std.meta.activeTag(result.completed.usage) == .exact);
 }
 
 test "owned stream result releases every Responses completion field" {

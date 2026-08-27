@@ -82,7 +82,7 @@ function reasoningToolResponse(
     ...responseFunctionCall(
       "call_1",
       "terminal",
-      { action: "exec", command: "printf hello" },
+      { action: "exec", timeout_ms: 600_000, command: "printf hello" },
       assistantText ? 2 : 1,
     ),
     responseCompleted(5, 6),

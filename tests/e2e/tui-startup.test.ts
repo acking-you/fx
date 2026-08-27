@@ -40,10 +40,11 @@ describe.skipIf(SKIP)("tui: startup and exit", () => {
       session = await TmuxSession.create();
       await session.waitForComposer(10_000);
       await session.sendText("/help");
-      const pane = await session.waitForText("Commands 35", 5_000);
-      expect(pane).toContain("General");
+      const pane = await session.waitForText("Tab Category", 5_000);
+      expect(pane).toContain("[All]");
+      expect(pane).toContain("Tab Category");
       expect(pane).toContain("Enter Open");
-      expect(pane).not.toContain("Run /help for commands");
+      expect(pane).toContain("Run /help for commands");
     },
     TIMEOUT,
   );
@@ -133,7 +134,8 @@ describe.skipIf(SKIP_TMUX)("tui: fresh-session commands", () => {
           (line) => line.includes("/help") && line.includes("show available slash commands"),
         );
         expect(wideHelp).toBeDefined();
-        expect(wideHelp!.indexOf("show available slash commands")).toBe(48);
+        const wideDescriptionColumn = wideHelp!.indexOf("show available slash commands");
+        expect(wideDescriptionColumn).toBe(18);
 
         await session.resizeWindow(60, 40);
         const narrow = await session.waitForPane(
@@ -146,7 +148,7 @@ describe.skipIf(SKIP_TMUX)("tui: fresh-session commands", () => {
           (line) => line.includes("/help") && line.includes("show available"),
         );
         expect(narrowHelp).toBeDefined();
-        expect(narrowHelp!.indexOf("show available")).toBe(40);
+        expect(narrowHelp!.indexOf("show available")).toBe(wideDescriptionColumn);
         expect(readFileSync(stderrPath, "utf8")).toBe("");
       } finally {
         if (session) {
@@ -355,46 +357,5 @@ describe.skipIf(SKIP_TMUX)("tui: MCP startup", () => {
       }
     },
     TIMEOUT,
-  );
-});
-
-describe.skipIf(SKIP_TMUX)("tui: credential onboarding", () => {
-  test(
-    "startup shows credential onboarding on the first frame and Escape remains session-only",
-    async () => {
-      const home = realpathSync(mkdtempSync(join(tmpdir(), "fx-e2e-login-onboarding-")));
-      const env = {
-        OPENAI_API_KEY: undefined,
-        HOME: home,
-        USER: "fx-e2e-login-onboarding",
-        FX_DISABLE_KEYCHAIN: "1",
-        FX_NO_OPEN_BROWSER: "1",
-        FX_SKIP_ONBOARDING: "0",
-      };
-
-      session = await TmuxSession.create({ env });
-
-      const initial = await session.waitForText("Welcome to fx", TIMEOUT);
-      expect(initial).toContain("Sign in with Codex");
-      expect(initial).toContain("Sign in with Grok");
-      expect(initial).toContain("Esc to sign in later");
-      expect(initial).not.toContain("Change team");
-      expect(initial).not.toContain("Switch credential");
-      expect(initial).not.toContain("Skip for now");
-
-      await session.sendKeys("Escape");
-      const skipped = await session.waitForPane(
-        (pane) => !pane.includes("Welcome to fx") && !pane.includes("Sign in with Codex"),
-        TIMEOUT,
-      );
-      expect(skipped).not.toContain("Sign in with Grok");
-
-      await session.kill();
-      session = await TmuxSession.create({ env });
-      const restarted = await session.waitForText("Welcome to fx", TIMEOUT);
-      expect(restarted).toContain("Sign in with Codex");
-      expect(restarted).toContain("Sign in with Grok");
-    },
-    60_000,
   );
 });

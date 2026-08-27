@@ -30,8 +30,6 @@ const DEFAULT_UNSET_ENV_KEYS = [
   "FX_CODEX_BASE_URL",
   "FX_CODEX_AUTH_FILE",
   "FX_CODEX_ISSUER",
-  "FX_E2E_OPENAI_MODELS_URL",
-  "FX_E2E_UPGRADE_BASE_URL",
   "FX_PERMISSION_MODE",
 ] as const;
 const MIRRORED_ENV_KEYS = [
@@ -1227,6 +1225,36 @@ export class TmuxSession {
     }
     throw new Error(
       `Timed out waiting for stable composer in ${this.name}.\nLast pane:\n${lastPane}`,
+    );
+  }
+
+  async waitForStableScrollback(
+    predicate: (scrollback: string) => boolean,
+    timeoutMs = 15_000,
+    stableMs = 100,
+  ): Promise<string> {
+    const deadline = Date.now() + timeoutMs;
+    let stableSince: number | null = null;
+    let previousScrollback = "";
+    let lastScrollback = "";
+    while (Date.now() < deadline) {
+      const scrollback = await this.captureFullScrollback();
+      lastScrollback = scrollback;
+      if (predicate(scrollback)) {
+        if (scrollback !== previousScrollback) {
+          previousScrollback = scrollback;
+          stableSince = Date.now();
+        } else if (stableSince !== null && Date.now() - stableSince >= stableMs) {
+          return scrollback;
+        }
+      } else {
+        previousScrollback = "";
+        stableSince = null;
+      }
+      await sleep(25);
+    }
+    throw new Error(
+      `Timed out waiting for stable scrollback in ${this.name}.\nLast scrollback:\n${lastScrollback}`,
     );
   }
 

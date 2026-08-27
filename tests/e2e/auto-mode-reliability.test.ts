@@ -82,12 +82,17 @@ function gatewayEnv(
 }
 
 function commandCall(command: string, id: string) {
-  return fakeGatewayToolCall(id, "terminal", { action: "exec", command });
+  return fakeGatewayToolCall(id, "terminal", {
+    action: "exec",
+    timeout_ms: 600_000,
+    command,
+  });
 }
 
 function userCommandCall(command: string, id: string) {
   return fakeGatewayToolCall(id, "terminal", {
     action: "exec",
+    timeout_ms: 600_000,
     command,
     profile: "user",
   });
@@ -96,6 +101,7 @@ function userCommandCall(command: string, id: string) {
 function cleanCommandCall(command: string, id: string) {
   return fakeGatewayToolCall(id, "terminal", {
     action: "exec",
+    timeout_ms: 600_000,
     command,
     profile: "clean",
   });
@@ -315,16 +321,19 @@ describe("lean auto mode reliability", () => {
           fakeGatewaySse([
             ...responseFunctionCall("clean_direct_pwd", "terminal", {
               action: "exec",
+              timeout_ms: 600_000,
               command: "pwd",
               profile: "clean",
             }),
             ...responseFunctionCall("clean_direct_git_status", "terminal", {
               action: "exec",
+              timeout_ms: 600_000,
               command: "git status --short",
               profile: "clean",
             }, 1),
             ...responseFunctionCall("clean_blocked_reset", "terminal", {
               action: "exec",
+              timeout_ms: 600_000,
               command: "git reset --hard",
               profile: "clean",
             }, 2),
@@ -1170,10 +1179,12 @@ describe("lean auto mode reliability", () => {
           fakeGatewaySse([
             ...responseFunctionCall("mixed_block_3", "terminal", {
               action: "exec",
+              timeout_ms: 600_000,
               command: `touch ${JSON.stringify(markers[2]!)}`,
             }),
             ...responseFunctionCall("mixed_safe_pwd", "terminal", {
               action: "exec",
+              timeout_ms: 600_000,
               command: "pwd",
             }, 1),
             responseCompleted(),
@@ -1297,7 +1308,7 @@ describe("lean auto mode reliability", () => {
       await activeSession.sendText("Initialize the saved allow session.");
       await activeSession.waitForText("allow session initialized", TIMEOUT);
       await activeSession.sendText(
-        `/permissions remember allow terminal ${JSON.stringify({ action: "exec", command: allowedCommand })}`,
+        `/permissions remember allow terminal ${JSON.stringify({ action: "exec", timeout_ms: 600_000, command: allowedCommand })}`,
       );
       await activeSession.waitForText("Remember allow for this saved session", TIMEOUT);
       await activeSession.sendKeys("1");
@@ -1419,7 +1430,7 @@ describe("lean auto mode reliability", () => {
       await activeSession.sendText("Initialize this saved session.");
       await activeSession.waitForText("session initialized", TIMEOUT);
       await activeSession.sendText(
-        `/permissions remember deny terminal ${JSON.stringify({ action: "exec", command: blockedCommand })}`,
+        `/permissions remember deny terminal ${JSON.stringify({ action: "exec", timeout_ms: 600_000, command: blockedCommand })}`,
       );
       await activeSession.waitForText("Remember deny for this saved session", TIMEOUT);
       await activeSession.sendKeys("1");

@@ -160,7 +160,7 @@ function lengthLimitedCommandCall(command: string) {
       item_id: "command_item_1",
       call_id: "command_1",
       output_index: 1,
-      arguments: JSON.stringify({ action: "exec", command }),
+      arguments: JSON.stringify({ action: "exec", command, timeout_ms: 30_000 }),
     },
     {
       type: "response.incomplete",
@@ -1807,19 +1807,18 @@ describe("acp: model-independent", () => {
   );
 
   test(
-    "ACP process status lists a yielded terminal exec",
+    "ACP process status lists a persistent terminal",
     async () => {
       const root = createShortIsolatedRoot("fx-acp-terminal-status-");
-      const command = "printf ACP_YIELDED_TERMINAL; sleep 5";
+      const command = "printf ACP_PERSISTENT_TERMINAL; sleep 5";
       const gateway = startFakeGateway([
         fakeGatewayToolCall("acp_terminal_status_1", "terminal", {
-          action: "exec",
+          action: "start",
           cwd: root.workspace,
           command,
           profile: "clean",
-          "yield_time_ms": 100,
         }),
-        finalText("ACP yielded terminal started"),
+        finalText("ACP persistent terminal started"),
       ]);
       try {
         client = await AcpClient.create({
@@ -1865,7 +1864,7 @@ describe("acp: model-independent", () => {
           else messages.push(message);
         }
         expect(response.result.stopReason).toBe("end_turn");
-        expect(JSON.stringify(messages)).toContain("ACP_YIELDED_TERMINAL");
+        expect(JSON.stringify(messages)).toContain("ACP_PERSISTENT_TERMINAL");
         expect(client.stderr).toBe("");
       } finally {
         await client?.close();
@@ -5308,7 +5307,6 @@ describe("acp: model-independent", () => {
           env: {
             HOME: root.home,
             OPENAI_API_KEY: "",
-            OPENAI_API_KEY: "",
             FX_DISABLE_KEYCHAIN: "1",
           },
         });
@@ -6460,6 +6458,7 @@ describe("acp: model-independent", () => {
           action: "exec",
           command: `printf approved > '${marker}'`,
           profile: "clean",
+          timeout_ms: 30_000,
         }),
         finalText("command approval complete"),
       ]);
@@ -7247,6 +7246,7 @@ describe("acp: model-independent", () => {
           fakeGatewayToolCall("cancelled_review_command", "terminal", {
             action: "exec",
             command: `printf cancelled > ${JSON.stringify(marker)}`,
+            timeout_ms: 30_000,
           }),
           finalText("follow-up after ACP review cancellation"),
         ],

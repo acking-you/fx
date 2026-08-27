@@ -178,6 +178,8 @@ function startAuthFixture(
     failFeatureRefreshAfterRotation?: boolean;
     rejectResourceTemplateAuth?: boolean;
     authorizationServerTrailingSlash?: boolean;
+    authorizationResponseIssuer?: string;
+    omitScopes?: boolean;
   } = {},
 ) {
   const transport = options.transport ?? "http";
@@ -230,8 +232,9 @@ function startAuthFixture(
           return new Response("", {
             status: 401,
             headers: {
-              "www-authenticate":
-                `Bearer resource_metadata="${origin}/.well-known/oauth-protected-resource${resourcePath}", scope="tools.read"`,
+              "www-authenticate": options.omitScopes
+                ? `Bearer resource_metadata="${origin}/.well-known/oauth-protected-resource${resourcePath}"`
+                : `Bearer resource_metadata="${origin}/.well-known/oauth-protected-resource${resourcePath}", scope="tools.read"`,
             },
           });
         }
@@ -375,7 +378,9 @@ function startAuthFixture(
           authorization_servers: [
             options.authorizationServerTrailingSlash ? `${origin}/` : origin,
           ],
-          scopes_supported: ["tools.read", "tools.call", "offline_access"],
+          ...(options.omitScopes
+            ? {}
+            : { scopes_supported: ["tools.read", "tools.call", "offline_access"] }),
         });
       }
       if (url.pathname === "/.well-known/oauth-authorization-server") {
@@ -384,7 +389,9 @@ function startAuthFixture(
           authorization_endpoint: `${origin}/authorize`,
           token_endpoint: `${origin}/token`,
           revocation_endpoint: `${origin}/revoke`,
-          scopes_supported: ["tools.read", "tools.call", "offline_access"],
+          ...(options.omitScopes
+            ? {}
+            : { scopes_supported: ["tools.read", "tools.call", "offline_access"] }),
           grant_types_supported: ["authorization_code", "refresh_token"],
           token_endpoint_auth_methods_supported: ["none"],
           code_challenge_methods_supported: ["S256"],
@@ -411,7 +418,10 @@ function startAuthFixture(
           "state",
           options.wrongState ? "wrong-state" : url.searchParams.get("state")!,
         );
-        redirect.searchParams.set("iss", origin);
+        redirect.searchParams.set(
+          "iss",
+          options.authorizationResponseIssuer ?? origin,
+        );
         return Response.redirect(redirect, 302);
       }
       if (url.pathname === "/token") {
@@ -473,7 +483,7 @@ function startAuthFixture(
             ? REFRESH_ROTATED
             : REFRESH_INITIAL,
           token_type: "Bearer",
-          scope: expectedScope,
+          ...(options.omitScopes ? {} : { scope: expectedScope }),
           expires_in: 3600,
         });
       }
@@ -770,6 +780,89 @@ async function preserveAuthTuiFailure(
 }
 
 describe("MCP remote authentication lifecycle", () => {
+  test.skipIf(!tmuxAvailable())(
+    "no-scope OAuth credentials survive reload and preserve an unrelated server",
+    async () => {
+      upstream = startModernMcpHttpFixture("json");
+      const canary = startModernMcpHttpFixture("json");
+      auth = startAuthFixture(upstream.url, { omitScopes: true });
+      const root = createRoot(auth);
+      const profilePath = join(root.home, ".fx", "mcp.json");
+      const profile = JSON.parse(readFileSync(profilePath, "utf8"));
+      delete profile.mcp.fixture.oauth.scopes;
+      profile.mcp.canary = {
+        type: "http",
+        url: canary.url,
+        startup_timeout_ms: 5_000,
+        operation_timeout_ms: 5_000,
+      };
+      writeFileSync(profilePath, JSON.stringify(profile));
+      const credentialDir = join(root.home, ".fx", "mcp-credentials");
+      mkdirSync(credentialDir, { recursive: true, mode: 0o700 });
+      const credentialPath = join(credentialDir, "credentials.json");
+      writeFileSync(
+        credentialPath,
+        JSON.stringify({ version: 1, credentials: [{}] }),
+        { mode: 0o600 },
+      );
+      chmodSync(credentialPath, 0o600);
+      gateway = startFakeGateway([], {
+        models: [{ id: MODEL, type: "language", tags: ["tool-use"] }],
+      });
+
+      try {
+        const env = {
+          ...baseEnv(root),
+          FX_RESPONSES_BASE_URL: gateway.baseUrl,
+        };
+        tui = await TmuxSession.create({
+          isolated: true,
+          cwd: root.workspace,
+          env,
+          width: 150,
+          height: 38,
+        });
+        await tui.waitForComposer(15_000);
+
+        await tui.sendText("/mcp auth fixture --open");
+        const authenticated = await tui.waitForText(
+          "Authenticated MCP server 'fixture'.",
+          15_000,
+        );
+        expect(authenticated).toContain(
+          "Removed 1 unreadable MCP credential entry.",
+        );
+        await tui.waitForText("MCP configuration reloaded", 15_000);
+        await tui.sendText("/mcp list");
+        let pane = await tui.waitForText("MCP health (2 servers):", 10_000);
+        expect(pane).toMatch(/fixture[\s\S]{0,240}state=ready/);
+        expect(pane).toMatch(/canary[\s\S]{0,240}state=ready/);
+
+        const stored = JSON.parse(readFileSync(credentialPath, "utf8"));
+        expect(stored.credentials).toHaveLength(1);
+        expect(stored.credentials[0].scope).toBe("");
+
+        await tui.kill();
+        tui = null;
+        tui = await TmuxSession.create({
+          isolated: true,
+          cwd: root.workspace,
+          env,
+          width: 150,
+          height: 38,
+        });
+        await tui.waitForComposer(15_000);
+        await tui.sendText("/mcp list");
+        pane = await tui.waitForText("MCP health (2 servers):", 10_000);
+        expect(pane).toMatch(/fixture[\s\S]{0,240}state=ready/);
+        expect(pane).toMatch(/canary[\s\S]{0,240}state=ready/);
+      } finally {
+        canary.stop();
+      }
+    },
+    45_000,
+  );
+
   test("required resource template authentication failure propagates before read", async () => {
     upstream = startModernMcpHttpFixture("features");
     auth = startAuthFixture(upstream.url, {
@@ -1472,16 +1565,19 @@ describe("MCP remote authentication lifecycle", () => {
         }),
       );
       gateway = startFakeGateway([
-        fakeGatewayToolCall("search_exact", "mcp_search_tools", {
+        fakeGatewayToolCall("search_exact", "capability_search", {
           query: "Please use mcp_linear_echo for this request",
         }),
-        fakeGatewayToolCall("search_unrelated", "mcp_search_tools", {
+        fakeGatewayToolCall("search_noisy", "capability_search", {
           query: "linear issue",
         }),
-        fakeGatewayToolCall("search_targeted", "mcp_search_tools", {
+        fakeGatewayToolCall("search_auth_collision", "capability_search", {
+          query: "slack data",
+        }),
+        fakeGatewayToolCall("search_targeted", "capability_search", {
           query: "authenticate slack now",
         }),
-        fakeGatewayToolCall("search_healthy", "mcp_search_tools", {
+        fakeGatewayToolCall("search_healthy", "capability_search", {
           query: "linear echo",
         }),
         fakeGatewayFinalText("MCP search isolation observed."),
@@ -1506,9 +1602,13 @@ describe("MCP remote authentication lifecycle", () => {
       const exact = toolResultText(finalBody, "search_exact");
       expect(exact).toContain("mcp_linear_echo");
       expect(exact).not.toContain("authentication_required");
-      const unrelated = toolResultText(finalBody, "search_unrelated");
-      expect(unrelated).toContain('\"tools\":[],\"count\":0');
-      expect(unrelated).not.toContain("authentication_required");
+      const noisy = toolResultText(finalBody, "search_noisy");
+      expect(noisy).toContain("mcp_linear_echo");
+      expect(noisy).not.toContain("authentication_required");
+      const collision = toolResultText(finalBody, "search_auth_collision");
+      expect(collision).toContain("authentication_required");
+      expect(collision).toContain('\"server\":\"slack\"');
+      expect(collision).not.toContain("mcp_linear_echo");
       const targeted = toolResultText(finalBody, "search_targeted");
       expect(targeted).toContain("authentication_required");
       expect(targeted).toContain('\"server\":\"slack\"');
@@ -1938,6 +2038,46 @@ describe("MCP remote authentication lifecycle", () => {
       expect(auth.tokenExchanges).toBe(1);
     },
     45_000,
+  );
+
+  test.skipIf(!tmuxAvailable())(
+    "authorization response issuer mismatch names the response and preserves the trust boundary",
+    async () => {
+      upstream = startModernMcpHttpFixture("json");
+      const returnedIssuer = "https://authorization-response.example.test";
+      auth = startAuthFixture(upstream.url, {
+        authorizationResponseIssuer: returnedIssuer,
+      });
+      const root = createRoot(auth);
+      gateway = startFakeGateway([], {
+        models: [{ id: MODEL, type: "language", tags: ["tool-use"] }],
+      });
+      tui = await TmuxSession.create({
+        isolated: true,
+        cwd: root.workspace,
+        env: {
+          ...baseEnv(root),
+          FX_RESPONSES_BASE_URL: gateway.baseUrl,
+        },
+        width: 140,
+        height: 36,
+      });
+      await tui.waitForComposer(15_000);
+
+      await tui.sendText("/mcp auth fixture --open");
+      const mismatch = await tui.waitForText("was rejected", 15_000);
+      const compactMismatch = mismatch.replace(/\s+/g, " ");
+      expect(compactMismatch).toContain("authorization response returned issuer");
+      expect(compactMismatch).toContain("authorization-response.example.test");
+      expect(compactMismatch).toContain("stopped before token exchange");
+      expect(compactMismatch).toContain("Contact the MCP server provider");
+      expect(compactMismatch).not.toContain('Add "oauth":{"issuer":');
+      expect(auth.authorizationRequests).toBe(1);
+      expect(auth.tokenExchanges).toBe(0);
+      expect(existsSync(join(root.home, ".fx", "mcp-credentials", "credentials.json")))
+        .toBe(false);
+    },
+    30_000,
   );
 
   test.skipIf(!tmuxAvailable())(

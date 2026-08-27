@@ -198,7 +198,7 @@ function lengthLimitedCommandResponse(command: string): Response {
       item_id: "command_item",
       call_id: "command_provisional",
       output_index: 1,
-      arguments: JSON.stringify({ action: "exec", command }),
+      arguments: JSON.stringify({ action: "exec", timeout_ms: 600_000, command }),
     },
     {
       type: "response.incomplete",
@@ -681,32 +681,6 @@ describe("gateway stream lifecycle", () => {
     }]);
     expect(findUnavailableCapabilityReferences(installSkillCurrent)).toEqual([]);
 
-    const mcpSearchOld = fixture("neutral", [{
-      type: "function",
-      name: "mcp_search_tools",
-      description: "When NOT to use: memory, skill, or ask-user work.",
-      parameters: { type: "object", properties: {} },
-    }]);
-    expect(findUnavailableCapabilityReferences(mcpSearchOld)).toEqual([
-      {
-        capability: "skill",
-        source: "tool:mcp_search_tools",
-        clause: "memory, skill, or ask-user work",
-      },
-      {
-        capability: "memory",
-        source: "tool:mcp_search_tools",
-        clause: "memory, skill, or ask-user work",
-      },
-    ]);
-    const mcpSearchCurrent = fixture("neutral", [{
-      type: "function",
-      name: "mcp_search_tools",
-      description: "When NOT to use: the needed capability is already advertised directly.",
-      parameters: { type: "object", properties: {} },
-    }]);
-    expect(findUnavailableCapabilityReferences(mcpSearchCurrent)).toEqual([]);
-
     const excludedText = [
       "Use terminal and web_search.",
       AMBIGUOUS_CAPABILITY_CLAUSES.subagent[0],
@@ -757,8 +731,8 @@ describe("gateway stream lifecycle", () => {
       expect(request.tools).toHaveLength(23);
       expect(findUnavailableCapabilityReferences(oracleRequest)).toEqual([]);
       expect(request.instructions).toContain("# Identity and context");
-      expect(toolByName(oracleRequest, "terminal")?.description).toBe(
-        "Run one captured command and return its result.",
+      expect(toolByName(oracleRequest, "terminal")?.description).toContain(
+        "required finite timeout_ms",
       );
       expect(toolByName(oracleRequest, "skill")?.description).toContain(
         "the task clearly matches one",
@@ -2671,7 +2645,11 @@ describe("gateway stream lifecycle", () => {
     const command = `cat <<'FX_LONG_COMMAND' > long-command-output.txt\n${payload}\nFX_LONG_COMMAND\n`;
     expect(Buffer.byteLength(command)).toBeGreaterThan(20 * 1024);
     const responses = [
-      fakeGatewayToolCall(callId, "terminal", { action: "exec", command }),
+      fakeGatewayToolCall(callId, "terminal", {
+        action: "exec",
+        timeout_ms: 600_000,
+        command,
+      }),
       fakeGatewayFinalText("Long command fixture written."),
     ];
     const gateway = startGateway(() =>
@@ -2717,6 +2695,7 @@ describe("gateway stream lifecycle", () => {
     const gateway = startGateway(() =>
       fakeGatewayToolCall("headless_sigterm_1", "terminal", {
         action: "exec",
+        timeout_ms: 600_000,
         command,
       })
     );
@@ -3511,6 +3490,7 @@ describe("gateway stream lifecycle", () => {
       if (responseIndex++ === 0) {
         return fakeGatewayToolCall("prompt_too_long_tool_1", "terminal", {
           action: "exec",
+          timeout_ms: 600_000,
           command: `printf 'once\\n' >> '${sideEffectPath}'`,
         });
       }
@@ -4550,6 +4530,7 @@ describe("gateway stream lifecycle", () => {
           output_index: 0,
           arguments: JSON.stringify({
             action: "exec",
+            timeout_ms: 600_000,
             command: "printf executed > command-must-not-run.txt",
           }),
         },

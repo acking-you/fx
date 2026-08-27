@@ -1,5 +1,7 @@
 const std = @import("std");
 const question_prompt = @import("../../core/agent/question_prompt.zig");
+const auth_runtime = @import("../../core/auth/auth_runtime.zig");
+const credentials = @import("../../core/auth/credentials.zig");
 const image_attachments = @import("../../core/images/image_attachments.zig");
 const command_specs = @import("../../core/slash_commands/command_specs.zig");
 const display_width = @import("../../core/shared/display_width.zig");
@@ -25,7 +27,7 @@ pub const composeDividerRow = row_text.composeDividerRow;
 pub const appendClipped = row_text.appendClipped;
 pub const appendAbsoluteColumn = row_text.appendAbsoluteColumn;
 
-pub const PickerKind = enum { model_stage, file, slash, auth };
+pub const PickerKind = enum { model_stage, models, file, slash, skills, help, settings, sessions, auth };
 pub const CappedInputRows = struct {
     row_limit: usize,
     total_lines: u16,
@@ -293,6 +295,57 @@ pub fn measureRawInputGeometry(
     };
 }
 
+fn authPickerInteractionHint(view: auth_runtime.PickerView, width: u16) ?[]const u8 {
+    if (!view.active or view.include_skip) return null;
+
+    const root_variants = [_][]const u8{
+        "↑↓ Navigate     Enter Open     Esc Close",
+        "↑↓ Move  Enter Open  Esc",
+        "Enter Open  Esc Close",
+        "Enter Esc",
+    };
+    const selection_variants = [_][]const u8{
+        "↑↓ Navigate     Enter Use     Esc Back",
+        "↑↓ Move  Enter Use  Esc",
+        "Enter Use  Esc Back",
+        "Enter Esc",
+    };
+    const codex_sign_in_variants = [_][]const u8{
+        "Enter reopens browser · Esc cancels",
+        "Enter reopens  Esc cancels",
+        "Enter  Esc",
+        "Enter Esc",
+    };
+    const grok_browser_variants = [_][]const u8{
+        "Enter reopens browser · Tab enters code · Esc cancels",
+        "Enter reopens  Tab code  Esc cancels",
+        "Enter  Tab  Esc",
+        "Enter Tab Esc",
+    };
+    const grok_manual_variants = [_][]const u8{
+        "Enter submits code · Tab returns to browser · Esc cancels",
+        "Enter submits  Tab browser  Esc cancels",
+        "Enter  Tab  Esc",
+        "Enter Tab Esc",
+    };
+    const variants = switch (view.stage) {
+        .root => root_variants,
+        .provider, .switch_credential => selection_variants,
+        .sign_in => switch (view.sign_in_source) {
+            .chatgpt_subscription => codex_sign_in_variants,
+            .grok_subscription => if (view.sign_in_code_visible)
+                grok_manual_variants
+            else
+                grok_browser_variants,
+            else => return null,
+        },
+    };
+    for (variants) |candidate| {
+        if (display_width.visibleWidth(candidate) <= width) return candidate;
+    }
+    return variants[variants.len - 1];
+}
+
 pub fn composeHintRow(
     alloc: Allocator,
     approval_active: bool,
@@ -303,6 +356,10 @@ pub fn composeHintRow(
     var question_hint_buf: [512]u8 = undefined;
     const question_hint = if (ctx.question) |projection|
         questionInteractionHint(projection, width, &question_hint_buf)
+    else
+        null;
+    const auth_hint = if (!approval_active and question_hint == null and !ctx.ctrl_c_pending)
+        authPickerInteractionHint(ctx.auth_picker, width)
     else
         null;
     var hint_buf: [max_status_line_len]u8 = undefined;
@@ -326,6 +383,8 @@ pub fn composeHintRow(
         hint
     else if (ctx.ctrl_c_pending)
         "press ctrl+c again to exit"
+    else if (auth_hint) |hint|
+        hint
     else if (ctx.selected_subagent_label) |label|
         if (ctx.selected_subagent_status) |status|
             std.fmt.bufPrint(
@@ -434,11 +493,11 @@ pub fn composeHelpMenuHintRow(alloc: Allocator, width: u16, ctrl_c_pending: bool
     }
 
     const variants = [_][]const u8{
-        "↑↓ Navigate     Enter Open     Esc Close",
-        "↑↓ Navigate  Enter Open  Esc Close",
-        "↑↓ Move  Enter Open  Esc",
-        "Enter Open  Esc Close",
-        "Enter Esc",
+        "↑↓ Navigate     Tab Category     Enter Open     Esc Close",
+        "↑↓ Navigate  Tab Category  Enter Open  Esc Close",
+        "↑↓ Move  Tab Category  Enter  Esc",
+        "Tab Category  Enter Open  Esc",
+        "Tab Enter Esc",
     };
     var hint = variants[variants.len - 1];
     for (variants) |candidate| {
@@ -471,11 +530,11 @@ pub fn composeSettingsMenuHintRow(
     }
 
     const variants = [_][]const u8{
-        "↑↓ Navigate     ←→ Change     Esc Close",
-        "↑↓ Navigate  ←→ Change  Esc Close",
-        "↑↓ Move  ←→ Change  Esc",
-        "←→ Change  Esc Close",
-        "←→ Esc",
+        "↑↓ Navigate     Tab Category     ←→ Change     Esc Close",
+        "↑↓ Navigate  Tab Category  ←→ Change  Esc Close",
+        "↑↓ Move  Tab Category  ←→ Change  Esc",
+        "Tab Category  ←→ Change  Esc",
+        "Tab ←→ Esc",
     };
     var hint = variants[variants.len - 1];
     for (variants) |candidate| {
@@ -876,7 +935,6 @@ fn finishComposedInputRow(alloc: Allocator, row: *std.ArrayList(u8), width: u16)
 
 const input_test_slash_specs = [_]command_specs.SlashSpec{
     .{ .kind = .model, .command = "/model", .help_entry = "/model <id-or-query>", .completion_description = "choose what model and reasoning effort to use", .presentation_category = .model, .has_args = true },
-    .{ .kind = .models, .command = "/models", .help_entry = "/models", .completion_description = "browse available models", .presentation_category = .model },
     .{ .kind = .resume_session, .command = "/resume", .help_entry = "/resume", .completion_description = "resume a session", .presentation_category = .session },
 };
 const input_test_slash_registry = command_specs.SlashRegistry{ .commands = input_test_slash_specs[0..] };
@@ -1382,6 +1440,79 @@ test "compose hint row keeps model in left hint text" {
     try std.testing.expect(std.mem.startsWith(u8, row.items, ui_render.statusline_style));
     try std.testing.expect(std.mem.find(u8, row.items, "gpt-5.1 · ⚡︎") != null);
     try std.testing.expect(std.mem.find(u8, row.items, "\x1b[14G") == null);
+}
+
+test "compose hint row replaces model status with auth navigation" {
+    var input = InputRuntime{};
+    defer input.deinit(std.testing.allocator);
+    var ctx = testRenderContext(&input);
+    ctx.auth_picker = .{
+        .active = true,
+        .available_sources = .empty,
+        .selected_choice = .{ .action = .chatgpt_login },
+        .active_source = null,
+        .include_skip = false,
+    };
+
+    var root = try composeHintRow(std.testing.allocator, false, null, ctx, 96);
+    defer root.deinit(std.testing.allocator);
+    try std.testing.expect(std.mem.find(u8, root.items, "↑↓ Navigate") != null);
+    try std.testing.expect(std.mem.find(u8, root.items, "Enter Open") != null);
+    try std.testing.expect(std.mem.find(u8, root.items, "Esc Close") != null);
+    try std.testing.expect(std.mem.find(u8, root.items, "gpt-5.1") == null);
+
+    ctx.auth_picker.stage = .provider;
+    ctx.auth_picker.selected_choice = .{ .provider = .gateway };
+    var child = try composeHintRow(std.testing.allocator, false, null, ctx, 96);
+    defer child.deinit(std.testing.allocator);
+    try std.testing.expect(std.mem.find(u8, child.items, "Esc Back") != null);
+}
+
+test "compose hint row replaces model status with subscription sign-in controls" {
+    const alloc = std.testing.allocator;
+    const cases = [_]struct {
+        source: credentials.Source,
+        manual_code_visible: bool,
+        expected: []const u8,
+    }{
+        .{
+            .source = .chatgpt_subscription,
+            .manual_code_visible = false,
+            .expected = "Enter reopens browser · Esc cancels",
+        },
+        .{
+            .source = .grok_subscription,
+            .manual_code_visible = false,
+            .expected = "Enter reopens browser · Tab enters code · Esc cancels",
+        },
+        .{
+            .source = .grok_subscription,
+            .manual_code_visible = true,
+            .expected = "Enter submits code · Tab returns to browser · Esc cancels",
+        },
+    };
+
+    for (cases) |case| {
+        var input = InputRuntime{};
+        defer input.deinit(alloc);
+        var ctx = testRenderContext(&input);
+        ctx.model = "model-status-sentinel";
+        ctx.auth_picker = .{
+            .active = true,
+            .available_sources = .empty,
+            .selected_choice = null,
+            .active_source = null,
+            .include_skip = false,
+            .stage = .sign_in,
+            .sign_in_source = case.source,
+            .sign_in_code_visible = case.manual_code_visible,
+        };
+
+        var row = try composeHintRow(alloc, false, null, ctx, 80);
+        defer row.deinit(alloc);
+        try std.testing.expect(std.mem.find(u8, row.items, case.expected) != null);
+        try std.testing.expect(std.mem.find(u8, row.items, "model-status-sentinel") == null);
+    }
 }
 
 test "compose hint row uses dots in subagent view" {

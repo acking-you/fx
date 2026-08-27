@@ -36,6 +36,7 @@ pub fn build(b: *std.Build) void {
         "napi-surface",
         "Build a Node-API addon surface (core)",
     ) orelse .none;
+    const test_filters = testFiltersFromArgs(b);
 
     const git_commit = readGitCommit(b);
     const app_version = readAppVersion(b);
@@ -74,6 +75,7 @@ pub fn build(b: *std.Build) void {
 
     const exe_tests = b.addTest(.{
         .root_module = exe.root_module,
+        .filters = test_filters,
     });
     // Some runtime tests execute the freshly built product binary. Serialize
     // the two large native compilations so `zig build test` does not hold both
@@ -209,6 +211,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
         }),
+        .filters = test_filters,
     });
     ui_activity_bench_tests.root_module.addImport(
         "benchmark_exports",
@@ -261,6 +264,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
         }),
+        .filters = test_filters,
     });
     approval_review_bench_tests.root_module.addImport(
         "benchmark_exports",
@@ -414,6 +418,23 @@ fn discoverNodeIncludeDir(b: *std.Build) []const u8 {
     if (code != 0) std.process.fatal("could not locate node_api.h; pass -Dnode-include-dir=<path>", .{});
     const trimmed = std.mem.trim(u8, out, " \t\r\n");
     return b.allocator.dupe(u8, trimmed) catch std.process.fatal("could not allocate Node include path", .{});
+}
+
+fn testFiltersFromArgs(b: *std.Build) []const []const u8 {
+    const args = b.args orelse return &.{};
+    var filters: std.ArrayList([]const u8) = .empty;
+    var index: usize = 0;
+    while (index < args.len) : (index += 1) {
+        if (!std.mem.eql(u8, args[index], "--test-filter")) continue;
+        if (index + 1 >= args.len) {
+            std.process.fatal("--test-filter requires a value", .{});
+        }
+        index += 1;
+        filters.append(b.allocator, args[index]) catch
+            std.process.fatal("could not allocate test filters", .{});
+    }
+    return filters.toOwnedSlice(b.allocator) catch
+        std.process.fatal("could not allocate test filters", .{});
 }
 
 fn readGitCommit(b: *std.Build) []const u8 {

@@ -17,6 +17,7 @@ const text_utils = @import("../shared/text_utils.zig");
 const session = @import("../session/session.zig");
 const session_child_store = @import("../session/session_child_store.zig");
 const session_codec = @import("../session/session_codec.zig");
+const session_usage = @import("../session/session_usage.zig");
 const model_provider = @import("../config/model_provider.zig");
 const session_event = @import("../session/session_event.zig");
 const session_store = @import("../session/session_store.zig");
@@ -537,6 +538,7 @@ pub const TurnContext = struct {
     active_work_id: ?[]const u8 = null,
     live_presentation: ?LivePresentationSink = null,
     failure_diagnostic: ?[]u8 = null,
+    usage_store: ?*session_store.Store = null,
     committed: bool = false,
 
     fn init(
@@ -561,6 +563,61 @@ pub const TurnContext = struct {
         self.worker.deinit(self.alloc);
         self.runtime.deinit(self.alloc);
         self.* = undefined;
+    }
+
+    /// Restores and durably publishes child-session usage after this context
+    /// has reached its final stack address.
+    fn initializeUsage(
+        self: *TurnContext,
+        sessions: *session_store.Store,
+    ) !void {
+        if (self.loaded.state.usage) |usage| {
+            try self.runtime.usage.restore(
+                self.alloc,
+                usage,
+                self.loaded.state.created_at_ms,
+            );
+        } else {
+            self.runtime.usage.restoreLegacyWallDuration(
+                self.loaded.state.created_at_ms,
+            );
+        }
+        _ = try self.runtime.initializeProfileUsage(
+            self.alloc,
+            sessions.home_dir,
+        );
+        self.usage_store = sessions;
+        self.runtime.usage.configureCheckpointSink(.{
+            .context = self,
+            .allocator = self.alloc,
+            .persist = persistUsageCheckpoint,
+        });
+        self.runtime.attachProfileUsagePublisher(self.alloc);
+    }
+
+    fn persistUsageCheckpoint(
+        raw: *anyopaque,
+        snapshot: session_usage.Snapshot,
+    ) !void {
+        const self: *TurnContext = @ptrCast(@alignCast(raw));
+        const sessions = self.usage_store orelse
+            return error.SessionStoreUnavailable;
+        const checkpoint = try sessions.prepareUsageRecoveryCheckpoint(
+            self.alloc,
+            self.loaded,
+            snapshot,
+        );
+        _ = try self.loaded.appendEvent(
+            self.alloc,
+            .{ .usage_checkpointed = .{ .usage = snapshot } },
+            checkpoint.timestamp_ms,
+            .retry_expected_tail,
+            .{ .checkpoint_interval = 0 },
+        );
+        try sessions.finishUsageRecoveryCheckpoint(
+            self.loaded.active_id,
+            checkpoint,
+        );
     }
 
     /// Retains the first bounded, model-safe diagnostic for the current child
@@ -1284,6 +1341,7 @@ fn livePresentationEventBytes(event: worker_runtime.WorkerEvent) ?usize {
         .begin_prompt,
         .begin_prompt_with_skill_bindings,
         .append_prompt,
+        .begin_presented_prompt,
         .finish_prompt,
         .notification,
         .question_requested,
@@ -3223,6 +3281,7 @@ fn runOne(slot: *Slot) OneResult {
         owner.max_history_turns,
     ) catch return .session_failed;
     defer turn.deinit();
+    turn.initializeUsage(owner.sessions) catch return .session_failed;
     turn.live_authority = owner.live_authority;
     turn.approval_registry = owner.approval_registry;
     turn.child_id = slot.child_id;

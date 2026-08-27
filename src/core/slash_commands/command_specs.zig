@@ -188,6 +188,7 @@ pub fn childChatSlashRegistry(
 
 pub const HelpMenu = struct {
     active: bool = false,
+    category: ?SlashPresentationCategory = null,
     selected_index: usize = 0,
     window_start: usize = 0,
 
@@ -204,8 +205,26 @@ pub const HelpMenu = struct {
         self.window_start = 0;
     }
 
+    pub fn cycleCategory(self: *HelpMenu, delta: i32) bool {
+        if (!self.active or delta == 0) return false;
+        const count: i32 = @intCast(std.meta.fields(SlashPresentationCategory).len + 1);
+        var next: i32 = if (self.category) |category|
+            @as(i32, @intCast(@intFromEnum(category))) + 1
+        else
+            0;
+        next += delta;
+        while (next < 0) next += count;
+        while (next >= count) next -= count;
+        self.category = if (next == 0)
+            null
+        else
+            @enumFromInt(next - 1);
+        self.resetForQuery();
+        return true;
+    }
+
     pub fn move(self: *HelpMenu, registry: SlashRegistry, query: []const u8, delta: i32, visible_items: u16) bool {
-        const item_count = helpCatalogCount(registry, query);
+        const item_count = helpCatalogCountForCategory(registry, self.category, query);
         if (!self.active or item_count == 0) return false;
 
         const current: i32 = @intCast(self.selected_index % item_count);
@@ -223,9 +242,9 @@ pub const HelpMenu = struct {
     }
 
     pub fn selectedSpec(self: *const HelpMenu, registry: SlashRegistry, query: []const u8) ?*const SlashSpec {
-        const item_count = helpCatalogCount(registry, query);
+        const item_count = helpCatalogCountForCategory(registry, self.category, query);
         if (!self.active or item_count == 0) return null;
-        return helpCatalogSpecAt(registry, query, self.selected_index % item_count);
+        return helpCatalogSpecAtForCategory(registry, self.category, query, self.selected_index % item_count);
     }
 };
 
@@ -381,6 +400,17 @@ pub fn helpCatalogCount(registry: SlashRegistry, query: []const u8) usize {
     return count;
 }
 
+pub fn helpCatalogCountForCategory(
+    registry: SlashRegistry,
+    category: ?SlashPresentationCategory,
+    query: []const u8,
+) usize {
+    return if (category) |value|
+        helpCatalogCategoryCount(registry, query, value)
+    else
+        helpCatalogCount(registry, query);
+}
+
 pub fn helpCatalogCategoryCount(registry: SlashRegistry, query: []const u8, category: SlashPresentationCategory) usize {
     var count: usize = 0;
     for (registry.commands) |spec| {
@@ -398,6 +428,22 @@ pub fn helpCatalogSpecAt(registry: SlashRegistry, query: []const u8, display_ind
             if (current == display_index) return spec;
             current += 1;
         }
+    }
+    return null;
+}
+
+pub fn helpCatalogSpecAtForCategory(
+    registry: SlashRegistry,
+    category: ?SlashPresentationCategory,
+    query: []const u8,
+    display_index: usize,
+) ?*const SlashSpec {
+    const value = category orelse return helpCatalogSpecAt(registry, query, display_index);
+    var current: usize = 0;
+    for (registry.commands) |*spec| {
+        if (spec.presentation_category != value or !helpCatalogSpecMatches(spec.*, query)) continue;
+        if (current == display_index) return spec;
+        current += 1;
     }
     return null;
 }

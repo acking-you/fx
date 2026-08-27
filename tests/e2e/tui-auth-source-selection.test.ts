@@ -102,7 +102,11 @@ function readSingleUsageSnapshot(testHome: string): {
   billing: string;
   next_sequence: number;
   settled_through_sequence: number;
-  pending: unknown[];
+  input_tokens: number;
+  output_tokens: number;
+  request_count: number | null;
+  models: Array<{ model: string; request_count: number | null }>;
+  publication_backlog: unknown[];
 } {
   const sessionsDir = join(testHome, ".fx", "sessions");
   const usagePaths = readdirSync(sessionsDir, { withFileTypes: true })
@@ -115,7 +119,11 @@ function readSingleUsageSnapshot(testHome: string): {
       billing: string;
       next_sequence: number;
       settled_through_sequence: number;
-      pending: unknown[];
+      input_tokens: number;
+      output_tokens: number;
+      request_count: number | null;
+      models: Array<{ model: string; request_count: number | null }>;
+      publication_backlog: unknown[];
     };
   }).snapshot;
 }
@@ -511,18 +519,17 @@ async function completeDisplayedGrokLogin(
   activeSession: TmuxSession,
   fixture: ReturnType<typeof startFakeGrokOAuth>,
 ) {
-  await activeSession.resizeWindow(500, 20);
-  const pane = await activeSession.waitForPane(
-    (value) => value.includes(`${fixture.baseUrl}/oauth2/authorize?`),
-    TIMEOUT,
-  );
-  const authorizationUrl = pane
-    .split(/\s+/)
-    .find((value) => value.startsWith(`${fixture.baseUrl}/oauth2/authorize?`));
-  if (!authorizationUrl) throw new Error("Grok authorization URL was not rendered");
+  await activeSession.waitForText("Authorize with Grok", TIMEOUT);
+  const escapes = await activeSession.capturePaneEscapes();
+  const urlStart = escapes.indexOf(`${fixture.baseUrl}/oauth2/authorize?`);
+  const linkStart = escapes.lastIndexOf("\x1b]8;", urlStart);
+  const urlEnd = escapes.indexOf("\x1b\\", urlStart);
+  if (urlStart < 0 || linkStart < 0 || urlEnd < 0) {
+    throw new Error("Grok authorization hyperlink was not rendered");
+  }
+  const authorizationUrl = escapes.slice(urlStart, urlEnd);
   const response = await fetch(authorizationUrl, { redirect: "follow" });
   expect(response.status).toBe(200);
-  await activeSession.resizeWindow(100, 30);
 }
 
 async function completeDisplayedCodexLogin(
@@ -744,7 +751,7 @@ function startFakeCodexAutoReview() {
       if (mainRequests === 1) {
         return new Response(
           'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","call_id":"call_terminal","name":"terminal"}}\n\n' +
-            'data: {"type":"response.function_call_arguments.done","output_index":0,"arguments":"{\\"action\\":\\"exec\\",\\"command\\":\\"pwd\\"}"}\n\n' +
+            'data: {"type":"response.function_call_arguments.done","output_index":0,"arguments":"{\\"action\\":\\"exec\\",\\"command\\":\\"rm auto-review-fixture\\",\\"timeout_ms\\":60000}"}\n\n' +
             'data: {"type":"response.completed","response":{"id":"gen_main_1","status":"completed","usage":{"input_tokens":5,"output_tokens":2}}}\n\n',
           { headers: { "content-type": "text/event-stream" } },
         );
@@ -810,7 +817,7 @@ function startFakeGrokAutoReview() {
       if (mainRequests === 1) {
         return new Response(
           'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","call_id":"call_terminal","name":"terminal"}}\n\n' +
-            'data: {"type":"response.function_call_arguments.done","output_index":0,"arguments":"{\\"action\\":\\"exec\\",\\"command\\":\\"pwd\\"}"}\n\n' +
+            'data: {"type":"response.function_call_arguments.done","output_index":0,"arguments":"{\\"action\\":\\"exec\\",\\"command\\":\\"rm auto-review-fixture\\",\\"timeout_ms\\":60000}"}\n\n' +
             'data: {"type":"response.completed","response":{"id":"gen_main_1","status":"completed","usage":{"input_tokens":5,"output_tokens":2}}}\n\n',
           { headers: { "content-type": "text/event-stream" } },
         );
@@ -920,7 +927,7 @@ async function openProviderPicker(pickerSession: TmuxSession): Promise<void> {
   await pickerSession.sendKeys("Down");
   await pickerSession.sendKeys("Down");
   await pickerSession.sendKeys("Enter");
-  await pickerSession.waitForText("Switch provider", TIMEOUT);
+  await pickerSession.waitForText("Model provider", TIMEOUT);
 }
 
 tmuxTest(
@@ -948,12 +955,12 @@ tmuxTest(
     await session.sendKeys("Down");
     await session.sendKeys("Down");
     await session.sendKeys("Enter");
-    await session.waitForText("Switch provider", TIMEOUT);
+    await session.waitForText("Model provider", TIMEOUT);
     await session.sendKeys("Escape");
     await session.waitForText("Accounts", TIMEOUT);
     await session.sendKeys("Down");
     await session.sendKeys("Enter");
-    const credentials = await session.waitForText("Use this credential", TIMEOUT);
+    const credentials = await session.waitForText("Credential source", TIMEOUT);
     expect(credentials).toContain("OPENAI_API_KEY");
     expect(credentials).not.toContain("fx login");
     await session.sendKeys("Escape");
@@ -2185,7 +2192,9 @@ test(
     home = mkdtempSync(join(tmpdir(), "fx-codex-auto-review-"));
     gateway = startFakeGateway([]);
     const codex = startFakeCodexAutoReview();
+    const tracePath = join(home, "permission-trace.log");
     try {
+      writeFileSync(join(home, "auto-review-fixture"), "temporary\n");
       writeSeededChatGptLogin(home, codex.accessToken);
       writeFileSync(
         join(home, ".fx", "settings.json"),
@@ -2193,7 +2202,7 @@ test(
         { mode: 0o600 },
       );
       const result = await runFx(
-        ["ask", "--json", "--auto", "Run pwd, then finish."],
+        ["ask", "--json", "--auto", "Run the auto-review fixture, then finish."],
         {
           env: {
             HOME: home,
@@ -2202,12 +2211,17 @@ test(
             FX_RESPONSES_BASE_URL: gateway.baseUrl,
             FX_CODEX_BASE_URL: codex.responsesUrl.replace(/\/responses$/, ""),
             FX_E2E_OPENAI_CODEX_MODELS_URL: codex.modelsUrl,
+            FX_TRACE_LOG: tracePath,
+            FX_TRACE_SCOPES: "permission",
           },
+          cwd: home,
           timeoutMs: TIMEOUT,
         },
       );
       expect(result.code, `stdout: ${result.stdout}\nstderr: ${result.stderr}`).toBe(0);
       expect(result.stdout).toContain("CODEX_AUTO_REVIEW_OK");
+      expect(readFileSync(tracePath, "utf8")).toContain("event=auto_review_start");
+      expect(gateway.classifierRequests).toHaveLength(0);
       expect(codex.bodies.map((body) => (JSON.parse(body) as { model: string }).model))
         .toEqual(["gpt-5.6-sol", "gpt-5.4-mini", "gpt-5.6-sol"]);
       expect(codex.bodies[1]).toContain('"name":"permission_decision"');
@@ -2219,8 +2233,15 @@ test(
       expect(readSingleUsageSnapshot(home)).toMatchObject({
         billing: "complete",
         api_duration_complete: true,
-        next_sequence: 1,
-        settled_through_sequence: 0,
+        next_sequence: 4,
+        settled_through_sequence: 3,
+        input_tokens: 20,
+        output_tokens: 8,
+        request_count: 3,
+        models: [
+          { model: "codex/gpt-5.6-sol", request_count: 2 },
+          { model: "codex/gpt-5.4-mini", request_count: 1 },
+        ],
         publication_backlog: [],
       });
     } finally {
@@ -2236,7 +2257,9 @@ test(
     home = mkdtempSync(join(tmpdir(), "fx-grok-auto-review-"));
     gateway = startFakeGateway([]);
     const grok = startFakeGrokAutoReview();
+    const tracePath = join(home, "permission-trace.log");
     try {
+      writeFileSync(join(home, "auto-review-fixture"), "temporary\n");
       writeSeededGrokLogin(home, grok.accessToken, "acct_auto_review");
       writeFileSync(
         join(home, ".fx", "settings.json"),
@@ -2244,7 +2267,7 @@ test(
         { mode: 0o600 },
       );
       const result = await runFx(
-        ["ask", "--json", "--auto", "Run pwd, then finish."],
+        ["ask", "--json", "--auto", "Run the auto-review fixture, then finish."],
         {
           env: {
             HOME: home,
@@ -2254,12 +2277,17 @@ test(
             FX_E2E_XAI_GROK_RESPONSES_URL: grok.responsesUrl,
             FX_E2E_XAI_GROK_MODELS_URL: grok.modelsUrl,
             FX_E2E_XAI_GROK_MODALITIES_URL: grok.modalitiesUrl,
+            FX_TRACE_LOG: tracePath,
+            FX_TRACE_SCOPES: "permission",
           },
+          cwd: home,
           timeoutMs: TIMEOUT,
         },
       );
       expect(result.code, `stdout: ${result.stdout}\nstderr: ${result.stderr}`).toBe(0);
       expect(result.stdout).toContain("GROK_AUTO_REVIEW_OK");
+      expect(readFileSync(tracePath, "utf8")).toContain("event=auto_review_start");
+      expect(gateway.classifierRequests).toHaveLength(0);
       expect(grok.bodies.map((body) => (JSON.parse(body) as { model: string }).model))
         .toEqual(["grok-4.20", "grok-4.20", "grok-4.20"]);
       expect(grok.bodies[1]).toContain('"name":"permission_decision"');
@@ -2280,8 +2308,12 @@ test(
       expect(readSingleUsageSnapshot(home)).toMatchObject({
         billing: "complete",
         api_duration_complete: true,
-        next_sequence: 1,
-        settled_through_sequence: 0,
+        next_sequence: 4,
+        settled_through_sequence: 3,
+        input_tokens: 20,
+        output_tokens: 8,
+        request_count: 3,
+        models: [{ model: "grok/grok-4.20", request_count: 3 }],
         publication_backlog: [],
       });
     } finally {
