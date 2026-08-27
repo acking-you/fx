@@ -1708,7 +1708,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
           env: {
             HOME: fixture.home,
             OPENAI_API_KEY: "command-stream-child-key",
-                        FX_RESPONSES_BASE_URL: gateway.baseUrl,
+            FX_RESPONSES_BASE_URL: gateway.baseUrl,
             FX_MODEL: FAKE_GATEWAY_MODEL,
             FX_DISABLE_KEYCHAIN: "1",
             FX_SKIP_ONBOARDING: "1",
