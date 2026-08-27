@@ -138,6 +138,7 @@ const Accumulator = struct {
     provider_output_sequence_complete: bool = false,
     citation_bytes: usize = 0,
     citation_sources_emitted: bool = false,
+    generation_id: ?[]u8 = null,
     usage: types.Usage = .{},
     finish_reason: ?types.ProviderFinishReason = null,
     failure_detail: ?[]u8 = null,
@@ -159,6 +160,7 @@ const Accumulator = struct {
         self.provider_output_items.deinit(alloc);
         for (self.delta_streams.items) |*key| key.deinit(alloc);
         self.delta_streams.deinit(alloc);
+        if (self.generation_id) |value| alloc.free(value);
         if (self.failure_detail) |value| alloc.free(value);
         self.* = undefined;
     }
@@ -473,6 +475,7 @@ fn applyEvent(
             }
         },
         .response_completed => |terminal| {
+            try replaceGenerationId(alloc, state, terminal.response_id);
             state.usage = mapUsage(terminal.usage);
             state.finish_reason = if (state.tools.items.len > 0) .tool_calls else .stop;
             try replaceProviderOutputItemsFromTerminal(alloc, state, terminal.output);
@@ -481,6 +484,7 @@ fn applyEvent(
             state.terminal = true;
         },
         .response_incomplete => |terminal| {
+            try replaceGenerationId(alloc, state, terminal.response_id);
             state.usage = mapUsage(terminal.usage);
             state.finish_reason = incompleteFinishReason(terminal.incomplete_reason);
             try setTerminalDetail(alloc, state, terminal);
@@ -490,6 +494,7 @@ fn applyEvent(
             state.terminal = true;
         },
         .response_failed => |terminal| {
+            try replaceGenerationId(alloc, state, terminal.response_id);
             state.usage = mapUsage(terminal.usage);
             state.finish_reason = .provider_error;
             try setTerminalDetail(alloc, state, terminal);
@@ -506,6 +511,20 @@ fn applyEvent(
             state.terminal = true;
         },
     }
+}
+
+fn replaceGenerationId(
+    alloc: Allocator,
+    state: *Accumulator,
+    response_id: ?[]const u8,
+) !void {
+    const value = response_id orelse return;
+    if (state.generation_id) |current| {
+        if (std.mem.eql(u8, current, value)) return;
+    }
+    const replacement = try alloc.dupe(u8, value);
+    if (state.generation_id) |current| alloc.free(current);
+    state.generation_id = replacement;
 }
 
 fn replaceProviderOutputItemsFromTerminal(
@@ -1097,6 +1116,8 @@ fn materialize(alloc: Allocator, state: *Accumulator) !types.ModelCompletion {
     completion.provider_failure_detail = if (state.failure_detail) |detail| try alloc.dupe(u8, detail) else null;
     completion.provider_failure_metadata = state.failure_metadata;
     completion.finish_reason = state.finish_reason;
+    completion.generation_id = state.generation_id;
+    state.generation_id = null;
     completion.usage = state.usage;
     return completion;
 }
@@ -1325,6 +1346,7 @@ fn freeCompletion(alloc: Allocator, completion: *types.ModelCompletion) void {
     types.freeResponsesProviderOutputItems(alloc, completion.responses_provider_output_items);
     types.freeResponsesUrlCitations(alloc, completion.url_citations);
     types.freeToolCallSlice(alloc, @constCast(completion.tool_calls));
+    if (completion.generation_id) |value| alloc.free(@constCast(value));
     if (completion.provider_failure_detail) |value| alloc.free(@constCast(value));
     completion.* = .{};
 }
@@ -1427,7 +1449,7 @@ test "Responses stream joins SSE data lines and retains reasoning tool and usage
         "data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_1\",\"delta\":\"{\\\"path\\\":\"}\n\n" ++
         "data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_1\",\"delta\":\"\\\"a.txt\\\"}\"}\n\n" ++
         "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\",\"id\":\"rs_1\",\"encrypted_content\":\"opaque\"}}\n\n" ++
-        "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":9,\"input_tokens_details\":{\"cached_tokens\":2},\"output_tokens\":4,\"output_tokens_details\":{\"reasoning_tokens\":1},\"total_tokens\":13}}}\n\n";
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"status\":\"completed\",\"usage\":{\"input_tokens\":9,\"input_tokens_details\":{\"cached_tokens\":2},\"output_tokens\":4,\"output_tokens_details\":{\"reasoning_tokens\":1},\"total_tokens\":13}}}\n\n";
     var reader = std.Io.Reader.fixed(payload);
     var cancel = std.atomic.Value(bool).init(false);
     const Noop = struct {
@@ -1448,6 +1470,7 @@ test "Responses stream joins SSE data lines and retains reasoning tool and usage
     try std.testing.expectEqual(@as(usize, 1), completion.tool_calls.len);
     try std.testing.expectEqualStrings("{\"path\":\"a.txt\"}", completion.tool_calls[0].arguments_json);
     try std.testing.expectEqual(types.ProviderFinishReason.tool_calls, completion.finish_reason.?);
+    try std.testing.expectEqualStrings("resp_1", completion.generation_id.?);
     try std.testing.expectEqual(@as(?u64, 2), completion.usage.cached_input_tokens);
     try std.testing.expectEqual(@as(?u64, 1), completion.usage.reasoning_output_tokens);
 }
