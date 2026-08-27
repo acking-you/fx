@@ -24,6 +24,8 @@ import {
   fakeGatewayToolCall,
   hasEmptyComposer,
   paneExitMatches,
+  responseCompleted,
+  responseTextDelta,
   startFakeGateway,
   TmuxSession,
   tmuxAvailable,
@@ -133,7 +135,6 @@ async function launchRecordedSurfaceSession(
     env: {
       HOME: home,
       OPENAI_API_KEY: undefined,
-      FX_AUTO_UPGRADE: "0",
       FX_RECORD: join(root, "session.fxtape"),
       FX_RECORD_INPUT: "1",
       NO_COLOR: "1",
@@ -192,21 +193,18 @@ function gatedResizeResponse(
   const event = (delta: string) =>
     encoder.encode(
       `data: ${JSON.stringify({
-        type: "text-delta",
-        id: "resize-stream",
+        type: "response.output_text.delta",
+        item_id: "resize-stream",
+        output_index: 0,
+        content_index: 0,
         delta,
       })}\n\n`,
     );
-  const sendJson = (controller: ReadableStreamDefaultController<Uint8Array>, value: object) => {
-    controller.enqueue(encoder.encode(`data: ${JSON.stringify(value)}\n\n`));
-  };
-
   return {
     response: () =>
       new Response(
         new ReadableStream<Uint8Array>({
           start(controller) {
-            sendJson(controller, { type: "text-start", id: "resize-stream" });
             controller.enqueue(event(first));
             timer = setInterval(() => {
               if (!closed) controller.enqueue(encoder.encode(": gated-resize-hold\n\n"));
@@ -218,15 +216,17 @@ function gatedResizeResponse(
               closed = true;
               if (timer) clearInterval(timer);
               controller.enqueue(event(final));
-              sendJson(controller, { type: "text-end", id: "resize-stream" });
               controller.enqueue(
                 encoder.encode(
                   `data: ${JSON.stringify({
-                    type: "finish",
-                    finishReason: { unified: "stop", raw: "stop" },
-                    usage: {
-                      inputTokens: { total: 1 },
-                      outputTokens: { total: 3 },
+                    type: "response.completed",
+                    response: {
+                      status: "completed",
+                      usage: {
+                        input_tokens: 1,
+                        output_tokens: 3,
+                        total_tokens: 4,
+                      },
                     },
                   })}\n\ndata: [DONE]\n\n`,
                 ),
@@ -847,15 +847,15 @@ async function waitForSubmittedUserText(
   }
 
   const request = JSON.parse(gatewayRequest.body) as {
-    prompt: Array<{
+    input?: Array<{
       role: string;
       content?: Array<{ type: string; text?: string }>;
     }>;
   };
-  return [...request.prompt]
+  return [...(request.input ?? [])]
     .reverse()
     .find((message) => message.role === "user")
-    ?.content?.find((part) => part.type === "text")?.text;
+    ?.content?.find((part) => part.type === "input_text")?.text;
 }
 
 async function waitForGatewayRequestCount(
@@ -1122,7 +1122,6 @@ async function runLargeSkillResizeAttempt(attempt: number): Promise<string> {
       env: {
         HOME: fixture.home,
         OPENAI_API_KEY: undefined,
-        FX_AUTO_UPGRADE: "0",
         FX_RECORD: tapePath,
         FX_RECORD_INPUT: "1",
         FX_TRACE_LOG: tracePath,
@@ -1322,7 +1321,6 @@ async function runRapidSkillResizeAttempt(
       env: {
         HOME: fixture.home,
         OPENAI_API_KEY: undefined,
-        FX_AUTO_UPGRADE: "0",
         FX_RECORD: tapePath,
         FX_RECORD_INPUT: "1",
         FX_TRACE_LOG: tracePath,
@@ -1556,10 +1554,8 @@ describe.skipIf(SKIP)("tui: resize", () => {
         env: {
           HOME: home,
           OPENAI_API_KEY: "fake-long-resize-key",
-          FX_GATEWAY_BASE_URL: gateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+          FX_RESPONSES_BASE_URL: gateway.baseUrl,
           FX_MODEL: FAKE_GATEWAY_MODEL,
-          FX_AUTO_UPGRADE: "0",
           FX_TRACE_LOG: tracePath,
           FX_TRACE_SCOPES: "frame_schedule,frame_diff,frame_commit,scroll,resize",
           NO_COLOR: "1",
@@ -1634,10 +1630,7 @@ describe.skipIf(SKIP)("tui: resize", () => {
         env: {
           HOME: home,
           OPENAI_API_KEY: "fake-resize-command-key",
-          FX_AUTO_UPGRADE: "0",
-          FX_GATEWAY_BASE_URL: gateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
-          FX_E2E_GATEWAY_CHAT_URL: gateway.chatUrl,
+          FX_RESPONSES_BASE_URL: gateway.baseUrl,
           FX_MODEL: FAKE_GATEWAY_MODEL,
           FX_RECORD: tapePath,
           FX_RECORD_INPUT: "1",
@@ -1717,40 +1710,31 @@ describe.skipIf(SKIP)("tui: resize", () => {
         end,
       ];
       const response = fakeGatewaySse([
-        {
-          type: "text-delta",
-          id: "retention-text-a",
-          delta: `${begin}\n${beforeMarkers.map((marker) =>
+        responseTextDelta(
+          `${begin}\n${beforeMarkers.map((marker) =>
             `${marker} retained before semantic code block`
           ).join("\n")}\n`,
-        },
-        {
-          type: "text-delta",
-          id: "retention-code",
-          delta: "```zig\nconst retained_scrollback = true;\n```\n",
-        },
-        {
-          type: "text-delta",
-          id: "retention-text-b",
-          delta: `${afterMarkers.map((marker) =>
+          "retention-text-a",
+        ),
+        responseTextDelta(
+          "```zig\nconst retained_scrollback = true;\n```\n",
+          "retention-code",
+          1,
+        ),
+        responseTextDelta(
+          `${afterMarkers.map((marker) =>
             `${marker} retained after semantic code block`
           ).join("\n")}\n`,
-        },
-        {
-          type: "text-delta",
-          id: "retention-tail",
-          delta:
-            "| phase | state |\n| --- | --- |\n| middle | retained |\n\n---\n" +
+          "retention-text-b",
+          2,
+        ),
+        responseTextDelta(
+          "| phase | state |\n| --- | --- |\n| middle | retained |\n\n---\n" +
             `${end}\n`,
-        },
-        {
-          type: "finish",
-          finishReason: { unified: "stop", raw: "stop" },
-          usage: {
-            inputTokens: { total: 3 },
-            outputTokens: { total: 5_000 },
-          },
-        },
+          "retention-tail",
+          3,
+        ),
+        responseCompleted(3, 5_000),
       ]);
       const command =
         `awk 'BEGIN { for (i = 0; i < 13500; i++) printf "RETENTION_SEED_%05d alpha beta gamma delta epsilon zeta eta theta iota kappa lambda\\n", i }'`;
@@ -1766,12 +1750,9 @@ describe.skipIf(SKIP)("tui: resize", () => {
         env: {
           HOME: home,
           OPENAI_API_KEY: "fake-retention-scrollback-key",
-          FX_GATEWAY_BASE_URL: gateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
-          FX_E2E_GATEWAY_CHAT_URL: gateway.chatUrl,
+          FX_RESPONSES_BASE_URL: gateway.baseUrl,
           FX_MODEL: FAKE_GATEWAY_MODEL,
           FX_MAX_AGENT_STEPS: "4",
-          FX_AUTO_UPGRADE: "0",
           NO_COLOR: "1",
         },
         width: 120,
@@ -1868,10 +1849,8 @@ describe.skipIf(SKIP)("tui: resize", () => {
         env: {
           HOME: home,
           OPENAI_API_KEY: "fake-approval-cancel-resize-key",
-          FX_GATEWAY_BASE_URL: gateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+          FX_RESPONSES_BASE_URL: gateway.baseUrl,
           FX_MODEL: FAKE_GATEWAY_MODEL,
-          FX_AUTO_UPGRADE: "0",
           FX_RECORD: tapePath,
           FX_RECORD_INPUT: "1",
           FX_TRACE_LOG: tracePath,
@@ -2022,10 +2001,8 @@ describe.skipIf(SKIP)("tui: resize", () => {
         env: {
           HOME: home,
           OPENAI_API_KEY: "fake-thematic-rule-key",
-          FX_GATEWAY_BASE_URL: gateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+          FX_RESPONSES_BASE_URL: gateway.baseUrl,
           FX_MODEL: FAKE_GATEWAY_MODEL,
-          FX_AUTO_UPGRADE: "0",
           NO_COLOR: "1",
         },
         width: 120,
@@ -2109,10 +2086,8 @@ describe.skipIf(SKIP)("tui: resize", () => {
         env: {
           HOME: home,
           OPENAI_API_KEY: "fake-nested-blockquote-key",
-          FX_GATEWAY_BASE_URL: gateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+          FX_RESPONSES_BASE_URL: gateway.baseUrl,
           FX_MODEL: FAKE_GATEWAY_MODEL,
-          FX_AUTO_UPGRADE: "0",
           FX_TRACE_LOG: tracePath,
           FX_TRACE_SCOPES: "resize,frame_schedule,scroll",
           NO_COLOR: "1",
@@ -2254,10 +2229,7 @@ describe.skipIf(SKIP)("tui: resize", () => {
         env: {
           HOME: home,
           OPENAI_API_KEY: "fake-gated-resize-key",
-          FX_AUTO_UPGRADE: "0",
-          FX_GATEWAY_BASE_URL: gateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
-          FX_E2E_GATEWAY_CHAT_URL: gateway.chatUrl,
+          FX_RESPONSES_BASE_URL: gateway.baseUrl,
           FX_MODEL: FAKE_GATEWAY_MODEL,
           FX_RECORD: tapePath,
           FX_RECORD_INPUT: "1",
@@ -2383,7 +2355,6 @@ describe.skipIf(SKIP)("tui: resize", () => {
         env: {
           HOME: home,
           OPENAI_API_KEY: undefined,
-          FX_AUTO_UPGRADE: "0",
           FX_RECORD: tapePath,
           FX_RECORD_INPUT: "1",
           FX_TRACE_LOG: tracePath,
@@ -2513,7 +2484,6 @@ describe.skipIf(SKIP)("tui: resize", () => {
         env: {
           HOME: home,
           OPENAI_API_KEY: undefined,
-          FX_AUTO_UPGRADE: "0",
           NO_COLOR: "1",
         },
         width: 72,
@@ -2670,8 +2640,8 @@ describe.skipIf(SKIP)("tui: resize", () => {
           surfaceCase.height,
           gateway
             ? {
-                FX_E2E_GATEWAY_MODELS_URL:
-                  `${gateway.baseUrl}/coding-agent/v1/models`,
+                OPENAI_API_KEY: "fake-resize-models-key",
+                FX_RESPONSES_BASE_URL: gateway.baseUrl,
               }
             : {},
         );
@@ -2798,10 +2768,8 @@ describe.skipIf(SKIP)("tui: resize", () => {
         env: {
           HOME: home,
           OPENAI_API_KEY: "fake-wide-user-key",
-          FX_GATEWAY_BASE_URL: gateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+          FX_RESPONSES_BASE_URL: gateway.baseUrl,
           FX_MODEL: FAKE_GATEWAY_MODEL,
-          FX_AUTO_UPGRADE: "0",
           FX_RECORD: tapePath,
           FX_RECORD_INPUT: "1",
           FX_TRACE_LOG: tracePath,
@@ -3011,10 +2979,8 @@ describe.skipIf(SKIP)("tui: resize", () => {
         env: {
           HOME: root.home,
           OPENAI_API_KEY: "fake-resize-file-approval-key",
-          FX_GATEWAY_BASE_URL: gateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+          FX_RESPONSES_BASE_URL: gateway.baseUrl,
           FX_MODEL: FAKE_GATEWAY_MODEL,
-          FX_AUTO_UPGRADE: "0",
           FX_RECORD: tapePath,
           NO_COLOR: "1",
         },
@@ -3151,10 +3117,8 @@ describe.skipIf(SKIP)("tui: resize", () => {
         env: {
           HOME: root.home,
           OPENAI_API_KEY: "fake-resize-gate-key",
-          FX_GATEWAY_BASE_URL: gateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+          FX_RESPONSES_BASE_URL: gateway.baseUrl,
           FX_MODEL: FAKE_GATEWAY_MODEL,
-          FX_AUTO_UPGRADE: "0",
           NO_COLOR: "1",
         },
         stderrPath,
@@ -3236,10 +3200,8 @@ describe.skipIf(SKIP)("tui: resize", () => {
         env: {
           HOME: root.home,
           OPENAI_API_KEY: "fake-post-approval-resize-key",
-          FX_GATEWAY_BASE_URL: gateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+          FX_RESPONSES_BASE_URL: gateway.baseUrl,
           FX_MODEL: FAKE_GATEWAY_MODEL,
-          FX_AUTO_UPGRADE: "0",
           FX_TRACE_LOG: tracePath,
           FX_TRACE_SCOPES: "frame_schedule",
           NO_COLOR: "1",
@@ -3292,11 +3254,7 @@ describe.skipIf(SKIP)("tui: resize", () => {
         40,
         {
           OPENAI_API_KEY: "fake-resize-activity-key",
-          FX_GATEWAY_BASE_URL: gateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
-          FX_E2E_GATEWAY_CHAT_URL: gateway.chatUrl,
-          FX_E2E_GATEWAY_MODELS_URL: `${gateway.baseUrl}/coding-agent/v1/models`,
-          FX_E2E_GATEWAY_CREDITS_URL: undefined,
+          FX_RESPONSES_BASE_URL: gateway.baseUrl,
           FX_MODEL: FAKE_GATEWAY_MODEL,
         },
       );
@@ -3483,8 +3441,7 @@ describe.skipIf(SKIP)("tui: resize", () => {
         env: {
           HOME: home,
           OPENAI_API_KEY: "test-key",
-          FX_AUTO_UPGRADE: "0",
-          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+          FX_RESPONSES_BASE_URL: gateway.baseUrl,
           FX_RECORD: tapePath,
           FX_RECORD_INPUT: "1",
           FX_TRACE_LOG: tracePath,
@@ -3641,7 +3598,7 @@ describe.skipIf(SKIP)("tui: resize", () => {
         stderrPath,
         env: {
           OPENAI_API_KEY: "test-key",
-          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+          FX_RESPONSES_BASE_URL: gateway.baseUrl,
           FX_TRACE_LOG: tracePath,
           FX_TRACE_SCOPES: "input,worker,resize",
         },
@@ -3700,7 +3657,7 @@ describe.skipIf(SKIP)("tui: resize", () => {
         stderrPath,
         env: {
           OPENAI_API_KEY: "test-key",
-          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+          FX_RESPONSES_BASE_URL: gateway.baseUrl,
           FX_TRACE_LOG: tracePath,
           FX_TRACE_SCOPES: "input,worker,resize",
         },
@@ -3781,7 +3738,7 @@ describe.skipIf(SKIP)("tui: resize", () => {
         stderrPath,
         env: {
           OPENAI_API_KEY: "test-key",
-          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+          FX_RESPONSES_BASE_URL: gateway.baseUrl,
           FX_TRACE_LOG: tracePath,
           FX_TRACE_SCOPES: "input,worker,resize",
           TMUX: undefined,
@@ -3891,7 +3848,7 @@ describe.skipIf(SKIP)("tui: resize", () => {
         stderrPath,
         env: {
           OPENAI_API_KEY: "test-key",
-          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+          FX_RESPONSES_BASE_URL: gateway.baseUrl,
           FX_TRACE_LOG: tracePath,
           FX_TRACE_SCOPES: "input,worker,resize",
           TMUX: undefined,
@@ -4005,10 +3962,8 @@ describe.skipIf(SKIP)("tui: resize", () => {
         env: {
           HOME: home,
           OPENAI_API_KEY: "fake-theme-reset-key",
-          FX_GATEWAY_BASE_URL: gateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+          FX_RESPONSES_BASE_URL: gateway.baseUrl,
           FX_MODEL: FAKE_GATEWAY_MODEL,
-          FX_AUTO_UPGRADE: "0",
           FX_RECORD: tapePath,
           FX_TRACE_LOG: tracePath,
           FX_TRACE_SCOPES: "theme,frame_schedule,frame_commit,resize",

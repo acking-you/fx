@@ -244,10 +244,11 @@ function heldSkillStreamResponse(state: HeldSkillStream): Response {
   return new Response(
     new ReadableStream<Uint8Array>({
       start(controller) {
-        controller.enqueue(event({ type: "text-start", id: "answer_1" }));
         controller.enqueue(event({
-          type: "text-delta",
-          id: "answer_1",
+          type: "response.output_text.delta",
+          item_id: "answer_1",
+          output_index: 0,
+          content_index: 0,
           delta: "catalog stream active",
         }));
         timer = setInterval(() => {
@@ -258,14 +259,18 @@ function heldSkillStreamResponse(state: HeldSkillStream): Response {
           closed = true;
           if (timer) clearInterval(timer);
           controller.enqueue(event({
-            type: "text-delta",
-            id: "answer_1",
+            type: "response.output_text.delta",
+            item_id: "answer_1",
+            output_index: 0,
+            content_index: 0,
             delta: " catalog stream completed",
           }));
-          controller.enqueue(event({ type: "text-end", id: "answer_1" }));
           controller.enqueue(event({
-            type: "finish",
-            finishReason: { unified: "stop", raw: "stop" },
+            type: "response.completed",
+            response: {
+              status: "completed",
+              usage: { input_tokens: 1, output_tokens: 2, total_tokens: 3 },
+            },
           }));
           controller.enqueue(encoder.encode("data: [DONE]\n\n"));
           controller.close();
@@ -310,8 +315,16 @@ function nestedText(content: unknown): string {
 }
 
 function gatewayPromptText(body: string): string {
-  const request = JSON.parse(body) as { prompt: Array<{ content: unknown }> };
-  return request.prompt.map((message) => nestedText(message.content)).join("\n");
+  const request = JSON.parse(body) as {
+    instructions?: string;
+    input?: Array<{ content?: unknown; output?: unknown }>;
+  };
+  return [
+    request.instructions ?? "",
+    ...(request.input ?? []).map((message) =>
+      nestedText(message.content ?? message.output)
+    ),
+  ].join("\n");
 }
 
 function countOccurrences(text: string, needle: string): number {
@@ -619,10 +632,8 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
         env: {
           HOME: fixture.home,
           OPENAI_API_KEY: "fake-linked-menu-key",
-          FX_GATEWAY_BASE_URL: gateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+          FX_RESPONSES_BASE_URL: gateway.baseUrl,
           FX_MODEL: FAKE_GATEWAY_MODEL,
-          FX_AUTO_UPGRADE: "0",
         },
         width: 120,
         height: 32,
@@ -668,10 +679,8 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
         env: {
           HOME: fixture.home,
           OPENAI_API_KEY: "fake-linked-metadata-key",
-          FX_GATEWAY_BASE_URL: gateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+          FX_RESPONSES_BASE_URL: gateway.baseUrl,
           FX_MODEL: FAKE_GATEWAY_MODEL,
-          FX_AUTO_UPGRADE: "0",
         },
         width: 120,
         height: 32,
@@ -715,7 +724,6 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
         env: {
           HOME: fixture.home,
           OPENAI_API_KEY: undefined,
-          FX_AUTO_UPGRADE: "0",
         },
         width: 120,
         height: 32,
@@ -757,7 +765,6 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
         env: {
           HOME: fixture.home,
           OPENAI_API_KEY: undefined,
-          FX_AUTO_UPGRADE: "0",
         },
         width: 120,
         height: 32,
@@ -809,10 +816,8 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
       const env = {
         HOME: home,
         OPENAI_API_KEY: "fake-title-rename-key",
-        FX_GATEWAY_BASE_URL: gateway.baseUrl,
-        FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+        FX_RESPONSES_BASE_URL: gateway.baseUrl,
         FX_MODEL: model,
-        FX_AUTO_UPGRADE: "0",
         NO_COLOR: "1",
       };
 
@@ -861,8 +866,7 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
         cwd: workspace,
         env: {
           ...env,
-          FX_GATEWAY_BASE_URL: gateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+          FX_RESPONSES_BASE_URL: gateway.baseUrl,
         },
         stderrPath: resumedStderrPath,
         width: 120,
@@ -904,10 +908,8 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
         env: {
           HOME: home,
           OPENAI_API_KEY: "fake-slash-footer-key",
-          FX_GATEWAY_BASE_URL: gateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+          FX_RESPONSES_BASE_URL: gateway.baseUrl,
           FX_MODEL: "openai/gpt-5",
-          FX_AUTO_UPGRADE: "0",
           NO_COLOR: "1",
         },
         stderrPath,
@@ -944,10 +946,8 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
         env: {
           HOME: home,
           OPENAI_API_KEY: "fake-slash-footer-key",
-          FX_GATEWAY_BASE_URL: gateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+          FX_RESPONSES_BASE_URL: gateway.baseUrl,
           FX_MODEL: "openai/gpt-5",
-          FX_AUTO_UPGRADE: "0",
           FX_RECORD: tapePath,
           FX_RECORD_INPUT: "1",
           FX_TRACE_LOG: tracePath,
@@ -1000,21 +1000,21 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
       const afterSlash = await capture("after-slash");
       expect(visibleTranscriptTailRow(afterSlash)).toBe(62);
       expect(composerRow(afterSlash)).toBe(64);
-      await session.sendLiteralText("f");
-      await session.waitForText("/feedback", 5_000);
-      const afterSlashF = await capture("after-slash-f");
-      await session.sendLiteralText("e");
-      await session.waitForText("/feedback", 5_000);
-      const afterSlashFe = await capture("after-slash-fe");
-      await session.sendLiteralText("edback");
-      await session.waitForText("/feedback", 5_000);
-      const afterSlashFeedback = await capture("after-slash-feedback");
+      await session.sendLiteralText("m");
+      await session.waitForText("/model", 5_000);
+      const afterSlashM = await capture("after-slash-m");
+      await session.sendLiteralText("o");
+      await session.waitForText("/model", 5_000);
+      const afterSlashMo = await capture("after-slash-mo");
+      await session.sendLiteralText("del");
+      await session.waitForText("/model", 5_000);
+      const afterSlashModel = await capture("after-slash-model");
 
       await session.sendKeys("Escape");
       await session.waitForPane(
         (pane) =>
-          composerContains(pane, "/feedback") &&
-          !pane.includes("open the fx feedback form"),
+          composerContains(pane, "/model") &&
+          !pane.includes("choose what model"),
         5_000,
       );
       const afterDismiss = await capture("after-dismiss");
@@ -1024,8 +1024,8 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
       await session.sendLiteralText("x");
       await session.waitForPane(
         (pane) =>
-          composerContains(pane, "/feedbackx") &&
-          !pane.includes("open the fx feedback form"),
+          composerContains(pane, "/modelx") &&
+          !pane.includes("choose what model"),
         5_000,
       );
       const afterDismissEdit = await capture("after-dismiss-edit");
@@ -1039,15 +1039,15 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
 
       const openComposerRows = [
         composerRow(afterSlash),
-        composerRow(afterSlashF),
-        composerRow(afterSlashFe),
-        composerRow(afterSlashFeedback),
+        composerRow(afterSlashM),
+        composerRow(afterSlashMo),
+        composerRow(afterSlashModel),
       ];
       const openFooterRows = [
         footerStatusRow(afterSlash),
-        footerStatusRow(afterSlashF),
-        footerStatusRow(afterSlashFe),
-        footerStatusRow(afterSlashFeedback),
+        footerStatusRow(afterSlashM),
+        footerStatusRow(afterSlashMo),
+        footerStatusRow(afterSlashModel),
       ];
       expect(new Set(openComposerRows).size).toBe(1);
       expect(new Set(openFooterRows).size).toBe(1);
@@ -1062,9 +1062,9 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
       for (const grid of [
         afterResponse,
         afterSlash,
-        afterSlashF,
-        afterSlashFe,
-        afterSlashFeedback,
+        afterSlashM,
+        afterSlashMo,
+        afterSlashModel,
         afterDismiss,
         afterDismissEdit,
         afterClear,
@@ -1075,9 +1075,9 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
       const historyLabels = [
         "after-response",
         "after-slash",
-        "after-slash-f",
-        "after-slash-fe",
-        "after-slash-feedback",
+        "after-slash-m",
+        "after-slash-mo",
+        "after-slash-model",
         "after-dismiss",
         "after-dismiss-edit",
         "after-clear",
@@ -1161,7 +1161,6 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
         env: {
           HOME: home,
           OPENAI_API_KEY: undefined,
-          FX_AUTO_UPGRADE: "0",
         },
         width: 100,
         height: 30,
@@ -1219,7 +1218,6 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
           env: {
             HOME: home,
             OPENAI_API_KEY: undefined,
-            FX_AUTO_UPGRADE: "0",
           },
           width: 100,
           height: 30,
@@ -1311,7 +1309,6 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
         env: {
           HOME: home,
           OPENAI_API_KEY: undefined,
-          FX_AUTO_UPGRADE: "0",
         },
         stderrPath,
         width: 100,
@@ -1374,7 +1371,6 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
         env: {
           HOME: home,
           OPENAI_API_KEY: undefined,
-          FX_AUTO_UPGRADE: "0",
         },
         stderrPath,
         width: 88,
@@ -1485,7 +1481,6 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
         env: {
           HOME: home,
           OPENAI_API_KEY: undefined,
-          FX_AUTO_UPGRADE: "0",
         },
         width: 100,
         height: 30,
@@ -1588,7 +1583,6 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
         env: {
           HOME: home,
           OPENAI_API_KEY: undefined,
-          FX_AUTO_UPGRADE: "0",
         },
         width: 100,
         height: 30,
@@ -1655,7 +1649,6 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
         env: {
           HOME: home,
           OPENAI_API_KEY: undefined,
-          FX_AUTO_UPGRADE: "0",
         },
         width: 60,
         height: 6,
@@ -1713,7 +1706,6 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
         env: {
           HOME: home,
           OPENAI_API_KEY: undefined,
-          FX_AUTO_UPGRADE: "0",
         },
         width: 100,
         height: 30,
@@ -1793,7 +1785,6 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
         env: {
           HOME: home,
           OPENAI_API_KEY: undefined,
-          FX_AUTO_UPGRADE: "0",
         },
         width: 100,
         height: 30,
@@ -1852,7 +1843,6 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
         env: {
           HOME: home,
           OPENAI_API_KEY: undefined,
-          FX_AUTO_UPGRADE: "0",
         },
         width: 100,
         height: 30,
@@ -1888,7 +1878,6 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
         env: {
           HOME: home,
           OPENAI_API_KEY: undefined,
-          FX_AUTO_UPGRADE: "0",
         },
         width: 100,
         height: 30,
@@ -1958,7 +1947,6 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
         env: {
           HOME: home,
           OPENAI_API_KEY: undefined,
-          FX_AUTO_UPGRADE: "0",
         },
         width: 100,
         height: 30,
@@ -2035,7 +2023,6 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
         env: {
           HOME: home,
           OPENAI_API_KEY: undefined,
-          FX_AUTO_UPGRADE: "0",
         },
         width: 100,
         height: 30,
@@ -2150,7 +2137,6 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
         env: {
           HOME: home,
           OPENAI_API_KEY: undefined,
-          FX_AUTO_UPGRADE: "0",
         },
         width: 120,
         height: 36,
@@ -2250,7 +2236,6 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
         env: {
           HOME: home,
           OPENAI_API_KEY: undefined,
-          FX_AUTO_UPGRADE: "0",
         },
         width: 120,
         height: 30,
@@ -2310,7 +2295,6 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
         env: {
           HOME: fixture.home,
           OPENAI_API_KEY: undefined,
-          FX_AUTO_UPGRADE: "0",
           FX_RECORD: tapePath,
         },
         width: 120,
@@ -2605,7 +2589,6 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
         env: {
           HOME: fixture.home,
           OPENAI_API_KEY: undefined,
-          FX_AUTO_UPGRADE: "0",
         },
         width: 120,
         height: 28,
@@ -2669,41 +2652,29 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
     "model Enter opens an inline provider catalog and selects through the existing model flow",
     async () => {
       const fixture = createModelsMenuFixture();
-      const currentModel = "anthropic/claude-opus-4.8";
+      const currentModel = "gpt-5.6-sol";
       const selectedModel = "private-team/plain-model";
       gateway = startFakeGateway([], {
         models: [
           {
             id: currentModel,
-            type: "language",
-            released: 400,
-            tags: ["reasoning", "tool-use", "vision", "file-input", "web-search"],
-            reasoning_options: [{ type: "effort", values: ["high", "xhigh"] }],
-            fast_options: [{ type: "toggle" }],
-            context_window: 1_000_000,
-            max_tokens: 32_000,
+            object: "model",
+            created: 400,
           },
           {
-            id: "openai/gpt-5.4",
-            type: "language",
-            released: 300,
-            tags: ["reasoning", "tool-use"],
-            context_window: 400_000,
-            max_tokens: 64_000,
+            id: "anthropic/claude-opus-4.8",
+            object: "model",
+            created: 300,
           },
           {
             id: "google/gemini-3-pro",
-            type: "language",
-            released: 200,
-            tags: ["tool-use", "vision"],
-            context_window: 2_000_000,
+            object: "model",
+            created: 200,
           },
           {
             id: selectedModel,
-            type: "language",
-            released: 100,
-            tags: ["tool-use"],
-            context_window: 128_000,
+            object: "model",
+            created: 100,
           },
         ],
       });
@@ -2712,11 +2683,8 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
         env: {
           HOME: fixture.home,
           OPENAI_API_KEY: "fake-models-menu-key",
-          FX_GATEWAY_BASE_URL: gateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
-          FX_E2E_GATEWAY_MODELS_URL: `${gateway.baseUrl}/coding-agent/v1/models`,
+          FX_RESPONSES_BASE_URL: gateway.baseUrl,
           FX_MODEL: currentModel,
-          FX_AUTO_UPGRADE: "0",
           FX_RECORD: fixture.tapePath,
           FX_RECORD_INPUT: "1",
         },
@@ -2771,23 +2739,19 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
       expect(pane).not.toContain("xAI");
       expect(pane).not.toContain("Z.AI");
       expect(pane).toContain(currentModel);
-      expect(pane).toContain("1M context · 32K output · Fast");
-      expect(pane).toContain("Note: Gateway catalog is authenticated with an API key");
+      expect(pane).toContain("OpenAI-compatible catalog: authenticated with an API key.");
       const headerRow = grid.findIndex((line) => line.includes("Models 4"));
-      const firstModelRow = grid.findIndex((line) => line.includes("openai/gpt-5.4"));
-      const lastModelRow = grid.findIndex((line) => line.includes(selectedModel));
+      const modelRows = [
+        currentModel,
+        "anthropic/claude-opus-4.8",
+        "google/gemini-3-pro",
+        selectedModel,
+      ].map((model) => grid.findIndex((line) => line.includes(model)));
       const statusRow = grid.findIndex((line) =>
-        line.includes("Note: Gateway catalog is authenticated with an API key")
+        line.includes("OpenAI-compatible catalog: authenticated with an API key.")
       );
-      const currentRow = grid[firstModelRow + 1]!;
-      const openaiRow = grid[firstModelRow]!;
-      const currentFactsColumn = currentRow.indexOf("1M context");
-      const openaiFactsColumn = openaiRow.indexOf("400K context");
-      const currentNameEnd = currentRow.indexOf(currentModel) + currentModel.length;
-      expect(firstModelRow).toBe(headerRow + 2);
-      expect(statusRow).toBe(lastModelRow + 2);
-      expect(currentFactsColumn - currentNameEnd).toBe(2);
-      expect(openaiFactsColumn).toBe(currentFactsColumn);
+      expect(Math.min(...modelRows)).toBe(headerRow + 2);
+      expect(statusRow).toBe(Math.max(...modelRows) + 2);
       expect(pane).not.toContain("Authenticated model catalog loaded.");
       expect(pane).not.toContain("Current");
       expect(pane).not.toContain("Reasoning");
@@ -2819,7 +2783,8 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
 
       await session.sendText("/model");
       await waitForModelsMenu(session, 4);
-      await session.sendKeys("Down");
+      await session.sendLiteralText(currentModel);
+      await waitForModelsMenu(session, 1);
       await session.sendKeys("Enter");
       await session.waitForPane(
         (current) => composerContains(current, `/model ${currentModel}`) && current.includes("default"),
@@ -2831,9 +2796,8 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
 
       await session.sendText("/model");
       await waitForModelsMenu(session, 4);
-      await session.sendKeys("Down");
-      await session.sendKeys("Down");
-      await session.sendKeys("Down");
+      await session.sendLiteralText(selectedModel);
+      await waitForModelsMenu(session, 1);
       await session.sendKeys("Enter");
       await session.waitForText(`● Switched to ${selectedModel}`, 5_000);
 
@@ -2868,10 +2832,8 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
       gateway = startFakeGateway([], {
         models: modelIds.map((id, index) => ({
           id,
-          type: "language",
-          released: modelIds.length - index,
-          tags: ["reasoning"],
-          context_window: 128_000,
+          object: "model",
+          created: modelIds.length - index,
         })),
       });
       session = await TmuxSession.create({
@@ -2879,11 +2841,8 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
         env: {
           HOME: fixture.home,
           OPENAI_API_KEY: "fake-models-menu-key",
-          FX_GATEWAY_BASE_URL: gateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
-          FX_E2E_GATEWAY_MODELS_URL: `${gateway.baseUrl}/coding-agent/v1/models`,
+          FX_RESPONSES_BASE_URL: gateway.baseUrl,
           FX_MODEL: modelIds[0],
-          FX_AUTO_UPGRADE: "0",
         },
         width: 40,
         height: 24,
@@ -2916,10 +2875,8 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
         models: [
           {
             id: selectedModel,
-            type: "language",
-            released: 100,
-            tags: ["reasoning", "tool-use"],
-            context_window: 128_000,
+            object: "model",
+            created: 100,
           },
         ],
       });
@@ -2929,11 +2886,8 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
         env: {
           HOME: fixture.home,
           OPENAI_API_KEY: "fake-model-picker-key",
-          FX_GATEWAY_BASE_URL: gateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
-          FX_E2E_GATEWAY_MODELS_URL: `${gateway.baseUrl}/coding-agent/v1/models`,
+          FX_RESPONSES_BASE_URL: gateway.baseUrl,
           FX_MODEL: "openai/gpt-4o",
-          FX_AUTO_UPGRADE: "0",
         },
         width: 120,
         height: 32,
@@ -2971,7 +2925,6 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
         env: {
           HOME: fixture.home,
           OPENAI_API_KEY: undefined,
-          FX_AUTO_UPGRADE: "0",
         },
         width: 120,
         height: 32,
@@ -3013,10 +2966,8 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
         env: {
           HOME: fixture.home,
           OPENAI_API_KEY: "fake-active-skills-stream-key",
-          FX_GATEWAY_BASE_URL: gateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+          FX_RESPONSES_BASE_URL: gateway.baseUrl,
           FX_MODEL: FAKE_GATEWAY_MODEL,
-          FX_AUTO_UPGRADE: "0",
         },
         width: 120,
         height: 32,
@@ -3061,10 +3012,8 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
         env: {
           HOME: fixture.home,
           OPENAI_API_KEY: "fake-active-slash-stream-key",
-          FX_GATEWAY_BASE_URL: gateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+          FX_RESPONSES_BASE_URL: gateway.baseUrl,
           FX_MODEL: FAKE_GATEWAY_MODEL,
-          FX_AUTO_UPGRADE: "0",
         },
         width: 72,
         height: 16,
@@ -3123,11 +3072,9 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
         env: {
           HOME: fixture.home,
           OPENAI_API_KEY: "fake-catalog-approval-key",
-          FX_GATEWAY_BASE_URL: gateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+          FX_RESPONSES_BASE_URL: gateway.baseUrl,
           FX_MODEL: FAKE_GATEWAY_MODEL,
           FX_PERMISSION_MODE: "ask",
-          FX_AUTO_UPGRADE: "0",
         },
         width: 120,
         height: 32,
@@ -3172,10 +3119,8 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
           env: {
             HOME: fixture.home,
             OPENAI_API_KEY: "fake-skill-token-key",
-            FX_GATEWAY_BASE_URL: gateway.baseUrl,
-            FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+            FX_RESPONSES_BASE_URL: gateway.baseUrl,
             FX_MODEL: FAKE_GATEWAY_MODEL,
-            FX_AUTO_UPGRADE: "0",
           },
           width: 120,
           height: 32,
@@ -3238,10 +3183,8 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
           env: {
             HOME: fixture.home,
             OPENAI_API_KEY: "fake-mention-guard-key",
-            FX_GATEWAY_BASE_URL: gateway.baseUrl,
-            FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+            FX_RESPONSES_BASE_URL: gateway.baseUrl,
             FX_MODEL: FAKE_GATEWAY_MODEL,
-            FX_AUTO_UPGRADE: "0",
           },
           width: 120,
           height: 32,
@@ -3287,10 +3230,8 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
           env: {
             HOME: fixture.home,
             OPENAI_API_KEY: "fake-mention-space-key",
-            FX_GATEWAY_BASE_URL: gateway.baseUrl,
-            FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+            FX_RESPONSES_BASE_URL: gateway.baseUrl,
             FX_MODEL: FAKE_GATEWAY_MODEL,
-            FX_AUTO_UPGRADE: "0",
           },
           width: 120,
           height: 32,
@@ -3332,10 +3273,8 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
         env: {
           HOME: fixture.home,
           OPENAI_API_KEY: "fake-exact-picker-key",
-          FX_GATEWAY_BASE_URL: gateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+          FX_RESPONSES_BASE_URL: gateway.baseUrl,
           FX_MODEL: FAKE_GATEWAY_MODEL,
-          FX_AUTO_UPGRADE: "0",
           FX_TRACE_LOG: tracePath,
           FX_TRACE_SCOPES: "skill,skills,agent,core",
         },
@@ -3430,7 +3369,6 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
         env: {
           HOME: home,
           OPENAI_API_KEY: undefined,
-          FX_AUTO_UPGRADE: "0",
         },
         width: 100,
         height: 30,
@@ -3497,7 +3435,6 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
         env: {
           HOME: home,
           OPENAI_API_KEY: undefined,
-          FX_AUTO_UPGRADE: "0",
         },
         width: 42,
         height: 18,
@@ -3509,8 +3446,9 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
 
       const grid = await session.capturePaneGrid();
       const pane = grid.join("\n");
-      expect(pane).toContain("Commands 1");
+      expect(pane).toContain("Commands 2");
       expect(pane).toContain("/model");
+      expect(pane).toContain("/models");
       expect(pane).toContain("…");
       expect(pane).not.toMatch(/\sModel\s*$/m);
       expect(session.isAlive()).toBe(true);

@@ -22,6 +22,8 @@ import {
   fakeGatewaySse,
   fakeGatewayToolCall,
   heldFakeGatewayFinalText,
+  responseCompleted,
+  responseFunctionCall,
   startFakeGateway,
   terminalFixtureShell,
   TmuxSession,
@@ -356,6 +358,9 @@ function createFixture(prefix: string, endpointBytes?: number) {
   const stderrPath = join(root, "stderr.log");
   mkdirSync(join(home, ".fx"), { recursive: true });
   mkdirSync(workspace);
+  if (TERMINAL_FIXTURE_SHELL.endsWith("/zsh")) {
+    writeFileSync(join(home, ".zshrc"), "");
+  }
   writeFileSync(
     join(home, ".fx", "settings.json"),
     JSON.stringify({
@@ -434,11 +439,9 @@ async function launch(
       HOME: fixture.home,
       SHELL: TERMINAL_FIXTURE_SHELL,
       OPENAI_API_KEY: "fake-terminal-tool-key",
-      FX_AUTO_UPGRADE: "0",
       FX_PERMISSION_MODE: "yolo",
       FX_MODEL: FAKE_GATEWAY_MODEL,
-      FX_GATEWAY_BASE_URL: gateway.baseUrl,
-      FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+      FX_RESPONSES_BASE_URL: gateway.baseUrl,
       FX_TRACE_LOG: fixture.tracePath,
       FX_TRACE_SCOPES:
         "input,terminal,terminal_client,terminal_store,terminal_host,agent,worker,gateway",
@@ -515,46 +518,31 @@ function countOccurrences(text: string, needle: string): number {
   return text.split(needle).length - 1;
 }
 
-function contentText(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) return content.map(contentText).join("");
-  if (content && typeof content === "object") {
-    const value = content as Record<string, unknown>;
-    return [
-      contentText(value.text),
-      contentText(value.value),
-      contentText(value.content),
-    ].join("");
-  }
-  return "";
-}
-
 function toolResultText(body: string, callId: string): string {
   const request = JSON.parse(body) as {
-    prompt: Array<{ content: unknown }>;
+    input?: Array<Record<string, unknown>>;
   };
-  const parts = request.prompt.flatMap((message) =>
-    Array.isArray(message.content) ? message.content : []
-  ) as Array<Record<string, unknown>>;
-  const result = parts.find((part) =>
-    part.type === "tool-result" && part.toolCallId === callId
+  const result = (request.input ?? []).find((part) =>
+    part.type === "function_call_output" && part.call_id === callId
   );
-  return result ? contentText(result.output) : `<missing ${callId}>`;
+  return typeof result?.output === "string"
+    ? result.output
+    : `<missing ${callId}>`;
 }
 
 function toolCallInput(body: string, callId: string): Record<string, unknown> {
   const request = JSON.parse(body) as {
-    prompt: Array<{ content: unknown }>;
+    input?: Array<Record<string, unknown>>;
   };
-  const parts = request.prompt.flatMap((message) =>
-    Array.isArray(message.content) ? message.content : []
-  ) as Array<Record<string, unknown>>;
-  const call = parts.find((part) =>
-    part.type === "tool-call" && part.toolCallId === callId
+  const call = (request.input ?? []).find((part) =>
+    part.type === "function_call" && part.call_id === callId
   );
-  const input = call?.input;
-  if (!input || typeof input !== "object" || Array.isArray(input)) {
+  if (typeof call?.arguments !== "string") {
     throw new Error(`missing tool call input for ${callId}`);
+  }
+  const input = JSON.parse(call.arguments);
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    throw new Error(`invalid tool call input for ${callId}`);
   }
   return input as Record<string, unknown>;
 }
@@ -563,16 +551,10 @@ function fakeTerminalToolBatch(
   calls: Array<{ id: string; input: Record<string, unknown> }>,
 ) {
   return fakeGatewaySse([
-    ...calls.map((call) => ({
-      type: "tool-call",
-      toolCallId: call.id,
-      toolName: "terminal",
-      input: call.input,
-    })),
-    {
-      type: "finish",
-      finishReason: { unified: "tool-calls", raw: "tool-calls" },
-    },
+    ...calls.flatMap((call, index) =>
+      responseFunctionCall(call.id, "terminal", call.input, index)
+    ),
+    responseCompleted(),
   ]);
 }
 
@@ -1388,12 +1370,12 @@ test.skipIf(!tmuxAvailable())(
     const firstRequest = JSON.parse(gateway.requests[0]!.body) as {
       tools: Array<{
         name?: string;
-        inputSchema?: JsonSchema;
+        parameters?: JsonSchema;
       }>;
     };
     const terminalSchema = firstRequest.tools.find(
       (tool) => tool.name === "terminal",
-    )?.inputSchema;
+    )?.parameters;
     expect(terminalSchema).toBeDefined();
     expect(terminalSchema!.type).toBe("object");
     expect(terminalSchema!.oneOf).toBeUndefined();
@@ -2914,12 +2896,12 @@ test.skipIf(!tmuxAvailable())(
     const request = JSON.parse(gateway.requests[0]!.body) as {
       tools: Array<{
         name?: string;
-        inputSchema?: WaitSchema;
+        parameters?: WaitSchema;
       }>;
     };
     const terminalSchema = request.tools.find(
       (tool) => tool.name === "terminal",
-    )?.inputSchema;
+    )?.parameters;
     expect(terminalSchema).toBeDefined();
     expect(terminalSchema!.type).toBe("object");
     expect(terminalSchema!.oneOf).toBeUndefined();
@@ -2938,8 +2920,12 @@ test.skipIf(!tmuxAvailable())(
     expect(waitProperties).not.toContain("safety_ceiling_ms");
     expect(waitProperties).not.toContain("authority");
     expect(waitProperties).not.toContain("proof");
-    expect(gateway.requests[4]!.body).toContain('"wait_ceiling_ms":20000');
-    expect(gateway.requests[4]!.body).not.toContain("safety_ceiling_ms");
+    const waitInput = toolCallInput(
+      gateway.requests[4]!.body,
+      "tui_terminal_wait_wait",
+    ) as { request?: Record<string, unknown> };
+    expect(waitInput.request?.wait_ceiling_ms).toBe(20_000);
+    expect(waitInput.request).not.toHaveProperty("safety_ceiling_ms");
     expect(readFileSync(fixture.stderrPath, "utf8")).toBe("");
   },
   TIMEOUT,
@@ -3121,12 +3107,23 @@ test.skipIf(!tmuxAvailable())(
       expect(pane).toContain(label);
     }
     expect(gateway.requests).toHaveLength(9);
-    expect(gateway.requests[2]!.body).toContain(
-      '"kind":"output_contains"',
+    const monitorInput = toolCallInput(
+      gateway.requests[2]!.body,
+      callIds[1]!,
+    ) as {
+      request?: {
+        monitor?: {
+          definition?: {
+            condition?: { kind?: string };
+            check_interval_ms?: number;
+          };
+        };
+      };
+    };
+    expect(monitorInput.request?.monitor?.definition?.condition?.kind).toBe(
+      "output_contains",
     );
-    expect(gateway.requests[2]!.body).toContain(
-      '"check_interval_ms":1',
-    );
+    expect(monitorInput.request?.monitor?.definition?.check_interval_ms).toBe(1);
     for (const [index, callId] of callIds.entries()) {
       const result = toolResultText(gateway.requests[index + 1]!.body, callId);
       expect(result).not.toContain("owner_authority");

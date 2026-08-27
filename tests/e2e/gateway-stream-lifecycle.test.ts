@@ -198,7 +198,7 @@ function lengthLimitedCommandResponse(command: string): Response {
       item_id: "command_item",
       call_id: "command_provisional",
       output_index: 1,
-      arguments: JSON.stringify({ action: "exec", command }),
+      arguments: JSON.stringify({ action: "exec", timeout_ms: 600_000, command }),
     },
     {
       type: "response.incomplete",
@@ -4530,6 +4530,7 @@ describe("gateway stream lifecycle", () => {
           output_index: 0,
           arguments: JSON.stringify({
             action: "exec",
+            timeout_ms: 600_000,
             command: "printf executed > command-must-not-run.txt",
           }),
         },

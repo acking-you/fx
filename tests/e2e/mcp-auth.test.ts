@@ -813,8 +813,7 @@ describe("MCP remote authentication lifecycle", () => {
       try {
         const env = {
           ...baseEnv(root),
-          FX_GATEWAY_BASE_URL: gateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+          FX_RESPONSES_BASE_URL: gateway.baseUrl,
         };
         tui = await TmuxSession.create({
           isolated: true,
@@ -2058,8 +2057,7 @@ describe("MCP remote authentication lifecycle", () => {
         cwd: root.workspace,
         env: {
           ...baseEnv(root),
-          FX_GATEWAY_BASE_URL: gateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+          FX_RESPONSES_BASE_URL: gateway.baseUrl,
         },
         width: 140,
         height: 36,

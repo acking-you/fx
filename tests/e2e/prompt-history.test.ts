@@ -35,8 +35,7 @@ function rejectedGatewayEnv(
   return {
     ...REJECTED_GATEWAY_AUTH,
     HOME: home,
-    FX_GATEWAY_BASE_URL: gateway.baseUrl,
-    FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+    FX_RESPONSES_BASE_URL: gateway.baseUrl,
     FX_MODEL: FAKE_GATEWAY_MODEL,
   };
 }
