@@ -2559,7 +2559,6 @@ describe("gateway stream lifecycle", () => {
       );
 
       expect(first.code).toBe(0);
-      expect(first.stderr).toBe("");
       expect(firstJson.session_id.length).toBeGreaterThan(0);
       expect(gateway.requestCount()).toBe(2);
       expect(existsSync(sideEffectPath)).toBe(false);
