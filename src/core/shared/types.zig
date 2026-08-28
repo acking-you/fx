@@ -316,16 +316,16 @@ pub const StreamState = struct {
     subagent_count: usize = 0,
     token_progress: TurnTokenProgress = .{},
     last_activity_kind: ?ToolActivityKind = null,
-    /// When the turn started; 0 hides the Thinking elapsed counter and its
+    /// When the turn started; 0 hides the Working elapsed counter and its
     /// wall-clock blink. Monotonic for the whole turn: tool boundaries never
     /// reset it.
     turn_started_ms: i64 = 0,
     /// When fx started waiting on user input (approval or question); 0 means
-    /// not waiting. While set, the Thinking clock freezes at this instant;
+    /// not waiting. While set, the Working clock freezes at this instant;
     /// on resume the wait is excluded by shifting turn_started_ms forward.
     waiting_since_ms: i64 = 0,
     /// Assistant text reached the transcript in the current stretch: the
-    /// status row stays with the response instead of flipping back to Thinking
+    /// status row stays with the response instead of flipping back to Working
     /// whenever the pacer catches up. A tool start opens the next stretch.
     assistant_text_started: bool = false,
     /// The model is streaming tool arguments that open no status row of their

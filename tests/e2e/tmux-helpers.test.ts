@@ -93,7 +93,7 @@ test("volatile token status rows stay narrowly classified", () => {
   expect(isVolatileTokenStatusRow("  (↑10 ↓5)")).toBe(true);
   expect(isVolatileTokenStatusRow("  0s (↑10 ↓5)")).toBe(true);
   expect(isVolatileTokenStatusRow("  1m 2s (↑1.2k ↓3k)")).toBe(true);
-  expect(isVolatileTokenStatusRow("• Streaming (↑10 ↓5)")).toBe(false);
+  expect(isVolatileTokenStatusRow("⠋ Working (↑10 ↓5)")).toBe(false);
   expect(isVolatileTokenStatusRow("ordinary output (↑10 ↓5)")).toBe(false);
 });
 

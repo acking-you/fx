@@ -46,6 +46,10 @@ pub const PollResult = struct {
     readable: bool = false,
     hung_up: bool = false,
     has_error: bool = false,
+    /// A worker/background event arrived while the terminal was blocked in
+    /// poll. This is deliberately separate from stdin readability so the
+    /// event loop can drain the worker queue without attempting a read.
+    woken: bool = false,
 
     pub fn closed(self: PollResult) bool {
         return self.hung_up or self.has_error;
@@ -65,6 +69,8 @@ pub const AlternateScreenOwner = enum {
 
 pub const TerminalState = struct {
     stdin_fd: std.posix.fd_t = std.posix.STDIN_FILENO,
+    wake_read_fd: std.posix.fd_t = -1,
+    wake_write_fd: std.posix.fd_t = -1,
     original_termios: std.posix.termios = undefined,
     raw_enabled: bool = false,
     alternate_screen_owner: AlternateScreenOwner = .none,
@@ -103,6 +109,61 @@ pub const TerminalState = struct {
     pub fn captureOriginalTermios(self: *TerminalState) !void {
         if (comptime builtin.os.tag == .wasi) return;
         self.original_termios = try std.posix.tcgetattr(self.stdin_fd);
+    }
+
+    /// Creates the native worker-to-terminal wake pipe. The pipe is kept
+    /// non-blocking because worker callbacks must never stall on a full wake
+    /// channel; one byte is enough to coalesce any number of queued events.
+    pub fn initEventWake(self: *TerminalState) !void {
+        if (comptime builtin.os.tag == .wasi) return;
+        if (self.wake_read_fd >= 0 or self.wake_write_fd >= 0) return;
+
+        var fds: [2]std.posix.fd_t = undefined;
+        if (std.c.pipe(&fds) != 0) return error.EventWakePipeFailed;
+        errdefer {
+            closeEventWakeFd(fds[0]);
+            closeEventWakeFd(fds[1]);
+        }
+        try setEventWakeFdFlags(fds[0]);
+        try setEventWakeFdFlags(fds[1]);
+        self.wake_read_fd = fds[0];
+        self.wake_write_fd = fds[1];
+    }
+
+    pub fn deinitEventWake(self: *TerminalState) void {
+        if (comptime builtin.os.tag == .wasi) return;
+        if (self.wake_read_fd >= 0) closeEventWakeFd(self.wake_read_fd);
+        if (self.wake_write_fd >= 0) closeEventWakeFd(self.wake_write_fd);
+        self.wake_read_fd = -1;
+        self.wake_write_fd = -1;
+    }
+
+    pub fn eventWakeAvailable(self: TerminalState) bool {
+        return if (comptime builtin.os.tag == .wasi)
+            false
+        else
+            self.wake_read_fd >= 0 and self.wake_write_fd >= 0;
+    }
+
+    /// Callback shape used by WorkerRuntime. It is safe to call from a worker
+    /// thread and intentionally ignores EAGAIN: poll will observe the byte
+    /// already in the pipe and the queue is drained in one batch.
+    pub fn notifyEventWake(context: ?*anyopaque) void {
+        const self: *TerminalState = @ptrCast(@alignCast(context.?));
+        if (comptime builtin.os.tag == .wasi) return;
+        if (self.wake_write_fd < 0) return;
+        const byte = [_]u8{1};
+        _ = std.c.write(self.wake_write_fd, &byte, byte.len);
+    }
+
+    fn drainEventWake(self: TerminalState) void {
+        if (comptime builtin.os.tag == .wasi) return;
+        if (self.wake_read_fd < 0) return;
+        var bytes: [64]u8 = undefined;
+        while (true) {
+            const count = std.c.read(self.wake_read_fd, &bytes, bytes.len);
+            if (count <= 0 or count < bytes.len) break;
+        }
     }
 
     pub fn enableRawMode(self: *TerminalState) !void {
@@ -264,21 +325,72 @@ pub const TerminalState = struct {
                 else => .{},
             };
         }
-        var fds = [_]std.posix.pollfd{.{
-            .fd = self.stdin_fd,
-            .events = std.posix.POLL.IN,
-            .revents = 0,
-        }};
+        var fds = [_]std.posix.pollfd{
+            .{
+                .fd = self.stdin_fd,
+                .events = std.posix.POLL.IN,
+                .revents = 0,
+            },
+            .{
+                .fd = self.wake_read_fd,
+                .events = if (self.wake_read_fd >= 0) std.posix.POLL.IN else 0,
+                .revents = 0,
+            },
+        };
 
         _ = try std.posix.poll(&fds, timeout_ms);
-        const revents = fds[0].revents;
+        const stdin_revents = fds[0].revents;
+        const wake_revents = fds[1].revents;
+        const woken = self.wake_read_fd >= 0 and
+            (wake_revents & (std.posix.POLL.IN | std.posix.POLL.HUP | std.posix.POLL.ERR)) != 0;
+        if (woken) self.drainEventWake();
         return .{
-            .readable = (revents & std.posix.POLL.IN) != 0,
-            .hung_up = (revents & std.posix.POLL.HUP) != 0,
-            .has_error = (revents & std.posix.POLL.ERR) != 0,
+            .readable = (stdin_revents & std.posix.POLL.IN) != 0,
+            .hung_up = (stdin_revents & std.posix.POLL.HUP) != 0,
+            .has_error = (stdin_revents & std.posix.POLL.ERR) != 0,
+            .woken = woken,
         };
     }
 };
+
+fn setEventWakeFdFlags(fd: std.posix.fd_t) !void {
+    while (true) switch (std.posix.errno(std.posix.system.fcntl(
+        fd,
+        std.posix.F.SETFD,
+        @as(usize, std.posix.FD_CLOEXEC),
+    ))) {
+        .SUCCESS => break,
+        .INTR => continue,
+        else => return error.EventWakePipeFailed,
+    };
+
+    const current = while (true) {
+        const rc = std.posix.system.fcntl(fd, std.posix.F.GETFL, @as(usize, 0));
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => break @as(usize, @intCast(rc)),
+            .INTR => continue,
+            else => return error.EventWakePipeFailed,
+        }
+    };
+    const nonblock = @as(usize, 1) << @bitOffsetOf(std.posix.O, "NONBLOCK");
+    while (true) switch (std.posix.errno(std.posix.system.fcntl(
+        fd,
+        std.posix.F.SETFL,
+        current | nonblock,
+    ))) {
+        .SUCCESS => break,
+        .INTR => continue,
+        else => return error.EventWakePipeFailed,
+    };
+}
+
+fn closeEventWakeFd(fd: std.posix.fd_t) void {
+    while (true) switch (std.posix.errno(std.posix.system.close(fd))) {
+        .SUCCESS => return,
+        .INTR => continue,
+        else => return,
+    };
+}
 
 fn clearTmuxHistoryForPane(alloc: Allocator, pane: []const u8) void {
     runTmuxHistoryClear(alloc, pane) catch |err| {

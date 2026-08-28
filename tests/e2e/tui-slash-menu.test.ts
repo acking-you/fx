@@ -98,6 +98,22 @@ async function waitForPaneTitle(
   throw new Error(`pane title never became ${expected}; last saw ${latest}`);
 }
 
+async function waitForPaneTitleMatching(
+  session: TmuxSession,
+  predicate: (title: string) => boolean,
+  description: string,
+  timeout: number,
+): Promise<string> {
+  const deadline = Date.now() + timeout;
+  let latest = "";
+  while (Date.now() < deadline) {
+    latest = await session.paneTitle();
+    if (predicate(latest)) return latest;
+    await Bun.sleep(25);
+  }
+  throw new Error(`pane title never matched ${description}; last saw ${latest}`);
+}
+
 async function waitForSkillsMenu(session: TmuxSession, count: number): Promise<string[]> {
   const deadline = Date.now() + TIMEOUT;
   let latest: string[] = [];
@@ -811,7 +827,8 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
       const stderrPath = join(workDir, "stderr.log");
       const resumedStderrPath = join(workDir, "resumed-stderr.log");
       const model = "openai/gpt-5";
-      gateway = startFakeGateway([fakeGatewayFinalText("TITLE_RENAME_COMPLETE")]);
+      const titleStream: HeldSkillStream = { cancelled: false };
+      gateway = startFakeGateway([() => heldSkillStreamResponse(titleStream)]);
 
       const env = {
         HOME: home,
@@ -838,7 +855,25 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
 
       // The first prompt names the session, and the tab follows it.
       await session.sendText("generate the release notes");
-      await session.waitForText("TITLE_RENAME_COMPLETE", 30_000);
+      await waitForHeldSkillStream(titleStream);
+      const busyTitlePattern = new RegExp(
+        `^fx · [⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] (?:workspace|generate the release notes) · ${model.replace("/", "\\/")}$`,
+      );
+      const firstBusyTitle = await waitForPaneTitleMatching(
+        session,
+        (title) => busyTitlePattern.test(title),
+        "the active-turn spinner",
+        5_000,
+      );
+      const secondBusyTitle = await waitForPaneTitleMatching(
+        session,
+        (title) => busyTitlePattern.test(title) && title !== firstBusyTitle,
+        "the next active-turn spinner frame",
+        5_000,
+      );
+      expect(secondBusyTitle).not.toBe(firstBusyTitle);
+      titleStream.release?.();
+      await session.waitForText("catalog stream completed", 30_000);
       await waitForPaneTitle(session, `fx · generate the release notes · ${model}`, 5_000);
 
       await session.sendText("/rename deploy pipeline fix");
@@ -922,7 +957,7 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
       await session.sendText("Print the deterministic slash footer transcript fixture.");
       await session.waitForText("SLASH_FOOTER_E2E_082", 30_000);
       await session.waitForPane(
-        (pane) => !pane.includes("esc interrupt") && !pane.includes("Thinking"),
+        (pane) => !pane.includes("esc interrupt") && !pane.includes("Working"),
         5_000,
       );
       await Bun.sleep(300);
@@ -2976,13 +3011,13 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
 
       await session.sendText("Keep this response active.");
       await waitForHeldSkillStream(stream);
-      await session.waitForText("Thinking", 10_000);
+      await session.waitForText("Working", 10_000);
       await session.sendLiteralText("$");
       await waitForSkillsMenu(session, 4);
 
       await session.sendKeys("C-[");
       await session.waitForPane(
-        (pane) => pane.includes("Thinking") && !pane.includes("↑↓ Navigate"),
+        (pane) => pane.includes("Working") && !pane.includes("↑↓ Navigate"),
         5_000,
       );
       expect(stream.cancelled).toBe(false);
@@ -3022,14 +3057,14 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
 
       await session.sendText("Keep this slash response active.");
       await waitForHeldSkillStream(stream);
-      await session.waitForText("Thinking", 10_000);
+      await session.waitForText("Working", 10_000);
       await session.sendLiteralText("/he");
       await session.waitForText("Esc Close", 10_000);
 
       await session.sendKeys("Escape");
       await session.waitForPane(
         (pane) =>
-          pane.includes("Thinking") &&
+          pane.includes("Working") &&
           pane.includes("/he") &&
           !pane.includes("Esc Close"),
         5_000,
@@ -3082,7 +3117,7 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
       await session.waitForComposer(10_000);
 
       await session.sendText("Request the catalog approval fixture.");
-      await session.waitForText("Thinking", 10_000);
+      await session.waitForText("Working", 10_000);
       await session.sendLiteralText("$");
       await waitForSkillsMenu(session, 4);
 

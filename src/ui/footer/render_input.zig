@@ -497,32 +497,29 @@ fn thinkingActivityProjection(
     _ = shell;
     if (ctx.compacting_context) {
         return .{ .turn_thinking = .{
-            .label = "• Compacting context",
+            .label = activity_status.buildWorkingLabel(
+                buf,
+                ctx.stream,
+                ctx.now_ms,
+                "Compacting context",
+            ),
             .tone = .thinking,
         } };
     }
-    // The markerless counter row belongs to the response: the text landing on
-    // screen is its own progress report, and it keeps the row through the gaps
-    // where the pacer waits on the next chunk. Once the model switches to a
-    // tool payload nothing will print for a while, so the row takes the marker
-    // back and starts blinking again.
+    // Match codex-cli's status contract: visible assistant output is already a
+    // progress surface, so a second persistent status row is redundant. Bring
+    // the animated work row back only when the model moves into an invisible
+    // tool-payload stretch.
     if (ctx.stream.active and ctx.stream.assistant_text_started and ctx.stream.composing_tool_payload) {
         return .{ .turn_thinking = .{
-            .label = activity_status.buildQuietTurnLabel(buf, ctx.stream, ctx.now_ms),
+            .label = activity_status.buildWorkingLabel(buf, ctx.stream, ctx.now_ms, "Working"),
         } };
     }
     if (ctx.writing_response or (ctx.stream.active and ctx.stream.assistant_text_started)) {
-        return .{ .turn_thinking = .{
-            .label = activity_status.buildStreamingLabel(buf, ctx.stream),
-            .tone = if (ctx.stream.active) .thinking else .neutral,
-        } };
+        return .none;
     }
     if (!ctx.stream.active) {
-        if (!ctx.completed_assistant_presentation_tail) return .none;
-        const presentation_stream: StreamState = .{ .active = true };
-        return .{ .turn_thinking = .{
-            .label = activity_status.buildThinkingLabel(buf, presentation_stream, ctx.now_ms) orelse "• Thinking",
-        } };
+        return .none;
     }
     var thinking_stream = ctx.stream;
     thinking_stream.last_activity_kind = null;
@@ -533,11 +530,8 @@ fn thinkingActivityProjection(
     thinking_stream.open_count = 0;
     thinking_stream.command_count = 0;
     thinking_stream.subagent_count = 0;
-    if (activity_status.buildThinkingLabel(buf, thinking_stream, ctx.now_ms)) |label| {
-        return .{ .turn_thinking = .{ .label = label } };
-    }
     return .{ .turn_thinking = .{
-        .label = "• Thinking",
+        .label = activity_status.buildWorkingLabel(buf, thinking_stream, ctx.now_ms, "Working"),
     } };
 }
 
@@ -722,7 +716,7 @@ test "frame-owned thinking activity projects the thinking label" {
 
     var dot_buf: [128]u8 = undefined;
     switch (frameOwnedActivityProjection(&dot_buf, &shell, ctx, null)) {
-        .turn_thinking => |thinking| try std.testing.expectEqualStrings("• Thinking", thinking.label),
+        .turn_thinking => |thinking| try std.testing.expectEqualStrings("⠋ Working", thinking.label),
         .none, .tool_slot => return error.TestUnexpectedResult,
     }
 }
@@ -749,7 +743,7 @@ test "frame-owned activity renders the thinking elapsed counter from the frame c
 
     var counter_buf: [128]u8 = undefined;
     switch (frameOwnedActivityProjection(&counter_buf, &shell, ctx, null)) {
-        .turn_thinking => |thinking| try std.testing.expectEqualStrings("• Thinking (3s)", thinking.label),
+        .turn_thinking => |thinking| try std.testing.expectEqualStrings("⠹ Working (3s)", thinking.label),
         .none, .tool_slot => return error.TestUnexpectedResult,
     }
 }
@@ -785,7 +779,7 @@ test "frame-owned activity keeps active tools out of the turn status row" {
     switch (frameOwnedActivityProjection(&active_buf, &shell, ctx, null)) {
         .turn_thinking => |thinking| {
             try std.testing.expectEqual(ActivityProjection.Tone.thinking, thinking.tone);
-            try std.testing.expectEqualStrings("• Thinking", thinking.label);
+            try std.testing.expectEqualStrings("⠋ Working", thinking.label);
         },
         .none, .tool_slot => return error.TestUnexpectedResult,
     }
@@ -830,7 +824,7 @@ test "current frame-owned activity leaves the focused tool in the transcript" {
     const projection = frameOwnedActivityProjection(&active_buf, &shell, ctx, null);
     switch (projection) {
         .turn_thinking => |thinking| try std.testing.expectEqualStrings(
-            "• Thinking (↑50k ↓1.2k)",
+            "⠋ Working (↑50k ↓1.2k)",
             thinking.label,
         ),
         .none, .tool_slot => return error.TestUnexpectedResult,
@@ -840,11 +834,8 @@ test "current frame-owned activity leaves the focused tool in the transcript" {
     var streaming_ctx = ctx;
     streaming_ctx.writing_response = true;
     switch (frameOwnedActivityProjection(&streaming_buf, &shell, streaming_ctx, null)) {
-        .turn_thinking => |thinking| try std.testing.expectEqualStrings(
-            "  (↑50k ↓1.2k)",
-            thinking.label,
-        ),
-        .none, .tool_slot => return error.TestUnexpectedResult,
+        .none => {},
+        .turn_thinking, .tool_slot => return error.TestUnexpectedResult,
     }
 }
 
@@ -872,7 +863,7 @@ test "remote compaction owns the activity row until it settles" {
     var active_buf: [256]u8 = undefined;
     switch (frameOwnedActivityProjection(&active_buf, &shell, ctx, null)) {
         .turn_thinking => |thinking| {
-            try std.testing.expectEqualStrings("• Compacting context", thinking.label);
+            try std.testing.expectEqualStrings("⠋ Compacting context", thinking.label);
             try std.testing.expectEqual(ActivityProjection.Tone.thinking, thinking.tone);
         },
         .none, .tool_slot => return error.TestUnexpectedResult,
@@ -885,7 +876,7 @@ test "minimal connected tool label clips with an ellipsis" {
     const projection: ActivityProjection = .{ .tool_slot = .{
         .entry_id = 123,
         .fallback_label = "● Running\x1b[0m \x1b[38;5;245mzig build test with a deliberately long target\x1b[0m\n",
-        .thinking_label = "• Thinking",
+        .thinking_label = "⠋ Working",
         .active = true,
         .kind = .command,
     } };
@@ -971,11 +962,8 @@ test "frame-owned activity shows live streaming token progress" {
 
     var active_buf: [256]u8 = undefined;
     switch (frameOwnedActivityProjection(&active_buf, &shell, ctx, null)) {
-        .turn_thinking => |thinking| {
-            try std.testing.expectEqualStrings("  (↑50k ↓1.2k)", thinking.label);
-            try std.testing.expectEqual(ActivityProjection.Tone.thinking, thinking.tone);
-        },
-        .none, .tool_slot => return error.TestUnexpectedResult,
+        .none => {},
+        .turn_thinking, .tool_slot => return error.TestUnexpectedResult,
     }
 
     // Pacer caught up mid-response and is waiting on the next chunk: the quiet
@@ -985,11 +973,8 @@ test "frame-owned activity shows live streaming token progress" {
     drained_ctx.stream.assistant_text_started = true;
     var drained_buf: [256]u8 = undefined;
     switch (frameOwnedActivityProjection(&drained_buf, &shell, drained_ctx, null)) {
-        .turn_thinking => |thinking| {
-            try std.testing.expectEqualStrings("  (↑50k ↓1.2k)", thinking.label);
-            try std.testing.expectEqual(ActivityProjection.Tone.thinking, thinking.tone);
-        },
-        .none, .tool_slot => return error.TestUnexpectedResult,
+        .none => {},
+        .turn_thinking, .tool_slot => return error.TestUnexpectedResult,
     }
 
     // The model moved on to a tool payload that prints nothing: the marker
@@ -1001,7 +986,7 @@ test "frame-owned activity shows live streaming token progress" {
     var stalled_buf: [256]u8 = undefined;
     switch (frameOwnedActivityProjection(&stalled_buf, &shell, composing_ctx, null)) {
         .turn_thinking => |thinking| {
-            try std.testing.expectEqualStrings("• (12s) (↑50k ↓1.2k)", thinking.label);
+            try std.testing.expectEqualStrings("⠋ Working (12s) (↑50k ↓1.2k)", thinking.label);
             try std.testing.expectEqual(ActivityProjection.Tone.thinking, thinking.tone);
         },
         .none, .tool_slot => return error.TestUnexpectedResult,
@@ -1012,11 +997,8 @@ test "frame-owned activity shows live streaming token progress" {
     tail_ctx.completed_assistant_presentation_tail = true;
     var tail_buf: [256]u8 = undefined;
     switch (frameOwnedActivityProjection(&tail_buf, &shell, tail_ctx, null)) {
-        .turn_thinking => |thinking| {
-            try std.testing.expectEqualStrings("  (↑50k ↓1.2k)", thinking.label);
-            try std.testing.expectEqual(ActivityProjection.Tone.neutral, thinking.tone);
-        },
-        .none, .tool_slot => return error.TestUnexpectedResult,
+        .none => {},
+        .turn_thinking, .tool_slot => return error.TestUnexpectedResult,
     }
 }
 
@@ -1083,7 +1065,7 @@ test "frame-owned activity uses clipped command activity label" {
     switch (frameOwnedActivityProjection(&active_buf, &shell, ctx, null)) {
         .turn_thinking => |thinking| {
             try std.testing.expectEqual(ActivityProjection.Tone.thinking, thinking.tone);
-            try std.testing.expectEqualStrings("• Thinking (↑10 ↓20)", thinking.label);
+            try std.testing.expectEqualStrings("⠋ Working (↑10 ↓20)", thinking.label);
         },
         .none, .tool_slot => return error.TestUnexpectedResult,
     }

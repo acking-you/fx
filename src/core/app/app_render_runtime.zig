@@ -3886,7 +3886,7 @@ test "core.app_render_runtime connects minimal focused tools to the transcript b
         .activity_projection = .{ .tool_slot = .{
             .entry_id = 9,
             .fallback_label = "Running zig build",
-            .thinking_label = "Thinking",
+            .thinking_label = "⠋ Working",
             .active = true,
             .kind = .command,
         } },

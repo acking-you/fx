@@ -10,6 +10,30 @@ const ActivityPart = struct {
     verb: []const u8,
 };
 
+/// Braille frames and cadence match codex-cli's status indicator. Keeping the
+/// frame selection in the output contract lets the TUI and terminal-title
+/// surfaces present the same notion of active work.
+pub const spinner_interval_ms: i64 = 100;
+pub const spinner_frames = [_][]const u8{
+    "⠋",
+    "⠙",
+    "⠹",
+    "⠸",
+    "⠼",
+    "⠴",
+    "⠦",
+    "⠧",
+    "⠇",
+    "⠏",
+};
+
+pub fn spinnerFrame(now_ms: i64, started_ms: i64) []const u8 {
+    const origin = if (started_ms > 0 and started_ms <= now_ms) started_ms else now_ms;
+    const elapsed = @max(@as(i64, 0), now_ms - origin);
+    const index: usize = @intCast(@mod(@divTrunc(elapsed, spinner_interval_ms), spinner_frames.len));
+    return spinner_frames[index];
+}
+
 fn streamStatusVerb(stream: StreamState) []const u8 {
     return switch (stream.last_activity_kind orelse return "thinking") {
         .list => "listing",
@@ -23,21 +47,27 @@ fn streamStatusVerb(stream: StreamState) []const u8 {
     };
 }
 
-pub fn buildThinkingLabel(buf: []u8, stream: StreamState, now_ms: i64) ?[]const u8 {
-    if (stream.last_activity_kind != null) return null;
+pub fn buildWorkingLabel(
+    buf: []u8,
+    stream: StreamState,
+    now_ms: i64,
+    heading: []const u8,
+) []const u8 {
     var out: std.Io.Writer = .fixed(buf);
-    out.writeAll("• Thinking") catch return "• Thinking";
-    appendThinkingElapsedSuffix(&out, stream, now_ms) catch return out.buffered();
+    out.writeAll(spinnerFrame(now_ms, stream.turn_started_ms)) catch return heading;
+    out.writeByte(' ') catch return heading;
+    out.writeAll(heading) catch return out.buffered();
+    appendWorkingElapsedSuffix(&out, stream, now_ms) catch return out.buffered();
     appendTurnTokenSuffix(&out, stream) catch return out.buffered();
     return out.buffered();
 }
 
 pub const thinking_blink_half_period_ms: i64 = 500;
 
-/// The instant the Thinking clock reads. While fx waits on user input the
+/// The instant the Working clock reads. While fx waits on user input the
 /// clock is frozen at the moment the wait began, so time spent on an approval
 /// or question never counts as thinking.
-fn thinkingClockNow(stream: StreamState, now_ms: i64) i64 {
+fn workingClockNow(stream: StreamState, now_ms: i64) i64 {
     if (stream.waiting_since_ms > 0 and stream.waiting_since_ms < now_ms) {
         return stream.waiting_since_ms;
     }
@@ -56,11 +86,11 @@ pub fn thinkingBlinkVisible(stream: StreamState, now_ms: i64) ?bool {
     return @mod(half_periods, 2) == 0;
 }
 
-fn appendThinkingElapsedSuffix(writer: *std.Io.Writer, stream: StreamState, now_ms: i64) !void {
+fn appendWorkingElapsedSuffix(writer: *std.Io.Writer, stream: StreamState, now_ms: i64) !void {
     if (stream.turn_started_ms <= 0 or now_ms < stream.turn_started_ms) return;
     // One displayed second spans exactly one on/off blink period.
     const ms_per_second = 2 * thinking_blink_half_period_ms;
-    const seconds = @divTrunc(thinkingClockNow(stream, now_ms) - stream.turn_started_ms, ms_per_second);
+    const seconds = @divTrunc(workingClockNow(stream, now_ms) - stream.turn_started_ms, ms_per_second);
     try writer.writeAll(" (");
     try writeElapsed(writer, seconds);
     try writer.writeByte(')');
@@ -84,7 +114,7 @@ fn writeElapsed(writer: *std.Io.Writer, seconds: i64) !void {
 }
 
 /// Tracks whether fx is waiting on user input (approval prompt or question)
-/// and keeps the Thinking clock honest: the clock freezes when the wait
+/// and keeps the Working clock honest: the clock freezes when the wait
 /// begins, and on resume the whole wait is excluded by shifting
 /// turn_started_ms forward. Call whenever the waiting state may have changed.
 pub fn syncWaitingClock(stream: *StreamState, waiting: bool, now_ms: i64) void {
@@ -102,39 +132,12 @@ pub fn syncWaitingClock(stream: *StreamState, waiting: bool, now_ms: i64) void {
     stream.waiting_since_ms = 0;
 }
 
-// Width of the "• " marker every other activity row carries.
-const marker_indent = "  ";
-
-// The printed response is its own progress report, so this row drops the marker
-// and the verb and keeps the live counter in the marker's column. A markerless
-// label also renders static, which stops the marker blinking through the text.
-pub fn buildStreamingLabel(buf: []u8, stream: StreamState) []const u8 {
-    const progress = stream.token_progress;
-    if (progress.input_tokens == 0 and progress.output_tokens == 0) return marker_indent;
-    var out: std.Io.Writer = .fixed(buf);
-    out.writeAll(marker_indent) catch return marker_indent;
-    writeTokenProgress(&out, progress) catch return out.buffered();
-    return out.buffered();
-}
-
-/// The response stretch is open but nothing is printing: the model is still
-/// producing output fx cannot show yet, typically a large tool payload. The row
-/// takes the marker back so it blinks and carries the turn clock, and stays
-/// verbless because naming the work would mean guessing at it.
-pub fn buildQuietTurnLabel(buf: []u8, stream: StreamState, now_ms: i64) []const u8 {
-    var out: std.Io.Writer = .fixed(buf);
-    out.writeAll("•") catch return "•";
-    appendThinkingElapsedSuffix(&out, stream, now_ms) catch return out.buffered();
-    appendTurnTokenSuffix(&out, stream) catch return out.buffered();
-    return out.buffered();
-}
-
 pub fn buildProgressLabel(buf: []u8, stream: StreamState) ?[]const u8 {
     if (!stream.active) return null;
-    return buildThinkingLabelFull(buf, stream);
+    return buildActivityLabel(buf, stream);
 }
 
-fn buildThinkingLabelFull(buf: []u8, stream: StreamState) []const u8 {
+fn buildActivityLabel(buf: []u8, stream: StreamState) []const u8 {
     var out: std.Io.Writer = .fixed(buf);
     out.writeAll(streamStatusVerb(stream)) catch return streamStatusVerb(stream);
 
@@ -211,67 +214,61 @@ pub fn appendTurnTokenSuffix(writer: *std.Io.Writer, stream: StreamState) !void 
     try appendTokenProgressSuffix(writer, stream.token_progress);
 }
 
-test "buildThinkingLabel returns thinking when no tool activity" {
-    var buf: [32]u8 = undefined;
-    const label = buildThinkingLabel(&buf, .{ .active = true }, 0);
-    try std.testing.expectEqualStrings("• Thinking", label.?);
-}
-
-test "buildThinkingLabel renders turn token suffix with input only" {
+test "buildWorkingLabel renders turn token suffix with input only" {
     var buf: [64]u8 = undefined;
-    const label = buildThinkingLabel(&buf, .{
+    const label = buildWorkingLabel(&buf, .{
         .active = true,
         .token_progress = .{ .input_tokens = 10 },
-    }, 0);
-    try std.testing.expectEqualStrings("• Thinking (↑10 ↓0)", label.?);
+    }, 0, "Working");
+    try std.testing.expectEqualStrings("⠋ Working (↑10 ↓0)", label);
 }
 
-test "buildThinkingLabel renders turn token suffix with input and output" {
+test "buildWorkingLabel renders turn token suffix with input and output" {
     var buf: [64]u8 = undefined;
-    const label = buildThinkingLabel(&buf, .{
+    const label = buildWorkingLabel(&buf, .{
         .active = true,
         .token_progress = .{ .input_tokens = 10, .output_tokens = 20 },
-    }, 0);
-    try std.testing.expectEqualStrings("• Thinking (↑10 ↓20)", label.?);
+    }, 0, "Working");
+    try std.testing.expectEqualStrings("⠋ Working (↑10 ↓20)", label);
 }
 
-test "buildThinkingLabel renders elapsed seconds for the running turn" {
+test "buildWorkingLabel renders elapsed seconds for the running turn" {
     var buf: [64]u8 = undefined;
-    const label = buildThinkingLabel(&buf, .{
+    const label = buildWorkingLabel(&buf, .{
         .active = true,
         .turn_started_ms = 1_000,
-    }, 6_500);
-    try std.testing.expectEqualStrings("• Thinking (5s)", label.?);
+    }, 6_500, "Working");
+    try std.testing.expectEqualStrings("⠴ Working (5s)", label);
 }
 
-test "buildThinkingLabel renders elapsed minutes and seconds for long turns" {
+test "buildWorkingLabel renders elapsed minutes and seconds for long turns" {
     var buf: [64]u8 = undefined;
     // 1080s of blink periods elapsed → 18m0s instead of a raw second count.
-    const label = buildThinkingLabel(&buf, .{
+    const label = buildWorkingLabel(&buf, .{
         .active = true,
         .turn_started_ms = 1_000,
-    }, 1_000 + 1_080 * 1_000);
-    try std.testing.expectEqualStrings("• Thinking (18m0s)", label.?);
+    }, 1_000 + 1_080 * 1_000, "Working");
+    try std.testing.expectEqualStrings("⠋ Working (18m0s)", label);
 }
 
-test "buildThinkingLabel renders elapsed hours for very long turns" {
+test "buildWorkingLabel renders elapsed hours for very long turns" {
     var buf: [64]u8 = undefined;
     // 3663s → 1h1m3s.
-    const label = buildThinkingLabel(&buf, .{
+    const label = buildWorkingLabel(&buf, .{
         .active = true,
         .turn_started_ms = 1_000,
-    }, 1_000 + 3_663 * 1_000);
-    try std.testing.expectEqualStrings("• Thinking (1h1m3s)", label.?);
+    }, 1_000 + 3_663 * 1_000, "Working");
+    try std.testing.expectEqualStrings("⠋ Working (1h1m3s)", label);
 }
 
-test "buildThinkingLabel renders elapsed seconds before the token suffix" {
+test "buildWorkingLabel renders elapsed seconds before the token suffix" {
     var buf: [64]u8 = undefined;
-    const label = buildThinkingLabel(&buf, .{
+    const label = buildWorkingLabel(&buf, .{
         .active = true,
         .turn_started_ms = 1_000,
         .token_progress = .{ .input_tokens = 10, .output_tokens = 20 },
-    }, 13_000);
-    try std.testing.expectEqualStrings("• Thinking (12s) (↑10 ↓20)", label.?);
+    }, 13_000, "Working");
+    try std.testing.expectEqualStrings("⠋ Working (12s) (↑10 ↓20)", label);
 }
 
 test "thinking blink relights exactly when the seconds digit advances" {
@@ -283,8 +280,8 @@ test "thinking blink relights exactly when the seconds digit advances" {
     try std.testing.expectEqual(@as(?bool, true), thinkingBlinkVisible(stream, 2_000));
 
     var label_buf: [64]u8 = undefined;
-    const at_relight = buildThinkingLabel(&label_buf, stream, 2_000).?;
-    try std.testing.expectEqualStrings("• Thinking (1s)", at_relight);
+    const at_relight = buildWorkingLabel(&label_buf, stream, 2_000, "Working");
+    try std.testing.expectEqualStrings("⠋ Working (1s)", at_relight);
 }
 
 test "thinking blink has no clock without a running turn" {
@@ -302,13 +299,13 @@ test "thinking clock freezes while waiting on user input and excludes the wait" 
     syncWaitingClock(&stream, true, 5_000);
     try std.testing.expectEqual(@as(i64, 5_000), stream.waiting_since_ms);
 
-    try std.testing.expectEqualStrings("• Thinking (4s)", buildThinkingLabel(&buf, stream, 900_000).?);
+    try std.testing.expectEqualStrings("⠋ Working (4s)", buildWorkingLabel(&buf, stream, 900_000, "Working"));
     try std.testing.expectEqual(@as(?bool, true), thinkingBlinkVisible(stream, 900_000));
 
     syncWaitingClock(&stream, false, 900_000);
     try std.testing.expectEqual(@as(i64, 0), stream.waiting_since_ms);
-    try std.testing.expectEqualStrings("• Thinking (4s)", buildThinkingLabel(&buf, stream, 900_000).?);
-    try std.testing.expectEqualStrings("• Thinking (7s)", buildThinkingLabel(&buf, stream, 903_000).?);
+    try std.testing.expectEqualStrings("⠋ Working (4s)", buildWorkingLabel(&buf, stream, 900_000, "Working"));
+    try std.testing.expectEqualStrings("⠋ Working (7s)", buildWorkingLabel(&buf, stream, 903_000, "Working"));
 }
 
 test "waiting clock accumulates across repeated prompts in one turn" {
@@ -324,7 +321,7 @@ test "waiting clock accumulates across repeated prompts in one turn" {
     syncWaitingClock(&stream, true, 11_000);
     syncWaitingClock(&stream, false, 20_000);
     var buf: [64]u8 = undefined;
-    try std.testing.expectEqualStrings("• Thinking (2s)", buildThinkingLabel(&buf, stream, 20_000).?);
+    try std.testing.expectEqualStrings("⠋ Working (2s)", buildWorkingLabel(&buf, stream, 20_000, "Working"));
 }
 
 test "waiting clock does not start without an active stream" {
@@ -333,62 +330,18 @@ test "waiting clock does not start without an active stream" {
     try std.testing.expectEqual(@as(i64, 0), stream.waiting_since_ms);
 }
 
-test "buildThinkingLabel hides elapsed seconds when the clock runs behind the mark" {
+test "buildWorkingLabel hides elapsed seconds when the clock runs behind the mark" {
     var buf: [64]u8 = undefined;
-    const label = buildThinkingLabel(&buf, .{
+    const label = buildWorkingLabel(&buf, .{
         .active = true,
         .turn_started_ms = 2_000,
-    }, 1_000);
-    try std.testing.expectEqualStrings("• Thinking", label.?);
+    }, 1_000, "Working");
+    try std.testing.expectEqualStrings("⠋ Working", label);
 }
 
-test "buildStreamingLabel renders live token progress without approximation markers" {
-    var buf: [64]u8 = undefined;
-    const label = buildStreamingLabel(&buf, .{
-        .active = true,
-        .token_progress = .{
-            .input_tokens = 1_500,
-            .output_tokens = 20,
-            .input_exact = false,
-            .output_exact = false,
-        },
-    });
-    try std.testing.expectEqualStrings("  (↑1.5k ↓20)", label);
-}
-
-test "buildStreamingLabel holds the marker column before the first usage report" {
-    var buf: [64]u8 = undefined;
-    try std.testing.expectEqualStrings("  ", buildStreamingLabel(&buf, .{ .active = true }));
-}
-
-test "buildQuietTurnLabel keeps the marker and the clock without naming the work" {
-    var buf: [64]u8 = undefined;
-    const label = buildQuietTurnLabel(&buf, .{
-        .active = true,
-        .turn_started_ms = 1_000,
-        .token_progress = .{ .input_tokens = 169, .output_tokens = 5_100 },
-    }, 13_000);
-    try std.testing.expectEqualStrings("• (12s) (↑169 ↓5.1k)", label);
-}
-
-test "buildQuietTurnLabel omits the clock before the turn is timed" {
-    var buf: [64]u8 = undefined;
-    const label = buildQuietTurnLabel(&buf, .{
-        .active = true,
-        .token_progress = .{ .input_tokens = 169, .output_tokens = 20 },
-    }, 13_000);
-    try std.testing.expectEqualStrings("• (↑169 ↓20)", label);
-}
-
-test "buildThinkingLabel returns null when tool activity is set" {
-    var buf: [32]u8 = undefined;
-    const label = buildThinkingLabel(&buf, .{ .active = true, .last_activity_kind = .write }, 0);
-    try std.testing.expect(label == null);
-}
-
-test "buildThinkingLabelFull renders ordered activity counts" {
+test "buildActivityLabel renders ordered activity counts" {
     var buf: [256]u8 = undefined;
-    const label = buildThinkingLabelFull(&buf, .{
+    const label = buildActivityLabel(&buf, .{
         .active = true,
         .last_activity_kind = .list,
         .read_count = 2,

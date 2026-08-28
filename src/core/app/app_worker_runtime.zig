@@ -612,7 +612,14 @@ pub fn Runtime(comptime App: type) type {
             }
             const status_changed = app.shell.worker_status_state().refresh_route_recovery(now_awake);
             if (status_changed) app.shell.render_requests.request(.footer);
-            if (!app.stream.active and !app.pacer.hasCompletedAssistantPresentationTail()) {
+            const background_activity = if (comptime @hasDecl(App, "backgroundActivityActive"))
+                app.backgroundActivityActive()
+            else
+                false;
+            if (!app.stream.active and
+                !app.pacer.hasCompletedAssistantPresentationTail() and
+                !background_activity)
+            {
                 return status_changed;
             }
             if (app.approval_prompt.isActive() or
@@ -639,11 +646,15 @@ pub fn Runtime(comptime App: type) type {
             presenter: activity_runtime.LifecyclePresenter,
             buf: []u8,
         ) ?[]const u8 {
-            // Existence guard only: pass no clock so the label skips the counter.
+            // Existence guard only: the rendered footer owns the actual
+            // spinner label, but this keeps animation scheduling alive while
+            // a background activity has no transcript row of its own.
             if (!app.stream.active and app.pacer.hasCompletedAssistantPresentationTail()) {
-                return activity_status.buildThinkingLabel(buf, .{ .active = true }, 0);
+                return activity_status.buildWorkingLabel(buf, .{ .active = true }, 0, "Working");
             }
-            if (activity_status.buildThinkingLabel(buf, app.stream, 0)) |label| return label;
+            if (app.stream.last_activity_kind == null) {
+                return activity_status.buildWorkingLabel(buf, app.stream, 0, "Working");
+            }
             if (app.stream.last_activity_kind == .ask) return ui_render.ask_activity_label;
             switch (presenter.snapshot().activity) {
                 .tool_slot => |slot| return slot.fallback_label,

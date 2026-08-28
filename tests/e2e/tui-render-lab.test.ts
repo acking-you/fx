@@ -144,7 +144,7 @@ test("render-lab analyzer flags excess gap before transient activity", () => {
   const manifest = writeAnalyzerFixture(outDir, [
     "content",
     "",
-    "thinking",
+    "⠋ Working",
     "",
     "",
     "────────────────",
@@ -163,7 +163,7 @@ test("render-lab analyzer treats thinking token counters as activity rows", () =
   const manifest = writeAnalyzerFixture(outDir, [
     "content",
     "",
-    "thinking (↑10 ↓20)",
+    "⠋ Working (↑10 ↓20)",
     "",
     "",
     "────────────────",
@@ -294,7 +294,7 @@ test("render-lab analyzer flags missing required gap before thinking", () => {
   outDir = mkdtempSync(join(tmpdir(), "fx-render-lab-analyzer-test-"));
   const manifest = writeAnalyzerFixture(outDir, [
     "content",
-    "thinking",
+    "⠋ Working",
     "────────────────",
     ">",
     "────────────────",
@@ -311,7 +311,7 @@ test("render-lab analyzer fails when the trace log is missing", () => {
   const manifest = writeAnalyzerFixture(outDir, [
     "content",
     "",
-    "thinking",
+    "⠋ Working",
     "────────────────",
     ">",
     "────────────────",
@@ -329,17 +329,17 @@ test("render-lab analyzer enforces active-tool placement and uniqueness", () => 
   const cases = [
     {
       event: "active-tool-visible",
-      grid: ["Run /help for commands", "", "● Running sleep 1; i=1", "  sleep 0.03; done; sleep 4", "", "▲ Thinking", "", "────────────────", "❯", "────────────────", "test"],
+      grid: ["Run /help for commands", "", "● Running sleep 1; i=1", "  sleep 0.03; done; sleep 4", "", "⠋ Working", "", "────────────────", "❯", "────────────────", "test"],
       rejected: false,
     },
     {
       event: "active-tool-clipped",
-      grid: ["│ ACTIVE_TOOL_LINE_05", "│ … 27 lines more (ctrl o to view)", "", "● Running sleep 1; i=1", "", "▲ Thinking", "", "────────────────", "❯", "────────────────", "test"],
+      grid: ["│ ACTIVE_TOOL_LINE_05", "│ … 27 lines more (ctrl o to view)", "", "● Running sleep 1; i=1", "", "⠋ Working", "", "────────────────", "❯", "────────────────", "test"],
       rejected: false,
     },
     {
       event: "active-tool-clipped",
-      grid: ["│ ACTIVE_TOOL_LINE_05", "│ … 27 lines more (ctrl o to view)", "", "▲ Thinking", "", "────────────────", "❯", "────────────────", "test"],
+      grid: ["│ ACTIVE_TOOL_LINE_05", "│ … 27 lines more (ctrl o to view)", "", "⠋ Working", "", "────────────────", "❯", "────────────────", "test"],
       rejected: true,
     },
     {
@@ -397,7 +397,7 @@ test("render-lab analyzer rejects activity marker corruption", () => {
       group,
       activity,
       "",
-      "• Thinking",
+      "⠋ Working",
       "",
       "┃",
       "",

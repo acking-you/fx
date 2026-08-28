@@ -133,6 +133,17 @@ const TRACE_SCOPES =
 const QUIESCENCE_INTERVAL_MS = 300;
 const ACTIVE_TOOL_RESIZE_CAPTURE_TIMEOUT_MS = 30_000;
 
+function normalizeWorkingStatusForStability(pane: string): string {
+  return pane
+    .split(/\r?\n/)
+    .map((line) =>
+      /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Working(?: \([^)]*\))*$/.test(line)
+        ? "⠋ Working"
+        : line,
+    )
+    .join("\n");
+}
+
 export async function runRenderLab(rawOptions: Partial<Options> = {}): Promise<RenderLabManifest[]> {
   const options = {
     scenario: rawOptions.scenario ?? SCENARIO,
@@ -2106,7 +2117,7 @@ class RenderLabTmux {
   }
 
   async waitForStableVisibleState() {
-    return waitForStableProbe(() => this.capturePane());
+    return waitForStableProbe(() => normalizeWorkingStatusForStability(this.capturePane()));
   }
 
   captureFrame(index: number, event: string, binarySha256: string, traceLogPath: string): RenderLabFrame {

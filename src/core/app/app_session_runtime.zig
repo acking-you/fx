@@ -3803,7 +3803,11 @@ pub fn Runtime(comptime App: type) type {
                     terminal_title_model_max_bytes,
                 ) catch return;
             }
-            provider.set(writer.buffered());
+            if (comptime @hasDecl(App, "setTerminalTitleBase")) {
+                app.setTerminalTitleBase(writer.buffered());
+            } else {
+                provider.set(writer.buffered());
+            }
         }
 
         pub fn cachedSessionTitle(app: *App) ?[]const u8 {

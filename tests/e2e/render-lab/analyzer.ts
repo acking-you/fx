@@ -376,7 +376,7 @@ export function findLogoRows(grid: string[]): number[] {
 function assertActivitySpacing(failures: RenderLabFailure[], frame: RenderLabFrame, footer: Footer | undefined): void {
   const footerTop = footer ? footerStartRow(footer) : frame.grid.length;
   for (let rowIndex = 0; rowIndex < frame.grid.length; rowIndex += 1) {
-    if (!isThinkingRow(frame.grid[rowIndex] ?? "")) continue;
+    if (!isWorkingRow(frame.grid[rowIndex] ?? "")) continue;
 
     let after = rowIndex + 1;
     let blankAfter = 0;
@@ -389,7 +389,7 @@ function assertActivitySpacing(failures: RenderLabFailure[], frame: RenderLabFra
         failures,
         "activity-footer-extra-blank",
         frame,
-        `thinking row has ${blankAfter} blank rows before the footer divider`,
+        `working row has ${blankAfter} blank rows before the footer divider`,
       );
     }
 
@@ -400,7 +400,7 @@ function assertActivitySpacing(failures: RenderLabFailure[], frame: RenderLabFra
       before -= 1;
     }
     if (before >= 0 && blankBefore === 0 && isTranscriptContentRow(frame.grid[before] ?? "")) {
-      push(failures, "activity-leading-gap-missing", frame, "thinking row has no semantic gap after transcript content");
+      push(failures, "activity-leading-gap-missing", frame, "working row has no semantic gap after transcript content");
     }
   }
 }
@@ -1001,8 +1001,8 @@ function assertMarkerCount(
   }
 }
 
-function isThinkingRow(line: string): boolean {
-  return /^(?:• )?thinking(?:\s+\(\d+s\))?(?:\s+\(↑\d+(?:\.\d+)?k?\s+↓\d+(?:\.\d+)?k?\))?$/i.test(
+function isWorkingRow(line: string): boolean {
+  return /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] working(?:\s+\([^)]*\))*$/i.test(
     semanticText(line).trim(),
   );
 }

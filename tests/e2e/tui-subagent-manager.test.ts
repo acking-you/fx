@@ -171,9 +171,11 @@ function providerErrorResponse(detail: string): Response {
   ]);
 }
 
-function normalizeThinkingFrame(grid: string[]) {
+function normalizeWorkingFrame(grid: string[]) {
   return grid.map((line) =>
-    line.includes("Thinking (") ? "<animated thinking frame>" : line
+    /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Working(?: \([^)]*\))*$/.test(line)
+      ? "<animated working frame>"
+      : line
   );
 }
 
@@ -6708,8 +6710,8 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
           (pane) => !pane.includes("Agents & processes") && pane.includes("Create the live manager fixture."),
           TIMEOUT,
         );
-        expect(normalizeThinkingFrame(await active.capturePaneGrid())).toEqual(
-          normalizeThinkingFrame(mainGridBeforeManager),
+        expect(normalizeWorkingFrame(await active.capturePaneGrid())).toEqual(
+          normalizeWorkingFrame(mainGridBeforeManager),
         );
         expect(active.cursorPosition()).toEqual(mainCursorBeforeManager);
         releaseParent(fakeGatewayToolCall("manager_archive_1", "subagent", {
