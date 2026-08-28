@@ -612,11 +612,13 @@ pub fn handlePrompt(
             },
         };
     }
-    if (comptime host_target.is_wasm and prompt_input.images.len > 0) {
-        return .{ .rpc_error = .{
-            .code = ErrorCode.invalid_params,
-            .message = "Image prompts are unavailable in this WASM runtime",
-        } };
+    if (comptime host_target.is_wasm) {
+        if (prompt_input.images.len > 0) {
+            return .{ .rpc_error = .{
+                .code = ErrorCode.invalid_params,
+                .message = "Image prompts are unavailable in this WASM runtime",
+            } };
+        }
     }
 
     try refreshProjectContext(
