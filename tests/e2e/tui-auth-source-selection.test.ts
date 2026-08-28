@@ -2237,7 +2237,7 @@ test(
         .toEqual(["gpt-5.6-sol", "gpt-5.4-mini", "gpt-5.6-sol"]);
       expect(codex.bodies[1]).toContain('"name":"permission_decision"');
       expect(codex.bodies[2]).toContain('"type":"function_call_output"');
-      expect(codex.bodies[2]).toContain("exit_code=0");
+      expect(codex.bodies[2]).toContain('\\"exit_code\\":0');
       for (const request of gateway.requests) {
         expect(request.body).not.toContain("permission_decision");
       }
@@ -2303,7 +2303,7 @@ test(
         .toEqual(["grok-4.20", "grok-4.20", "grok-4.20"]);
       expect(grok.bodies[1]).toContain('"name":"permission_decision"');
       expect(grok.bodies[2]).toContain('"type":"function_call_output"');
-      expect(grok.bodies[2]).toContain("exit_code=0");
+      expect(grok.bodies[2]).toContain('\\"exit_code\\":0');
       expect(grok.headers).toHaveLength(3);
       for (const headers of grok.headers) {
         expect(headers.tokenAuth).toBe("xai-grok-cli");
