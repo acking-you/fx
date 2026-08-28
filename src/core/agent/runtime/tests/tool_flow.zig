@@ -4321,7 +4321,7 @@ test "processQueuedPrompt caps chatty terminal exec result with explicit marker"
     try runFakePrompt(&gateway, &hooks, config, fixture.job());
 
     try expectBodyContains(&gateway, 1, "truncated");
-    try expectBodyContains(&gateway, 1, "tool result truncated for terminal");
+    try expectBodyContains(&gateway, 1, "tool result truncated for exec_command");
     try expectBodyContains(&gateway, 1, "cap is 1024 bytes");
 }
 

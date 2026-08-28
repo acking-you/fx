@@ -287,6 +287,7 @@ test "processQueuedPrompt in-stream cancellation settles every eligible provisio
     try std.testing.expectEqual(@as(usize, 1), hooks.interrupted_event_count);
     try std.testing.expectEqual(@as(usize, 1), hooks.finish_event_count);
     try expectToolTerminalsBeforeTurnFinished(&hooks, &.{
+        .{ .call_id = "call_command", .kind = .cancelled },
         .{ .call_id = "call_read", .kind = .cancelled },
     });
 }

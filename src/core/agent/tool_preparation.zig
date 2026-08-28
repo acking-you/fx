@@ -329,7 +329,7 @@ fn prepareRegisteredApplicableTargets(
     call: ToolCall,
     tool: tool_dispatch.Tool,
 ) Allocator.Error!RegisteredTargetPreparation {
-    if (try isCapturedCommandCall(alloc, call, tool)) {
+    if (try usesCommandCwdTarget(alloc, call, tool)) {
         const command_cwd = permissions.resolveCommandCwdForCallInScope(
             alloc,
             access_scope orelse workspace_access.AccessScope.primaryOnly(workspace_root),
@@ -377,12 +377,12 @@ fn prepareRegisteredApplicableTargets(
     return .{ .prepared = applicable_targets };
 }
 
-fn isCapturedCommandCall(
+fn usesCommandCwdTarget(
     alloc: Allocator,
     call: ToolCall,
     tool: tool_dispatch.Tool,
 ) Allocator.Error!bool {
-    if (tool.executor_kind == .run_command) return true;
+    if (tool.executor_kind == .run_command or tool.executor_kind == .exec_command) return true;
     const expected_action = tool.captured_command_action orelse return false;
     var parsed = std.json.parseFromSlice(std.json.Value, alloc, call.arguments_json, .{}) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -481,7 +481,7 @@ fn applicableTargetsFromPermissionTargets(
 
 fn filesystemTargetKind(kind: tool_dispatch.ExecutorKind) ?context_contract.TargetKind {
     return switch (kind) {
-        .list_files, .glob_files, .grep_files, .semantic_search, .create_folder => .directory,
+        .list_files, .glob_files, .grep_files, .semantic_search, .create_folder, .exec_command => .directory,
         .read_file, .copy_file => .file,
         else => null,
     };

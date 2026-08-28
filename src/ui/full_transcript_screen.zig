@@ -1502,10 +1502,9 @@ test "full projection preserves semantic arguments clipped from a tool heading" 
     );
     defer alloc.free(source);
 
-    try std.testing.expect(std.mem.indexOf(u8, source, "command: printf") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source, "cmd: printf") != null);
     try std.testing.expect(std.mem.indexOf(u8, source, "FULL_ARGUMENT_TAIL") != null);
     try std.testing.expect(std.mem.indexOf(u8, source, "action: exec") == null);
-    try std.testing.expect(std.mem.indexOf(u8, source, "profile: clean") != null);
     try std.testing.expect(std.mem.indexOf(u8, source, "{\"command\"") == null);
 }
 

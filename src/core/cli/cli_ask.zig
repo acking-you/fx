@@ -3949,21 +3949,13 @@ fn testProcessQueuedPromptChecksExecOnlyTerminal(deps: *const agent_runtime.Agen
         advertised_terminal.input_schema,
         "request",
     ));
-    try std.testing.expect(std.mem.find(
-        u8,
-        advertised_terminal.description,
-        "required finite timeout_ms",
-    ) != null);
-    try std.testing.expect(std.mem.find(
-        u8,
-        advertised_terminal.description,
-        "Use start",
-    ) == null);
+    try std.testing.expect(std.mem.find(u8, advertised_terminal.description, "plain pipes") != null);
+    try std.testing.expect(std.mem.find(u8, advertised_terminal.description, "numeric session id") != null);
     try std.testing.expectEqualStrings("", cfg.custom_tool_guidance);
     try std.testing.expectEqualStrings("test model overlay", cfg.model_prompt_overlay.?);
     const runtime_terminal = deps.tool_registry.lookup("exec_command") orelse
         return error.TestExpectedEqual;
-    try std.testing.expect(std.mem.find(u8, runtime_terminal.description, "Use start") != null);
+    try std.testing.expect(std.mem.find(u8, runtime_terminal.description, "plain pipes") != null);
     try testPushAssistantText(deps, "assistant text");
 }
 
@@ -3974,7 +3966,7 @@ fn testProcessQueuedPromptChecksFullTerminal(deps: *const agent_runtime.AgentRun
     const advertised_terminal = for (cfg.advertised_functions) |function| {
         if (std.mem.eql(u8, function.name, "exec_command")) break function;
     } else return error.TestExpectedEqual;
-    try std.testing.expect(std.mem.find(u8, advertised_terminal.description, "Use start") != null);
+    try std.testing.expect(std.mem.find(u8, advertised_terminal.description, "plain pipes") != null);
     try testPushAssistantText(deps, "assistant text");
 }
 
@@ -6587,7 +6579,7 @@ test "CLI ask auto mode requires review when only one copy or rename target is c
     }
 }
 
-test "runWithDeps projects exec-only terminal when saved setup has no capability" {
+test "runWithDeps projects unified exec when saved setup has no capability" {
     const alloc = std.testing.allocator;
     var stdout_capture: TestCapture = .{};
     defer stdout_capture.deinit(alloc);
@@ -6684,7 +6676,7 @@ test "runWithDeps honors no-save by skipping ask session stores" {
     try std.testing.expectEqual(@as(usize, 0), test_initialize_session_store_calls);
 }
 
-test "runWithDeps retains full terminal projection with saved capability" {
+test "runWithDeps retains unified exec projection with saved capability" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

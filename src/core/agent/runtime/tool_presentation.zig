@@ -1367,12 +1367,18 @@ test "formatToolStatusWithStats accents the +/- counts and falls back to neutral
 test "provisional lifecycle preflight distinguishes unknown eligible and ineligible tools" {
     try std.testing.expect(ProvisionalToolStatuses.preflight(test_tool_registry, "unknown_tool") == null);
 
-    for ([_][]const u8{ "ask_user_question", "write_file", "edit_file", "exec_command", "run_command" }) |name| {
+    for ([_][]const u8{ "ask_user_question", "write_file", "edit_file" }) |name| {
         const preflight = ProvisionalToolStatuses.preflight(test_tool_registry, name) orelse return error.TestExpectedEqual;
         switch (preflight) {
             .ineligible => {},
             .eligible => return error.TestExpectedEqual,
         }
+    }
+
+    const command_preflight = ProvisionalToolStatuses.preflight(test_tool_registry, "exec_command") orelse return error.TestExpectedEqual;
+    switch (command_preflight) {
+        .eligible => |metadata| try std.testing.expectEqualStrings("Running", metadata.action_label),
+        .ineligible => return error.TestExpectedEqual,
     }
 
     const preflight = ProvisionalToolStatuses.preflight(test_tool_registry, "read_file") orelse return error.TestExpectedEqual;
@@ -1578,7 +1584,7 @@ test "tracked provisional cancellation retains labels without exposing registere
         if (std.mem.eql(u8, event.terminal.id.call_id, "read_1")) {
             try std.testing.expectEqualStrings("Cancelled src/main.zig", event.terminal.outcome.summary);
         } else if (std.mem.eql(u8, event.terminal.id.call_id, "command_1")) {
-            try std.testing.expectEqualStrings("Cancelled tool call", event.terminal.outcome.summary);
+            try std.testing.expectEqualStrings("Cancelled run_command", event.terminal.outcome.summary);
         } else if (std.mem.eql(u8, event.terminal.id.call_id, "mcp_1")) {
             try std.testing.expectEqualStrings("Cancelled mcp_custom", event.terminal.outcome.summary);
         } else {
@@ -1614,7 +1620,7 @@ test "unmatched recovery starts hide registered names but retain unknown identit
         terminal_count += 1;
         if (std.mem.eql(u8, event.terminal.id.call_id, "command_1")) {
             try std.testing.expectEqualStrings(
-                "Connection interrupted before tool call ran",
+                "Connection interrupted before run_command ran",
                 event.terminal.outcome.summary,
             );
         } else if (std.mem.eql(u8, event.terminal.id.call_id, "mcp_1")) {
