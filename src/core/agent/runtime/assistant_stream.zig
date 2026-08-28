@@ -40,7 +40,7 @@ const test_tools = [_]tool_dispatch.Tool{
     test_builtin_tools.read_file,
     test_builtin_tools.write_file,
     test_builtin_tools.edit_file,
-    test_builtin_tools.terminal,
+    test_builtin_tools.exec_command,
     test_builtin_tools.ask_user_question,
 };
 const test_tool_registry = tool_dispatch.Registry{ .tools = test_tools[0..] };
@@ -1441,7 +1441,7 @@ test "streamed tool start flushes presentation before separator and lifecycle" {
         emits_lifecycle: bool,
     }{
         .{ .id = "read_1", .name = "read_file", .emits_lifecycle = true },
-        .{ .id = "command_1", .name = "run_command", .emits_lifecycle = false },
+        .{ .id = "command_1", .name = "exec_command", .emits_lifecycle = true },
         .{ .id = "write_1", .name = "write_file", .emits_lifecycle = false },
         .{ .id = "edit_1", .name = "edit_file", .emits_lifecycle = false },
         .{ .id = "ask_1", .name = "ask_user_question", .emits_lifecycle = false },

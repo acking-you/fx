@@ -140,14 +140,12 @@ Example result:
 
 The catalog is refreshed from the durable terminal owner before the response is written. `kind` is `terminal` for durable terminal sessions and `background` for older background-runtime tasks.
 
-## Long-running terminal commands
+## Unified Exec commands
 
-In a native writable ACP session, the public `terminal` tool can yield a long-running `exec` command into a durable terminal session. The default foreground budget is 10 seconds. The model can set `yield-time_ms` from 1 through 60,000 milliseconds.
+A native writable ACP session advertises `exec_command` and `write_stdin`. `exec_command` waits for a bounded yield window, returns immediately when the command exits, or returns a numeric session ID while the same process continues running. `write_stdin` uses that ID to poll newly available output or send input.
 
-After the command yields, its terminal session is visible through `/ps` and `fx/backgroundTerminals/list`. The agent can continue managing it with terminal actions such as `read`, `wait`, `screen`, `signal`, and `close`.
-
-WASM ACP sessions, read-only sessions, and configurations without native tools do not expose durable terminal ownership.
+Unified Exec processes are session-local and are not durable terminal catalog entries, so they do not appear in `/ps` or `fx/backgroundTerminals/list`. WASM ACP sessions, read-only sessions, and configurations without native process support do not advertise these tools and do not fall back to the removed model-facing `terminal` tool.
 
 ## Cancellation
 
-`session/cancel` requests cancellation of the active turn. It does not automatically terminate durable background terminals. Query the terminal catalog and use the public terminal tool when explicit process cleanup is required.
+`session/cancel` requests cancellation of the active turn. A Unified Exec process that already yielded remains alive for the ACP session and can be polled in a later turn with `write_stdin`; closing the session cleans up remaining processes. Independently hosted durable terminals keep their existing catalog lifecycle.

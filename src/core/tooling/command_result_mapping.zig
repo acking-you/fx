@@ -68,7 +68,7 @@ pub const Foreground = struct {
         return .{
             .status = .failure,
             .model_output = try tool_result_errors.toolExecutionFailureJson(arena, .{
-                .tool_name = "terminal",
+                .tool_name = "exec_command",
                 .message = if (foreground.exit_code != null) "Command exited with non-zero status" else "Command terminated before completing successfully",
                 .details = details[0..count],
                 .suggestion = "Inspect stderr and the command context, then fix the command or explain the blocker rather than retrying unchanged.",
@@ -118,7 +118,7 @@ pub const Foreground = struct {
         return .{
             .status = .failure,
             .model_output = try tool_result_errors.toolExecutionFailureJson(arena, .{
-                .tool_name = "terminal",
+                .tool_name = "exec_command",
                 .message = "Command output could not be retained",
                 .details = &details,
                 .suggestion = "Do not retry unchanged. Inspect available command evidence, free storage if needed, or explain that complete output capture failed.",

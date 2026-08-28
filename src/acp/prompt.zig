@@ -63,7 +63,6 @@ else
     struct {};
 const types = @import("../core/shared/types.zig");
 const worker_runtime = @import("../core/agent/worker_runtime.zig");
-const terminal_tool = @import("../tools/terminal/terminal.zig");
 
 const Allocator = std.mem.Allocator;
 const ErrorCode = jsonrpc.ErrorCode;
@@ -287,7 +286,7 @@ const AcpContext = struct {
                 writable.childCapability() catch null
             else
                 null,
-            .terminal_client = &self.state.terminal_client,
+            .unified_exec = &self.state.unified_exec,
             .web_fetch_runtime = &self.state.web_fetch_runtime,
             .web_fetch_artifact_store = session.session_rt.webFetchArtifactStore(),
             .web_fetch_artifact_error = session.session_rt.webFetchArtifactError(),
@@ -941,32 +940,6 @@ pub fn handleTurnStatus(
     try state.writer.writeResponse(alloc, msg.id, response.writer.buffered());
 }
 
-fn refreshTerminalProjection(
-    state: *server.ServerState,
-    alloc: Allocator,
-) void {
-    const session = if (state.active_session) |*active| active else return;
-    const writable = if (session.writable) |*value| value else return;
-    const child_capability = writable.childCapability() catch return;
-    terminal_tool.refreshListProjection(.{
-        .allocator = alloc,
-        .workspace_root = state.workspace_root,
-        .access_scope = state.workspace_access.scope(state.workspace_root),
-        .session_child_capability = child_capability,
-        .terminal_client = &state.terminal_client,
-        .terminal_owner_session_id = session.session_id,
-        .terminal_transport_role = .acp,
-        .background_lifecycle_allocator = state.alloc,
-        .cancel_flag = &session.cancel_flag,
-    }) catch |err| {
-        debug_trace.logf(
-            "acp",
-            "terminal status refresh failed err={s}",
-            .{@errorName(err)},
-        );
-    };
-}
-
 fn terminalVisibleInProcessStatus(row: anytype) bool {
     return row.lifecycle == .running or row.lifecycle == .starting;
 }
@@ -976,7 +949,6 @@ fn writeBackgroundTerminalsJson(
     state: *server.ServerState,
     alloc: Allocator,
 ) !void {
-    refreshTerminalProjection(state, alloc);
     var terminal_snapshot = try state.terminal_client.terminalProjection(alloc);
     defer terminal_snapshot.deinit();
     var task_snapshot = try state.background.snapshotTasks(alloc);
@@ -1049,7 +1021,6 @@ pub fn handleProcessStatusPrompt(
     msg: *jsonrpc.Message,
 ) !void {
     const session = if (state.active_session) |*active| active else return state.writer.writeError(alloc, msg.id, no_active_session_rpc_error);
-    refreshTerminalProjection(state, alloc);
     var terminal_snapshot = try state.terminal_client.terminalProjection(alloc);
     defer terminal_snapshot.deinit();
     var task_snapshot = try state.background.snapshotTasks(alloc);
@@ -1438,7 +1409,6 @@ fn agentRuntimeDeps(ctx: *AcpContext) agent_runtime.AgentRuntimeDeps {
         .context_registry = ctx.state.cfg.context_registry,
         .context_enabled = ctx.state.context_enabled,
         .finalize_turn = finalizeTurn,
-        .release_agent_terminal_lease = releaseAgentTerminalLease,
         .prepare_parent_turn_context = prepareParentTurnContext,
         .acknowledge_parent_turn_context = acknowledgeParentTurnContext,
         .append_runtime_context = appendRuntimeContext,
@@ -1492,11 +1462,6 @@ fn takePendingSteer(
     const ctx: *AcpContext = @ptrCast(@alignCast(raw));
     const active = ctx.state.active_prompt orelse return null;
     return active.takeSteer(alloc, turn_id, finish_if_empty);
-}
-
-fn releaseAgentTerminalLease(raw_ctx: *anyopaque, session_id: []const u8) !void {
-    const ctx: *AcpContext = @ptrCast(@alignCast(raw_ctx));
-    return tool_runtime.release_agent_terminal_lease(ctx.toolContext(), session_id);
 }
 
 fn refreshGatewayCredential(
@@ -1856,14 +1821,10 @@ fn describeToolAction(raw_ctx: *anyopaque, arena: Allocator, call: ToolCall, dis
 }
 
 fn resolveToolActionDisplayTarget(raw_ctx: *anyopaque, arena: Allocator, call: ToolCall) !?[]const u8 {
-    const ctx: *AcpContext = @ptrCast(@alignCast(raw_ctx));
-    return tool_presentation.resolveTerminalDisplayTarget(
-        arena,
-        ctx.toolRegistry(),
-        ctx.state.workspace_root,
-        &ctx.state.terminal_client,
-        call,
-    );
+    _ = raw_ctx;
+    _ = arena;
+    _ = call;
+    return null;
 }
 
 fn describeToolActionCompleted(raw_ctx: *anyopaque, arena: Allocator, call: ToolCall, display_target: ?[]const u8, advertised_dynamic_tool_names: []const []const u8) ![]const u8 {
@@ -2924,8 +2885,8 @@ pub fn mapToolKind(tool_name: []const u8) acp_types.ToolCallKind {
     if (std.mem.eql(u8, tool_name, "rename_file")) return .move;
     if (std.mem.eql(u8, tool_name, "copy_file")) return .move;
     if (std.mem.eql(u8, tool_name, "create_folder")) return .edit;
-    if (std.mem.eql(u8, tool_name, "terminal")) return .execute;
-    if (std.mem.eql(u8, tool_name, "run_command")) return .execute;
+    if (std.mem.eql(u8, tool_name, "exec_command")) return .execute;
+    if (std.mem.eql(u8, tool_name, "write_stdin")) return .execute;
     if (std.mem.eql(u8, tool_name, "memory")) return .other;
     if (std.mem.eql(u8, tool_name, "skill")) return .other;
     if (std.mem.eql(u8, tool_name, "install_skill")) return .other;
@@ -2937,17 +2898,6 @@ fn describeToolTitle(registry: tool_dispatch.Registry, arena: Allocator, call: T
         return std.fmt.allocPrint(arena, "{s}", .{presentation.action_label});
     }
     return std.fmt.allocPrint(arena, "{s}", .{call.name});
-}
-
-test "ACP terminal title uses the call-aware action label" {
-    const alloc = std.testing.allocator;
-    const title = try describeToolTitle(builtin_tools.registry, alloc, .{
-        .id = "close",
-        .name = "terminal",
-        .arguments_json = "{\"action\":\"close\",\"session_id\":\"terminal-a\",\"close_policy\":\"graceful\"}",
-    });
-    defer alloc.free(title);
-    try std.testing.expectEqualStrings("Closing", title);
 }
 
 test "ACP lifecycle action preserves dynamic MCP availability boundaries" {
@@ -2976,9 +2926,9 @@ test "ACP lifecycle action preserves dynamic MCP availability boundaries" {
     defer alloc.free(missing_label);
     try std.testing.expectEqualStrings("Working: mcp_lookup", missing_label);
 
-    const builtin = dynamicMcpToolAvailable(builtin_tools.registry, "terminal", &.{"terminal"}, @ptrCast(&fixture), Fixture.hasTool, .unrestricted);
+    const builtin = dynamicMcpToolAvailable(builtin_tools.registry, "unknown_tool", &.{"unknown_tool"}, @ptrCast(&fixture), Fixture.hasTool, .unrestricted);
     try std.testing.expect(!builtin);
-    try std.testing.expectEqual(@as(usize, 1), fixture.calls);
+    try std.testing.expectEqual(@as(usize, 2), fixture.calls);
 }
 
 test "ACP lifecycle resolves dynamic MCP availability through session context" {
@@ -3037,7 +2987,8 @@ test "mapToolKind maps common tools" {
     try std.testing.expectEqual(acp_types.ToolCallKind.delete, mapToolKind("delete_file"));
     try std.testing.expectEqual(acp_types.ToolCallKind.move, mapToolKind("rename_file"));
     try std.testing.expectEqual(acp_types.ToolCallKind.search, mapToolKind("grep_files"));
-    try std.testing.expectEqual(acp_types.ToolCallKind.execute, mapToolKind("run_command"));
+    try std.testing.expectEqual(acp_types.ToolCallKind.execute, mapToolKind("exec_command"));
+    try std.testing.expectEqual(acp_types.ToolCallKind.execute, mapToolKind("write_stdin"));
     try std.testing.expectEqual(acp_types.ToolCallKind.other, mapToolKind("unknown_tool"));
 }
 
@@ -3924,8 +3875,8 @@ test "ACP pending tool_call updates keep provider ids stable and dedupe" {
 
     const call = ToolCall{
         .id = "provider_call_7",
-        .name = "terminal",
-        .arguments_json = "{\"action\":\"exec\",\"command\":\"ls\"}",
+        .name = "exec_command",
+        .arguments_json = "{\"cmd\":\"ls\"}",
     };
     const first = try ctx.sendToolCallPending(alloc, call);
     const second = try ctx.sendToolCallPending(alloc, call);
@@ -4214,16 +4165,16 @@ test "ACP default user commands require configured authority or review" {
 
     const direct = (try requestToolPermissionOutcome(&ctx, arena, .{
         .id = "direct",
-        .name = "terminal",
-        .arguments_json = "{\"action\":\"exec\",\"command\":\"pwd\"}",
+        .name = "exec_command",
+        .arguments_json = "{\"cmd\":\"pwd\"}",
     }, .ask, &.{}, &.{}));
     try std.testing.expectEqual(ToolPermissionDecision.permission_required, direct.decision);
     try std.testing.expect(direct.execution_authority == null);
 
     const blocked = (try requestToolPermissionOutcome(&ctx, arena, .{
         .id = "blocked",
-        .name = "terminal",
-        .arguments_json = "{\"action\":\"exec\",\"command\":\"touch blocked.txt\"}",
+        .name = "exec_command",
+        .arguments_json = "{\"cmd\":\"touch blocked.txt\"}",
     }, .ask, &.{}, &.{}));
     try std.testing.expectEqual(ToolPermissionDecision.permission_required, blocked.decision);
     try std.testing.expect(blocked.execution_authority == null);
@@ -4231,8 +4182,8 @@ test "ACP default user commands require configured authority or review" {
     state.active_session.?.permission_rules = try testPermissionRuleSet(alloc, "bash", "touch *", .allow);
     const configured = (try requestToolPermissionOutcome(&ctx, arena, .{
         .id = "configured",
-        .name = "terminal",
-        .arguments_json = "{\"action\":\"exec\",\"command\":\"touch configured.txt\"}",
+        .name = "exec_command",
+        .arguments_json = "{\"cmd\":\"touch configured.txt\"}",
     }, .ask, &.{}, &.{}));
     switch ((configured.execution_authority orelse return error.TestExpectedEqual).run_command) {
         .direct_only => return error.TestExpectedShellAllowed,
@@ -4243,8 +4194,8 @@ test "ACP default user commands require configured authority or review" {
     state.active_session.?.permission_rules = .{};
     const automatic = (try requestToolPermissionOutcome(&ctx, arena, .{
         .id = "automatic",
-        .name = "terminal",
-        .arguments_json = "{\"action\":\"exec\",\"command\":\"touch automatic.txt\"}",
+        .name = "exec_command",
+        .arguments_json = "{\"cmd\":\"touch automatic.txt\"}",
     }, .auto, &.{}, &.{}));
     try std.testing.expectEqual(ToolPermissionDecision.deny, automatic.decision);
     try std.testing.expectEqual(types.ToolPermissionDenialReason.review_unavailable, automatic.denial_reason.?);
@@ -4292,8 +4243,8 @@ test "ACP auto mode uses automatic review clear and caution without prompting" {
 
     const direct_call: ToolCall = .{
         .id = "direct",
-        .name = "terminal",
-        .arguments_json = "{\"action\":\"exec\",\"command\":\"pwd\"}",
+        .name = "exec_command",
+        .arguments_json = "{\"cmd\":\"pwd\"}",
     };
     var direct_review = TestReviewTurn.init("Inspect the workspace.", direct_call);
     const direct = try requestToolPermissionOutcomeWithRequest(
@@ -4315,8 +4266,8 @@ test "ACP auto mode uses automatic review clear and caution without prompting" {
 
     const accepted_call: ToolCall = .{
         .id = "accepted",
-        .name = "terminal",
-        .arguments_json = "{\"action\":\"exec\",\"command\":\"touch accepted.txt\"}",
+        .name = "exec_command",
+        .arguments_json = "{\"cmd\":\"touch accepted.txt\"}",
     };
     var accepted_review = TestReviewTurn.init("Create accepted.txt.", accepted_call);
     const accepted = try requestToolPermissionOutcomeWithRequest(&ctx, arena, accepted_call, accepted_review.context(), .auto, &.{}, null, null, &.{});
@@ -4336,8 +4287,8 @@ test "ACP auto mode uses automatic review clear and caution without prompting" {
     fake.decision = .caution;
     const blocked_call: ToolCall = .{
         .id = "check",
-        .name = "terminal",
-        .arguments_json = "{\"action\":\"exec\",\"command\":\"touch check.txt\"}",
+        .name = "exec_command",
+        .arguments_json = "{\"cmd\":\"touch check.txt\"}",
     };
     var blocked_review = TestReviewTurn.init("Check whether this is allowed.", blocked_call);
     const blocked = try requestToolPermissionOutcomeWithRequest(&ctx, arena, blocked_call, blocked_review.context(), .auto, &.{}, null, null, &.{});

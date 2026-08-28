@@ -31,6 +31,11 @@ pub fn makePersistedToolResult(
     else
         null else null;
     errdefer if (command_output_replay) |replay| types.freeCommandOutputReplay(alloc, replay);
+    const command_artifact_handle = if (memory) |info| if (info.command_artifact_handle) |handle|
+        try alloc.dupe(u8, handle)
+    else
+        null else null;
+    errdefer if (command_artifact_handle) |handle| alloc.free(handle);
     var result: types.PersistedToolResult = .{
         .tool_call_id = tool_call_id,
         .tool_name = tool_name,
@@ -44,8 +49,8 @@ pub fn makePersistedToolResult(
         .provider_native = false,
         .created_at_ms = io_mod.milliTimestamp(),
         .command_output_replay = command_output_replay,
+        .command_artifact_handle = command_artifact_handle,
         .command_process_presentation = if (memory) |info| info.command_process_presentation else null,
-        .terminal_action_presentation = if (memory) |info| info.terminal_action_presentation else null,
     };
     if (memory) |info| {
         if (info.committed_file_presentation) |presentation| {
@@ -684,6 +689,7 @@ pub fn freeTransientPersistedToolResult(
     if (result.command_output_replay) |replay| {
         types.freeCommandOutputReplay(alloc, replay);
     }
+    if (result.command_artifact_handle) |handle| alloc.free(handle);
 }
 
 fn appendPersistedPermissionFeedback(

@@ -28,7 +28,6 @@ const tool_args = @import("../../tooling/tool_args.zig");
 const hooks = @import("../../hooks/hooks.zig");
 const command_contract = @import("../../execution/command_contract.zig");
 const command_environment = @import("../../execution/command_environment.zig");
-const terminal_contracts = @import("../../terminal/contracts.zig");
 const context_contract = @import("../../workspace/context_contract.zig");
 const tool_preparation = @import("../tool_preparation.zig");
 const command_admission = @import("../../permissions/command_admission.zig");
@@ -70,8 +69,6 @@ const CredentialRefreshMode = runtime_deps.CredentialRefreshMode;
 const http_error_detail_max_bytes: usize = 4096;
 const assistant_prefill_recovery_prompt =
     "Continue from the preceding tool result.";
-const repeated_terminal_validation_notice =
-    "Repeated terminal validation failures stopped the tool loop. The invalid terminal calls were not executed and produced no terminal effect.";
 const repeated_malformed_arguments_notice =
     "Repeated malformed tool arguments stopped the agent loop. The invalid calls were not executed. Continue with a follow-up prompt if needed.";
 const Config = runtime_config.Config;
@@ -102,6 +99,91 @@ fn compactionNotice(tone: types.NoticeTone, body: []const u8) types.SemanticNoti
     };
 }
 
+/// A yielded Unified Exec command is complete from the model protocol's point
+/// of view, but its process remains alive after the command result is sent.
+/// If the user interrupts the following model wait, keep that command's
+/// output out of the ordinary transcript while retaining its artifact and
+/// process identity for the interrupted-turn replay path.
+fn persistInterruptedTurnAfterYieldedCommand(
+    deps: *const AgentRuntimeDeps,
+    finalization: *TurnFinalizationGuard,
+    job: QueuedPrompt,
+    partial_assistant: ?[]const u8,
+    recent_command: ?ToolCall,
+    recent_command_result_json: ?[]const u8,
+    completed_tool_names: [][]u8,
+    persisted: *bool,
+    trace_ctx: TraceContext,
+    current_turn_messages: []const ChatMessage,
+    retained_candidate: ?[]const u8,
+    terminal_materializing: *bool,
+    turn_id: u64,
+    arena: Allocator,
+    advertised_dynamic_tool_names: []const []const u8,
+) !void {
+    if (recent_command) |command| {
+        debug_trace.logf(
+            "agent",
+            "persisting yielded command as cancelled call_id={s} has_result_json={s}",
+            .{ command.id, if (recent_command_result_json != null) "true" else "false" },
+        );
+        const cancelled_result: ToolExecutionResult = .{
+            .status = .failure,
+            .cancelled = true,
+            .model_output = "command cancelled\n",
+            .command_result_json = recent_command_result_json,
+        };
+        try runtime_tool_presentation.finishCancelledToolStatus(
+            deps,
+            arena,
+            turn_id,
+            command,
+            true,
+            null,
+            cancelled_result,
+            advertised_dynamic_tool_names,
+        );
+        return runtime_interruption.persistInterruptedCommandTurnOnce(
+            deps,
+            finalization,
+            job,
+            partial_assistant,
+            command,
+            completed_tool_names,
+            persisted,
+            trace_ctx,
+            current_turn_messages,
+            retained_candidate,
+            terminal_materializing,
+            null,
+        );
+    }
+    return runtime_interruption.persistInterruptedTurnOnce(
+        deps,
+        finalization,
+        job,
+        partial_assistant,
+        null,
+        completed_tool_names,
+        persisted,
+        trace_ctx,
+        current_turn_messages,
+        retained_candidate,
+        terminal_materializing,
+    );
+}
+
+fn outputHasUnifiedExecSessionId(arena: Allocator, output: []const u8) bool {
+    var parsed = std.json.parseFromSlice(std.json.Value, arena, output, .{}) catch return false;
+    defer parsed.deinit();
+    const object = switch (parsed.value) {
+        .object => |value| value,
+        else => return false,
+    };
+    const session_id = object.get("session_id") orelse return false;
+    return session_id == .integer and session_id.integer > 0;
+}
+
 fn pushVisibleCompactionNotice(
     deps: *const AgentRuntimeDeps,
     tone: types.NoticeTone,
@@ -122,785 +204,6 @@ test "automatic compaction notices are visible in the inline transcript" {
     try std.testing.expectEqual(
         types.NoticeVisibility.compact_and_full,
         notice.visibility,
-    );
-}
-
-fn terminal_request_schema_advertised(
-    advertised_functions: []const model_tool_schema.FunctionSchema,
-) bool {
-    for (advertised_functions) |function| {
-        if (!std.mem.eql(u8, function.name, "terminal")) continue;
-        return model_tool_schema.isSingleRequiredObjectUnionField(
-            function.input_schema,
-            "request",
-        );
-    }
-    return false;
-}
-
-fn terminal_request_normalization_eligible(
-    base_nested_terminal_advertised: bool,
-    vision_mode: runtime_gateway_step.VisionToolMode,
-) bool {
-    return base_nested_terminal_advertised and vision_mode != .required;
-}
-
-fn terminal_action_is(object: std.json.ObjectMap, action_name: []const u8) bool {
-    const action = object.get("action") orelse return false;
-    return action == .string and std.mem.eql(u8, action.string, action_name);
-}
-
-fn terminal_lease_is_absent(value: std.json.Value) bool {
-    return switch (value) {
-        .null => true,
-        .string => |text| tool_args.isNullPlaceholderText(text),
-        else => false,
-    };
-}
-
-fn elide_terminal_null_lease(object: *std.json.ObjectMap) void {
-    const lease = object.get("lease") orelse return;
-    if (!terminal_lease_is_absent(lease)) return;
-    _ = object.orderedRemove("lease");
-}
-
-const TerminalModelPayloadMapping = struct {
-    kind: []const u8,
-    model_field: []const u8,
-    internal_field: []const u8,
-};
-
-const terminal_model_payload_mappings = [_]TerminalModelPayloadMapping{
-    .{ .kind = "text", .model_field = "text", .internal_field = "text" },
-    .{ .kind = "keys", .model_field = "keys", .internal_field = "keys" },
-    .{ .kind = "controls", .model_field = "controls", .internal_field = "controls" },
-    .{ .kind = "paste", .model_field = "paste", .internal_field = "text" },
-};
-
-fn terminal_payload_mapping(
-    wanted: []const u8,
-    comptime field: enum { kind, model },
-) ?TerminalModelPayloadMapping {
-    for (terminal_model_payload_mappings) |mapping| {
-        const candidate = switch (field) {
-            .kind => mapping.kind,
-            .model => mapping.model_field,
-        };
-        if (std.mem.eql(u8, candidate, wanted)) return mapping;
-    }
-    return null;
-}
-
-fn project_terminal_model_write(
-    arena: Allocator,
-    object: *std.json.ObjectMap,
-) Allocator.Error!bool {
-    if (!terminal_action_is(object.*, "write")) return false;
-    elide_terminal_null_lease(object);
-    if (object.get("lease") != null or object.get("input") != null) {
-        return false;
-    }
-    const write = object.get("write") orelse return false;
-    if (write != .object) return false;
-    const kind = write.object.get("kind") orelse return false;
-    if (kind != .string) return false;
-    const mapping = terminal_payload_mapping(kind.string, .kind) orelse return false;
-    const payload = write.object.get(mapping.internal_field) orelse return false;
-    var input = std.json.Value{ .object = .empty };
-    try input.object.put(arena, mapping.model_field, payload);
-    try object.put(arena, "input", input);
-    _ = object.orderedRemove("write");
-    return true;
-}
-
-fn normalize_terminal_model_input(
-    arena: Allocator,
-    object: *std.json.ObjectMap,
-) Allocator.Error!bool {
-    if (!terminal_action_is(object.*, "write")) return false;
-    elide_terminal_null_lease(object);
-    if (object.get("write") != null or object.get("lease") != null) {
-        return false;
-    }
-    const input = object.get("input") orelse return false;
-    if (input != .object or input.object.count() != 1) return false;
-    const input_key = input.object.keys()[0];
-    const input_value = input.object.values()[0];
-    const mapping = terminal_payload_mapping(input_key, .model) orelse return false;
-    var write = std.json.Value{ .object = .empty };
-    try write.object.put(arena, "kind", .{ .string = mapping.kind });
-    try write.object.put(arena, mapping.internal_field, input_value);
-    try object.put(arena, "write", write);
-    _ = object.orderedRemove("input");
-    return true;
-}
-
-fn projected_terminal_request_arguments(
-    alloc: Allocator,
-    arguments_json: []const u8,
-) Allocator.Error!?[]u8 {
-    var parsed = std.json.parseFromSlice(std.json.Value, alloc, arguments_json, .{}) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return null,
-    };
-    defer parsed.deinit();
-    if (parsed.value != .object) return null;
-    const arena = parsed.arena.allocator();
-    if (parsed.value.object.count() == 1) {
-        if (parsed.value.object.getPtr("request")) |request| {
-            if (request.* == .object) {
-                if (!try project_terminal_model_write(arena, &request.object)) {
-                    return null;
-                }
-                var wrapped_out: std.Io.Writer.Allocating = .init(alloc);
-                defer wrapped_out.deinit();
-                std.json.Stringify.value(parsed.value, .{}, &wrapped_out.writer) catch
-                    return error.OutOfMemory;
-                return try wrapped_out.toOwnedSlice();
-            }
-        }
-    }
-    _ = try project_terminal_model_write(arena, &parsed.value.object);
-
-    var out: std.Io.Writer.Allocating = .init(alloc);
-    defer out.deinit();
-    std.json.Stringify.value(.{ .request = parsed.value }, .{}, &out.writer) catch return error.OutOfMemory;
-    return try out.toOwnedSlice();
-}
-
-fn free_terminal_request_projection(
-    alloc: Allocator,
-    source: []const ChatMessage,
-    projected: []const ChatMessage,
-) void {
-    if (source.ptr == projected.ptr) return;
-    for (projected, source) |message, original| {
-        if (message.tool_calls.ptr == original.tool_calls.ptr) continue;
-        for (message.tool_calls, original.tool_calls) |call, original_call| {
-            if (call.arguments_json.ptr != original_call.arguments_json.ptr) {
-                alloc.free(@constCast(call.arguments_json));
-            }
-        }
-        alloc.free(@constCast(message.tool_calls));
-    }
-    alloc.free(@constCast(projected));
-}
-
-fn project_terminal_request_messages(
-    alloc: Allocator,
-    registry: tool_dispatch.Registry,
-    attempt_eligible: bool,
-    source: []const ChatMessage,
-) Allocator.Error![]const ChatMessage {
-    if (!attempt_eligible) return source;
-
-    var projected: ?[]ChatMessage = null;
-    errdefer if (projected) |messages| {
-        free_terminal_request_projection(alloc, source, messages);
-    };
-
-    for (source, 0..) |message, message_index| {
-        if (message.role != .assistant) continue;
-        for (message.tool_calls, 0..) |call, call_index| {
-            if (call.argument_integrity != .valid) continue;
-            const tool = registry.lookup(call.name) orelse continue;
-            if (tool.executor_kind != .terminal) continue;
-            const arguments_json = try projected_terminal_request_arguments(
-                alloc,
-                call.arguments_json,
-            ) orelse continue;
-
-            if (projected == null) {
-                projected = alloc.dupe(ChatMessage, source) catch |err| {
-                    alloc.free(arguments_json);
-                    return err;
-                };
-            }
-            if (projected.?[message_index].tool_calls.ptr == message.tool_calls.ptr) {
-                projected.?[message_index].tool_calls = alloc.dupe(ToolCall, message.tool_calls) catch |err| {
-                    alloc.free(arguments_json);
-                    return err;
-                };
-            }
-            @constCast(projected.?[message_index].tool_calls)[call_index].arguments_json = arguments_json;
-        }
-    }
-    return projected orelse source;
-}
-
-fn normalized_terminal_request_arguments(
-    alloc: Allocator,
-    arguments_json: []const u8,
-) Allocator.Error!?[]u8 {
-    var parsed = std.json.parseFromSlice(std.json.Value, alloc, arguments_json, .{}) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return null,
-    };
-    defer parsed.deinit();
-    if (parsed.value != .object or parsed.value.object.count() != 1) return null;
-    const request = parsed.value.object.getPtr("request") orelse return null;
-    if (request.* != .object) return null;
-    _ = try normalize_terminal_model_input(
-        parsed.arena.allocator(),
-        &request.object,
-    );
-
-    var out: std.Io.Writer.Allocating = .init(alloc);
-    defer out.deinit();
-    std.json.Stringify.value(request.*, .{}, &out.writer) catch return error.OutOfMemory;
-    return try out.toOwnedSlice();
-}
-
-const AgentTerminalLeaseTransition = union(enum) {
-    track: []const u8,
-    remove: []const u8,
-    atomic: []const u8,
-};
-
-fn agent_terminal_lease_transition(
-    alloc: Allocator,
-    registry: tool_dispatch.Registry,
-    call: ToolCall,
-) !?AgentTerminalLeaseTransition {
-    const tool = registry.lookup(call.name) orelse return null;
-    if (tool.executor_kind != .terminal) return null;
-    const parsed = std.json.parseFromSliceLeaky(
-        std.json.Value,
-        alloc,
-        call.arguments_json,
-        .{},
-    ) catch |err| return switch (err) {
-        error.OutOfMemory => error.OutOfMemory,
-        else => error.InvalidTerminalLeaseTrackingInput,
-    };
-    if (parsed != .object) return error.InvalidTerminalLeaseTrackingInput;
-    const action = parsed.object.get("action") orelse return error.InvalidTerminalLeaseTrackingInput;
-    if (action != .string) return error.InvalidTerminalLeaseTrackingInput;
-    if (!std.mem.eql(u8, action.string, "write")) return null;
-    const session_id = parsed.object.get("session_id") orelse
-        return error.InvalidTerminalLeaseTrackingInput;
-    if (session_id != .string) {
-        return error.InvalidTerminalLeaseTrackingInput;
-    }
-    const lease_value = parsed.object.get("lease");
-    const lease_absent = lease_value == null or terminal_lease_is_absent(lease_value.?);
-    if (lease_absent) {
-        const write = parsed.object.get("write") orelse
-            return error.InvalidTerminalLeaseTrackingInput;
-        if (write == .null) return error.InvalidTerminalLeaseTrackingInput;
-        return .{ .atomic = session_id.string };
-    }
-    const concrete_lease = lease_value.?;
-    if (concrete_lease != .string) return error.InvalidTerminalLeaseTrackingInput;
-    const lease = std.meta.stringToEnum(
-        terminal_contracts.WriteLeaseIntent,
-        concrete_lease.string,
-    ) orelse return error.InvalidTerminalLeaseTrackingInput;
-    return switch (lease) {
-        .acquire, .use => .{ .track = session_id.string },
-        .release, .revoke => .{ .remove = session_id.string },
-    };
-}
-
-test "agent terminal lease transitions derive from normalized validated write intent" {
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-    const terminal_tool = tool_dispatch.Tool{
-        .name = "terminal",
-        .description = "terminal",
-        .model_schema = .{ .name = "terminal", .description = "terminal" },
-        .executor_kind = .terminal,
-        .decode = undefined,
-        .call = undefined,
-        .reads_only_fn = undefined,
-        .irreversible_fn = undefined,
-    };
-    const registry = tool_dispatch.Registry{ .tools = &.{terminal_tool} };
-    const cases = [_]struct {
-        lease: []const u8,
-        track: bool,
-    }{
-        .{ .lease = "acquire", .track = true },
-        .{ .lease = "use", .track = true },
-        .{ .lease = "release", .track = false },
-        .{ .lease = "revoke", .track = false },
-    };
-    for (cases) |case| {
-        const arguments_json = try std.fmt.allocPrint(
-            arena,
-            "{{\"action\":\"write\",\"session_id\":\"terminal-one\",\"lease\":\"{s}\",\"write\":null}}",
-            .{case.lease},
-        );
-        const transition = (try agent_terminal_lease_transition(
-            arena,
-            registry,
-            .{ .id = "call", .name = "terminal", .arguments_json = arguments_json },
-        )).?;
-        switch (transition) {
-            .track => |session_id| {
-                try std.testing.expect(case.track);
-                try std.testing.expectEqualStrings("terminal-one", session_id);
-            },
-            .remove => |session_id| {
-                try std.testing.expect(!case.track);
-                try std.testing.expectEqualStrings("terminal-one", session_id);
-            },
-            .atomic => unreachable,
-        }
-    }
-    const atomic_arguments = [_][]const u8{
-        "{\"action\":\"write\",\"session_id\":\"terminal-one\",\"write\":{\"kind\":\"text\",\"text\":\"input\"}}",
-        "{\"action\":\"write\",\"session_id\":\"terminal-one\",\"lease\":null,\"write\":{\"kind\":\"text\",\"text\":\"input\"}}",
-        "{\"action\":\"write\",\"session_id\":\"terminal-one\",\"lease\":\"null\",\"write\":{\"kind\":\"text\",\"text\":\"input\"}}",
-    };
-    for (atomic_arguments) |arguments_json| {
-        const atomic = (try agent_terminal_lease_transition(
-            arena,
-            registry,
-            .{
-                .id = "atomic",
-                .name = "terminal",
-                .arguments_json = arguments_json,
-            },
-        )).?;
-        switch (atomic) {
-            .atomic => |session_id| try std.testing.expectEqualStrings(
-                "terminal-one",
-                session_id,
-            ),
-            .track, .remove => unreachable,
-        }
-    }
-    try std.testing.expect((try agent_terminal_lease_transition(
-        arena,
-        registry,
-        .{ .id = "list", .name = "terminal", .arguments_json = "{\"action\":\"list\"}" },
-    )) == null);
-}
-
-fn normalize_terminal_request_tool_calls(
-    alloc: Allocator,
-    registry: tool_dispatch.Registry,
-    attempt_eligible: bool,
-    source: []const ToolCall,
-) Allocator.Error![]const ToolCall {
-    if (!attempt_eligible) return source;
-
-    var normalized: ?[]ToolCall = null;
-    errdefer if (normalized) |calls| {
-        for (calls, source) |call, original| {
-            if (call.arguments_json.ptr != original.arguments_json.ptr) {
-                alloc.free(@constCast(call.arguments_json));
-            }
-        }
-        alloc.free(calls);
-    };
-
-    for (source, 0..) |call, index| {
-        if (call.argument_integrity != .valid) continue;
-        const tool = registry.lookup(call.name) orelse continue;
-        if (tool.executor_kind != .terminal) continue;
-        const arguments_json = try normalized_terminal_request_arguments(
-            alloc,
-            call.arguments_json,
-        ) orelse continue;
-        if (normalized == null) {
-            normalized = alloc.dupe(ToolCall, source) catch |err| {
-                alloc.free(arguments_json);
-                return err;
-            };
-        }
-        normalized.?[index].arguments_json = arguments_json;
-    }
-    return normalized orelse source;
-}
-
-test "terminal request normalization follows effective attempt advertisement" {
-    const nested = tool_dispatch.Tool{
-        .name = "terminal",
-        .description = "terminal",
-        .model_schema = .{
-            .name = "terminal",
-            .description = "terminal",
-            .input_schema = .{
-                .properties = &.{.{
-                    .name = "request",
-                    .json_type = .object,
-                    .shape = &.{ .object = &.{ .one_of = &.{.{}} } },
-                }},
-                .required = &.{"request"},
-                .additional_properties = false,
-            },
-        },
-        .decode = undefined,
-        .call = undefined,
-        .reads_only_fn = undefined,
-        .irreversible_fn = undefined,
-    };
-    const flat = tool_dispatch.Tool{
-        .name = "terminal",
-        .description = "terminal",
-        .model_schema = .{ .name = "terminal", .description = "terminal" },
-        .decode = undefined,
-        .call = undefined,
-        .reads_only_fn = undefined,
-        .irreversible_fn = undefined,
-    };
-
-    try std.testing.expect(terminal_request_schema_advertised(&.{nested.model_schema}));
-    try std.testing.expect(!terminal_request_schema_advertised(&.{flat.model_schema}));
-    try std.testing.expect(!terminal_request_schema_advertised(&.{}));
-    try std.testing.expect(terminal_request_normalization_eligible(true, .unavailable));
-    try std.testing.expect(terminal_request_normalization_eligible(true, .optional));
-    try std.testing.expect(!terminal_request_normalization_eligible(true, .required));
-    try std.testing.expect(!terminal_request_normalization_eligible(false, .unavailable));
-}
-
-test "terminal inferred model input round trips every atomic write payload" {
-    const alloc = std.testing.allocator;
-    const cases = [_]struct {
-        internal: []const u8,
-        model: []const u8,
-    }{
-        .{
-            .internal = "{\"action\":\"write\",\"session_id\":\"terminal-a\",\"write\":{\"kind\":\"text\",\"text\":\"hello\"}}",
-            .model = "{\"request\":{\"action\":\"write\",\"session_id\":\"terminal-a\",\"input\":{\"text\":\"hello\"}}}",
-        },
-        .{
-            .internal = "{\"action\":\"write\",\"session_id\":\"terminal-a\",\"write\":{\"kind\":\"keys\",\"keys\":[\"enter\"]}}",
-            .model = "{\"request\":{\"action\":\"write\",\"session_id\":\"terminal-a\",\"input\":{\"keys\":[\"enter\"]}}}",
-        },
-        .{
-            .internal = "{\"action\":\"write\",\"session_id\":\"terminal-a\",\"write\":{\"kind\":\"controls\",\"controls\":[108]}}",
-            .model = "{\"request\":{\"action\":\"write\",\"session_id\":\"terminal-a\",\"input\":{\"controls\":[108]}}}",
-        },
-        .{
-            .internal = "{\"action\":\"write\",\"session_id\":\"terminal-a\",\"write\":{\"kind\":\"paste\",\"text\":\"large\"}}",
-            .model = "{\"request\":{\"action\":\"write\",\"session_id\":\"terminal-a\",\"input\":{\"paste\":\"large\"}}}",
-        },
-    };
-    for (cases) |case| {
-        const projected = (try projected_terminal_request_arguments(
-            alloc,
-            case.internal,
-        )).?;
-        defer alloc.free(projected);
-        try std.testing.expectEqualStrings(case.model, projected);
-        const normalized = (try normalized_terminal_request_arguments(
-            alloc,
-            projected,
-        )).?;
-        defer alloc.free(normalized);
-        try std.testing.expectEqualStrings(case.internal, normalized);
-    }
-}
-
-test "terminal request projection wraps eligible flat objects without changing source messages" {
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-
-    const terminal_tool = tool_dispatch.Tool{
-        .name = "terminal",
-        .description = "terminal",
-        .model_schema = .{ .name = "terminal", .description = "terminal" },
-        .executor_kind = .terminal,
-        .decode = undefined,
-        .call = undefined,
-        .reads_only_fn = undefined,
-        .irreversible_fn = undefined,
-    };
-    var browser_terminal = terminal_tool;
-    browser_terminal.name = "browser_terminal";
-    browser_terminal.executor_kind = .run_command;
-    const tools = [_]tool_dispatch.Tool{ terminal_tool, browser_terminal };
-    const registry = tool_dispatch.Registry{ .tools = &tools };
-
-    const cases = [_]struct {
-        id: []const u8,
-        input: []const u8,
-        expected: []const u8,
-    }{
-        .{ .id = "missing-action", .input = "{}", .expected = "{\"request\":{}}" },
-        .{ .id = "null-action", .input = "{\"action\":null}", .expected = "{\"request\":{\"action\":null}}" },
-        .{ .id = "non-string-action", .input = "{\"action\":7}", .expected = "{\"request\":{\"action\":7}}" },
-        .{ .id = "unknown-action", .input = "{\"action\":\"unknown\"}", .expected = "{\"request\":{\"action\":\"unknown\"}}" },
-        .{ .id = "valid-action", .input = "{\"action\":\"list\"}", .expected = "{\"request\":{\"action\":\"list\"}}" },
-        .{ .id = "atomic-keys", .input = "{\"action\":\"write\",\"session_id\":\"terminal-a\",\"write\":{\"kind\":\"keys\",\"keys\":[\"enter\"]}}", .expected = "{\"request\":{\"action\":\"write\",\"session_id\":\"terminal-a\",\"input\":{\"keys\":[\"enter\"]}}}" },
-        .{ .id = "null-lease", .input = "{\"action\":\"write\",\"session_id\":\"terminal-a\",\"lease\":null,\"write\":{\"kind\":\"keys\",\"keys\":[\"enter\"]}}", .expected = "{\"request\":{\"action\":\"write\",\"session_id\":\"terminal-a\",\"input\":{\"keys\":[\"enter\"]}}}" },
-        .{ .id = "textual-null-lease", .input = "{\"action\":\"write\",\"session_id\":\"terminal-a\",\"lease\":\"null\",\"write\":{\"kind\":\"keys\",\"keys\":[\"enter\"]}}", .expected = "{\"request\":{\"action\":\"write\",\"session_id\":\"terminal-a\",\"input\":{\"keys\":[\"enter\"]}}}" },
-        .{ .id = "explicit-lease", .input = "{\"action\":\"write\",\"session_id\":\"terminal-a\",\"lease\":\"use\",\"write\":{\"kind\":\"keys\",\"keys\":[\"enter\"]}}", .expected = "{\"request\":{\"action\":\"write\",\"session_id\":\"terminal-a\",\"lease\":\"use\",\"write\":{\"kind\":\"keys\",\"keys\":[\"enter\"]}}}" },
-        .{ .id = "null-request", .input = "{\"request\":null}", .expected = "{\"request\":{\"request\":null}}" },
-        .{ .id = "request-sibling", .input = "{\"request\":{\"action\":\"list\"},\"sibling\":true}", .expected = "{\"request\":{\"request\":{\"action\":\"list\"},\"sibling\":true}}" },
-        .{ .id = "exact-wrapper", .input = "{\"request\":{\"action\":\"list\"}}", .expected = "{\"request\":{\"action\":\"list\"}}" },
-        .{ .id = "non-object", .input = "[]", .expected = "[]" },
-    };
-    var calls: [cases.len + 3]ToolCall = undefined;
-    for (cases, 0..) |case, index| {
-        calls[index] = .{ .id = case.id, .name = "terminal", .arguments_json = case.input };
-    }
-    calls[cases.len] = .{ .id = "malformed", .name = "terminal", .arguments_json = "{", .argument_integrity = .malformed_json };
-    calls[cases.len + 1] = .{ .id = "unknown-tool", .name = "missing", .arguments_json = "{}" };
-    calls[cases.len + 2] = .{ .id = "other-executor", .name = "browser_terminal", .arguments_json = "{}" };
-    const messages = [_]ChatMessage{
-        .{ .role = .user, .content = "keep user message", .tool_calls = calls[0..1] },
-        .{ .role = .assistant, .content = "assistant", .tool_calls = &calls, .provider_state_json = "[]", .cache_policy = .no_cache },
-        .{ .role = .tool, .content = "keep result", .tool_call_id = "valid-action", .tool_name = "terminal" },
-    };
-
-    const projected = try project_terminal_request_messages(arena, registry, true, &messages);
-    try std.testing.expect(projected.ptr != messages[0..].ptr);
-    try std.testing.expectEqualStrings("keep user message", projected[0].content.?);
-    try std.testing.expectEqual(messages[0].tool_calls.ptr, projected[0].tool_calls.ptr);
-    try std.testing.expectEqualStrings("assistant", projected[1].content.?);
-    try std.testing.expectEqualStrings("[]", projected[1].provider_state_json.?);
-    try std.testing.expectEqual(.no_cache, projected[1].cache_policy);
-    try std.testing.expectEqualStrings("keep result", projected[2].content.?);
-    for (cases, 0..) |case, index| {
-        try std.testing.expectEqualStrings(case.expected, projected[1].tool_calls[index].arguments_json);
-        try std.testing.expectEqualStrings(case.input, messages[1].tool_calls[index].arguments_json);
-    }
-    try std.testing.expectEqualStrings("{", projected[1].tool_calls[cases.len].arguments_json);
-    try std.testing.expectEqualStrings("{}", projected[1].tool_calls[cases.len + 1].arguments_json);
-    try std.testing.expectEqualStrings("{}", projected[1].tool_calls[cases.len + 2].arguments_json);
-
-    const idempotent = try project_terminal_request_messages(arena, registry, true, projected);
-    try std.testing.expectEqual(projected.ptr, idempotent.ptr);
-    const ineligible = try project_terminal_request_messages(arena, registry, false, &messages);
-    try std.testing.expectEqual(messages[0..].ptr, ineligible.ptr);
-}
-
-fn check_terminal_request_projection_allocation_failures(alloc: Allocator) !void {
-    const terminal_tool = tool_dispatch.Tool{
-        .name = "terminal",
-        .description = "terminal",
-        .model_schema = .{ .name = "terminal", .description = "terminal" },
-        .executor_kind = .terminal,
-        .decode = undefined,
-        .call = undefined,
-        .reads_only_fn = undefined,
-        .irreversible_fn = undefined,
-    };
-    const tools = [_]tool_dispatch.Tool{terminal_tool};
-    const registry = tool_dispatch.Registry{ .tools = &tools };
-    const first_calls = [_]ToolCall{
-        .{ .id = "one", .name = "terminal", .arguments_json = "{}" },
-        .{ .id = "two", .name = "terminal", .arguments_json = "{\"action\":null}" },
-        .{ .id = "atomic", .name = "terminal", .arguments_json = "{\"action\":\"write\",\"session_id\":\"terminal-a\",\"write\":{\"kind\":\"text\",\"text\":\"input\"}}" },
-    };
-    const second_calls = [_]ToolCall{
-        .{ .id = "three", .name = "terminal", .arguments_json = "{\"action\":\"list\"}" },
-    };
-    const source = [_]ChatMessage{
-        .{ .role = .assistant, .tool_calls = &first_calls },
-        .{ .role = .assistant, .tool_calls = &second_calls },
-    };
-    const projected = try project_terminal_request_messages(alloc, registry, true, &source);
-    if (projected.ptr == source[0..].ptr) return error.TestUnexpectedResult;
-    defer free_terminal_request_projection(alloc, &source, projected);
-    try std.testing.expectEqualStrings("{\"request\":{}}", projected[0].tool_calls[0].arguments_json);
-    try std.testing.expectEqualStrings("{\"request\":{\"action\":null}}", projected[0].tool_calls[1].arguments_json);
-    try std.testing.expectEqualStrings(
-        "{\"request\":{\"action\":\"write\",\"session_id\":\"terminal-a\",\"input\":{\"text\":\"input\"}}}",
-        projected[0].tool_calls[2].arguments_json,
-    );
-    try std.testing.expectEqualStrings("{\"request\":{\"action\":\"list\"}}", projected[1].tool_calls[0].arguments_json);
-}
-
-test "terminal request projection cleans every partial allocation failure" {
-    try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
-        check_terminal_request_projection_allocation_failures,
-        .{},
-    );
-}
-
-test "terminal request normalization unwraps only exact eligible native calls" {
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-
-    const native_terminal = tool_dispatch.Tool{
-        .name = "terminal",
-        .description = "terminal",
-        .model_schema = .{ .name = "terminal", .description = "terminal" },
-        .executor_kind = .terminal,
-        .decode = undefined,
-        .call = undefined,
-        .reads_only_fn = undefined,
-        .irreversible_fn = undefined,
-    };
-    var browser_terminal = native_terminal;
-    browser_terminal.executor_kind = .run_command;
-    const native_tools = [_]tool_dispatch.Tool{native_terminal};
-    const browser_tools = [_]tool_dispatch.Tool{browser_terminal};
-    const native_registry = tool_dispatch.Registry{ .tools = &native_tools };
-    const browser_registry = tool_dispatch.Registry{ .tools = &browser_tools };
-
-    const wrapped = "{\"request\":{\"action\":\"exec\",\"command\":\"printf ok\"}}";
-    const calls = [_]ToolCall{
-        .{
-            .id = "terminal-call",
-            .name = "terminal",
-            .arguments_json = wrapped,
-            .provisional_id = "provisional-terminal",
-            .provider_result = "provider-result",
-            .provenance = .provider_executed,
-        },
-        .{
-            .id = "other-call",
-            .name = "read_file",
-            .arguments_json = "{\"path\":\"README.md\"}",
-        },
-    };
-    const normalized = try normalize_terminal_request_tool_calls(
-        arena,
-        native_registry,
-        true,
-        &calls,
-    );
-    try std.testing.expect(normalized.ptr != calls[0..].ptr);
-    try std.testing.expectEqualStrings(
-        "{\"action\":\"exec\",\"command\":\"printf ok\"}",
-        normalized[0].arguments_json,
-    );
-    try std.testing.expectEqualStrings(calls[0].id, normalized[0].id);
-    try std.testing.expectEqualStrings(calls[0].provisional_id.?, normalized[0].provisional_id.?);
-    try std.testing.expectEqualStrings(calls[0].provider_result.?, normalized[0].provider_result.?);
-    try std.testing.expectEqual(calls[0].provenance, normalized[0].provenance);
-    try std.testing.expectEqualStrings(calls[1].arguments_json, normalized[1].arguments_json);
-
-    const inferred_write_calls = [_]ToolCall{.{
-        .id = "inferred-write",
-        .name = "terminal",
-        .arguments_json = "{\"request\":{\"action\":\"write\",\"session_id\":\"terminal-a\",\"input\":{\"keys\":[\"enter\"]}}}",
-    }};
-    const inferred_write = try normalize_terminal_request_tool_calls(
-        arena,
-        native_registry,
-        true,
-        &inferred_write_calls,
-    );
-    try std.testing.expectEqualStrings(
-        "{\"action\":\"write\",\"session_id\":\"terminal-a\",\"write\":{\"kind\":\"keys\",\"keys\":[\"enter\"]}}",
-        inferred_write[0].arguments_json,
-    );
-
-    const semantic_null_write_calls = [_]ToolCall{
-        .{
-            .id = "null-lease-write",
-            .name = "terminal",
-            .arguments_json = "{\"request\":{\"action\":\"write\",\"session_id\":\"terminal-a\",\"lease\":null,\"input\":{\"keys\":[\"enter\"]}}}",
-        },
-        .{
-            .id = "textual-null-lease-write",
-            .name = "terminal",
-            .arguments_json = "{\"request\":{\"action\":\"write\",\"session_id\":\"terminal-a\",\"lease\":\"null\",\"input\":{\"keys\":[\"enter\"]}}}",
-        },
-    };
-    const semantic_null_writes = try normalize_terminal_request_tool_calls(
-        arena,
-        native_registry,
-        true,
-        &semantic_null_write_calls,
-    );
-    for (semantic_null_writes) |call| {
-        try std.testing.expectEqualStrings(
-            "{\"action\":\"write\",\"session_id\":\"terminal-a\",\"write\":{\"kind\":\"keys\",\"keys\":[\"enter\"]}}",
-            call.arguments_json,
-        );
-    }
-
-    const invalid_input_calls = [_]ToolCall{.{
-        .id = "invalid-input",
-        .name = "terminal",
-        .arguments_json = "{\"request\":{\"action\":\"write\",\"session_id\":\"terminal-a\",\"input\":{\"text\":\"x\",\"keys\":[\"enter\"]}}}",
-    }};
-    const invalid_input = try normalize_terminal_request_tool_calls(
-        arena,
-        native_registry,
-        true,
-        &invalid_input_calls,
-    );
-    try std.testing.expectEqualStrings(
-        "{\"action\":\"write\",\"session_id\":\"terminal-a\",\"input\":{\"text\":\"x\",\"keys\":[\"enter\"]}}",
-        invalid_input[0].arguments_json,
-    );
-
-    const ineligible = try normalize_terminal_request_tool_calls(arena, native_registry, false, &calls);
-    try std.testing.expectEqual(calls[0..].ptr, ineligible.ptr);
-    try std.testing.expectEqual(wrapped.ptr, ineligible[0].arguments_json.ptr);
-
-    const browser = try normalize_terminal_request_tool_calls(arena, browser_registry, true, &calls);
-    try std.testing.expectEqual(calls[0..].ptr, browser.ptr);
-    try std.testing.expectEqual(wrapped.ptr, browser[0].arguments_json.ptr);
-
-    const non_exact_calls = [_]ToolCall{.{
-        .id = "non-exact",
-        .name = "terminal",
-        .arguments_json = "{\"request\":{\"action\":\"exec\",\"command\":\"true\"},\"extra\":true}",
-    }};
-    const non_exact = try normalize_terminal_request_tool_calls(arena, native_registry, true, &non_exact_calls);
-    try std.testing.expectEqual(non_exact_calls[0..].ptr, non_exact.ptr);
-
-    const malformed_calls = [_]ToolCall{.{
-        .id = "malformed",
-        .name = "terminal",
-        .arguments_json = "{",
-        .argument_integrity = .malformed_json,
-    }};
-    const malformed = try normalize_terminal_request_tool_calls(arena, native_registry, true, &malformed_calls);
-    try std.testing.expectEqual(malformed_calls[0..].ptr, malformed.ptr);
-}
-
-fn check_terminal_request_normalization_allocation_failures(alloc: Allocator) !void {
-    const native_terminal = tool_dispatch.Tool{
-        .name = "terminal",
-        .description = "terminal",
-        .model_schema = .{ .name = "terminal", .description = "terminal" },
-        .executor_kind = .terminal,
-        .decode = undefined,
-        .call = undefined,
-        .reads_only_fn = undefined,
-        .irreversible_fn = undefined,
-    };
-    const tools = [_]tool_dispatch.Tool{native_terminal};
-    const registry = tool_dispatch.Registry{ .tools = &tools };
-    const source = [_]ToolCall{
-        .{ .id = "one", .name = "terminal", .arguments_json = "{\"request\":{\"action\":\"exec\",\"command\":\"true\"}}" },
-        .{ .id = "two", .name = "terminal", .arguments_json = "{\"request\":{\"action\":\"start\"}}" },
-        .{ .id = "atomic", .name = "terminal", .arguments_json = "{\"request\":{\"action\":\"write\",\"session_id\":\"terminal-a\",\"input\":{\"text\":\"input\"}}}" },
-    };
-    const normalized = try normalize_terminal_request_tool_calls(alloc, registry, true, &source);
-    if (normalized.ptr == source[0..].ptr) return error.TestUnexpectedResult;
-    defer {
-        for (normalized, source) |call, original| {
-            if (call.arguments_json.ptr != original.arguments_json.ptr) {
-                alloc.free(@constCast(call.arguments_json));
-            }
-        }
-        alloc.free(@constCast(normalized));
-    }
-    try std.testing.expectEqualStrings(
-        "{\"action\":\"exec\",\"command\":\"true\"}",
-        normalized[0].arguments_json,
-    );
-    try std.testing.expectEqualStrings(
-        "{\"action\":\"start\"}",
-        normalized[1].arguments_json,
-    );
-    try std.testing.expectEqualStrings(
-        "{\"action\":\"write\",\"session_id\":\"terminal-a\",\"write\":{\"kind\":\"text\",\"text\":\"input\"}}",
-        normalized[2].arguments_json,
-    );
-}
-
-test "terminal request normalization cleans every partial allocation failure" {
-    try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
-        check_terminal_request_normalization_allocation_failures,
-        .{},
     );
 }
 
@@ -2720,10 +2023,6 @@ fn processQueuedPromptInner(
     var arena_state = std.heap.ArenaAllocator.init(std.heap.c_allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const base_nested_terminal_advertised = terminal_request_schema_advertised(
-        config.advertised_functions,
-    );
-
     var stable_prefix: std.ArrayList(ChatMessage) = .empty;
     defer stable_prefix.deinit(arena);
 
@@ -2853,7 +2152,6 @@ fn processQueuedPromptInner(
         config,
         job,
         request_capabilities,
-        base_nested_terminal_advertised,
         finalization,
         arena,
         turn_id,
@@ -3199,7 +2497,6 @@ fn processQueuedPromptLoop(
     config: Config,
     initial_job: QueuedPrompt,
     request_capabilities: model_capabilities.Capabilities,
-    base_nested_terminal_advertised: bool,
     finalization: *TurnFinalizationGuard,
     arena: Allocator,
     turn_id: u64,
@@ -3227,8 +2524,6 @@ fn processQueuedPromptLoop(
     defer turn_file_mutation_denials.deinit(arena);
     var turn_review_cache: runtime_tool_admission.TurnReviewCache = .{};
     defer turn_review_cache.deinit(arena);
-    var terminal_validation_retry: runtime_tool_admission.TerminalValidationRetryState = .{};
-    defer terminal_validation_retry.deinit(arena);
     var malformed_arguments_retry: runtime_tool_admission.MalformedArgumentsRetryState = .{};
     var completed_tool_names = completed_tool_names_ptr.*;
     defer completed_tool_names_ptr.* = completed_tool_names;
@@ -3258,6 +2553,9 @@ fn processQueuedPromptLoop(
     var interrupted_persisted = interrupted_persisted_ptr.*;
     defer interrupted_persisted_ptr.* = interrupted_persisted;
     var silent_tool_steps: usize = 0;
+    var last_yielded_command: ?ToolCall = null;
+    var last_yielded_command_result_json: ?[]const u8 = null;
+    var last_assistant_partial: ?[]const u8 = null;
     var continuation_injected = false;
     var last_step_ctx = finish_trace.ctx;
     var current_step_index: usize = 0;
@@ -3355,7 +2653,23 @@ fn processQueuedPromptLoop(
         last_step_ctx = step_ctx;
         if (config.cancel_flag.load(.seq_cst)) {
             runtime_telemetry.traceCancelObserved(step_ctx, false);
-            try runtime_interruption.persistInterruptedTurnOnce(deps, finalization, job, null, null, completed_tool_names.items, &interrupted_persisted, step_ctx, within_turn_suffix.items, stop_state.retained_candidate, &stop_state.terminal_materializing);
+            try persistInterruptedTurnAfterYieldedCommand(
+                deps,
+                finalization,
+                job,
+                last_assistant_partial,
+                last_yielded_command,
+                last_yielded_command_result_json,
+                completed_tool_names.items,
+                &interrupted_persisted,
+                step_ctx,
+                within_turn_suffix.items,
+                stop_state.retained_candidate,
+                &stop_state.terminal_materializing,
+                turn_id,
+                arena,
+                selected_dynamic_tool_names.items,
+            );
             finish_trace.finish("interrupted");
             return;
         }
@@ -3630,16 +2944,7 @@ fn processQueuedPromptLoop(
                     job.authorized_image_catalog,
                 );
             };
-            const terminal_request_eligible = terminal_request_normalization_eligible(
-                base_nested_terminal_advertised,
-                vision_mode,
-            );
-            const request_messages = try project_terminal_request_messages(
-                overlay_arena,
-                deps.tool_registry,
-                terminal_request_eligible,
-                projected_request_messages,
-            );
+            const request_messages = projected_request_messages;
             last_gateway_message_count = request_messages.len;
             const provider_opts = model_capabilities.resolveProviderOptionsForCapabilities(request_capabilities, config.effort, route_fast_mode);
             runtime_telemetry.traceGatewayProviderOptions(step_ctx, gateway_model, route_fast_mode, config.effort, provider_opts);
@@ -4052,7 +3357,7 @@ fn processQueuedPromptLoop(
                         arena,
                         turn_id,
                     );
-                    try runtime_interruption.persistInterruptedTurnOnce(deps, finalization, job, stream_ctx.raw_text.items, null, completed_tool_names.items, &interrupted_persisted, step_ctx, within_turn_suffix.items, stop_state.retained_candidate, &stop_state.terminal_materializing);
+                    try persistInterruptedTurnAfterYieldedCommand(deps, finalization, job, stream_ctx.raw_text.items, last_yielded_command, last_yielded_command_result_json, completed_tool_names.items, &interrupted_persisted, step_ctx, within_turn_suffix.items, stop_state.retained_candidate, &stop_state.terminal_materializing, turn_id, arena, advertised_dynamic_tool_names);
                     finish_trace.finish("interrupted");
                     return;
                 }
@@ -4214,14 +3519,6 @@ fn processQueuedPromptLoop(
                         .{semantic_attempt + 1},
                     );
                 }
-            }
-            if (streamCompletionPtr(&stream_result)) |completion| {
-                completion.tool_calls = try normalize_terminal_request_tool_calls(
-                    arena,
-                    deps.tool_registry,
-                    terminal_request_eligible,
-                    completion.tool_calls,
-                );
             }
             if (recovery_strategy == .reconcile_tool and
                 streamSucceeded(stream_result) and
@@ -4530,7 +3827,7 @@ fn processQueuedPromptLoop(
                             response_completion.tool_calls,
                             advertised_dynamic_tool_names,
                         );
-                        try runtime_interruption.persistInterruptedTurnOnce(deps, finalization, job, stream_ctx.raw_text.items, null, completed_tool_names.items, &interrupted_persisted, step_ctx, within_turn_suffix.items, stop_state.retained_candidate, &stop_state.terminal_materializing);
+                        try persistInterruptedTurnAfterYieldedCommand(deps, finalization, job, stream_ctx.raw_text.items, last_yielded_command, last_yielded_command_result_json, completed_tool_names.items, &interrupted_persisted, step_ctx, within_turn_suffix.items, stop_state.retained_candidate, &stop_state.terminal_materializing, turn_id, arena, advertised_dynamic_tool_names);
                         finish_trace.finish("interrupted");
                         return;
                     }
@@ -4547,6 +3844,9 @@ fn processQueuedPromptLoop(
             else
                 "";
             const partial_assistant = current_partial_assistant;
+            if (partial_assistant.len > 0) {
+                last_assistant_partial = try arena.dupe(u8, partial_assistant);
+            }
             if (stop_state.retained_candidate != null) {
                 try copyLatestStopPartial(arena, stop_state, partial_assistant);
             }
@@ -4564,7 +3864,7 @@ fn processQueuedPromptLoop(
                     attempt_completion.tool_calls,
                     advertised_dynamic_tool_names,
                 );
-                try runtime_interruption.persistInterruptedTurnOnce(deps, finalization, job, partial_assistant, null, completed_tool_names.items, &interrupted_persisted, step_ctx, within_turn_suffix.items, stop_state.retained_candidate, &stop_state.terminal_materializing);
+                try persistInterruptedTurnAfterYieldedCommand(deps, finalization, job, partial_assistant, last_yielded_command, last_yielded_command_result_json, completed_tool_names.items, &interrupted_persisted, step_ctx, within_turn_suffix.items, stop_state.retained_candidate, &stop_state.terminal_materializing, turn_id, arena, advertised_dynamic_tool_names);
                 finish_trace.finish("interrupted");
                 return;
             }
@@ -4736,7 +4036,7 @@ fn processQueuedPromptLoop(
                             attempt_completion.tool_calls,
                             advertised_dynamic_tool_names,
                         );
-                        try runtime_interruption.persistInterruptedTurnOnce(deps, finalization, job, partial_assistant, null, completed_tool_names.items, &interrupted_persisted, step_ctx, within_turn_suffix.items, stop_state.retained_candidate, &stop_state.terminal_materializing);
+                        try persistInterruptedTurnAfterYieldedCommand(deps, finalization, job, partial_assistant, last_yielded_command, last_yielded_command_result_json, completed_tool_names.items, &interrupted_persisted, step_ctx, within_turn_suffix.items, stop_state.retained_candidate, &stop_state.terminal_materializing, turn_id, arena, advertised_dynamic_tool_names);
                         finish_trace.finish("interrupted");
                         return;
                     }
@@ -5728,7 +5028,6 @@ fn processQueuedPromptLoop(
         }
 
         var step_batch = runtime_tool_batch.StepBatchState{};
-        terminal_validation_retry.beginBatch();
         malformed_arguments_retry.beginBatch();
         for (effective_tool_calls) |tool_call| {
             malformed_arguments_retry.observe(tool_call);
@@ -6350,13 +5649,6 @@ fn processQueuedPromptLoop(
                                 );
                             },
                             .validation_failure, .availability_failure => {
-                                if (terminal.kind == .validation_failure) {
-                                    try terminal_validation_retry.observe(
-                                        arena,
-                                        tool_call,
-                                        model_output,
-                                    );
-                                }
                                 const execution: ToolExecutionResult = .{
                                     .status = .failure,
                                     .model_output = safe_output,
@@ -6594,11 +5886,6 @@ fn processQueuedPromptLoop(
                 true;
             if (requires_legacy_classification) {
                 if (try runtime_tool_admission.registeredToolValidationFailure(deps, arena, tool_call)) |execution| {
-                    try terminal_validation_retry.observe(
-                        arena,
-                        tool_call,
-                        execution.model_output,
-                    );
                     const prepared = try runtime_execution_memory.prepareToolModelOutput(arena, config, tool_call, execution.model_output);
                     const safe_tool_output = prepared.model_output;
                     _ = try stream_ctx.provisional_statuses.finishExecutedCall(
@@ -7382,17 +6669,6 @@ fn processQueuedPromptLoop(
             else
                 null;
 
-            const terminal_lease_transition = try agent_terminal_lease_transition(
-                arena,
-                deps.tool_registry,
-                execution_call,
-            );
-            if (terminal_lease_transition) |transition| switch (transition) {
-                .track => |session_id| try finalization.track_agent_terminal_lease(session_id),
-                .atomic => |session_id| try finalization.track_agent_terminal_lease(session_id),
-                .remove => {},
-            };
-
             debug_trace.eventf("tool", "before_tool_execution", step_ctx, "call_id={s} name={s}", .{ tool_call.id, tool_call.name });
             debug_trace.eventf("tool", "execution_start", step_ctx, "call_id={s} name={s}", .{ tool_call.id, tool_call.name });
             if (deps.tool_activity_recorder) |recorder| {
@@ -7522,14 +6798,6 @@ fn processQueuedPromptLoop(
                 replay_handed_off = true;
                 finish_trace.finish("interrupted");
                 return;
-            }
-
-            if (execution.status == .success) {
-                if (terminal_lease_transition) |transition| switch (transition) {
-                    .track => {},
-                    .atomic => |session_id| finalization.remove_agent_terminal_lease(session_id),
-                    .remove => |session_id| finalization.remove_agent_terminal_lease(session_id),
-                };
             }
 
             if (deps.tool_activity_recorder) |recorder| {
@@ -7764,6 +7032,15 @@ fn processQueuedPromptLoop(
                 prepared.memory,
                 execution,
             );
+            if (execution_is_command and outputHasUnifiedExecSessionId(arena, execution.model_output)) {
+                debug_trace.logf(
+                    "agent",
+                    "tracking yielded command call_id={s} has_result_json={s} model_output_bytes={d}",
+                    .{ tool_call.id, if (execution.command_result_json != null) "true" else "false", execution.model_output.len },
+                );
+                last_yielded_command = tool_call;
+                last_yielded_command_result_json = execution.command_result_json;
+            }
             replay_handed_off = true;
             if (execution.system_notice) |notice| {
                 try within_turn_suffix.append(arena, .{ .role = .system, .content = notice });
@@ -7825,35 +7102,6 @@ fn processQueuedPromptLoop(
                 &finish_trace,
                 repeated_malformed_arguments_notice,
                 "repeated_malformed_tool_arguments",
-            );
-            return;
-        }
-        if (terminal_validation_retry.finishBatch()) {
-            try deps.push_system_notice(
-                deps.ctx,
-                repeated_terminal_validation_notice,
-            );
-            const assistant_text = if (stop_state.retained_candidate != null)
-                try hooks.prompt.joinVisibleSegments(
-                    arena,
-                    stop_state.retained_candidate,
-                    stop_state.latest_partial,
-                )
-            else
-                "";
-            stop_state.terminal_materializing = true;
-            try finishCommonAssistantTerminal(
-                deps,
-                finalization,
-                arena,
-                job,
-                within_turn_suffix.items,
-                &summary_accumulator,
-                assistant_text,
-                .completed,
-                null,
-                &finish_trace,
-                "terminal_validation_retry",
             );
             return;
         }

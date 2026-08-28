@@ -27,6 +27,22 @@ fn fallbackLoginShell() []const u8 {
     return if (builtin.os.tag == .macos) "/bin/zsh" else "/bin/bash";
 }
 
+/// Returns whether a shell path can be launched with the supported
+/// invocation semantics.  The captured-command and Unified Exec permission
+/// fingerprints must agree with the shell that will actually be started.
+pub fn isSupportedShell(path: []const u8) bool {
+    return std.fs.path.isAbsolute(path) and shellKind(path) != null;
+}
+
+/// Resolves the configured login shell to one of the shells whose startup
+/// arguments and environment semantics fx understands.
+pub fn configuredOrDefaultLoginShellInto(buffer: []u8) []const u8 {
+    if (configuredLoginShellInto(buffer)) |configured| {
+        if (isSupportedShell(configured)) return configured;
+    }
+    return fallbackLoginShell();
+}
+
 fn supportedLoginShell(configured_login_shell: ?[]const u8) ResolveError![]const u8 {
     const path = configured_login_shell orelse return error.MissingLoginShell;
     if (!std.fs.path.isAbsolute(path)) return error.RelativeShellPath;

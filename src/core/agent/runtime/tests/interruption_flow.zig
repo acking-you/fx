@@ -3,8 +3,6 @@ const builtin_tools = @import("../../../../builtins/tools.zig");
 const model_tool_schema = @import("../../../tooling/model_tool_schema.zig");
 const types = @import("../../../shared/types.zig");
 const session_runtime = @import("../../../session/session.zig");
-const session_child_store = @import("../../../session/session_child_store.zig");
-const command_replay_store = @import("../../../session/command_replay_store.zig");
 const debug_trace = @import("../../../shared/debug_trace.zig");
 const io_mod = @import("../../../shared/io.zig");
 
@@ -268,7 +266,7 @@ test "processQueuedPrompt cancellation after valid tool finish settles streamed 
 test "processQueuedPrompt in-stream cancellation settles every eligible provisional start" {
     const alloc = std.testing.allocator;
     const calls = [_]ToolCall{
-        toolCall("call_command", "terminal", "{}"),
+        toolCall("call_command", "exec_command", "{\"cmd\":\"true\"}"),
         toolCall("call_read", "read_file", "{}"),
     };
     const completions = [_]FakeCompletion{.{
@@ -289,6 +287,7 @@ test "processQueuedPrompt in-stream cancellation settles every eligible provisio
     try std.testing.expectEqual(@as(usize, 1), hooks.interrupted_event_count);
     try std.testing.expectEqual(@as(usize, 1), hooks.finish_event_count);
     try expectToolTerminalsBeforeTurnFinished(&hooks, &.{
+        .{ .call_id = "call_command", .kind = .cancelled },
         .{ .call_id = "call_read", .kind = .cancelled },
     });
 }
@@ -487,161 +486,9 @@ test "processQueuedPrompt persists interrupted turn with aborted tool output for
     try expectGatewayPromptRoleContentKinds(&follow_gateway, 0);
 }
 
-test "processQueuedPrompt retains cancelled command replay in interrupted history" {
-    const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
-    defer alloc.free(root);
-    try tmp.dir.createDir(
-        io_mod.getIo(),
-        "session",
-        std.Io.File.Permissions.fromMode(0o700),
-    );
-    var session_dir = try tmp.dir.openDir(io_mod.getIo(), "session", .{
-        .iterate = true,
-        .follow_symlinks = false,
-    });
-    defer session_dir.close(io_mod.getIo());
-    const session_path = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "session");
-    defer alloc.free(session_path);
-    var capability = try session_child_store.SessionChildCapability.initForTesting(
-        alloc,
-        session_dir,
-        session_path,
-        .writable,
-        .{},
-    );
-    defer capability.deinit();
-    const trace_path = try std.fs.path.join(alloc, &.{ root, "cancelled-command.log" });
-    defer alloc.free(trace_path);
-
-    debug_trace.resetForTest();
-    defer debug_trace.resetForTest();
-    try debug_trace.configureForTestWithScopes(alloc, trace_path, "interrupt");
-
-    const artifact_path = "/tmp/session/logs/commands/fx-command-cancelled.log";
-    const artifact_handle = "fx-command-cancelled.log";
-    const result_output = "RESULT-ONLY-OUTPUT-SENTINEL\nTERM-TAIL-SENTINEL\n";
-    const result_json =
-        "{\"kind\":\"foreground\",\"command\":\"sleep 5\",\"cwd\":\"/tmp/RESULT-JSON-ONLY-SENTINEL\",\"exit_code\":null,\"signal\":15,\"timed_out\":false,\"duration_ms\":7,\"stdout_bytes\":49,\"stderr_bytes\":0,\"truncated\":false,\"output_file\":\"" ++ artifact_path ++ "\",\"stdout_file\":null,\"stderr_file\":null}";
-    const replay_output = "CANCELLED-REPLAY-SENTINEL\n";
-    const calls = [_]ToolCall{toolCall("call_cancelled_command", "terminal", "{\"action\":\"exec\",\"command\":\"sleep 5\",\"timeout_ms\":600000}")};
-    const completions = [_]FakeCompletion{.{ .tool_calls = &calls }};
-    var gateway = FakeGateway.init(alloc, &completions);
-    defer gateway.deinit();
-    var hooks = FakeAgentRuntimeDeps.init(alloc);
-    defer hooks.deinit();
-    var fixture = PromptFixture{};
-    hooks.exec_plans = &.{.{ .result = .{
-        .status = .failure,
-        .cancelled = true,
-        .model_output = result_output,
-        .command_result_json = result_json,
-    } }};
-    hooks.command_replay_output = replay_output;
-    hooks.command_replay_capability = &capability;
-    hooks.cancel_on_execute = &fixture.cancel_flag;
-
-    var config = fixture.config();
-    config.session_child_capability = &capability;
-    try runFakePrompt(&gateway, &hooks, config, fixture.job());
-    debug_trace.shutdown();
-
-    const trace = try readTraceFile(alloc, trace_path, 65_536);
-    defer alloc.free(trace);
-    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, trace, "event=cancel_observed"));
-
-    try std.testing.expectEqual(@as(usize, 1), hooks.executed_names.items.len);
-    try std.testing.expectEqualStrings("terminal", hooks.executed_names.items[0]);
-    try std.testing.expectEqual(@as(usize, 3), hooks.lifecycle_events.items.len);
-    const terminal = hooks.lifecycle_events.items[2].terminal;
-    try std.testing.expectEqual(types.ToolOutcomeKind.cancelled, terminal.outcome.kind);
-    try std.testing.expectEqualStrings("Cancelled terminal", terminal.outcome.summary);
-    try std.testing.expectEqualStrings(
-        artifact_handle,
-        terminal.command_artifact_handle orelse return error.TestExpectedArtifactHandle,
-    );
-    try std.testing.expect(terminal.result == null);
-    try std.testing.expect(terminal.result_memory == null);
-    try std.testing.expectEqual(@as(usize, 1), hooks.command_complete_count);
-    try std.testing.expectEqual(@as(usize, 1), hooks.interrupted_history_count);
-    try std.testing.expectEqual(@as(usize, 1), hooks.interrupted_event_count);
-    try std.testing.expectEqual(@as(usize, 1), hooks.history_turns.items.len);
-    const interrupted = hooks.history_turns.items[0].interrupted;
-    const interrupted_call = interrupted.tool_call orelse return error.TestExpectedInterruptedToolCall;
-    try std.testing.expectEqualStrings("call_cancelled_command", interrupted_call.id);
-    try std.testing.expectEqualStrings("terminal", interrupted_call.name);
-    try std.testing.expectEqual(@as(usize, 0), interrupted.completed_tool_names.len);
-    try std.testing.expect(interrupted.execution.isEmpty());
-    const presentation = interrupted.cancelled_command orelse
-        return error.TestExpectedCancelledCommandPresentation;
-    const descriptor = switch (presentation.output_replay orelse
-        return error.TestExpectedReplay) {
-        .available => |value| value,
-        .unavailable => return error.TestExpectedReplay,
-    };
-    const page = try command_replay_store.readAgentPageManaged(
-        alloc,
-        &capability,
-        descriptor.handle,
-        1,
-        4096,
-    );
-    defer alloc.free(page);
-    try std.testing.expect(
-        std.mem.find(u8, page, "CANCELLED-REPLAY-SENTINEL") != null,
-    );
-    var artifacts = try capability.iterate(alloc, .command_artifacts);
-    defer artifacts.deinit();
-    try std.testing.expectEqual(@as(usize, 1), artifacts.names.len);
-
-    const complete_log = try std.fmt.allocPrint(
-        alloc,
-        "command_output_complete:{d}:call_cancelled_command",
-        .{terminal.id.turn_id},
-    );
-    defer alloc.free(complete_log);
-    const terminal_index = logIndex(&hooks, "status:finished:Cancelled terminal") orelse return error.TestMissingCancelledTerminal;
-    const complete_index = logIndex(&hooks, complete_log) orelse return error.TestMissingCommandCompletion;
-    const history_index = logIndex(&hooks, "history:interrupted") orelse return error.TestMissingInterruptedHistory;
-    const finalized_index = logIndex(&hooks, "event:turn_finished") orelse return error.TestMissingTurnFinalization;
-    try std.testing.expect(terminal_index < complete_index);
-    try std.testing.expect(complete_index < history_index);
-    try std.testing.expect(history_index < finalized_index);
-
-    const follow_completions = [_]FakeCompletion{.{ .content = "The command was interrupted." }};
-    var follow_gateway = FakeGateway.init(alloc, &follow_completions);
-    defer follow_gateway.deinit();
-    var follow_hooks = FakeAgentRuntimeDeps.init(alloc);
-    defer follow_hooks.deinit();
-    var follow_fixture = PromptFixture{};
-    var follow_job = follow_fixture.job();
-    follow_job.prompt = @constCast("what happened?");
-    follow_job.history = hooks.history_turns.items;
-
-    try runFakePrompt(&follow_gateway, &follow_hooks, follow_fixture.config(), follow_job);
-
-    try expectBodyContains(&follow_gateway, 0, "<turn_aborted>");
-    try expectBodyContains(&follow_gateway, 0, session_runtime.aborted_tool_output);
-    try expectBodyContains(&follow_gateway, 0, "\"name\":\"terminal\"");
-    try expectBodyContains(&follow_gateway, 0, "\"call_id\":\"call_cancelled_command\"");
-    try expectBodyNotContains(&follow_gateway, 0, "RESULT-ONLY-OUTPUT-SENTINEL");
-    try expectBodyNotContains(&follow_gateway, 0, "RESULT-JSON-ONLY-SENTINEL");
-    try expectBodyNotContains(&follow_gateway, 0, "TERM-TAIL-SENTINEL");
-    try expectBodyNotContains(&follow_gateway, 0, replay_output);
-    try std.testing.expectEqual(
-        @as(usize, 1),
-        std.mem.count(u8, follow_gateway.request_bodies.items[0], descriptor.handle),
-    );
-    try expectBodyNotContains(&follow_gateway, 0, artifact_handle);
-    try expectBodyNotContains(&follow_gateway, 0, artifact_path);
-    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, follow_gateway.request_bodies.items[0], session_runtime.aborted_tool_output));
-}
-
 test "processQueuedPrompt does not interrupt for an unconfirmed cancellation result" {
     const alloc = std.testing.allocator;
-    const calls = [_]ToolCall{toolCall("call_unconfirmed", "terminal", "{\"action\":\"exec\",\"command\":\"sleep 5\"}")};
+    const calls = [_]ToolCall{toolCall("call_unconfirmed", "exec_command", "{\"cmd\":\"sleep 5\"}")};
     const completions = [_]FakeCompletion{
         .{ .tool_calls = &calls },
         .{ .content = "Recovered after the failed command." },

@@ -2049,9 +2049,9 @@ test "nonzero command remains Ran in the current compact projection" {
     _ = try runtime.applyToolLifecycle(alloc, .{ .authoritative_started = .{
         .id = id,
         .reconciles_provisional_call_id = null,
-        .tool_name = "terminal",
+        .tool_name = "exec_command",
         .activity_kind = .command,
-        .arguments_json = "{\"action\":\"exec\",\"command\":\"false\"}",
+        .arguments_json = "{\"cmd\":\"false\"}",
     } });
     try std.testing.expect(runtime.toolActivityRecord(id).?.captured_command);
     _ = try runtime.applyToolLifecycle(alloc, .{ .terminal = .{
@@ -2065,32 +2065,6 @@ test "nonzero command remains Ran in the current compact projection" {
     try std.testing.expect(std.mem.find(u8, source.bytes, "Ran false") != null);
     try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, source.bytes, "│ exit code 7"));
     try std.testing.expect(std.mem.find(u8, source.bytes, "Failed") == null);
-}
-
-test "terminal lifecycle records distinguish captured exec from durable actions" {
-    const alloc = std.testing.allocator;
-    var runtime = TranscriptRuntime{};
-    defer runtime.deinit(alloc);
-    const exec_id = types.ToolLifecycleId{ .turn_id = 1, .call_id = "exec" };
-    const start_id = types.ToolLifecycleId{ .turn_id = 1, .call_id = "start" };
-
-    _ = try runtime.applyToolLifecycle(alloc, .{ .authoritative_started = .{
-        .id = exec_id,
-        .reconciles_provisional_call_id = null,
-        .tool_name = "terminal",
-        .activity_kind = .command,
-        .arguments_json = "{\"action\":\"exec\",\"command\":\"printf exec\"}",
-    } });
-    _ = try runtime.applyToolLifecycle(alloc, .{ .authoritative_started = .{
-        .id = start_id,
-        .reconciles_provisional_call_id = null,
-        .tool_name = "terminal",
-        .activity_kind = .command,
-        .arguments_json = "{\"action\":\"start\",\"command\":\"printf start\"}",
-    } });
-
-    try std.testing.expect(runtime.toolActivityRecord(exec_id).?.captured_command);
-    try std.testing.expect(!runtime.toolActivityRecord(start_id).?.captured_command);
 }
 
 test "nonzero streamed command reuses its active output block" {
@@ -2116,9 +2090,9 @@ test "nonzero streamed command reuses its active output block" {
     _ = try runtime.applyToolLifecycle(alloc, .{ .authoritative_started = .{
         .id = id,
         .reconciles_provisional_call_id = null,
-        .tool_name = "terminal",
+        .tool_name = "exec_command",
         .activity_kind = .command,
-        .arguments_json = "{\"action\":\"exec\",\"command\":\"printf lines; exit 7\"}",
+        .arguments_json = "{\"cmd\":\"printf lines; exit 7\"}",
     } });
     const started_entry_id = runtime.toolActivityRecord(id).?.entry_id;
     try std.testing.expect(runtime.toolDetailForEntry(started_entry_id).?.isCapturedCommand());
@@ -2501,13 +2475,13 @@ test "historical permission denial keeps denied outcome without internal result 
         entry_id,
         .{
             .id = "denied-command",
-            .name = "terminal",
-            .arguments_json = "{\"action\":\"exec\",\"command\":\"pwd\"}",
+            .name = "exec_command",
+            .arguments_json = "{\"cmd\":\"pwd\"}",
         },
         .command,
         .{
             .tool_call_id = @constCast("denied-command"),
-            .tool_name = @constCast("terminal"),
+            .tool_name = @constCast("exec_command"),
             .status = .failure,
             .output = @constCast(denial_output),
             .output_bytes = denial_output.len,
@@ -5274,7 +5248,8 @@ pub const TranscriptRuntime = struct {
         const deferred = types.isDeferredToolResult(result);
         const permission_denied = tool_result_errors.toolPermissionDenialReason(result.output) != null;
         const command_artifact_handle = if (!deferred and !permission_denied and activity_kind == .command)
-            command_output_runtime.commandArtifactHandleFromResult(result.output)
+            result.command_artifact_handle orelse
+                command_output_runtime.commandArtifactHandleFromResult(result.output)
         else
             null;
         try self.upsertToolDetailStart(alloc, entry_id, lifecycle_id, call.name, activity_kind, call.arguments_json);
@@ -5288,8 +5263,6 @@ pub const TranscriptRuntime = struct {
                 .deferred
             else if (deferred or permission_denied)
                 .denied
-            else if (result.terminal_action_presentation) |presentation|
-                presentation.outcomeKind()
             else if (result.status == .success or
                 (activity_kind == .command and
                     result.command_process_presentation != null))
@@ -5304,8 +5277,8 @@ pub const TranscriptRuntime = struct {
                 .stored_output_bytes = result.stored_output_bytes,
                 .truncated = result.truncated,
                 .command_output_replay = result.command_output_replay,
+                .command_artifact_handle = result.command_artifact_handle,
                 .command_process_presentation = result.command_process_presentation,
-                .terminal_action_presentation = result.terminal_action_presentation,
             },
             command_artifact_handle,
             if (deferred or permission_denied) null else command_output_entry_id,
@@ -6026,20 +5999,10 @@ pub const TranscriptRuntime = struct {
         metrics: *Metrics,
         text: []const u8,
     ) !u32 {
-        const transcript_was_pending = self.render_requests.hasReason(.transcript);
-        const entry_id = try transcript_store.streamAssistantChunk(self, alloc, metrics, text);
-        if (!transcript_was_pending and
-            self.nativeHistoryActive() and
-            std.mem.findScalar(u8, text, '\n') == null)
-        {
-            self.render_requests.clearReason(.transcript);
-            debug_trace.logf(
-                "scroll",
-                "assistant_partial_paint_deferred bytes={d} entry_id={d}",
-                .{ text.len, entry_id },
-            );
-        }
-        return entry_id;
+        // Every paced chunk must retain the transcript render request. Native
+        // terminal scrollback is an output storage detail, not permission to
+        // defer newline-less token updates until a later turn.
+        return transcript_store.streamAssistantChunk(self, alloc, metrics, text);
     }
 
     pub fn retintEntriesForTheme(
@@ -9809,14 +9772,6 @@ pub const TranscriptRuntime = struct {
     pub fn markTranscriptDirty(self: *TranscriptRuntime) void {
         self.transcript_band_dirty = true;
         self.render_requests.request(.transcript);
-    }
-
-    pub fn nativeHistoryActive(self: *const TranscriptRuntime) bool {
-        return switch (self.transcript_commit_state) {
-            .invalid => false,
-            .stable => |anchor| anchor.history_visual_offset > 0,
-            .recovering => |receipt| receipt.accepted_history_visual_offset > 0,
-        };
     }
 
     pub fn markTranscriptContentDirty(self: *TranscriptRuntime) void {

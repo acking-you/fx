@@ -37,7 +37,7 @@ pub fn call(ctx: tool_dispatch.DispatchContext, erased: tool_dispatch.ToolInput)
         ctx.previous_assistant_turn,
     ) catch return error.OutOfMemory;
     defer if (recent_input_json) |owned| ctx.allocator.free(owned);
-    const turn_search_id = if (ctx.terminal_owner_session_id == null)
+    const turn_search_id = if (ctx.session_id == null)
         if (ctx.output_chunk_lifecycle_id) |lifecycle|
             std.fmt.allocPrint(ctx.allocator, "fx-turn-{d}", .{lifecycle.turn_id}) catch
                 return error.OutOfMemory
@@ -52,7 +52,7 @@ pub fn call(ctx: tool_dispatch.DispatchContext, erased: tool_dispatch.ToolInput)
         .blocked_domains = optionalConstStrings(input.blocked_domains),
         .commands_json = input.commands_json,
         .input_json = recent_input_json,
-        .request_id = ctx.terminal_owner_session_id orelse
+        .request_id = ctx.session_id orelse
             turn_search_id orelse
             ctx.tool_call_id,
     }) catch |err| return backendFailure(ctx.allocator, err);
@@ -476,7 +476,7 @@ test "web_search backend receives the saved session identity instead of the tool
         .allocator = std.testing.allocator,
         .web_search_backend = .{ .ctx = @ptrCast(&capture), .execute_fn = Capture.execute },
         .root_user_intent_context = "current_request: find current news\n",
-        .terminal_owner_session_id = "session_saved",
+        .session_id = "session_saved",
         .tool_call_id = "call_once",
     }, stackInput(&input));
     defer result.deinit(std.testing.allocator);

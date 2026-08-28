@@ -903,6 +903,25 @@ pub const WorkerRuntime = struct {
         return true;
     }
 
+    /// Requests that no queued prompt start after the current worker action.
+    /// Unlike `tryHoldTurnStart`, this is also valid while a turn is still
+    /// processing.  The worker observes the hold when it reaches its next
+    /// queue boundary, which lets UI-side post-turn work (such as remote
+    /// compaction) establish a fresh history snapshot before admission.
+    pub fn requestTurnStartHold(self: *WorkerRuntime) bool {
+        self.worker_mutex.lockUncancelable(io_mod.getIo());
+        defer self.worker_mutex.unlock(io_mod.getIo());
+        if (self.worker_stop_requested or self.turn_start_held) return false;
+        self.turn_start_held = true;
+        debug_trace.logf(
+            "worker",
+            "turn start hold requested processing={s} queued={d}",
+            .{ if (self.worker_processing) "true" else "false", self.queued_prompt_count },
+        );
+        self.worker_cond.broadcast(io_mod.getIo());
+        return true;
+    }
+
     pub fn releaseTurnStartHold(self: *WorkerRuntime) void {
         self.worker_mutex.lockUncancelable(io_mod.getIo());
         defer self.worker_mutex.unlock(io_mod.getIo());
@@ -3205,6 +3224,11 @@ fn dupeToolResultMemory(
     else
         null;
     errdefer if (command_output_replay) |replay| types.freeCommandOutputReplay(alloc, replay);
+    const command_artifact_handle = if (memory.command_artifact_handle) |handle|
+        try alloc.dupe(u8, handle)
+    else
+        null;
+    errdefer if (command_artifact_handle) |handle| alloc.free(handle);
     return .{
         .output_handle = output_handle,
         .preview = preview,
@@ -3213,8 +3237,8 @@ fn dupeToolResultMemory(
         .truncated = memory.truncated,
         .model_view_covers_full_file = memory.model_view_covers_full_file,
         .command_output_replay = command_output_replay,
+        .command_artifact_handle = command_artifact_handle,
         .command_process_presentation = memory.command_process_presentation,
-        .terminal_action_presentation = memory.terminal_action_presentation,
     };
 }
 
@@ -3228,6 +3252,7 @@ fn freeToolResultMemory(
     if (value.command_output_replay) |replay| {
         types.freeCommandOutputReplay(alloc, replay);
     }
+    if (value.command_artifact_handle) |handle| alloc.free(@constCast(handle));
 }
 
 fn makePrompt(alloc: std.mem.Allocator, text: []const u8, model: []const u8) !QueuedPrompt {
@@ -4667,7 +4692,7 @@ test "submitted text only queues while a prompt is active" {
     runtime.pending_permission_request_shared =
         try permission_request.OwnedPermissionRequest.dupe(
             alloc,
-            .{ .id = 1, .label = "terminal.exec launch chrome" },
+            .{ .id = 1, .label = "exec_command launch chrome" },
         );
     const question_options = [_]types.QuestionOption{.{ .label = "Wait", .description = null }};
     const question_entries = [_]types.QuestionBatchEntry{.{

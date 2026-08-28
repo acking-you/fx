@@ -6170,14 +6170,14 @@ test "child command approval route exposes complete scroll review and resolves" 
     snapshot.nodes[0].approvals = try alloc.alloc(projection.Approval, 1);
     const command = try std.fmt.allocPrint(
         alloc,
-        "# terminal.exec profile=user shell=/bin/zsh\n{s}COMMAND_TAIL_VISIBLE",
+        "# exec_command profile=user shell=/bin/zsh\n{s}COMMAND_TAIL_VISIBLE",
         .{"printf review-line\\n\n" ** 20},
     );
     snapshot.nodes[0].approvals[0] = .{
         .id = try alloc.dupe(u8, "command-approval-id"),
         .kind = .tool,
         .status = .pending,
-        .label = try alloc.dupe(u8, "terminal.exec printf ok"),
+        .label = try alloc.dupe(u8, "exec_command printf ok"),
         .explanation = null,
         .command = command,
     };
@@ -6219,7 +6219,7 @@ test "pending command approval route shows profile and keeps authoritative decis
     var snapshot = try pendingApprovalTestSnapshot(alloc, "pending-command-id");
     snapshot.pending_approvals[0].request.command = try alloc.dupe(
         u8,
-        "# terminal.exec profile=clean shell=/bin/bash\nprintf ok",
+        "# exec_command profile=clean shell=/bin/bash\nprintf ok",
     );
     try std.testing.expect(try runtime.replaceSnapshot(alloc, snapshot));
     try std.testing.expectEqual(Command.redraw, try runtime.handle(alloc, .notifications));
@@ -6714,16 +6714,16 @@ test "child approval card preserves the semantic label and live preview" {
     var snapshot = try pendingApprovalTestSnapshot(alloc, "semantic-label-id");
     alloc.free(snapshot.pending_approvals[0].request.label);
     snapshot.pending_approvals[0].request.label =
-        try alloc.dupe(u8, "terminal.exec touch child-marker");
+        try alloc.dupe(u8, "exec_command touch child-marker");
     snapshot.pending_approvals[0].request.command =
-        try alloc.dupe(u8, "# terminal.exec profile=user shell=/bin/zsh\ntouch child-marker");
+        try alloc.dupe(u8, "# exec_command profile=user shell=/bin/zsh\ntouch child-marker");
     snapshot.pending_approvals[0].tool_arguments_preview =
         try alloc.dupe(u8, "{\"text\":\"child sentinel\"}");
     try std.testing.expect(try runtime.replaceSnapshot(alloc, snapshot));
 
     const card = runtime.mainApprovalRequest().?;
     try std.testing.expectEqualStrings(
-        "terminal.exec touch child-marker",
+        "exec_command touch child-marker",
         card.label,
     );
     switch (card.origin) {
@@ -6738,7 +6738,7 @@ test "child approval card preserves the semantic label and live preview" {
         card.tool_arguments_preview.?,
     );
     try std.testing.expectEqualStrings(
-        "# terminal.exec profile=user shell=/bin/zsh\ntouch child-marker",
+        "# exec_command profile=user shell=/bin/zsh\ntouch child-marker",
         card.command.?,
     );
 }
@@ -7343,14 +7343,14 @@ test "main approval notification opens from an empty manager without owning reso
     const layout = types.Layout{ .rows = 9, .cols = 72, .content_bottom = 5, .divider_top_row = 6, .input_row = 7, .divider_bottom_row = 8, .hint_row = 9 };
     const rendered = try paint(alloc, &runtime, layout, .{
         .id = 42,
-        .label = "terminal.exec zig build test",
+        .label = "exec_command zig build test",
         .explanation = "requires confirmation",
         .command = "zig build test",
     });
     defer alloc.free(rendered);
     try std.testing.expect(std.mem.find(u8, rendered, "Main chat approval") != null);
     try std.testing.expect(std.mem.find(u8, rendered, "Request ID: 42") != null);
-    try std.testing.expect(std.mem.find(u8, rendered, "terminal.exec zig build test") != null);
+    try std.testing.expect(std.mem.find(u8, rendered, "exec_command zig build test") != null);
     try std.testing.expect(std.mem.find(u8, rendered, "Read-only here") != null);
 
     runtime.setDegraded(alloc, .store_failure);

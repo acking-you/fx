@@ -1140,7 +1140,7 @@ test "minimal tool groups preserve denied and deferred action text" {
         .{ .raw_bytes = .{ .id = 2, .bytes = "↻ Context updated runtime.zig\n", .class = .tool_status } },
     };
     const details = [_]ToolDetailRecord{
-        .{ .entry_id = 1, .tool_name = @constCast("terminal"), .activity_kind = .command, .outcome = .denied },
+        .{ .entry_id = 1, .tool_name = @constCast("exec_command"), .activity_kind = .command, .outcome = .denied },
         .{ .entry_id = 2, .tool_name = @constCast("read_file"), .activity_kind = .read, .outcome = .deferred },
     };
 

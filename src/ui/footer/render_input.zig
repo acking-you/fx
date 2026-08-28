@@ -858,7 +858,7 @@ test "remote compaction owns the activity row until it settles" {
         .compacting_context = true,
         .has_api_key = true,
         .model = "gpt-5.6-sol",
-        .composer_visible = false,
+        .composer_visible = true,
         .queued_count = 0,
         .subagent_count = 0,
         .subagent_view_active = false,
@@ -877,7 +877,7 @@ test "remote compaction owns the activity row until it settles" {
         },
         .none, .tool_slot => return error.TestUnexpectedResult,
     }
-    try std.testing.expect(!ctx.composer_visible);
+    try std.testing.expect(ctx.composer_visible);
 }
 
 test "minimal connected tool label clips with an ellipsis" {

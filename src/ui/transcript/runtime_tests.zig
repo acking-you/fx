@@ -15480,7 +15480,7 @@ test "empty assistant tail leaves the complete prepared source final" {
     );
 }
 
-test "native history defers partial assistant paints but publishes hard lines" {
+test "native history publishes partial assistant chunks without waiting for hard lines" {
     const alloc = std.testing.allocator;
     var runtime = TranscriptRuntime{
         .layout = transcriptTestLayout(40, 10, 4),
@@ -15499,8 +15499,9 @@ test "native history defers partial assistant paints but publishes hard lines" {
     );
     var metrics: Metrics = .{};
     _ = try runtime.streamAssistantChunk(alloc, &metrics, "partial");
-    try std.testing.expect(!runtime.render_requests.hasReason(.transcript));
+    try std.testing.expect(runtime.render_requests.hasReason(.transcript));
 
+    runtime.render_requests.clearReason(.transcript);
     _ = try runtime.streamAssistantChunk(alloc, &metrics, " line\n");
     try std.testing.expect(runtime.render_requests.hasReason(.transcript));
 }

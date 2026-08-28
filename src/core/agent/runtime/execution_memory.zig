@@ -298,8 +298,8 @@ pub fn applyToolResultMemory(
 ) void {
     const source_memory = source orelse return;
     prepared.command_output_replay = source_memory.command_output_replay;
+    prepared.command_artifact_handle = source_memory.command_artifact_handle;
     prepared.command_process_presentation = source_memory.command_process_presentation;
-    prepared.terminal_action_presentation = source_memory.terminal_action_presentation;
     const source_covers_full_file =
         source_memory.model_view_covers_full_file orelse return;
     prepared.model_view_covers_full_file =
@@ -508,7 +508,6 @@ test "command sidebands merge without file-view metadata" {
     applyToolResultMemory(&prepared, .{
         .command_output_replay = .unavailable,
         .command_process_presentation = .{ .signal = 9 },
-        .terminal_action_presentation = .{ .returned = .safety_ceiling },
     });
     switch (prepared.command_output_replay.?) {
         .unavailable => {},
@@ -517,10 +516,6 @@ test "command sidebands merge without file-view metadata" {
     try std.testing.expectEqual(
         types.CommandProcessPresentation{ .signal = 9 },
         prepared.command_process_presentation.?,
-    );
-    try std.testing.expectEqual(
-        types.TerminalActionPresentation{ .returned = .safety_ceiling },
-        prepared.terminal_action_presentation.?,
     );
     try std.testing.expect(prepared.model_view_covers_full_file == null);
 }
@@ -736,7 +731,7 @@ test "exact command sources delete replay and missing handles retain it" {
     try std.testing.expectEqual(transform_cases.len + 1, after_missing.names.len);
 }
 
-test "required terminal exec retains exact replay and publishes its handle" {
+test "required exec command retains exact replay and publishes its handle" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -779,9 +774,9 @@ test "required terminal exec retains exact replay and publishes its handle" {
     try finalizeCommandReplay(
         arena,
         toolCall(
-            "terminal_exact",
-            "terminal",
-            "{\"action\":\"exec\",\"command\":\"printf one\",\"timeout_ms\":600000}",
+            "exec_exact",
+            "exec_command",
+            "{\"cmd\":\"printf one\"}",
         ),
         &prepared,
         &capability,
@@ -798,7 +793,7 @@ test "required terminal exec retains exact replay and publishes its handle" {
     capture.releaseRetained(arena);
 }
 
-test "required terminal exec stores large output only as replay" {
+test "required exec command stores large output only as replay" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -834,8 +829,8 @@ test "required terminal exec stores large output only as replay" {
         .{body},
     );
     const tool_call = toolCall(
-        "terminal_large",
-        "terminal",
+        "exec_large",
+        "exec_command",
         "{}",
     );
     const capture = try command_replay_store.Capture.create(arena, 1024, &capability);

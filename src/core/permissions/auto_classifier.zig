@@ -1409,7 +1409,7 @@ test "prior tool results exclude the pending group and retain newest completed e
     };
     const pending_calls = [_]types.ToolCall{.{
         .id = "pending",
-        .name = "terminal",
+        .name = "exec_command",
         .arguments_json = "{}",
     }};
     const messages = [_]types.ChatMessage{
@@ -1445,7 +1445,7 @@ test "prior tool result selection is entry bounded and keeps the newest window" 
     }
     const pending_calls = [_]types.ToolCall{.{
         .id = "pending",
-        .name = "terminal",
+        .name = "exec_command",
         .arguments_json = "{}",
     }};
     messages[20] = .{ .role = .assistant, .tool_calls = &pending_calls };
@@ -1988,8 +1988,8 @@ test "automatic review sends complete action evidence above sixteen kib" {
             .model = "zai/glm-5.2",
             .pending_assistant = .{ .role = .assistant, .tool_calls = &.{.{
                 .id = "structured",
-                .name = "terminal",
-                .arguments_json = "{\"action\":\"start\",\"command\":\"npm install\"}",
+                .name = "exec_command",
+                .arguments_json = "{\"cmd\":\"npm install\"}",
             }} },
             .target_call_id = "structured",
             .origin = .root,
@@ -1997,8 +1997,8 @@ test "automatic review sends complete action evidence above sixteen kib" {
         },
         .targets = &.{},
         .action = .{ .tool = .{
-            .tool_name = "terminal",
-            .arguments_json = "{\"action\":\"start\",\"command\":\"npm install\"}",
+            .tool_name = "exec_command",
+            .arguments_json = "{\"cmd\":\"npm install\"}",
             .schema_json = "{\"description\":\"" ++ ("s" ** (20 * 1024)) ++ "\"}",
         } },
     });

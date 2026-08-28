@@ -319,6 +319,10 @@ fn writePersistedToolResultJson(writer: *std.Io.Writer, result: session.Persiste
         try writer.writeAll(",\"committed_file_presentation\":");
         try writeCommittedFilePresentationJson(writer, presentation);
     }
+    if (result.command_artifact_handle) |handle| {
+        try writer.writeAll(",\"command_artifact_handle\":");
+        try std.json.Stringify.value(handle, .{}, writer);
+    }
     try writer.writeByte('}');
 }
 
@@ -1126,6 +1130,11 @@ fn parsePersistedToolResult(
     errdefer if (committed_file_presentation) |presentation| {
         types.freeCommittedFilePresentation(alloc, presentation);
     };
+    const command_artifact_handle = try optionalStringDup(
+        alloc,
+        object.get("command_artifact_handle"),
+    );
+    errdefer if (command_artifact_handle) |handle| alloc.free(handle);
     return .{
         .tool_call_id = tool_call_id,
         .tool_name = tool_name,
@@ -1140,6 +1149,7 @@ fn parsePersistedToolResult(
         .created_at_ms = try requireI64(object, "created_at_ms"),
         .permission_feedback = permission_feedback,
         .committed_file_presentation = committed_file_presentation,
+        .command_artifact_handle = command_artifact_handle,
     };
 }
 

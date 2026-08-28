@@ -163,7 +163,9 @@ fx usage --codex
 
 With `--json`, `output` contains accumulated assistant Markdown across the request, while `final_output` contains only a completed final assistant response and is `""` for interrupted, failed, background, or otherwise absent final responses.
 
-Foreground terminal commands run with an explicit finite deadline. fx uses durable terminal sessions for services, watchers, GUI applications, and other long-lived work, and keeps captured foreground output available through an opaque bounded-read handle for the active session or `--no-save` process.
+Model tool execution uses Codex-style Unified Exec. `exec_command` runs a shell command and returns its output immediately when it finishes within the yield window; a still-running command returns a numeric session ID. The shell defaults to the user's configured shell. Use `write_stdin` with that ID to poll output or send interactive input. Output is continuously drained, bounded, and UTF-8 safe. Yielding never kills the process, and the manager keeps sessions alive across turns until they exit or the owning fx session is closed. Hosts without native process support advertise neither tool and do not fall back to the removed `terminal` API.
+
+The hosted terminal engine remains available for explicit interactive terminal takeover and replay. It is separate from the model-facing command tools and is not used as a shell fallback.
 
 fx starts in `auto` permission mode. Routine understood development actions run directly. Each unresolved action receives one narrow safety review based on the current user request and the exact pending action. A clear result authorizes only that action. A caution or unavailable review holds the action and returns advice to the agent without opening a permission prompt or ending the turn.
 

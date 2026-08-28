@@ -273,7 +273,6 @@ fn runtimeDeps(context: *Context) agent_runtime.AgentRuntimeDeps {
         .context_registry = context.config.context_registry,
         .context_enabled = context.config.context_enabled,
         .finalize_turn = finalizeTurn,
-        .release_agent_terminal_lease = releaseAgentTerminalLease,
         .live_tool_authority = context.turn.liveToolAuthorityProvider(),
         .tool_activity_recorder = context.turn.toolActivityRecorder(),
         .prepare_parent_turn_context = prepareParentTurnContext,
@@ -310,11 +309,6 @@ fn runtimeDeps(context: *Context) agent_runtime.AgentRuntimeDeps {
         .usage = &context.turn.sessionRuntime().usage,
         .usage_allocator = context.turn.alloc,
     };
-}
-
-fn releaseAgentTerminalLease(raw: *anyopaque, session_id: []const u8) !void {
-    const context: *Context = @ptrCast(@alignCast(raw));
-    return tool_runtime.release_agent_terminal_lease(context.toolContext(), session_id);
 }
 
 fn refreshGatewayCredential(
@@ -548,14 +542,10 @@ fn describeToolAction(raw: *anyopaque, arena: Allocator, call: types.ToolCall, f
 }
 
 fn resolveToolActionDisplayTarget(raw: *anyopaque, arena: Allocator, call: types.ToolCall) !?[]const u8 {
-    const context: *Context = @ptrCast(@alignCast(raw));
-    return tool_presentation.resolveTerminalDisplayTarget(
-        arena,
-        context.config.tool_context.tool_registry,
-        context.config.tool_context.workspace_root,
-        context.config.tool_context.terminal_client,
-        call,
-    );
+    _ = raw;
+    _ = arena;
+    _ = call;
+    return null;
 }
 
 fn describeToolActionDenied(raw: *anyopaque, arena: Allocator, call: types.ToolCall, file_path: ?[]const u8, label: []const u8, dynamic_names: []const []const u8) ![]const u8 {

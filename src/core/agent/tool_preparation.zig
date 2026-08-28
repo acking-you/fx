@@ -329,7 +329,7 @@ fn prepareRegisteredApplicableTargets(
     call: ToolCall,
     tool: tool_dispatch.Tool,
 ) Allocator.Error!RegisteredTargetPreparation {
-    if (try isCapturedCommandCall(alloc, call, tool)) {
+    if (try usesCommandCwdTarget(alloc, call, tool)) {
         const command_cwd = permissions.resolveCommandCwdForCallInScope(
             alloc,
             access_scope orelse workspace_access.AccessScope.primaryOnly(workspace_root),
@@ -377,12 +377,12 @@ fn prepareRegisteredApplicableTargets(
     return .{ .prepared = applicable_targets };
 }
 
-fn isCapturedCommandCall(
+fn usesCommandCwdTarget(
     alloc: Allocator,
     call: ToolCall,
     tool: tool_dispatch.Tool,
 ) Allocator.Error!bool {
-    if (tool.executor_kind == .run_command) return true;
+    if (tool.executor_kind == .run_command or tool.executor_kind == .exec_command) return true;
     const expected_action = tool.captured_command_action orelse return false;
     var parsed = std.json.parseFromSlice(std.json.Value, alloc, call.arguments_json, .{}) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -481,7 +481,7 @@ fn applicableTargetsFromPermissionTargets(
 
 fn filesystemTargetKind(kind: tool_dispatch.ExecutorKind) ?context_contract.TargetKind {
     return switch (kind) {
-        .list_files, .glob_files, .grep_files, .semantic_search, .create_folder => .directory,
+        .list_files, .glob_files, .grep_files, .semantic_search, .create_folder, .exec_command => .directory,
         .read_file, .copy_file => .file,
         else => null,
     };
@@ -641,7 +641,7 @@ test "classifiers are ordered" {
 
         fn stop(_: ?*anyopaque, callback_alloc: Allocator, call: ToolCall) anyerror!?CallbackTerminal {
             stop_calls += 1;
-            if (!std.mem.eql(u8, call.name, "terminal")) return null;
+            if (!std.mem.eql(u8, call.name, "exec_command")) return null;
             return .{ .model_output = try callback_alloc.dupe(u8, "blocked restart"), .status = .failure };
         }
     };
@@ -651,7 +651,7 @@ test "classifiers are ordered" {
     const tools = [_]tool_dispatch.Tool{
         builtin_tools.skill,
         test_web_search,
-        builtin_tools.terminal,
+        builtin_tools.exec_command,
     };
     const registry = tool_dispatch.Registry{ .tools = &tools };
     const classifiers: Classifiers = .{
@@ -691,8 +691,8 @@ test "classifiers are ordered" {
 
     var blocked = try prepareReadyCall(alloc, .{
         .id = "command",
-        .name = "terminal",
-        .arguments_json = "{\"action\":\"exec\",\"command\":\"echo hi\"}",
+        .name = "exec_command",
+        .arguments_json = "{\"cmd\":\"echo hi\"}",
     }, .{ .tool_registry = registry, .workspace_root = "/tmp/workspace", .classifiers = classifiers });
     defer blocked.deinit(alloc);
     try std.testing.expectEqual(TerminalKind.stop_policy, blocked.terminal.kind);
@@ -769,7 +769,7 @@ test "registered candidates expose only authoritative canonical targets" {
         builtin_tools.read_file,
         builtin_tools.write_file,
         builtin_tools.edit_file,
-        builtin_tools.terminal,
+        builtin_tools.exec_command,
         builtin_tools.delete_file,
         builtin_tools.rename_file,
         builtin_tools.copy_file,
@@ -824,8 +824,8 @@ test "registered candidates expose only authoritative canonical targets" {
 
     var command = try prepareReadyCall(alloc, .{
         .id = "command",
-        .name = "terminal",
-        .arguments_json = "{\"action\":\"exec\",\"command\":\"cat unrelated/AGENTS.md\",\"cwd\":\"build\"}",
+        .name = "exec_command",
+        .arguments_json = "{\"cmd\":\"cat unrelated/AGENTS.md\",\"workdir\":\"build\"}",
     }, .{ .tool_registry = registry, .workspace_root = workspace, .classifiers = test_classifiers });
     defer command.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 1), command.candidate.applicable_targets.len);
@@ -834,8 +834,8 @@ test "registered candidates expose only authoritative canonical targets" {
 
     var delimiter_command = try prepareReadyCall(alloc, .{
         .id = "delimiter-command",
-        .name = "terminal",
-        .arguments_json = "{\"action\":\"exec\",\"command\":\"pwd\",\"cwd\":\"segment::scope\"}",
+        .name = "exec_command",
+        .arguments_json = "{\"cmd\":\"pwd\",\"workdir\":\"segment::scope\"}",
     }, .{ .tool_registry = registry, .workspace_root = workspace, .classifiers = test_classifiers });
     defer delimiter_command.deinit(alloc);
     try std.testing.expectEqual(
@@ -954,7 +954,7 @@ test "ordinary applicable target freshness detects retarget and resolution failu
     defer alloc.free(workspace);
     const tools = [_]tool_dispatch.Tool{
         builtin_tools.read_file,
-        builtin_tools.terminal,
+        builtin_tools.exec_command,
         builtin_tools.file_info,
     };
     const config: Config = .{
@@ -971,8 +971,8 @@ test "ordinary applicable target freshness detects retarget and resolution failu
     defer read.deinit(alloc);
     var command = try prepareReadyCall(alloc, .{
         .id = "command",
-        .name = "terminal",
-        .arguments_json = "{\"action\":\"exec\",\"command\":\"pwd\",\"cwd\":\"link\"}",
+        .name = "exec_command",
+        .arguments_json = "{\"cmd\":\"pwd\",\"workdir\":\"link\"}",
     }, config);
     defer command.deinit(alloc);
     const file_info_call: ToolCall = .{
@@ -996,7 +996,7 @@ test "ordinary applicable target freshness detects retarget and resolution failu
     ));
     try std.testing.expect(try ordinaryApplicableTargetsFresh(
         alloc,
-        .{ .id = "command", .name = "terminal", .arguments_json = "{\"action\":\"exec\",\"command\":\"pwd\",\"cwd\":\"link\"}" },
+        .{ .id = "command", .name = "exec_command", .arguments_json = "{\"cmd\":\"pwd\",\"workdir\":\"link\"}" },
         config.tool_registry,
         config.workspace_root,
         &command.candidate,
@@ -1049,7 +1049,7 @@ test "ordinary applicable target freshness detects retarget and resolution failu
     ));
     try std.testing.expect(!try ordinaryApplicableTargetsFresh(
         alloc,
-        .{ .id = "command", .name = "terminal", .arguments_json = "{\"action\":\"exec\",\"command\":\"pwd\",\"cwd\":\"link\"}" },
+        .{ .id = "command", .name = "exec_command", .arguments_json = "{\"cmd\":\"pwd\",\"workdir\":\"link\"}" },
         config.tool_registry,
         config.workspace_root,
         &command.candidate,

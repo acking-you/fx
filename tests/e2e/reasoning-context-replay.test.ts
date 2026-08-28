@@ -81,8 +81,8 @@ function reasoningToolResponse(
     ...(assistantText ? [responseTextDelta(assistantText, "answer_1", 1)] : []),
     ...responseFunctionCall(
       "call_1",
-      "terminal",
-      { action: "exec", timeout_ms: 600_000, command: "printf hello" },
+      "exec_command",
+      { cmd: "printf hello" },
       assistantText ? 2 : 1,
     ),
     responseCompleted(5, 6),

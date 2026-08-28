@@ -102,6 +102,7 @@ const app_terminal_runtime = @import("core/app/app_terminal_runtime.zig");
 const app_terminal_takeover_runtime = @import("core/app/app_terminal_takeover_runtime.zig");
 const terminal_host = @import("core/terminal/host.zig");
 const terminal_native_session = @import("core/terminal/native_session.zig");
+const unified_exec_runtime = @import("core/execution/unified_exec.zig");
 const terminal_tmux_session = @import("core/terminal/tmux_session.zig");
 const session_runtime = @import("core/session/session.zig");
 const session_codec = @import("core/session/session_codec.zig");
@@ -382,11 +383,6 @@ const App = struct {
         return null;
     }
 
-    pub fn workspaceExecutor(self: *const Self) ?js_host_workspace.Executor {
-        if (comptime host_profile.js_host_workspace) return self.workspace_host.executor();
-        return null;
-    }
-
     pub fn promptPolicy(_: *const Self) prompt_policy.Policy {
         return builtin_context.prompt_policy;
     }
@@ -531,6 +527,7 @@ const App = struct {
     worker: WorkerRuntime = .{},
     background: BackgroundRuntime = .{},
     terminal_client: terminal_client_runtime.Runtime = .{},
+    unified_exec: unified_exec_runtime.Manager = unified_exec_runtime.Manager.init(std.heap.c_allocator),
     terminal_direct: terminal_direct_runtime.Runtime = .{},
     terminal_takeover: app_terminal_takeover_runtime.Controller = .{},
     subagents: ui_subagents.Controller = .{},
@@ -580,6 +577,7 @@ const App = struct {
                 background_process_provider.unavailable_provider
             else
                 background_process.provider),
+            .unified_exec = unified_exec_runtime.Manager.init(std.heap.c_allocator),
         };
         if (comptime host_profile.js_host_workspace) {
             app.workspace_host = js_host_workspace.Runtime.init(alloc) catch |err| blk: {
@@ -761,6 +759,7 @@ const App = struct {
             break :blk terminal_direct_runtime.DeinitDisposition.abnormal;
         };
         self.terminal_client.deinit();
+        self.unified_exec.deinit();
         self.model_cache.deinit();
         InputSubmitRuntime.clearPendingSubmission(self, "shutdown");
         const resume_handoff = if (capture_resume_handoff and
@@ -1906,21 +1905,6 @@ const App = struct {
 
     pub fn executeToolCallWithAdvertised(self: *App, request: agent_runtime.ToolExecutionRequest) !ToolExecutionResult {
         return self.executeToolCall(request);
-    }
-
-    pub fn releaseAgentTerminalLease(self: *App, session_id: []const u8) !void {
-        return AgentAppRuntime.releaseAgentTerminalLease(
-            self,
-            session_id,
-            &ignored_list_entries,
-            max_list_entries,
-            max_read_file_bytes,
-            max_read_file_lines,
-            max_read_file_line_len,
-            max_command_output_bytes,
-            builtin_gateway.retry_count,
-            builtin_gateway.defaultChatUrl(),
-        );
     }
 
     pub fn formatToolExecutionErrorForAgent(self: *App, arena: Allocator, tool_name: []const u8, err: anyerror) ![]const u8 {
@@ -3987,7 +3971,6 @@ test {
     _ = @import("core/terminal/client.zig");
     _ = @import("core/terminal/direct_runtime.zig");
     _ = @import("core/app/app_terminal_runtime.zig");
-    _ = @import("tools/terminal/terminal.zig");
     _ = @import("core/app/input_approval_runtime.zig");
     _ = @import("acp/sessions.zig");
     _ = @import("core/tasks/task_helpers.zig");

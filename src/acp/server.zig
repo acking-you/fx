@@ -33,6 +33,7 @@ const session_usage = @import("../core/session/session_usage.zig");
 const worker_runtime = @import("../core/agent/worker_runtime.zig");
 const background_runtime = @import("../core/background/background_runtime.zig");
 const terminal_client_runtime = @import("../core/terminal/client.zig");
+const unified_exec_runtime = @import("../core/execution/unified_exec.zig");
 const subagent_tool_host = @import("../core/subagent/tool_host.zig");
 const subagent_authority = @import("../core/subagent/authority.zig");
 const types = @import("../core/shared/types.zig");
@@ -341,6 +342,7 @@ pub const ServerState = struct {
     worker: worker_runtime.WorkerRuntime = .{},
     background: background_runtime.BackgroundRuntime = .{},
     terminal_client: terminal_client_runtime.Runtime = .{},
+    unified_exec: unified_exec_runtime.Manager = unified_exec_runtime.Manager.init(std.heap.c_allocator),
     subagent_store: ?session_store.Store = null,
     subagent_host: ?*subagent_tool_host.Runtime = null,
     capability_resolver: gateway_provider.CapabilityResolver = .{},
@@ -359,6 +361,7 @@ pub const ServerState = struct {
     pub fn deinit(self: *ServerState) void {
         reapActivePrompt(self, true);
         self.terminal_client.deinit();
+        self.unified_exec.deinit();
         closeActiveSession(self) catch |err| {
             debug_trace.logf(
                 "session",

@@ -11,7 +11,8 @@ export const CANONICAL_BUILTIN_NAMES = [
   "rename_file",
   "copy_file",
   "create_folder",
-  "terminal",
+  "exec_command",
+  "write_stdin",
   "subagent",
   "capability_search",
   "skill",
@@ -36,22 +37,23 @@ export const READ_ONLY_SERIALIZED_TOOL_NAMES = [
 
 export const VERIFY_SERIALIZED_TOOL_NAMES = [
   ...READ_ONLY_SERIALIZED_TOOL_NAMES,
-  "terminal",
+  "exec_command",
+  "write_stdin",
 ] as const;
 
 export const AUTO_RESPONSES_SERIALIZED_TOOL_NAMES = CANONICAL_BUILTIN_NAMES.filter(
   (name) => name !== "web_search" && name !== "vision",
 );
 
-// Durable-only tools are capability-gated on a writable session. `terminal`
-// remains available because its exec action does not require a session store.
+// Durable-only tools are capability-gated on a writable session. Unified Exec
+// is available on native hosts without a session store.
 export const AUTO_RESPONSES_WITHOUT_DURABLE_TOOLS_SERIALIZED_TOOL_NAMES =
   AUTO_RESPONSES_SERIALIZED_TOOL_NAMES.filter((name) =>
     name !== "subagent"
   );
 
 export const AMBIGUOUS_CAPABILITY_CLAUSES = {
-  terminal: ["terminal"],
+  exec_command: ["exec_command"],
   subagent: [
     "use a subagent only for focused work",
     "Delegate focused work to a specialized subagent",
@@ -197,11 +199,11 @@ export function findUnavailableCapabilityReferences(
     }
   }
 
-  for (const name of ["terminal", "subagent", "skill", "memory"] as const) {
+  for (const name of ["exec_command", "subagent", "skill", "memory"] as const) {
     if (advertised.has(name)) continue;
     for (const clause of AMBIGUOUS_CAPABILITY_CLAUSES[name]) {
       for (const fragment of fragments) {
-        const matches = name === "terminal"
+        const matches = name === "exec_command"
           ? hasExactSymbolToken(fragment.text, clause)
           : fragment.text.includes(clause);
         if (matches) {

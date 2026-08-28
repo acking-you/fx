@@ -42,8 +42,6 @@ pub const TurnFinalizationGuard = struct {
     state: State = .open,
     auto_compact_after_finish: bool = false,
     auto_compact_after_finish_local_only: bool = false,
-    lease_allocator: Allocator = std.heap.c_allocator,
-    agent_terminal_leases: std.ArrayList([]u8) = .empty,
 
     pub fn init(
         deps: *const AgentRuntimeDeps,
@@ -68,53 +66,7 @@ pub const TurnFinalizationGuard = struct {
     }
 
     pub fn deinit(self: *TurnFinalizationGuard) void {
-        for (self.agent_terminal_leases.items) |session_id| {
-            self.lease_allocator.free(session_id);
-        }
-        self.agent_terminal_leases.deinit(self.lease_allocator);
         self.* = undefined;
-    }
-
-    pub fn track_agent_terminal_lease(
-        self: *TurnFinalizationGuard,
-        session_id: []const u8,
-    ) Allocator.Error!void {
-        for (self.agent_terminal_leases.items) |tracked| {
-            if (std.mem.eql(u8, tracked, session_id)) return;
-        }
-        const owned = try self.lease_allocator.dupe(u8, session_id);
-        errdefer self.lease_allocator.free(owned);
-        try self.agent_terminal_leases.append(self.lease_allocator, owned);
-    }
-
-    pub fn remove_agent_terminal_lease(
-        self: *TurnFinalizationGuard,
-        session_id: []const u8,
-    ) void {
-        for (self.agent_terminal_leases.items, 0..) |tracked, index| {
-            if (!std.mem.eql(u8, tracked, session_id)) continue;
-            const removed = self.agent_terminal_leases.swapRemove(index);
-            self.lease_allocator.free(removed);
-            return;
-        }
-    }
-
-    fn cleanup_agent_terminal_leases(self: *TurnFinalizationGuard) !void {
-        var first_error: ?anyerror = null;
-        for (self.agent_terminal_leases.items) |session_id| {
-            self.deps.release_agent_terminal_lease(
-                self.deps.ctx,
-                session_id,
-            ) catch |err| {
-                debug_trace.logf(
-                    "terminal",
-                    "turn lease cleanup failed turn_id={d} session_id={s} err={s}",
-                    .{ self.turn_id, session_id, @errorName(err) },
-                );
-                if (first_error == null) first_error = err;
-            };
-        }
-        if (first_error) |err| return err;
     }
 
     pub fn finish(
@@ -134,14 +86,6 @@ pub const TurnFinalizationGuard = struct {
             );
             return;
         }
-
-        self.cleanup_agent_terminal_leases() catch |err| {
-            self.state = .fatal;
-            if (finished_prompt) |finished| {
-                types.freeFinishedPrompt(std.heap.c_allocator, finished);
-            }
-            return err;
-        };
 
         self.deps.finalize_turn(self.deps.ctx, self.turn_id, outcome, disposition) catch |err| {
             self.state = .fatal;

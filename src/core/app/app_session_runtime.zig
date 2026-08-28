@@ -2658,12 +2658,19 @@ pub fn Runtime(comptime App: type) type {
             );
             if (finished.auto_compact_after_finish and
                 comptime @hasField(App, "auth") and
-                    @hasField(App, "selected_model") and
                     @hasDecl(App, "responsesCompactionProvider"))
             {
+                const turn_start_held = if (comptime @hasField(App, "worker") and
+                    @hasDecl(@TypeOf(app.worker), "requestTurnStartHold"))
+                    app.worker.requestTurnStartHold()
+                else
+                    false;
+                var keep_turn_start_hold = false;
+                defer if (turn_start_held and !keep_turn_start_hold)
+                    app.worker.releaseTurnStartHold();
                 const outcome: CompactHistoryOutcome = blk: {
                     if (finished.auto_compact_after_finish_local_only) {
-                        break :blk if (compactHistoryFullyLocally(app) catch |err| {
+                        const local_outcome: CompactHistoryOutcome = if (compactHistoryFullyLocally(app) catch |err| {
                             debug_trace.logf(
                                 "session",
                                 "event=post_turn_auto_compaction outcome=failed err={s}",
@@ -2676,8 +2683,9 @@ pub fn Runtime(comptime App: type) type {
                             );
                             return;
                         }) .compacted_locally else .unchanged;
+                        break :blk local_outcome;
                     }
-                    break :blk autoCompactHistory(app) catch |err| {
+                    const remote_outcome = autoCompactHistory(app) catch |err| {
                         debug_trace.logf(
                             "session",
                             "event=post_turn_auto_compaction outcome=failed err={s}",
@@ -2690,6 +2698,8 @@ pub fn Runtime(comptime App: type) type {
                         );
                         return;
                     };
+                    keep_turn_start_hold = remote_outcome == .remote_started;
+                    break :blk remote_outcome;
                 };
                 debug_trace.logf(
                     "session",
@@ -4709,14 +4719,7 @@ pub fn Runtime(comptime App: type) type {
                 )
             else
                 null;
-            const terminal_action_decision = if (std.mem.eql(u8, call.name, "terminal"))
-                try tool_presentation.terminalActionOutcomeDecision(
-                    action_arena.allocator(),
-                    result.terminal_action_presentation,
-                )
-            else
-                null;
-            const outcome_decision = command_decision orelse terminal_action_decision;
+            const outcome_decision = command_decision;
             const formatted_action_base = if (deferred)
                 try app.describeToolActionDeniedWithAdvertised(
                     action_arena.allocator(),
@@ -4799,6 +4802,7 @@ pub fn Runtime(comptime App: type) type {
                     result.command_output_replay,
                     result.tool_call_id,
                 ) or
+                try writeCommandArtifactOutput(app, sink, result) or
                 try writeStoredCommandOutput(app, sink, result) or
                 try writeSavedCommandOutput(sink, result.output);
             // Attach terminal detail after historical command chunks so typed
@@ -5017,6 +5021,61 @@ pub fn Runtime(comptime App: type) type {
             };
             defer app.alloc.free(output);
             return writeSavedCommandOutput(sink, output);
+        }
+
+        fn writeCommandArtifactOutput(
+            app: *App,
+            sink: anytype,
+            result: types.PersistedToolResult,
+        ) !bool {
+            const handle = result.command_artifact_handle orelse return false;
+            const loaded = if (app.session_persistence.writable) |*value|
+                value
+            else
+                return false;
+            const capability = loaded.childCapability() catch |err| {
+                debug_trace.logf(
+                    "session",
+                    "resume command artifact could not open handle={s} err={s}",
+                    .{ handle, @errorName(err) },
+                );
+                return false;
+            };
+            var file = capability.openFileReadOnly(
+                app.alloc,
+                .command_artifacts,
+                handle,
+            ) catch |err| {
+                debug_trace.logf(
+                    "session",
+                    "resume command artifact unavailable handle={s} err={s}",
+                    .{ handle, @errorName(err) },
+                );
+                return false;
+            };
+            defer file.deinit();
+            const stat = file.stat() catch |err| {
+                debug_trace.logf(
+                    "session",
+                    "resume command artifact stat failed handle={s} err={s}",
+                    .{ handle, @errorName(err) },
+                );
+                return false;
+            };
+            const size = std.math.cast(usize, stat.size) orelse return false;
+            if (size == 0) return false;
+            const output = file.readToEnd(app.alloc, size +| 1) catch |err| {
+                debug_trace.logf(
+                    "session",
+                    "resume command artifact read failed handle={s} err={s}",
+                    .{ handle, @errorName(err) },
+                );
+                return false;
+            };
+            defer app.alloc.free(output);
+            try sink.appendCommandOutput(.stdout, output);
+            try sink.finishCommandOutput();
+            return true;
         }
 
         fn writeUnreportedToolStatus(
@@ -7847,84 +7906,6 @@ test "historical command timeout preserves its typed outcome" {
     );
 }
 
-test "historical terminal actions preserve typed return and failure causes" {
-    const alloc = std.testing.allocator;
-    var app = try TestApp.init(alloc, "/workspace");
-    defer app.deinit();
-
-    var calls = [_]types.ToolCall{
-        .{
-            .id = "start_exit",
-            .name = "terminal",
-            .arguments_json = "{\"action\":\"start\",\"command\":\"true\"}",
-        },
-        .{
-            .id = "wait_ceiling",
-            .name = "terminal",
-            .arguments_json = "{\"action\":\"wait\",\"session_id\":\"terminal-1\"}",
-        },
-        .{
-            .id = "wait_missing",
-            .name = "terminal",
-            .arguments_json = "{\"action\":\"wait\",\"session_id\":\"terminal-2\"}",
-        },
-    };
-    var results = [_]types.PersistedToolResult{
-        .{
-            .tool_call_id = @constCast("start_exit"),
-            .tool_name = @constCast("terminal"),
-            .status = .success,
-            .output = @constCast("start exited"),
-            .output_bytes = 12,
-            .stored_output_bytes = 12,
-            .terminal_action_presentation = .{ .returned = .{ .exited = 0 } },
-        },
-        .{
-            .tool_call_id = @constCast("wait_ceiling"),
-            .tool_name = @constCast("terminal"),
-            .status = .success,
-            .output = @constCast("wait ceiling"),
-            .output_bytes = 12,
-            .stored_output_bytes = 12,
-            .terminal_action_presentation = .{ .returned = .safety_ceiling },
-        },
-        .{
-            .tool_call_id = @constCast("wait_missing"),
-            .tool_name = @constCast("terminal"),
-            .status = .failure,
-            .output = @constCast("wait missing"),
-            .output_bytes = 12,
-            .stored_output_bytes = 12,
-            .terminal_action_presentation = .{ .failed = .session_not_found },
-        },
-    };
-    var steps = [_]types.ToolExecutionStep{.{
-        .tool_calls = calls[0..],
-        .tool_results = results[0..],
-    }};
-
-    try Runtime(TestApp).writeExecutionHistory(&app, .{ .tool_steps = steps[0..] });
-
-    try std.testing.expectEqual(@as(usize, 3), app.completed_tool_statuses.items.len);
-    try std.testing.expectEqualStrings(
-        "● Exited 0 terminal\n",
-        app.completed_tool_statuses.items[0],
-    );
-    try std.testing.expectEqualStrings(
-        "● Wait limit reached for terminal\n",
-        app.completed_tool_statuses.items[1],
-    );
-    try std.testing.expectEqualStrings(
-        "● Failed terminal: terminal session not found\n",
-        app.completed_tool_statuses.items[2],
-    );
-    try std.testing.expectEqualSlices(
-        types.ToolOutcomeKind,
-        &.{ .completed, .completed, .failed },
-        app.completed_tool_outcomes.items,
-    );
-}
-
 test "execution replay releases action-formatting scratch allocations" {
     const alloc = std.testing.allocator;
     var app = try TestApp.init(alloc, "/workspace");
@@ -9058,8 +9039,8 @@ test "cancelled command presentation survives a persisted session restart" {
             .assistant = @constCast("I started it."),
             .tool_call = .{
                 .id = "cancelled-command",
-                .name = "terminal",
-                .arguments_json = "{\"action\":\"exec\",\"command\":\"slow\"}",
+                .name = "exec_command",
+                .arguments_json = "{\"cmd\":\"slow\"}",
             },
             .cancelled_command = .{
                 .output_replay = .{ .available = descriptor },
@@ -9192,8 +9173,8 @@ fn expectAuthoritativeCancelledReplayIsSoleArtifact() !void {
         .user = .{ .text = @constCast("cancel") },
         .tool_call = .{
             .id = "authoritative-cancelled-command",
-            .name = "terminal",
-            .arguments_json = "{\"action\":\"exec\",\"command\":\"slow\",\"timeout_ms\":600000}",
+            .name = "exec_command",
+            .arguments_json = "{\"cmd\":\"slow\"}",
         },
         .cancelled_command = .{
             .output_replay = .{ .available = descriptor },
@@ -9481,8 +9462,8 @@ test "authoritative cancelled replay survives history insertion failure" {
             .user = .{ .text = @constCast("cancel") },
             .tool_call = .{
                 .id = "failed-external-insert",
-                .name = "terminal",
-                .arguments_json = "{\"action\":\"exec\",\"command\":\"slow\",\"timeout_ms\":600000}",
+                .name = "exec_command",
+                .arguments_json = "{\"cmd\":\"slow\"}",
             },
             .cancelled_command = .{
                 .output_replay = .{ .available = descriptor },

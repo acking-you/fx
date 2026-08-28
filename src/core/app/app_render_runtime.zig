@@ -638,7 +638,10 @@ pub fn Runtime(comptime App: type) type {
                 .has_api_key = app.auth.credentialSource() != null,
                 .model = visible_model,
                 .pending_images = app.pending_images.items,
-                .composer_visible = !compacting_context,
+                // Remote compaction runs off-thread. Keep the composer live so
+                // input can be queued for the next turn while its activity row
+                // remains visible.
+                .composer_visible = true,
                 .permission_mode = if (comptime @hasField(App, "permission_engine"))
                     app.permission_engine.mode
                 else
@@ -6271,7 +6274,7 @@ test "core.app_render_runtime generic approval exits the full transcript screen 
 
     try std.testing.expect(try app.approval_prompt.syncRequest(alloc, .{
         .id = 42,
-        .label = "terminal.exec sh -c 'printf approval'",
+        .label = "exec_command sh -c 'printf approval'",
     }));
     app.shell.render_requests.request(.modal);
     try Runtime(CoordinatorTestApp).flushRequestedFrame(&app);
@@ -6951,7 +6954,7 @@ test "child approval arrival closes review and full transcript depths before ren
         defer app.deinit();
         try std.testing.expect(try app.approval_prompt.syncRequest(alloc, .{
             .id = 91,
-            .label = "terminal.exec npm test",
+            .label = "exec_command npm test",
         }));
 
         try std.testing.expect(try Runtime(ChildApprovalReconcileApp)

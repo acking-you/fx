@@ -225,10 +225,6 @@ jobs:
         env:
           FX_REQUIRE_TMUX: "1"
 
-      - name: Run headless SIGINT regression
-        run: bun test ./tui-command-permissions.test.ts --test-name-pattern "fx ask SIGINT during classifier wait terminates before decision or execution"
-        working-directory: tests/e2e
-
       - name: Run TUI input line deletion regression
         run: |
           tmux -V
@@ -257,7 +253,6 @@ jobs:
         run: |
           tmux -V
           bun test tui-gateway-stream-lifecycle.test.ts tui-direct-write-audit.test.ts
-          bun test ./tui-command-permissions.test.ts --test-name-pattern "TUI preserves completed transcript when a later auto-approved command starts|TUI isolates approved foreground commands from terminal ownership"
         working-directory: tests/e2e
         env:
           FX_REQUIRE_TMUX: "1"

@@ -64,6 +64,78 @@ afterEach(async () => {
 
 describe.skipIf(SKIP)("tui: interrupt recovery", () => {
   test(
+    "interrupt leaves yielded exec_command process alive for the session",
+    async () => {
+      root = realpathSync(mkdtempSync(join(tmpdir(), "fx-unified-exec-interrupt-")));
+      const home = join(root, "home");
+      const workspace = join(root, "workspace");
+      const stderrPath = join(root, "stderr.log");
+      const tracePath = join(root, "trace.log");
+      const survivedPath = join(workspace, "unified-exec-survived.txt");
+      mkdirSync(join(home, ".fx"), { recursive: true });
+      mkdirSync(workspace, { recursive: true });
+      writeFileSync(join(home, ".fx", "settings.json"), "{}");
+
+      const held: HoldState = {
+        started: false,
+        cancelled: false,
+        cancelCount: 0,
+        released: false,
+      };
+      gateway = startFakeGateway([
+        fakeGatewayToolCall("yielded_exec", "exec_command", {
+          cmd: "sleep 1; printf survived > unified-exec-survived.txt",
+          yield_time_ms: 250,
+        }),
+        () => heldUntilReleasedResponse(held),
+        fakeGatewayFinalText("UNIFIED_EXEC_INTERRUPT_RECOVERED"),
+      ]);
+      session = await TmuxSession.create({
+        cwd: realpathSync(workspace),
+        stderrPath,
+        width: 120,
+        height: 40,
+        env: {
+          HOME: home,
+          OPENAI_API_KEY: "fake-unified-exec-interrupt-key",
+          FX_RESPONSES_BASE_URL: gateway.baseUrl,
+          FX_MODEL: FAKE_GATEWAY_MODEL,
+          FX_PERMISSION_MODE: "yolo",
+          FX_TRACE_SCOPES: TRACE_SCOPES,
+          FX_TRACE_LOG: tracePath,
+        },
+      });
+      await session.waitForComposer(TIMEOUT);
+
+      await session.sendText("Start the yielded command, then wait.");
+      await waitForCondition(() => held.started, "post-command held response");
+      const toolFollowUp = JSON.parse(gateway.requests[1]!.body) as {
+        input: Array<{ type?: string; call_id?: string; output?: unknown }>;
+      };
+      const execResult = toolFollowUp.input.find((item) =>
+        item.type === "function_call_output" && item.call_id === "yielded_exec"
+      );
+      expect(execResult).toBeDefined();
+      expect(JSON.parse(String(execResult!.output)).session_id).toBe(1);
+
+      await session.sendKeys("Escape");
+      await waitForCondition(() => held.cancelled, "held response cancellation");
+      await waitForTrace(tracePath, "event=interrupt_persisted", TIMEOUT);
+      await waitForCondition(() => existsSync(survivedPath), "yielded process completion after interrupt");
+      expect(readFileSync(survivedPath, "utf8")).toBe("survived");
+
+      await session.sendText("Confirm the next prompt still works.");
+      await session.waitForText("UNIFIED_EXEC_INTERRUPT_RECOVERED", TIMEOUT);
+      expect(gateway.requests).toHaveLength(3);
+      expect(held.cancelCount).toBe(1);
+      expect(readFileSync(stderrPath, "utf8")).toBe("");
+      expect(session.isAlive()).toBe(true);
+      expect(session.isPaneAlive()).toBe(true);
+    },
+    TIMEOUT * 2,
+  );
+
+  test(
     "submitted status text queues behind an active response",
     async () => {
       root = realpathSync(mkdtempSync(join(tmpdir(), "fx-text-queues-")));
@@ -330,10 +402,8 @@ while :; do sleep 1; done
       chmodSync(scriptPath, 0o755);
 
       gateway = startFakeGateway([
-        fakeGatewayToolCall("workspace-cancel-hold", "terminal", {
-          action: "exec",
-          timeout_ms: 600_000,
-          command: "./hold-workspace-cancel.sh",
+        fakeGatewayToolCall("workspace-cancel-hold", "exec_command", {
+          cmd: "./hold-workspace-cancel.sh",
         }),
       ]);
       session = await TmuxSession.create({

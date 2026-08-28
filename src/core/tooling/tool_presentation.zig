@@ -5,9 +5,6 @@ const file_mutation_contract = @import("file_mutation_contract.zig");
 const text_utils = @import("../shared/text_utils.zig");
 const tool_args = @import("tool_args.zig");
 const tool_dispatch = @import("tool_dispatch.zig");
-const terminal_contracts = @import("../terminal/contracts.zig");
-const terminal_client_runtime = @import("../terminal/client.zig");
-const terminal_ui_projection = @import("../terminal/ui_projection.zig");
 const types = @import("../shared/types.zig");
 const test_builtin_tools = if (builtin.is_test)
     @import("../../builtins/tools.zig")
@@ -128,8 +125,8 @@ pub fn formatRunCommandPermissionLabel(
         command,
         max_run_command_activity_bytes,
     );
-    const suffix = try commandApprovalLabelSuffix(scratch, "terminal", command);
-    return std.fmt.allocPrint(alloc, "terminal.exec {s}{s}", .{ encoded.bytes, suffix });
+    const suffix = try commandApprovalLabelSuffix(scratch, "exec_command", command);
+    return std.fmt.allocPrint(alloc, "exec_command {s}{s}", .{ encoded.bytes, suffix });
 }
 
 pub fn isAdvertisedDynamicMcpName(registry: tool_dispatch.Registry, name: []const u8, advertised: []const []const u8) bool {
@@ -153,7 +150,7 @@ pub fn formatRunCommandActivity(
 
     const args = tool_args.parseToolArgsObject(scratch, call.arguments_json) catch return null;
     if (!isCapturedCommandCall(registry, call, args)) return null;
-    const command = tool_args.optionalStringArg(args, "command") orelse return null;
+    const command = tool_args.optionalStringArg(args, if (std.mem.eql(u8, call.name, "exec_command")) "cmd" else "command") orelse return null;
     var projected_storage: [max_run_command_activity_bytes + 1]u8 = undefined;
     const projected = projectRunCommandActivitySource(command, workspace_root, &projected_storage);
     const encoded = try text_utils.encodeTerminalSafe(scratch, projected, max_run_command_activity_bytes);
@@ -161,122 +158,6 @@ pub fn formatRunCommandActivity(
         .detail = try alloc.dupe(u8, encoded.bytes),
         .compatibility_tool = if (try tool_dispatch.matchRunCommandCompatibility(registry, command)) |matched| matched.tool else null,
     };
-}
-
-/// The caller owns the returned allocation and must free it with `alloc`.
-fn resolveTerminalDisplayTargetFromRows(
-    alloc: Allocator,
-    registry: tool_dispatch.Registry,
-    workspace_root: []const u8,
-    call: ToolCall,
-    rows: []const terminal_ui_projection.Row,
-) !?[]const u8 {
-    var scratch_state = std.heap.ArenaAllocator.init(alloc);
-    defer scratch_state.deinit();
-    const session_id = terminalDisplayTargetSessionId(
-        scratch_state.allocator(),
-        registry,
-        call,
-    ) orelse return null;
-    return @as(?[]const u8, try resolveTerminalSessionTargetFromRows(
-        alloc,
-        workspace_root,
-        session_id,
-        rows,
-    ));
-}
-
-fn terminalDisplayTargetSessionId(
-    scratch: Allocator,
-    registry: tool_dispatch.Registry,
-    call: ToolCall,
-) ?[]const u8 {
-    const spec = registry.lookup(call.name) orelse return null;
-    if (spec.executor_kind != .terminal) return null;
-    const args = tool_args.parseToolArgsObject(
-        scratch,
-        call.arguments_json,
-    ) catch return null;
-    const presentation = tool_dispatch.presentationForArgs(spec.*, args);
-    if (presentation.label_arg_kind != .session_id) return null;
-    return tool_args.optionalStringArg(args, "session_id");
-}
-
-/// The caller owns the returned allocation and must free it with `alloc`.
-fn resolveTerminalSessionTargetFromRows(
-    alloc: Allocator,
-    workspace_root: []const u8,
-    session_id: []const u8,
-    rows: []const terminal_ui_projection.Row,
-) ![]const u8 {
-    for (rows) |row| {
-        if (!std.mem.eql(u8, row.session_id, session_id)) continue;
-        if (row.label.len == 0 or std.mem.eql(u8, row.label, session_id)) break;
-        return try formatTerminalDisplayTarget(
-            alloc,
-            workspace_root,
-            row.label,
-        );
-    }
-
-    var encoded = try text_utils.encodeTerminalSafe(
-        alloc,
-        session_id,
-        max_run_command_activity_bytes - "session ".len,
-    );
-    defer encoded.deinit(alloc);
-    return try std.fmt.allocPrint(alloc, "session {s}", .{encoded.bytes});
-}
-
-/// The caller owns the returned allocation and must free it with `alloc`.
-pub fn resolveTerminalDisplayTarget(
-    alloc: Allocator,
-    registry: tool_dispatch.Registry,
-    workspace_root: []const u8,
-    terminal_client: ?*terminal_client_runtime.Runtime,
-    call: ToolCall,
-) !?[]const u8 {
-    var scratch_state = std.heap.ArenaAllocator.init(std.heap.c_allocator);
-    defer scratch_state.deinit();
-    const session_id = terminalDisplayTargetSessionId(
-        scratch_state.allocator(),
-        registry,
-        call,
-    ) orelse return null;
-    const runtime = terminal_client orelse return @as(?[]const u8, try resolveTerminalSessionTargetFromRows(
-        alloc,
-        workspace_root,
-        session_id,
-        &.{},
-    ));
-    var snapshot = try runtime.terminalProjection(std.heap.c_allocator);
-    defer snapshot.deinit();
-    return @as(?[]const u8, try resolveTerminalSessionTargetFromRows(
-        alloc,
-        workspace_root,
-        session_id,
-        snapshot.rows,
-    ));
-}
-
-/// The caller owns the returned allocation and must free it with `alloc`.
-fn formatTerminalDisplayTarget(
-    alloc: Allocator,
-    workspace_root: []const u8,
-    raw: []const u8,
-) ![]u8 {
-    var projected_storage: [max_run_command_activity_bytes + 1]u8 = undefined;
-    const projected = projectRunCommandActivitySource(
-        raw,
-        workspace_root,
-        &projected_storage,
-    );
-    const encoded = try text_utils.encodeTerminalSafe(
-        alloc,
-        projected,
-        max_run_command_activity_bytes,
-    );
-    return encoded.bytes;
 }
 
 /// The caller owns the returned allocation and must free it with `alloc`.
@@ -336,7 +217,7 @@ pub fn formatPermissionLabel(alloc: Allocator, registry: tool_dispatch.Registry,
         return try alloc.dupe(u8, call.name);
     };
     if (isCapturedCommandCall(registry, call, args)) {
-        const command = tool_args.optionalStringArg(args, "command") orelse
+        const command = tool_args.optionalStringArg(args, if (std.mem.eql(u8, call.name, "exec_command")) "cmd" else "command") orelse
             return try alloc.dupe(u8, call.name);
         return formatRunCommandPermissionLabel(alloc, command);
     }
@@ -353,9 +234,10 @@ pub fn formatPermissionLabel(alloc: Allocator, registry: tool_dispatch.Registry,
     }
     const value = tool_dispatch.toolLabelValue(spec.*, args) orelse return try alloc.dupe(u8, call.name);
 
-    if (spec.label_arg_kind == .command) {
+    if (spec.label_arg_kind == .command or spec.label_arg_kind == .cmd) {
         const suffix = try commandApprovalLabelSuffix(scratch, call.name, value);
-        if (tool_args.optionalStringArg(args, "cwd")) |cwd| {
+        const cwd_key: []const u8 = if (spec.label_arg_kind == .cmd) "workdir" else "cwd";
+        if (tool_args.optionalStringArg(args, cwd_key)) |cwd| {
             return std.fmt.allocPrint(alloc, "{s} {s} @ {s}{s}", .{ call.name, value, cwd, suffix });
         }
         return std.fmt.allocPrint(alloc, "{s} {s}{s}", .{ call.name, value, suffix });
@@ -421,7 +303,7 @@ fn appendWebSearchDomains(writer: *std.Io.Writer, label: []const u8, value: ?std
 
 fn commandApprovalLabelSuffix(alloc: Allocator, tool_name: []const u8, command: []const u8) ![]const u8 {
     if (!std.mem.eql(u8, tool_name, "run_command") and
-        !std.mem.eql(u8, tool_name, "terminal")) return "";
+        !std.mem.eql(u8, tool_name, "exec_command")) return "";
     const risk = command_policy.command_risk_note_for(command);
     const safer = command_policy.command_safer_alternative_for(command);
     if (risk == null and safer == null) return "";
@@ -471,7 +353,7 @@ fn isCapturedCommandCall(
     // registry no longer contains a `run_command` tool.
     if (std.mem.eql(u8, call.name, "run_command")) return true;
     const tool = registry.lookup(call.name) orelse return false;
-    if (tool.executor_kind == .run_command) return true;
+    if (tool.executor_kind == .run_command or tool.executor_kind == .exec_command) return true;
     const expected = tool.captured_command_action orelse return false;
     const action = tool_args.optionalStringArg(args, "action") orelse return false;
     return std.mem.eql(u8, action, expected);
@@ -539,7 +421,7 @@ const test_tools = [_]tool_dispatch.Tool{
     test_builtin_tools.rename_file,
     test_builtin_tools.copy_file,
     test_web_search,
-    test_builtin_tools.terminal,
+    test_builtin_tools.exec_command,
     test_builtin_tools.memory,
     test_builtin_tools.skill,
     test_install_skill,
@@ -736,7 +618,7 @@ test "run command activity abbreviates only active workspace paths" {
     });
     defer alloc.free(permission);
     try std.testing.expectEqualStrings(
-        "terminal.exec cd /Users/example/workspace/packages/cli && pwd",
+        "exec_command cd /Users/example/workspace/packages/cli && pwd",
         permission,
     );
 }
@@ -775,7 +657,7 @@ test "run command activity hides only a leading no-op current directory prefix" 
         .arguments_json = "{\"command\":\"cd . && zig build\"}",
     });
     defer alloc.free(permission);
-    try std.testing.expectEqualStrings("terminal.exec cd . && zig build", permission);
+    try std.testing.expectEqualStrings("exec_command cd . && zig build", permission);
 }
 
 test "tool presentation formats bounded web search action detail" {
@@ -822,7 +704,7 @@ test "tool presentation formats permission labels" {
         .arguments_json = "{\"command\":\"npm test\",\"cwd\":\"/tmp/fx\"}",
     });
     defer alloc.free(cwd);
-    try std.testing.expectEqualStrings("terminal.exec npm test", cwd);
+    try std.testing.expectEqualStrings("exec_command npm test", cwd);
 
     const risk = try formatPermissionLabel(alloc, test_tool_registry, .{
         .id = "risk",
@@ -856,71 +738,6 @@ test "tool presentation preserves plain action fallbacks" {
         defer alloc.free(label);
         try std.testing.expectEqualStrings(case.expected, label);
     }
-}
-
-test "terminal display target is call-local across a cold inspect projection update" {
-    const alloc = std.testing.allocator;
-    const session_id = "terminal-cold-session";
-    const facts = terminal_contracts.SessionFacts{
-        .session_id = session_id,
-        .lifecycle = .running,
-        .attention = .{},
-        .backend = .native,
-        .output_cursor = .{ .segment = 1, .offset = 0 },
-        .screen_recovery = .{ .unavailable = .missing },
-    };
-    var projection: terminal_ui_projection.Store = .{};
-    defer projection.deinit(alloc);
-    try projection.observe(
-        alloc,
-        .{ .list = .{} },
-        .{ .success = .{ .list = .{ .sessions = &.{facts} } } },
-    );
-
-    const inspect_call = ToolCall{
-        .id = "inspect",
-        .name = "terminal",
-        .arguments_json = "{\"action\":\"inspect\",\"session_id\":\"terminal-cold-session\"}",
-    };
-    var cold_snapshot = try projection.snapshot(alloc);
-    const current_target = try resolveTerminalDisplayTargetFromRows(
-        alloc,
-        test_tool_registry,
-        "/tmp/workspace",
-        inspect_call,
-        cold_snapshot.rows,
-    ) orelse return error.TestExpectedEqual;
-    cold_snapshot.deinit();
-    defer alloc.free(current_target);
-    try std.testing.expectEqualStrings("session terminal-cold-session", current_target);
-
-    try projection.observe(
-        alloc,
-        .{ .inspect = .{ .session_id = session_id } },
-        .{ .success = .{ .inspect = .{
-            .session = facts,
-            .shell = "/bin/zsh",
-            .cwd = "/tmp/workspace",
-            .command = "npm run dev",
-        } } },
-    );
-    try std.testing.expectEqualStrings("session terminal-cold-session", current_target);
-
-    var learned_snapshot = try projection.snapshot(alloc);
-    defer learned_snapshot.deinit();
-    const next_target = try resolveTerminalDisplayTargetFromRows(
-        alloc,
-        test_tool_registry,
-        "/tmp/workspace",
-        .{
-            .id = "read",
-            .name = "terminal",
-            .arguments_json = "{\"action\":\"read\",\"session_id\":\"terminal-cold-session\"}",
-        },
-        learned_snapshot.rows,
-    ) orelse return error.TestExpectedEqual;
-    defer alloc.free(next_target);
-    try std.testing.expectEqualStrings("npm run dev", next_target);
 }
 
 test "tool presentation frees all formatted output with a normal allocator" {

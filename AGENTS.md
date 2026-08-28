@@ -47,6 +47,17 @@ Upstream frequently changes counts and layout that fork tests assert (command to
 
 A clean merge is not proof that fork-owned documentation survived. Preserve and adapt the `About this fork` section, the BYOK maintenance commitment and status, provider configuration, fork-specific examples, and these repository instructions. Upstream wording may be incorporated, but it must not silently delete or replace the fork's contract.
 
+### BYOK protected behavior inventory
+
+The following fork-owned behavior is a merge boundary, not disposable drift. An upstream merge may reorganize these files, but it must preserve the contracts they implement and their focused regression coverage:
+
+* Codex Responses is the default ChatGPT login route, including its account-bound `/responses` endpoint, beta headers, opaque remote-compaction trigger, and encrypted-reasoning replay (`src/core/gateway/provider_route.zig`, `src/core/gateway/responses_compaction_binding.zig`, `src/gateway/openai_responses.zig`, `src/gateway/client.zig`).
+* Remote compaction is asynchronous at the UI boundary, persists its lifecycle/checkpoint, keeps ordinary input queued for the next turn, and falls back locally only after a recorded remote failure (`src/core/app/app_session_runtime.zig`, `src/core/session/session.zig`, `src/core/gateway/responses_compaction*.zig`).
+* Worker and gateway callbacks enqueue stream/reasoning/compaction events; transcript mutation and rendering stay on the UI thread. Streamed tokens must remain visible in the current frame and must not be delayed by native scrollback (`src/core/app/app_callbacks.zig`, `src/core/app/app_worker_runtime.zig`, `src/ui/transcript/runtime.zig`).
+* BYOK provider configuration remains generic and Vercel onboarding stays removed. Do not reintroduce Vercel setup/login, silently replace the fork README contract, or restore vendor-specific defaults while resolving conflicts.
+
+After every upstream merge, inspect the first-parent diff for these paths and run focused tests for each changed boundary. Search for stale `selected_model` compile guards, synchronous compaction admission, direct callback transcript mutation, delayed newline-less stream handling, and Vercel setup/login entrypoints before declaring the merge safe.
+
 ### Contributing back to upstream
 
 When a change on this fork is a bug fix or a feature upstream would plausibly accept, send it to `vercel-labs/fx` as a pull request instead of letting it live only here. Fewer fork-only patches means less merge cost forever.

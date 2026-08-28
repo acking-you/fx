@@ -480,7 +480,7 @@ test "approval wheel keeps scrolling a committed command review after review syn
     defer app.deinit();
     const request: permission_request.PermissionRequest = .{
         .id = 42,
-        .label = "terminal.exec " ++ ("x" ** 2_400),
+        .label = "exec_command " ++ ("x" ** 2_400),
     };
     try std.testing.expect(try app.approval_prompt.syncRequest(alloc, request));
     try std.testing.expect(try approval_screen.needsScreen(

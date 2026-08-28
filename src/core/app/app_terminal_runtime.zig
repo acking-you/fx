@@ -1,5 +1,4 @@
 const std = @import("std");
-const terminal_tool = @import("../../tools/terminal/terminal.zig");
 const direct_runtime = @import("../terminal/direct_runtime.zig");
 const identity = @import("../terminal/identity.zig");
 const app_session_runtime = @import("app_session_runtime.zig");
@@ -81,21 +80,7 @@ pub fn Runtime(comptime App: type) type {
         /// Refresh the UI projection from the durable owner before local status
         /// commands render it. Failures leave the last observed projection intact.
         pub fn refreshProjection(app: *App) void {
-            const durable_session_id = app_session_runtime.Runtime(App).activeSessionId(app) orelse return;
-            const child_capability = app_session_runtime.Runtime(App).childCapability(app) orelse return;
-            terminal_tool.refreshListProjection(.{
-                .allocator = app.alloc,
-                .workspace_root = app.workspace_root,
-                .session_child_capability = child_capability,
-                .terminal_client = &app.terminal_client,
-                .terminal_owner_session_id = durable_session_id,
-                .terminal_transport_role = .interactive,
-                .background_lifecycle_allocator = app.alloc,
-            }) catch |err| debug_trace.logf(
-                "terminal",
-                "interactive terminal status refresh failed err={s}",
-                .{@errorName(err)},
-            );
+            _ = app;
         }
 
         pub fn requestOpen(app: *App, session_id: []const u8) OpenRequestResult {

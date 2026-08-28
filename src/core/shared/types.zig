@@ -870,8 +870,11 @@ pub const PersistedToolResult = struct {
     permission_feedback: [][]u8 = &.{},
     committed_file_presentation: ?CommittedFilePresentation = null,
     command_output_replay: ?CommandOutputReplay = null,
+    /// Durable plain-text artifact retained by Unified Exec for full-detail
+    /// rendering after a session resume. The file lives under the session's
+    /// managed command-artifacts directory.
+    command_artifact_handle: ?[]u8 = null,
     command_process_presentation: ?CommandProcessPresentation = null,
-    terminal_action_presentation: ?TerminalActionPresentation = null,
 };
 
 pub const CommandOutputReplayDescriptor = struct {
@@ -894,81 +897,6 @@ pub const CommandProcessPresentation = union(enum) {
     signal: u32,
     timed_out,
     output_capture_failed,
-};
-
-pub const TerminalReturnPresentation = union(enum) {
-    started,
-    condition_met,
-    safety_ceiling,
-    cancelled,
-    exited: i32,
-    signal: u32,
-};
-
-pub const TerminalFailurePresentation = enum {
-    invalid_request,
-    path_outside_workspace,
-    unsupported_host,
-    shell_unavailable,
-    pty_unavailable,
-    startup_failed,
-    process_identity_unavailable,
-    session_lost,
-    session_not_found,
-    invalid_lifecycle,
-    authority_denied,
-    authority_retired,
-    lease_conflict,
-    cursor_gap,
-    screen_unavailable,
-    monitor_unavailable,
-    protocol_incompatible,
-    capacity_exceeded,
-    cancelled,
-
-    pub fn detail(self: TerminalFailurePresentation) []const u8 {
-        return switch (self) {
-            .invalid_request => "invalid request",
-            .path_outside_workspace => "path is outside the workspace",
-            .unsupported_host => "terminal host is unavailable",
-            .shell_unavailable => "terminal shell is unavailable",
-            .pty_unavailable => "terminal PTY is unavailable",
-            .startup_failed => "terminal startup failed",
-            .process_identity_unavailable => "terminal process identity is unavailable",
-            .session_lost => "terminal session was lost",
-            .session_not_found => "terminal session not found",
-            .invalid_lifecycle => "terminal session is in an invalid lifecycle state",
-            .authority_denied => "terminal authority denied",
-            .authority_retired => "saved terminal authority is from an older fx version; start a new terminal",
-            .lease_conflict => "terminal control lease conflict",
-            .cursor_gap => "terminal output cursor gap",
-            .screen_unavailable => "terminal screen is unavailable",
-            .monitor_unavailable => "terminal monitor is unavailable",
-            .protocol_incompatible => "terminal protocol is incompatible",
-            .capacity_exceeded => "terminal capacity exceeded",
-            .cancelled => "terminal action was cancelled",
-        };
-    }
-};
-
-pub const TerminalActionPresentation = union(enum) {
-    returned: TerminalReturnPresentation,
-    failed: TerminalFailurePresentation,
-
-    pub fn outcomeKind(self: TerminalActionPresentation) ToolOutcomeKind {
-        return switch (self) {
-            .returned => |returned| switch (returned) {
-                .started, .condition_met, .safety_ceiling => .completed,
-                .cancelled => .cancelled,
-                .exited => |code| if (code == 0) .completed else .failed,
-                .signal => .failed,
-            },
-            .failed => |failed| if (failed == .cancelled)
-                .cancelled
-            else
-                .failed,
-        };
-    }
 };
 
 pub const deferred_tool_result_output = "Not executed";
@@ -1027,8 +955,9 @@ pub const ToolResultMemory = struct {
     model_view_covers_full_file: ?bool = null,
     committed_file_presentation: ?CommittedFilePresentation = null,
     command_output_replay: ?CommandOutputReplay = null,
+    /// Borrowed handle for a plain Unified Exec output artifact.
+    command_artifact_handle: ?[]const u8 = null,
     command_process_presentation: ?CommandProcessPresentation = null,
-    terminal_action_presentation: ?TerminalActionPresentation = null,
 };
 
 /// One finalized Responses reasoning output item. The summary is ordinary
@@ -2661,6 +2590,11 @@ fn dupePersistedToolResult(alloc: std.mem.Allocator, result: PersistedToolResult
     else
         null;
     errdefer if (command_output_replay) |replay| freeCommandOutputReplay(alloc, replay);
+    const command_artifact_handle = if (result.command_artifact_handle) |handle|
+        try alloc.dupe(u8, handle)
+    else
+        null;
+    errdefer if (command_artifact_handle) |handle| alloc.free(handle);
     return .{
         .tool_call_id = tool_call_id,
         .tool_name = tool_name,
@@ -2676,8 +2610,8 @@ fn dupePersistedToolResult(alloc: std.mem.Allocator, result: PersistedToolResult
         .permission_feedback = permission_feedback,
         .committed_file_presentation = committed_file_presentation,
         .command_output_replay = command_output_replay,
+        .command_artifact_handle = command_artifact_handle,
         .command_process_presentation = result.command_process_presentation,
-        .terminal_action_presentation = result.terminal_action_presentation,
     };
 }
 
@@ -2692,6 +2626,7 @@ fn freePersistedToolResult(alloc: std.mem.Allocator, result: PersistedToolResult
         freeCommittedFilePresentation(alloc, presentation);
     }
     if (result.command_output_replay) |replay| freeCommandOutputReplay(alloc, replay);
+    if (result.command_artifact_handle) |handle| alloc.free(handle);
 }
 
 pub fn dupeCommandOutputReplay(

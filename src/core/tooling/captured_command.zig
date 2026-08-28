@@ -2,40 +2,27 @@ const std = @import("std");
 
 const Allocator = std.mem.Allocator;
 
-/// Classifies command-shaped tool calls that use captured execution rather
-/// than a durable terminal session. Historical `run_command` records remain
-/// presentation-compatible even though that tool is no longer executable.
+/// Classifies command-shaped tool calls that use captured execution. Historical
+/// `run_command` records remain presentation-compatible even though that tool
+/// is no longer executable.
 pub fn isToolCall(
     alloc: Allocator,
     tool_name: []const u8,
     arguments_json: []const u8,
 ) Allocator.Error!bool {
-    if (std.mem.eql(u8, tool_name, "run_command")) return true;
-    if (!std.mem.eql(u8, tool_name, "terminal")) return false;
-
-    var parsed = std.json.parseFromSlice(std.json.Value, alloc, arguments_json, .{}) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return false,
-    };
-    defer parsed.deinit();
-    if (parsed.value != .object) return false;
-    const action = parsed.value.object.get("action") orelse return false;
-    return action == .string and std.mem.eql(u8, action.string, "exec");
+    _ = alloc;
+    _ = arguments_json;
+    return std.mem.eql(u8, tool_name, "run_command") or
+        std.mem.eql(u8, tool_name, "exec_command");
 }
 
-test "captured command classification recognizes terminal exec and historical records" {
+test "captured command classification recognizes unified exec and history" {
     const alloc = std.testing.allocator;
     try std.testing.expect(try isToolCall(
         alloc,
-        "terminal",
-        "{\"action\":\"exec\",\"command\":\"printf ok\"}",
-    ));
-    try std.testing.expect(!try isToolCall(
-        alloc,
-        "terminal",
-        "{\"action\":\"start\",\"command\":\"printf ok\"}",
+        "exec_command",
+        "{\"cmd\":\"printf ok\"}",
     ));
     try std.testing.expect(try isToolCall(alloc, "run_command", "{}"));
     try std.testing.expect(!try isToolCall(alloc, "read_file", "{}"));
-    try std.testing.expect(!try isToolCall(alloc, "terminal", "not-json"));
 }

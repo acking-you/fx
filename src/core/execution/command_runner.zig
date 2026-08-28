@@ -704,7 +704,13 @@ const ArtifactFile = union(enum) {
     }
 };
 
-const CommandArtifact = struct {
+pub const CommandArtifact = struct {
+    pub const Paths = struct {
+        output_file: []const u8,
+        stdout_file: []const u8,
+        stderr_file: []const u8,
+    };
+
     output_file: []const u8,
     stdout_file: []const u8,
     stderr_file: []const u8,
@@ -715,7 +721,7 @@ const CommandArtifact = struct {
     output_hasher: std.crypto.hash.sha2.Sha256 =
         std.crypto.hash.sha2.Sha256.init(.{}),
 
-    fn append(self: *CommandArtifact, stream: CommandOutputStream, bytes: []const u8) !void {
+    pub fn append(self: *CommandArtifact, stream: CommandOutputStream, bytes: []const u8) !void {
         if (bytes.len == 0) return;
         try self.output.writeAll(bytes);
         switch (stream) {
@@ -725,19 +731,27 @@ const CommandArtifact = struct {
         self.output_hasher.update(bytes);
     }
 
-    fn close(self: *CommandArtifact) void {
+    pub fn close(self: *CommandArtifact) void {
         self.output.close();
         self.stdout.close();
         self.stderr.close();
     }
 
-    fn sync(self: *CommandArtifact) !void {
+    pub fn deinit(self: *CommandArtifact, alloc: Allocator) void {
+        self.close();
+        alloc.free(self.output_file);
+        alloc.free(self.stdout_file);
+        alloc.free(self.stderr_file);
+        self.* = undefined;
+    }
+
+    pub fn sync(self: *CommandArtifact) !void {
         try self.output.sync();
         try self.stdout.sync();
         try self.stderr.sync();
     }
 
-    fn contentAddressManagedOutput(
+    pub fn contentAddressManagedOutput(
         self: *CommandArtifact,
         alloc: Allocator,
     ) !void {
@@ -782,6 +796,14 @@ const CommandArtifact = struct {
             return err;
         };
         self.output_file = target_path;
+    }
+
+    pub fn paths(self: *const CommandArtifact) Paths {
+        return .{
+            .output_file = self.output_file,
+            .stdout_file = self.stdout_file,
+            .stderr_file = self.stderr_file,
+        };
     }
 };
 
@@ -1307,7 +1329,7 @@ fn streamPreviewLimit(max_command_output_bytes: usize) usize {
     return @max(@as(usize, 1), max_command_output_bytes / 2);
 }
 
-fn createCommandArtifact(
+pub fn createCommandArtifact(
     alloc: Allocator,
     capability: ?*session_child_store.SessionChildCapability,
     preferred_dir: ?[]const u8,

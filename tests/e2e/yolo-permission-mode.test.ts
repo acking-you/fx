@@ -91,10 +91,8 @@ describe("yolo permission mode", () => {
       );
 
       const fake = startFakeGateway([
-        fakeGatewayToolCall("yolo_command", "terminal", {
-          action: "exec",
-          timeout_ms: 600_000,
-          command: `printf 'YOLO_COMMAND_OK\\n' > ${JSON.stringify(markerPath)}`,
+        fakeGatewayToolCall("yolo_command", "exec_command", {
+          cmd: `printf 'YOLO_COMMAND_OK\\n' > ${JSON.stringify(markerPath)}`,
         }),
         fakeGatewayFinalText("YOLO_HEADLESS_DONE"),
       ]);
@@ -127,7 +125,7 @@ describe("yolo permission mode", () => {
       expect(output.output).toContain("YOLO_HEADLESS_DONE");
       expect(
         output.tool_calls.some(
-          (call) => call.name === "terminal" && call.status === "success",
+          (call) => call.name === "exec_command" && call.status === "success",
         ),
       ).toBe(true);
       expect(readFileSync(markerPath, "utf8")).toBe("YOLO_COMMAND_OK\n");
@@ -196,10 +194,8 @@ describe("yolo permission mode", () => {
       );
 
       const fake = startFakeGateway([
-        fakeGatewayToolCall("legacy_ps", "terminal", {
-          action: "exec",
-          timeout_ms: 600_000,
-          command: `ps -p $$ -o pid= > ${JSON.stringify(psPath)}; printf x >> ${JSON.stringify(attemptsPath)}`,
+        fakeGatewayToolCall("legacy_ps", "exec_command", {
+          cmd: `ps -p $$ -o pid= > ${JSON.stringify(psPath)}; printf x >> ${JSON.stringify(attemptsPath)}`,
         }),
         fakeGatewayFinalText("LEGACY_PS_DONE"),
       ]);
@@ -321,10 +317,8 @@ describe.skipIf(!tmuxAvailable())("yolo interactive mode", () => {
       const fake = startFakeGateway([
         async () => {
           await toolCallGate;
-          return fakeGatewayToolCall("live_auto_command", "terminal", {
-            action: "exec",
-            timeout_ms: 600_000,
-            command: `printf 'LIVE_AUTO_OK\\n' > ${JSON.stringify(markerPath)}`,
+          return fakeGatewayToolCall("live_auto_command", "exec_command", {
+            cmd: `printf 'LIVE_AUTO_OK\\n' > ${JSON.stringify(markerPath)}`,
           });
         },
         fakeGatewayFinalText("LIVE_AUTO_DONE"),
@@ -363,7 +357,7 @@ describe.skipIf(!tmuxAvailable())("yolo interactive mode", () => {
       expect(readFileSync(markerPath, "utf8")).toBe("LIVE_AUTO_OK\n");
       expect(fake.classifierRequests).toHaveLength(1);
       expect(readFileSync(tracePath, "utf8")).toContain(
-        "tool_name=terminal permission_mode=auto",
+        "tool_name=exec_command permission_mode=auto",
       );
       expect(JSON.parse(readFileSync(fixture.settingsPath, "utf8"))).toMatchObject({
         permission_mode: "auto",
@@ -397,10 +391,8 @@ describe.skipIf(!tmuxAvailable())("yolo interactive mode", () => {
       const fake = startFakeGateway([
         async () => {
           await toolCallGate;
-          return fakeGatewayToolCall("live_ask_command", "terminal", {
-            action: "exec",
-            timeout_ms: 600_000,
-            command: `printf 'LIVE_ASK_WRONG\\n' > ${JSON.stringify(markerPath)}`,
+          return fakeGatewayToolCall("live_ask_command", "exec_command", {
+            cmd: `printf 'LIVE_ASK_WRONG\\n' > ${JSON.stringify(markerPath)}`,
           });
         },
         fakeGatewayFinalText("LIVE_ASK_DONE"),
@@ -441,7 +433,7 @@ describe.skipIf(!tmuxAvailable())("yolo interactive mode", () => {
       expect(existsSync(markerPath)).toBe(false);
       expect(fake.classifierRequests).toHaveLength(0);
       expect(readFileSync(tracePath, "utf8")).toContain(
-        "tool_name=terminal permission_mode=ask",
+        "tool_name=exec_command permission_mode=ask",
       );
 
       await session.sendKeys("3");

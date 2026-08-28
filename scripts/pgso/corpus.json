@@ -6,7 +6,6 @@
     "notifications.test.ts": "Sound-related tests are prohibited on the production training host.",
     "tmux-helpers.test.ts": "The suite validates E2E harness helpers rather than fx runtime behavior.",
     "tui-agent.test.ts": "The suite requires a real model credential and is not deterministic.",
-    "tui-command-permissions.test.ts": "The file contains a sound scenario and cannot be run safely as a whole.",
     "tui-direct-write-audit.test.ts": "The suite validates a repository audit tool rather than the candidate runtime.",
     "tui-keybindings.test.ts": "The file-wide guard requires a real model credential.",
     "tui-render-lab.test.ts": "The suite validates render-lab infrastructure and owns separate native opt-in scenarios.",
@@ -77,7 +76,6 @@
       "requires_tmux": false
     },
     {"name": "e2e-cli", "argv": ["bun", "test", "--max-concurrency", "1", "./cli.test.ts"], "test_file": "cli.test.ts", "allow_keychain": true},
-    {"name": "e2e-ask-presentation", "argv": ["bun", "test", "--max-concurrency", "1", "./ask-presentation.test.ts"], "test_file": "ask-presentation.test.ts"},
     {"name": "e2e-config-persistence", "argv": ["bun", "test", "--max-concurrency", "1", "./config-persistence.test.ts"], "test_file": "config-persistence.test.ts"},
     {"name": "e2e-prompt-history", "argv": ["bun", "test", "--max-concurrency", "1", "./prompt-history.test.ts"], "test_file": "prompt-history.test.ts"},
     {"name": "e2e-reasoning-context-replay", "argv": ["bun", "test", "--max-concurrency", "1", "./reasoning-context-replay.test.ts"], "test_file": "reasoning-context-replay.test.ts", "requires_tmux": false},
@@ -103,7 +101,6 @@
     {"name": "e2e-tui-permissions", "argv": ["bun", "test", "--max-concurrency", "1", "./tui-permissions.test.ts"], "test_file": "tui-permissions.test.ts"},
     {"name": "e2e-tui-interrupt-recovery", "argv": ["bun", "test", "--max-concurrency", "1", "./tui-interrupt-recovery.test.ts"], "test_file": "tui-interrupt-recovery.test.ts"},
     {"name": "e2e-tui-subagent-manager", "argv": ["bun", "test", "--max-concurrency", "1", "./tui-subagent-manager.test.ts"], "test_file": "tui-subagent-manager.test.ts"},
-    {"name": "e2e-tui-terminal-tool", "argv": ["bun", "test", "--max-concurrency", "1", "./tui-terminal-tool.test.ts"], "test_file": "tui-terminal-tool.test.ts"},
     {"name": "e2e-tui-native-clear-recovery", "argv": ["bun", "test", "--max-concurrency", "1", "./tui-native-clear-recovery.test.ts"], "test_file": "tui-native-clear-recovery.test.ts"},
     {"name": "e2e-tui-gateway-stream-lifecycle", "argv": ["bun", "test", "--max-concurrency", "1", "./tui-gateway-stream-lifecycle.test.ts"], "test_file": "tui-gateway-stream-lifecycle.test.ts"}
   ],
