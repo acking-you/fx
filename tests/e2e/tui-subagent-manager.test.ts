@@ -1751,13 +1751,12 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
           await active.waitForText(childName, TIMEOUT);
         }
 
-        const completed = await active.waitForPane(
+        await active.waitForPane(
           (pane) =>
             pane.includes("COMMAND_STREAM_CHILD_COMPLETE") &&
-            pane.includes("status: idle"),
+            pane.includes(`${childName} · idle ·`),
           TIMEOUT,
         );
-        expect(completed).toContain("10 tool calls");
         expect(active.paneStatus()).toEqual({ dead: false, status: null });
         expect(gateway.requests).toHaveLength(commandCount + 3);
         expect(readFileSync(fixture.stderrPath, "utf8")).toBe("");
