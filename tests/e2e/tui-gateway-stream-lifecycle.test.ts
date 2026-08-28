@@ -5536,7 +5536,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       });
       await session.waitForText(finalText, TIMEOUT);
       const resumed = await session.captureFullScrollback();
-      expect(countOccurrences(resumed, "● 1 tool call · 1 command")).toBe(3);
+      expect(countOccurrences(resumed, "● 3 tool calls · 3 commands")).toBe(1);
       expect(resumed).toContain(
         "Ran cd ./example/packages/cli/test/fixtures/unit/commands/git/connect/unlink && pwd",
       );
