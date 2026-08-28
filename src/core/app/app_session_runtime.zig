@@ -4802,6 +4802,7 @@ pub fn Runtime(comptime App: type) type {
                     result.command_output_replay,
                     result.tool_call_id,
                 ) or
+                try writeCommandArtifactOutput(app, sink, result) or
                 try writeStoredCommandOutput(app, sink, result) or
                 try writeSavedCommandOutput(sink, result.output);
             // Attach terminal detail after historical command chunks so typed
@@ -5020,6 +5021,61 @@ pub fn Runtime(comptime App: type) type {
             };
             defer app.alloc.free(output);
             return writeSavedCommandOutput(sink, output);
+        }
+
+        fn writeCommandArtifactOutput(
+            app: *App,
+            sink: anytype,
+            result: types.PersistedToolResult,
+        ) !bool {
+            const handle = result.command_artifact_handle orelse return false;
+            const loaded = if (app.session_persistence.writable) |*value|
+                value
+            else
+                return false;
+            const capability = loaded.childCapability() catch |err| {
+                debug_trace.logf(
+                    "session",
+                    "resume command artifact could not open handle={s} err={s}",
+                    .{ handle, @errorName(err) },
+                );
+                return false;
+            };
+            var file = capability.openFileReadOnly(
+                app.alloc,
+                .command_artifacts,
+                handle,
+            ) catch |err| {
+                debug_trace.logf(
+                    "session",
+                    "resume command artifact unavailable handle={s} err={s}",
+                    .{ handle, @errorName(err) },
+                );
+                return false;
+            };
+            defer file.deinit();
+            const stat = file.stat() catch |err| {
+                debug_trace.logf(
+                    "session",
+                    "resume command artifact stat failed handle={s} err={s}",
+                    .{ handle, @errorName(err) },
+                );
+                return false;
+            };
+            const size = std.math.cast(usize, stat.size) orelse return false;
+            if (size == 0) return false;
+            const output = file.readToEnd(app.alloc, size +| 1) catch |err| {
+                debug_trace.logf(
+                    "session",
+                    "resume command artifact read failed handle={s} err={s}",
+                    .{ handle, @errorName(err) },
+                );
+                return false;
+            };
+            defer app.alloc.free(output);
+            try sink.appendCommandOutput(.stdout, output);
+            try sink.finishCommandOutput();
+            return true;
         }
 
         fn writeUnreportedToolStatus(

@@ -6,6 +6,7 @@ const pathing = @import("../../core/workspace/pathing.zig");
 const shell_resolver = @import("../../core/terminal/shell_resolver.zig");
 const tool_dispatch = @import("../../core/tooling/tool_dispatch.zig");
 const tool_args = @import("../../core/tooling/tool_args.zig");
+const types = @import("../../core/shared/types.zig");
 const unified_exec = @import("../../core/execution/unified_exec.zig");
 
 const Allocator = std.mem.Allocator;
@@ -167,11 +168,16 @@ pub fn callExec(ctx: tool_dispatch.DispatchContext, erased: tool_dispatch.ToolIn
         .command_artifact_threshold = ctx.max_command_output_bytes,
     }) catch |err| return .{ .failure = try std.fmt.allocPrint(ctx.allocator, "exec_command failed: {s}", .{@errorName(err)}) };
     defer result.deinit(ctx.allocator);
-    reportArtifactHandle(ctx, result.output_file) catch return error.OutOfMemory;
+    reportResultMemory(ctx, result) catch return error.OutOfMemory;
     if (ctx.command_result_json_sink) |sink| {
         sink.* = commandResultJson(ctx.allocator, input.cmd, cwd, result) catch return error.OutOfMemory;
     }
-    return .{ .success = formatResult(ctx.allocator, result) catch return error.OutOfMemory };
+    const body = formatResult(ctx.allocator, result) catch return error.OutOfMemory;
+    return if (result.status == .exited and
+        ((result.exit_code orelse 0) != 0 or result.signal != null))
+        .{ .failure = body }
+    else
+        .{ .success = body };
 }
 
 pub fn callWrite(ctx: tool_dispatch.DispatchContext, erased: tool_dispatch.ToolInput) tool_dispatch.DispatchError!tool_dispatch.ToolResult {
@@ -184,7 +190,7 @@ pub fn callWrite(ctx: tool_dispatch.DispatchContext, erased: tool_dispatch.ToolI
         .max_output_tokens = input.max_output_tokens,
     }) catch |err| return .{ .failure = try std.fmt.allocPrint(ctx.allocator, "write_stdin failed: {s}", .{@errorName(err)}) };
     defer result.deinit(ctx.allocator);
-    reportArtifactHandle(ctx, result.output_file) catch return error.OutOfMemory;
+    reportResultMemory(ctx, result) catch return error.OutOfMemory;
     if (ctx.command_result_json_sink) |sink| {
         sink.* = commandResultJson(
             ctx.allocator,
@@ -193,13 +199,31 @@ pub fn callWrite(ctx: tool_dispatch.DispatchContext, erased: tool_dispatch.ToolI
             result,
         ) catch return error.OutOfMemory;
     }
-    return .{ .success = formatResult(ctx.allocator, result) catch return error.OutOfMemory };
+    const body = formatResult(ctx.allocator, result) catch return error.OutOfMemory;
+    return if (result.status == .exited and
+        ((result.exit_code orelse 0) != 0 or result.signal != null))
+        .{ .failure = body }
+    else
+        .{ .success = body };
 }
 
-fn reportArtifactHandle(ctx: tool_dispatch.DispatchContext, output_file: ?[]const u8) !void {
-    const path = output_file orelse return;
-    const handle = try ctx.allocator.dupe(u8, std.fs.path.basename(path));
-    tool_dispatch.reportToolResultMemory(ctx, .{ .command_artifact_handle = handle });
+fn reportResultMemory(ctx: tool_dispatch.DispatchContext, result: unified_exec.Manager.Result) !void {
+    var memory: types.ToolResultMemory = .{};
+    if (result.output_file) |path| {
+        memory.command_artifact_handle = try ctx.allocator.dupe(u8, std.fs.path.basename(path));
+    }
+    if (result.status == .exited) {
+        if (result.signal) |signal| {
+            memory.command_process_presentation = .{ .signal = signal };
+        } else if (result.exit_code) |code| {
+            memory.command_process_presentation = .{ .exit_code = code };
+        }
+    }
+    if (memory.command_artifact_handle != null or
+        memory.command_process_presentation != null)
+    {
+        tool_dispatch.reportToolResultMemory(ctx, memory);
+    }
 }
 
 fn commandResultJson(alloc: Allocator, command: []const u8, cwd: []const u8, result: unified_exec.Manager.Result) ![]u8 {
@@ -233,6 +257,7 @@ fn formatResult(alloc: Allocator, result: unified_exec.Manager.Result) ![]u8 {
     try out.writer.print("\"wall_time_seconds\":{d:.3},\"output\":", .{result.wall_time_seconds});
     try std.json.Stringify.value(combined.items, .{}, &out.writer);
     if (result.exit_code) |code| try out.writer.print(",\"exit_code\":{d}", .{code});
+    if (result.signal) |signal| try out.writer.print(",\"signal\":{d}", .{signal});
     if (result.process_id) |id| try out.writer.print(",\"session_id\":{d}", .{id});
     const original_token_count = (result.stdout_bytes +| result.stderr_bytes +| 3) / 4;
     try out.writer.print(",\"original_token_count\":{d}}}", .{original_token_count});
