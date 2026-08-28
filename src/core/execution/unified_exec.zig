@@ -27,23 +27,15 @@ pub const Manager = struct {
     }
 
     pub fn deinit(self: *Manager) void {
-        const zio = io_mod.getIo();
-        self.operation_mutex.lockUncancelable(zio);
-        defer self.operation_mutex.unlock(zio);
-        self.mutex.lockUncancelable(zio);
-        self.stopping = true;
-        var values: std.ArrayList(*Process) = .empty;
-        defer values.deinit(self.alloc);
-        var iterator = self.processes.iterator();
-        while (iterator.next()) |entry| values.append(self.alloc, entry.value_ptr.*) catch {};
-        self.processes.clearRetainingCapacity();
-        self.mutex.unlock(zio);
-
-        for (values.items) |process| {
-            process.stopAndJoin();
-            process.destroy();
-        }
+        self.stopAll(true);
         self.processes.deinit();
+    }
+
+    /// Stops every process still owned by the manager without making the
+    /// manager unusable. ACP session changes call this so a process ID from a
+    /// previous session cannot be reused against the newly active session.
+    pub fn terminateAll(self: *Manager) void {
+        self.stopAll(false);
     }
 
     pub fn supported() bool {
@@ -224,6 +216,29 @@ pub const Manager = struct {
         defer self.mutex.unlock(io_mod.getIo());
         const entry = self.processes.fetchRemove(id) orelse return null;
         return entry.value;
+    }
+
+    fn stopAll(self: *Manager, mark_stopping: bool) void {
+        const zio = io_mod.getIo();
+        self.operation_mutex.lockUncancelable(zio);
+        defer self.operation_mutex.unlock(zio);
+        self.mutex.lockUncancelable(zio);
+        if (mark_stopping) self.stopping = true;
+        var values: [max_processes]*Process = undefined;
+        var count: usize = 0;
+        var iterator = self.processes.iterator();
+        while (iterator.next()) |entry| {
+            if (count == values.len) break;
+            values[count] = entry.value_ptr.*;
+            count += 1;
+        }
+        self.processes.clearRetainingCapacity();
+        self.mutex.unlock(zio);
+
+        for (values[0..count]) |process| {
+            process.stopAndJoin();
+            process.destroy();
+        }
     }
 };
 
@@ -797,6 +812,34 @@ test "unified exec explicitly terminates a live session" {
         std.testing.allocator,
         .{ .process_id = process_id },
     ));
+}
+
+test "unified exec terminateAll clears live sessions and preserves the manager" {
+    if (!Manager.supported()) return error.SkipZigTest;
+    var manager = Manager.init(std.testing.allocator);
+    defer manager.deinit();
+    var running = try manager.exec(std.testing.allocator, .{
+        .command = "sleep 30",
+        .cwd = "/tmp",
+        .yield_time_ms = 250,
+    });
+    const process_id = running.process_id.?;
+    running.deinit(std.testing.allocator);
+
+    manager.terminateAll();
+    try std.testing.expectError(error.UnknownProcessId, manager.writeStdin(
+        std.testing.allocator,
+        .{ .process_id = process_id },
+    ));
+
+    var result = try manager.exec(std.testing.allocator, .{
+        .command = "printf reusable",
+        .cwd = "/tmp",
+        .yield_time_ms = 250,
+    });
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expectEqual(Manager.Status.exited, result.status);
+    try std.testing.expectEqualStrings("reusable", result.stdout);
 }
 
 test "unified exec drains large output without unbounded retained memory" {

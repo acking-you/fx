@@ -27,6 +27,11 @@ pub const Request = struct {
     messages: []const types.ChatMessage,
     capabilities: model_capabilities.Capabilities = .{},
     provider_options: model_capabilities.ResolvedProviderOptions,
+    /// When supplied, use the caller's captured route identity instead of
+    /// rebuilding it from the live process environment. Background callers
+    /// use this to keep the request and its stale-result check bound to the
+    /// same provider endpoint and credential identity.
+    provider_binding: ?types.ResponsesCompactionProviderBindingView = null,
     cancel_flag: *std.atomic.Value(bool),
 };
 
@@ -96,17 +101,35 @@ pub fn compact(alloc: Allocator, request: Request) !Result {
     }
     const provider = request.provider orelse return localResult(local_summary);
 
-    const binding = responses_compaction_binding.buildFromEnvironmentAlloc(
-        alloc,
-        source,
-        request.credential,
-        request.account_id,
-    ) catch |err| {
-        debug_trace.logf("compaction", "provider binding unavailable err={s}", .{@errorName(err)});
-        return localResult(local_summary);
+    var owned_binding: ?types.ResponsesCompactionProviderBinding = null;
+    const binding_view = if (request.provider_binding) |provided| blk: {
+        responses_compaction_binding.validate(source, provided) catch |err| {
+            debug_trace.logf("compaction", "provider binding unavailable err={s}", .{@errorName(err)});
+            return localResult(local_summary);
+        };
+        if (!responses_compaction_binding.credentialMatches(
+            source,
+            request.credential,
+            request.account_id,
+            provided,
+        )) {
+            debug_trace.logf("compaction", "provider binding unavailable err=CredentialBindingMismatch", .{});
+            return localResult(local_summary);
+        }
+        break :blk provided;
+    } else blk: {
+        owned_binding = responses_compaction_binding.buildFromEnvironmentAlloc(
+            alloc,
+            source,
+            request.credential,
+            request.account_id,
+        ) catch |err| {
+            debug_trace.logf("compaction", "provider binding unavailable err={s}", .{@errorName(err)});
+            return localResult(local_summary);
+        };
+        break :blk owned_binding.?.view();
     };
-    var owns_binding = true;
-    errdefer if (owns_binding) {
+    defer if (owned_binding) |binding| {
         types.freeResponsesCompactionProviderBinding(alloc, binding);
     };
 
@@ -122,12 +145,12 @@ pub fn compact(alloc: Allocator, request: Request) !Result {
     const outcome = provider.fetch(alloc, .{
         .credential = request.credential,
         .account_id = request.account_id,
-        .provider_binding = binding.view(),
+        .provider_binding = binding_view,
         .build_request = .{
             .credential_source = source,
             .provider_credential = request.credential,
             .account_id = request.account_id,
-            .responses_compaction_binding = binding.view(),
+            .responses_compaction_binding = binding_view,
             .session_id = request.session_id,
             .model = request.model,
             .serialized_tools = request.serialized_tools,
@@ -141,8 +164,6 @@ pub fn compact(alloc: Allocator, request: Request) !Result {
         error.Cancelled => return error.Cancelled,
         else => {
             debug_trace.logf("compaction", "remote request failed err={s}", .{@errorName(err)});
-            types.freeResponsesCompactionProviderBinding(alloc, binding);
-            owns_binding = false;
             return localResult(local_summary);
         },
     };
@@ -150,18 +171,19 @@ pub fn compact(alloc: Allocator, request: Request) !Result {
     return switch (outcome) {
         .unsupported => {
             debug_trace.logf("compaction", "remote request unsupported for active route", .{});
-            types.freeResponsesCompactionProviderBinding(alloc, binding);
-            owns_binding = false;
             return localResult(local_summary);
         },
         .rejected => |status| {
             debug_trace.logf("compaction", "remote request rejected status={d}", .{@intFromEnum(status)});
-            types.freeResponsesCompactionProviderBinding(alloc, binding);
-            owns_binding = false;
             return localResult(local_summary);
         },
         .compacted => |completed| blk: {
-            owns_binding = false;
+            var owned_remote = completed;
+            errdefer owned_remote.deinit(alloc);
+            const result_binding = if (owned_binding) |binding| blk_binding: {
+                owned_binding = null;
+                break :blk_binding binding;
+            } else try types.dupeResponsesCompactionProviderBinding(alloc, binding_view);
             break :blk .{
                 .message = .{
                     .role = .system,
@@ -170,12 +192,12 @@ pub fn compact(alloc: Allocator, request: Request) !Result {
                         .credential_source = completed.credential_source,
                         .wire_model = completed.wire_model,
                         .input_json = completed.input_json,
-                        .provider_binding = binding.view(),
+                        .provider_binding = result_binding.view(),
                     },
                 },
                 .used_remote = true,
-                .owned_binding = binding,
-                .owned_remote = completed,
+                .owned_binding = result_binding,
+                .owned_remote = owned_remote,
             };
         },
     };
@@ -512,6 +534,57 @@ test "remote compaction keeps messages untouched when they fit" {
 
     try std.testing.expect(prepared.owned_messages == null);
     try std.testing.expect(prepared.messages.ptr == messages[0..].ptr);
+}
+
+test "remote compaction honors a caller-captured provider binding" {
+    const Fake = struct {
+        fn fetch(
+            _: ?*anyopaque,
+            alloc: Allocator,
+            request: responses_compaction_provider.Request,
+        ) !responses_compaction_provider.Outcome {
+            try std.testing.expectEqualStrings(
+                "https://captured.example/v1/responses",
+                request.provider_binding.normalized_origin,
+            );
+            try std.testing.expectEqualStrings(
+                request.provider_binding.api_key_sha256.?,
+                request.build_request.responses_compaction_binding.?.api_key_sha256.?,
+            );
+            return .{ .compacted = .{
+                .credential_source = .openai_api_key,
+                .wire_model = try alloc.dupe(u8, "gpt-5.4"),
+                .input_json = try alloc.dupe(u8, "[{\"type\":\"compaction\"}]"),
+            } };
+        }
+    };
+
+    const alloc = std.testing.allocator;
+    const captured = try responses_compaction_binding.buildAlloc(
+        alloc,
+        .openai_api_key,
+        "sk-captured",
+        null,
+        .{ .endpoint_overrides = .{ .responses_base_url = "https://captured.example/v1" } },
+    );
+    defer types.freeResponsesCompactionProviderBinding(alloc, captured);
+
+    var cancel_flag = std.atomic.Value(bool).init(false);
+    var result = try compact(alloc, .{
+        .provider = .{ .fetch_fn = Fake.fetch },
+        .credential_source = .openai_api_key,
+        .credential = "sk-captured",
+        .account_id = null,
+        .session_id = "session",
+        .model = "gpt-5.4",
+        .serialized_tools = "[]",
+        .messages = &.{.{ .role = .user, .content = "retain this intent" }},
+        .provider_options = .{},
+        .provider_binding = captured.view(),
+        .cancel_flag = &cancel_flag,
+    });
+    defer result.deinit(alloc);
+    try std.testing.expect(result.used_remote);
 }
 
 test "context overflow recognizes 413 and OpenAI 400 details" {

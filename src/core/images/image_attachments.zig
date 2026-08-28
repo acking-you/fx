@@ -194,6 +194,79 @@ pub fn createTempSnapshotDir(alloc: std.mem.Allocator) ![]u8 {
     return error.PathAlreadyExists;
 }
 
+/// Materializes an ACP inline image directly into the session snapshot
+/// directory. The resulting attachment owns both path fields and can be
+/// passed through the normal snapshot verification and history lifecycle.
+pub fn createImageAttachmentFromBytes(
+    alloc: std.mem.Allocator,
+    snapshot_dir: []const u8,
+    image_id: usize,
+    bytes: []const u8,
+    declared_media_type: ?[]const u8,
+) !types.ImageAttachment {
+    if (image_id == 0) return error.InvalidImageId;
+    if (bytes.len == 0 or bytes.len > max_image_bytes) return error.ImageTooLarge;
+    if (!fitsEncodedLimit(bytes.len)) return error.ImagePreparationFailed;
+    const detected_media_type = detectMediaTypeFromBytes(bytes) orelse
+        return error.UnsupportedImageType;
+    if (declared_media_type) |declared| {
+        if (!std.mem.eql(u8, declared, detected_media_type)) {
+            return error.ImageSnapshotMediaTypeMismatch;
+        }
+    }
+
+    var hasher = Sha256.init(.{});
+    hasher.update(bytes);
+    var digest: [Sha256.digest_length]u8 = undefined;
+    hasher.final(&digest);
+    const digest_hex = std.fmt.bytesToHex(digest, .lower);
+
+    var directory = try openOrCreateSnapshotDirectoryNoFollow(snapshot_dir);
+    defer directory.close(io_mod.getIo());
+
+    var suffix: u64 = undefined;
+    io_mod.getIo().random(std.mem.asBytes(&suffix));
+    const name = try std.fmt.allocPrint(
+        alloc,
+        "image-{d}-{s}-{x}.bin",
+        .{ image_id, digest_hex[0..16], suffix },
+    );
+    defer alloc.free(name);
+    var file = try directory.createFile(io_mod.getIo(), name, .{
+        .truncate = false,
+        .exclusive = true,
+        .permissions = std.Io.File.Permissions.fromMode(0o600),
+        .resolve_beneath = true,
+    });
+    var file_open = true;
+    defer if (file_open) file.close(io_mod.getIo());
+    errdefer deleteSnapshotFile(directory, name, "acp_inline_image");
+    try file.writeStreamingAll(io_mod.getIo(), bytes);
+    try file.sync(io_mod.getIo());
+    file.close(io_mod.getIo());
+    file_open = false;
+    try syncSnapshotDirectory(directory);
+
+    const final_path = try std.fs.path.join(alloc, &.{ snapshot_dir, name });
+    errdefer alloc.free(final_path);
+    const path = try alloc.dupe(u8, final_path);
+    errdefer alloc.free(path);
+    const media_type = try alloc.dupe(u8, detected_media_type);
+    errdefer alloc.free(media_type);
+    const snapshot_path = try alloc.dupe(u8, final_path);
+    errdefer alloc.free(snapshot_path);
+    const snapshot_sha256 = try alloc.dupe(u8, &digest_hex);
+    errdefer alloc.free(snapshot_sha256);
+    alloc.free(final_path);
+    return .{
+        .id = image_id,
+        .path = path,
+        .media_type = media_type,
+        .snapshot_path = snapshot_path,
+        .snapshot_sha256 = snapshot_sha256,
+    };
+}
+
 pub fn cleanupSnapshotDir(path: []const u8) void {
     if (path.len == 0) return;
     const parent_path = std.fs.path.dirname(path) orelse return;
@@ -2851,6 +2924,31 @@ test "snapshot directory handle syncs after create and after reopen" {
     var reopened = try openOrCreateSnapshotDirectoryNoFollow(snapshot_dir);
     defer reopened.close(std.testing.io);
     try syncSnapshotDirectory(reopened);
+}
+
+test "inline image bytes create a verified snapshot attachment" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const snapshot_dir = try testSnapshotDir(alloc, &tmp);
+    defer alloc.free(snapshot_dir);
+    const png = "\x89PNG\r\n\x1a\nacp-inline";
+    const attachment = try createImageAttachmentFromBytes(
+        alloc,
+        snapshot_dir,
+        1,
+        png,
+        "image/png",
+    );
+    defer discardImageAttachment(alloc, attachment);
+
+    try std.testing.expect(attachment.snapshot_path != null);
+    try std.testing.expect(attachment.snapshot_sha256 != null);
+    var verified = try loadVerifiedSnapshot(alloc, attachment, .{});
+    defer verified.deinit(alloc);
+    try std.testing.expectEqualStrings("image/png", verified.media_type);
+    try std.testing.expectEqualSlices(u8, png, verified.bytes);
 }
 
 test "encoded image limit uses exact padded base64 length" {

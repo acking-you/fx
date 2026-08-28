@@ -236,6 +236,7 @@ fn commandResultJson(alloc: Allocator, command: []const u8, cwd: []const u8, res
         .stdout_bytes = result.stdout_bytes,
         .stderr_bytes = result.stderr_bytes,
         .truncated = result.stdout_truncated or result.stderr_truncated,
+        .process_id = result.process_id,
     };
     if (result.output_file) |path| foreground.output_file = path;
     if (result.stdout_file) |path| foreground.stdout_file = path;

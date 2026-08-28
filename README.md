@@ -185,6 +185,11 @@ fx builds as a native binary or WebAssembly. Applications embedding fx can provi
 
 The WebAssembly SDK is experimental. See the [WebAssembly SDK](sdk/README.md) and the repository's [ACP usage and fx extensions guide](docs/acp.md).
 
+Native ACP clients can also interact with a running Unified Exec process
+directly through `fx/unifiedExec/writeStdin` and `fx/unifiedExec/kill`; see the
+ACP guide for the session and process ID contract. Vision-capable models accept
+standard ACP base64 image prompt blocks and persist verified image snapshots.
+
 ## Extend fx
 
 Add reusable instructions with skills, connect external tools through MCP, or delegate independent work to subagents. Inside fx, `/mcp add <name> <command> [args...]` saves a local server and `/mcp add --transport http <name> <url>` saves a remote Streamable HTTP server. Project instruction files may link within their scope, and read-only workspace or compatibility skill directories and their primary `SKILL.md` files may link within their owning workspace or home; managed skills, secondary resources, and escaping links remain no-follow. Skills installed via symlinks that resolve outside home or workspace (e.g. Nix store paths) are loaded when their resolved target is inside a directory listed in the `FX_SKILL_SYMLINK_AUTHORITIES` environment variable (colon-separated absolute paths). `fx status` and `fx doctor` report an invalid trusted MCP profile without starting its servers.

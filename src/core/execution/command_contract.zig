@@ -27,6 +27,9 @@ pub const ForegroundCommandResult = struct {
     stdout_bytes: usize = 0,
     stderr_bytes: usize = 0,
     truncated: bool = false,
+    /// Numeric Unified Exec ID when the process is still running after the
+    /// bounded yield window. Completed commands omit this field on the wire.
+    process_id: ?u64 = null,
     output_file: ?[]const u8 = null,
     stdout_file: ?[]const u8 = null,
     stderr_file: ?[]const u8 = null,
@@ -161,6 +164,9 @@ fn writeForegroundJson(result: ForegroundCommandResult, writer: *std.Io.Writer) 
     try writeIntField(writer, "stdout_bytes", result.stdout_bytes);
     try writeIntField(writer, "stderr_bytes", result.stderr_bytes);
     try writeBoolField(writer, "truncated", result.truncated);
+    if (result.process_id) |process_id| {
+        try writeIntField(writer, "process_id", process_id);
+    }
     try writeOptionalStringField(writer, "output_file", result.output_file);
     try writeOptionalStringField(writer, "stdout_file", result.stdout_file);
     try writeOptionalStringField(writer, "stderr_file", result.stderr_file);

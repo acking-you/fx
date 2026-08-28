@@ -5,6 +5,7 @@ const config_runtime = @import("../config/config_runtime.zig");
 const model_capabilities = @import("../config/model_capabilities.zig");
 const stream_provider = @import("../agent/stream_provider.zig");
 const worker_runtime = @import("../agent/worker_runtime.zig");
+const runtime_compaction = @import("../agent/runtime/compaction.zig");
 const responses_compaction_provider = @import("../gateway/responses_compaction_provider.zig");
 const responses_compaction_binding = @import("../gateway/responses_compaction_binding.zig");
 const provider_route = @import("../gateway/provider_route.zig");
@@ -1196,6 +1197,7 @@ const ResponsesCompactionTaskRuntime = struct {
         model_prompt_overlay: ?[]u8,
         serialized_tools: []u8,
         history: []types.HistoryTurn,
+        capabilities: model_capabilities.Capabilities = .{},
         provider_options: model_capabilities.ResolvedProviderOptions,
 
         fn deinit(self: *Task) void {
@@ -1288,26 +1290,32 @@ const ResponsesCompactionTaskRuntime = struct {
         }
         try session_runtime.appendHistoryChatMessages(arena, &messages, task.history);
 
-        const outcome = try task.provider.fetch(backing, .{
+        var result = try runtime_compaction.compact(backing, .{
+            .provider = task.provider,
+            .credential_source = task.credential_source,
             .credential = task.credential,
             .account_id = task.account_id,
+            .session_id = task.session_id,
+            .model = task.model,
+            .serialized_tools = task.serialized_tools,
+            .messages = messages.items,
+            .capabilities = task.capabilities,
+            .provider_options = task.provider_options,
             .provider_binding = task.provider_binding.view(),
-            .build_request = .{
-                .credential_source = task.credential_source,
-                .session_id = task.session_id,
-                .model = task.model,
-                .serialized_tools = task.serialized_tools,
-                .messages = messages.items,
-                .tool_choice = .auto,
-                .provider_options = task.provider_options,
-                .budget = .{ .cancel_flag = &task.cancel_requested },
-            },
+            .cancel_flag = &task.cancel_requested,
         });
-        switch (outcome) {
-            .unsupported => try publishFailure(task, "ResponsesCompactionUnsupported"),
-            .rejected => |status| try publishRejected(task, status),
-            .compacted => |completed| try publishCompleted(task, completed),
+        defer result.deinit(backing);
+        if (!result.used_remote) {
+            // The shared runtime owns the provider call and context-safe
+            // message preparation. The worker event still carries the
+            // captured binding so the UI can perform its normal stale-result
+            // validation and local fallback exactly once.
+            return publishFailure(task, "RemoteCompactionFallback");
         }
+        const completed = result.owned_remote orelse
+            return publishFailure(task, "ResponsesCompactionMissingResult");
+        result.owned_remote = null;
+        return publishCompleted(task, completed);
     }
 
     fn eventBase(task: *Task) !types.ResponsesCompactionWorkerEvent {
@@ -3323,6 +3331,7 @@ pub fn Runtime(comptime App: type) type {
                 .model_prompt_overlay = model_prompt_overlay,
                 .serialized_tools = serialized_tools,
                 .history = history,
+                .capabilities = capabilities,
                 .provider_options = provider_options,
             };
             snapshots_owned_by_task = true;

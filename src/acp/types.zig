@@ -183,12 +183,26 @@ pub fn writeToolCallUpdateWithCommandResult(
     try w.writeAll("}");
 }
 
+pub const InitializeOptions = struct {
+    image_capable: bool = true,
+    unified_exec_capable: bool = true,
+};
+
 pub fn writeInitializeResponse(w: *std.Io.Writer) !void {
+    return writeInitializeResponseWithOptions(w, .{});
+}
+
+pub fn writeInitializeResponseWithOptions(
+    w: *std.Io.Writer,
+    options: InitializeOptions,
+) !void {
     try w.writeAll("{\"protocolVersion\":");
     try w.print("{d}", .{protocol_version});
     try w.writeAll(",\"agentCapabilities\":{");
     try w.writeAll("\"loadSession\":true,");
-    try w.writeAll("\"promptCapabilities\":{\"image\":false,\"audio\":false,\"embeddedContext\":true},");
+    try w.writeAll("\"promptCapabilities\":{\"image\":");
+    try w.writeAll(if (options.image_capable) "true" else "false");
+    try w.writeAll(",\"audio\":false,\"embeddedContext\":true},");
     try w.writeAll("\"mcpCapabilities\":{\"http\":true,\"sse\":true},");
     try w.writeAll("\"sessionCapabilities\":{\"list\":{},\"resume\":{},\"close\":{}}");
     try w.writeAll("},\"agentInfo\":{\"name\":\"fx\",\"title\":\"fx\",\"version\":");
@@ -198,6 +212,9 @@ pub fn writeInitializeResponse(w: *std.Io.Writer) !void {
     try w.writeAll("\"_meta\":{\"fx\":{");
     try w.writeAll("\"turnSteer\":true,\"turnStatus\":true,");
     try w.writeAll("\"backgroundTerminals\":true,\"processStatusCommand\":\"/ps\"");
+    if (options.unified_exec_capable) {
+        try w.writeAll(",\"unifiedExec\":{\"writeStdin\":true,\"kill\":true}");
+    }
     try w.writeAll("}}}");
 }
 
@@ -327,7 +344,7 @@ test "writeInitializeResponse contains required fields" {
         build_options.app_version,
         parsed.value.object.get("agentInfo").?.object.get("version").?.string,
     );
-    try std.testing.expect(std.mem.find(u8, out.writer.buffered(), "\"image\":false") != null);
+    try std.testing.expect(std.mem.find(u8, out.writer.buffered(), "\"image\":true") != null);
     try std.testing.expect(std.mem.find(u8, out.writer.buffered(), "\"list\":{}") != null);
     try std.testing.expect(std.mem.find(u8, out.writer.buffered(), "\"resume\":{}") != null);
     try std.testing.expect(std.mem.find(u8, out.writer.buffered(), "\"close\":{}") != null);
@@ -338,6 +355,9 @@ test "writeInitializeResponse contains required fields" {
     try std.testing.expect(fx_meta.get("turnStatus").?.bool);
     try std.testing.expect(fx_meta.get("backgroundTerminals").?.bool);
     try std.testing.expectEqualStrings("/ps", fx_meta.get("processStatusCommand").?.string);
+    const unified_exec = fx_meta.get("unifiedExec").?.object;
+    try std.testing.expect(unified_exec.get("writeStdin").?.bool);
+    try std.testing.expect(unified_exec.get("kill").?.bool);
 }
 
 test "writeUserMessageChunk produces valid json" {

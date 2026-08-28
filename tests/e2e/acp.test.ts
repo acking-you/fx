@@ -1790,6 +1790,77 @@ describe("acp: model-independent", () => {
   );
 
   test(
+    "ACP directly writes to a yielded Unified Exec process during a turn",
+    async () => {
+      const root = createShortIsolatedRoot("fx-acp-unified-exec-direct-");
+      const toolCallId = "acp_unified_exec_direct_1";
+      const gateway = startFakeGateway([
+        fakeGatewayToolCall(toolCallId, "exec_command", {
+          cmd: "IFS= read -r reply; printf 'ACP_DIRECT_%s' \"$reply\"",
+          yield_time_ms: 250,
+        }),
+        finalText("ACP direct process complete"),
+      ]);
+      try {
+        client = await AcpClient.create({
+          cwd: root.workspace,
+          env: fakeGatewayEnv(root, gateway),
+        });
+        client.setPermissionOption("allow_once");
+        const sessionId = await startCodeSession(client);
+        const promptId = 781;
+        const directId = 782;
+        client.send({
+          jsonrpc: "2.0",
+          id: promptId,
+          method: "session/prompt",
+          params: { prompt: [{ type: "text", text: "Run an interactive command." }] },
+        });
+
+        let directResponse: any = null;
+        let promptResponse: any = null;
+        let directSent = false;
+        const messages: any[] = [];
+        const deadline = Date.now() + TIMEOUT;
+        while ((!directResponse || !promptResponse) && Date.now() < deadline) {
+          const message = await client.readLine(Math.min(5_000, Math.max(100, deadline - Date.now()))) as any;
+          messages.push(message);
+          const processId = message.params?.update?.command_result?.process_id;
+          if (!directSent && typeof processId === "number") {
+            directSent = true;
+            client.send({
+              jsonrpc: "2.0",
+              id: directId,
+              method: "fx/unifiedExec/writeStdin",
+              params: {
+                sessionId,
+                processId,
+                chars: "hello\n",
+                yieldTimeMs: 1_000,
+              },
+            });
+          }
+          if (message.id === directId) directResponse = message;
+          if (message.id === promptId) promptResponse = message;
+        }
+
+        expect(directResponse?.error).toBeUndefined();
+        expect(directResponse?.result.status).toBe("exited");
+        expect(directResponse?.result.output).toBe("ACP_DIRECT_hello");
+        expect(promptResponse?.result.stopReason).toBe("end_turn");
+        expect(JSON.stringify(messages)).toContain("ACP direct process complete");
+        expect(gateway.requests).toHaveLength(2);
+        expect(client.stderr).toBe("");
+      } finally {
+        await client?.close();
+        gateway.stop();
+        rmSync(root.root, { recursive: true, force: true });
+      }
+    },
+    TIMEOUT,
+  );
+
+  test(
     "ACP added-root reads skip external deferral and added project instructions",
     async () => {
       const root = createIsolatedRoot("fx-acp-added-root-");
@@ -2069,7 +2140,7 @@ describe("acp: model-independent", () => {
   );
 
   test(
-    "initialize reports that image prompt blocks are unsupported",
+    "initialize advertises image prompt support",
     async () => {
       const root = createIsolatedRoot("fx-acp-initialize-");
       try {
@@ -2101,7 +2172,7 @@ describe("acp: model-independent", () => {
         expect(resp.result.agentInfo.name).toBe("fx");
         expect(resp.result.agentInfo.version).toBe(version.stdout.trim());
         expect(resp.result.agentCapabilities.loadSession).toBe(true);
-        expect(resp.result.agentCapabilities.promptCapabilities.image).toBe(false);
+        expect(resp.result.agentCapabilities.promptCapabilities.image).toBe(true);
         expect(resp.result.agentCapabilities.mcpCapabilities.http).toBe(true);
         expect(resp.result.agentCapabilities.mcpCapabilities.sse).toBe(true);
         expect(resp.result.agentCapabilities.sessionCapabilities.resume).toEqual({});
@@ -4502,7 +4573,7 @@ describe("acp: model-independent", () => {
         const invalid = await readResponse(client, 94);
         expect(invalid.error).toEqual({
           code: -32602,
-          message: "Image prompt blocks are not supported",
+          message: "Image prompt could not be prepared",
         });
         expect(gateway.requests).toHaveLength(0);
         const detailBefore = await runFx(["session", "--id", sessionId, "--json"], {
@@ -7856,6 +7927,56 @@ describe.skipIf(!HAS_API_KEY)("acp: model-backed protocol", () => {
         for (const request of [...gateway.requests, ...gateway.modelRequests]) {
           expect(request.headers.get("authorization")).not.toBe(`Bearer ${codex.accessToken}`);
         }
+      } finally {
+        await client?.close();
+        codex.stop();
+        gateway.stop();
+        rmSync(root.root, { recursive: true, force: true });
+      }
+    },
+    TIMEOUT,
+  );
+
+  test(
+    "ACP advertises and forwards native image prompts for Codex models",
+    async () => {
+      const root = createIsolatedRoot("fx-acp-image-prompt-");
+      const gateway = startFakeGateway([]);
+      const codex = startAcpFakeCodex();
+      writeSeededAcpChatGptLogin(root.home, codex.accessToken);
+      try {
+        client = await AcpClient.create({
+          cwd: root.workspace,
+          env: {
+            ...fakeGatewayEnv(root, gateway),
+            FX_CODEX_BASE_URL: codex.responsesUrl.replace(/\/responses$/, ""),
+            FX_E2E_OPENAI_CODEX_MODELS_URL: codex.modelsUrl,
+          },
+        });
+        const initialized = await client.request("initialize", { protocolVersion: 1 }, 1) as any;
+        expect(initialized.result.agentCapabilities.promptCapabilities.image).toBe(true);
+        await client.request("session/new", { mcpServers: [] }, 2);
+        await client.readLine();
+        await client.request("session/set_mode", { modeId: "code" }, 3);
+        const changed = await client.request("session/set_config_option", {
+          configId: "provider",
+          value: "codex",
+        }, 4) as any;
+        expect(changed.result.configOptions.find((option: any) => option.id === "provider").currentValue)
+          .toBe("codex");
+
+        const imageData = readFileSync(join(import.meta.dirname, "fixtures", "favicon.png"))
+          .toString("base64");
+        const result = await runPromptBlocks(client, [
+          { type: "text", text: "Describe the attached image." },
+          { type: "image", data: imageData, mimeType: "image/png" },
+        ], TIMEOUT);
+        expect(result.promptResult.result.stopReason).toBe("end_turn");
+        expect(codex.requests).toHaveLength(1);
+        const body = codex.requests[0]!.body;
+        expect(body).toContain('"type":"input_image"');
+        expect(body).toContain("data:image/png;base64,");
+        expect(client.stderr).toBe("");
       } finally {
         await client?.close();
         codex.stop();

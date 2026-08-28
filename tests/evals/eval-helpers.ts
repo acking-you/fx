@@ -77,6 +77,7 @@ export interface HeadlessResult {
       stdout_bytes?: number;
       stderr_bytes?: number;
       truncated?: boolean;
+      process_id?: number;
     };
     question?: string;
   }>;

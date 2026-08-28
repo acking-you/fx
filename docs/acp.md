@@ -25,7 +25,8 @@ The initialize response advertises fx-specific capabilities under `_meta.fx`:
       "turnSteer": true,
       "turnStatus": true,
       "backgroundTerminals": true,
-      "processStatusCommand": "/ps"
+      "processStatusCommand": "/ps",
+      "unifiedExec": {"writeStdin": true, "kill": true}
     }
   }
 }
@@ -87,7 +88,14 @@ The input is consumed at the next model-step boundary. It does not interrupt a m
 
 `expectedTurnId` prevents a delayed client message from steering a newer turn accidentally. The request fails when the session does not own the active turn, the turn ID is stale, or the turn has stopped accepting input.
 
-ACP image prompts are not currently supported, including steer input. Text blocks are supported. Resource blocks retain their embedded text.
+Image prompt blocks are supported for native sessions. Send standard ACP base64
+content with `data` and `mimeType`; fx verifies the bytes and stores a session
+snapshot before sending them to a vision-capable provider. Image blocks are not
+accepted by `fx/turn/steer`, which remains text-only.
+
+```json
+{"jsonrpc":"2.0","id":14,"method":"session/prompt","params":{"sessionId":"SESSION_ID","prompt":[{"type":"text","text":"Describe this image"},{"type":"image","data":"iVBORw0KGgo...","mimeType":"image/png"}]}}
+```
 
 A second standard `session/prompt` request is still treated as a new turn and is rejected while another prompt is active. Use `fx/turn/steer` for same-turn input.
 
@@ -145,6 +153,38 @@ The catalog is refreshed from the durable terminal owner before the response is 
 A native writable ACP session advertises `exec_command` and `write_stdin`. `exec_command` waits for a bounded yield window, returns immediately when the command exits, or returns a numeric session ID while the same process continues running. `write_stdin` uses that ID to poll newly available output or send input.
 
 Unified Exec processes are session-local and are not durable terminal catalog entries, so they do not appear in `/ps` or `fx/backgroundTerminals/list`. WASM ACP sessions, read-only sessions, and configurations without native process support do not advertise these tools and do not fall back to the removed model-facing `terminal` tool.
+
+### Direct Unified Exec interaction
+
+The model-facing `exec_command` result includes a numeric `session_id` whenever
+the process remains alive after its yield window. An ACP client can use that ID
+to write input or poll output directly while the model turn is still running:
+
+The ID first appears in the normal `session/update` notification for the
+completed `exec_command` tool call:
+
+```json
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"SESSION_ID","update":{"sessionUpdate":"tool_call_update","toolCallId":"CALL_ID","status":"completed","command_result":{"kind":"foreground","command":"...","cwd":"/workspace","exit_code":null,"signal":null,"timed_out":false,"duration_ms":250,"stdout_bytes":0,"stderr_bytes":0,"truncated":false,"process_id":7}}}}
+```
+
+```json
+{"jsonrpc":"2.0","id":15,"method":"fx/unifiedExec/writeStdin","params":{"sessionId":"SESSION_ID","processId":7,"chars":"next input\n","yieldTimeMs":250}}
+```
+
+The response is immediate after the bounded poll and has this shape:
+
+```json
+{"sessionId":"SESSION_ID","processId":7,"status":"running","output":"...","wallTimeSeconds":0.250,"exitCode":null,"signal":null,"stdoutBytes":12,"stderrBytes":0,"truncated":false}
+```
+
+Omit `chars` to poll without writing. Terminate the process with:
+
+```json
+{"jsonrpc":"2.0","id":16,"method":"fx/unifiedExec/kill","params":{"sessionId":"SESSION_ID","processId":7}}
+```
+
+These are fx extensions, not the Codex app-server `process/*` methods: fx keeps
+its existing numeric manager IDs and plain-pipe Unified Exec implementation.
 
 ## Cancellation
 
