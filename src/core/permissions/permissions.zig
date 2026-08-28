@@ -196,8 +196,9 @@ pub fn permissionTargetForCall(
 
     return switch (target_kind) {
         .command_cwd => blk: {
-            const command = try tool_args.requiredStringArg(args, "command");
-            const cwd = try resolveCommandCwdFromArgs(arena, workspace_root, args);
+            const unified_exec = std.mem.eql(u8, call.name, "exec_command");
+            const command = try tool_args.requiredStringArg(args, if (unified_exec) "cmd" else "command");
+            const cwd = try resolveCommandCwdFromArgs(arena, workspace_root, args, if (unified_exec) "workdir" else "cwd");
             break :blk std.fmt.allocPrint(arena, "{s}::{s}", .{ cwd, command });
         },
         .url => arena.dupe(u8, try tool_args.requiredStringArg(args, "url")),
@@ -235,7 +236,12 @@ pub fn resolveCommandCwdForCallInScope(
     defer scratch_state.deinit();
     const scratch = scratch_state.allocator();
     const args = try tool_args.parseToolArgsObject(scratch, call.arguments_json);
-    const cwd = try resolveCommandCwdFromArgsInScope(scratch, scope, args);
+    const cwd = try resolveCommandCwdFromArgsInScope(
+        scratch,
+        scope,
+        args,
+        if (std.mem.eql(u8, call.name, "exec_command")) "workdir" else "cwd",
+    );
     return alloc.dupe(u8, cwd);
 }
 
@@ -243,8 +249,9 @@ fn resolveCommandCwdFromArgs(
     arena: std.mem.Allocator,
     workspace_root: []const u8,
     args: std.json.ObjectMap,
+    key: []const u8,
 ) ![]const u8 {
-    const cwd_input = tool_args.nullablePlaceholderStringArg(args, "cwd") orelse ".";
+    const cwd_input = tool_args.nullablePlaceholderStringArg(args, key) orelse ".";
     if (std.mem.eql(u8, cwd_input, ".")) return arena.dupe(u8, workspace_root);
     return pathing.resolveWorkspaceOrExternalPath(arena, workspace_root, cwd_input);
 }
@@ -253,8 +260,9 @@ fn resolveCommandCwdFromArgsInScope(
     arena: std.mem.Allocator,
     scope: workspace_access.AccessScope,
     args: std.json.ObjectMap,
+    key: []const u8,
 ) ![]const u8 {
-    const cwd_input = tool_args.nullablePlaceholderStringArg(args, "cwd") orelse ".";
+    const cwd_input = tool_args.nullablePlaceholderStringArg(args, key) orelse ".";
     if (std.mem.eql(u8, cwd_input, ".")) return arena.dupe(u8, scope.primary_directory);
     return pathing.resolveWorkspaceOrExternalPath(arena, scope.primary_directory, cwd_input);
 }
@@ -372,8 +380,9 @@ pub fn permissionTargetForCallInScope(
         return permissionTargetForCall(arena, scope.primary_directory, call, target_kind);
     }
     const args = try tool_args.parseToolArgsObject(arena, call.arguments_json);
-    const command = try tool_args.requiredStringArg(args, "command");
-    const cwd = try resolveCommandCwdFromArgsInScope(arena, scope, args);
+    const unified_exec = std.mem.eql(u8, call.name, "exec_command");
+    const command = try tool_args.requiredStringArg(args, if (unified_exec) "cmd" else "command");
+    const cwd = try resolveCommandCwdFromArgsInScope(arena, scope, args, if (unified_exec) "workdir" else "cwd");
     return std.fmt.allocPrint(arena, "{s}::{s}", .{ cwd, command });
 }
 
@@ -2111,6 +2120,16 @@ test "permissionTargetForCall preserves run_command cwd targets" {
 
     try std.testing.expectEqualStrings("/tmp/workspace::npm run dev", try permissionTargetForCall(arena, "/tmp/workspace", explicit_workspace_cwd, .command_cwd));
     try std.testing.expectEqualStrings("/tmp/workspace::zig build", try permissionTargetForCall(arena, "/tmp/workspace", default_workspace_cwd, .command_cwd));
+
+    const unified_exec_call: types.ToolCall = .{
+        .id = "call_3",
+        .name = "exec_command",
+        .arguments_json = "{\"cmd\":\"zig build\",\"workdir\":\".\"}",
+    };
+    try std.testing.expectEqualStrings(
+        "/tmp/workspace::zig build",
+        try permissionTargetForCall(arena, "/tmp/workspace", unified_exec_call, .command_cwd),
+    );
 }
 
 test "permissionTargetForCall preserves skill and install skill targets" {
@@ -2724,15 +2743,15 @@ test "rulesDenyAllTargetsForPermission honors last matching overrides" {
     try std.testing.expect(!rulesDenyAllTargetsForPermission(.{ .rules = &target_deny_rules }, "edit"));
 }
 
-test "command permission target treats a textual null cwd as absent" {
+test "command permission target treats a textual null workdir as absent" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
     const target = try permissionTargetForCall(arena, "/tmp/workspace", .{
-        .id = "terminal",
-        .name = "terminal",
-        .arguments_json = "{\"action\":\"exec\",\"command\":\"ls\",\"cwd\":\" NULL \"}",
+        .id = "exec",
+        .name = "exec_command",
+        .arguments_json = "{\"cmd\":\"ls\",\"workdir\":\" NULL \"}",
     }, .command_cwd);
 
     try std.testing.expectEqualStrings("/tmp/workspace::ls", target);

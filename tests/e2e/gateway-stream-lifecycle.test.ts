@@ -190,7 +190,7 @@ function lengthLimitedCommandResponse(command: string): Response {
         type: "function_call",
         id: "command_item",
         call_id: "command_provisional",
-        name: "terminal",
+        name: "exec_command",
       },
     },
     {
@@ -198,7 +198,7 @@ function lengthLimitedCommandResponse(command: string): Response {
       item_id: "command_item",
       call_id: "command_provisional",
       output_index: 1,
-      arguments: JSON.stringify({ action: "exec", timeout_ms: 600_000, command }),
+      arguments: JSON.stringify({ cmd: command }),
     },
     {
       type: "response.incomplete",
@@ -652,7 +652,7 @@ describe("gateway stream lifecycle", () => {
         });
       }
     }
-    for (const capability of ["terminal", "web_search", "ask_user_question"]) {
+    for (const capability of ["exec_command", "web_search", "ask_user_question"]) {
       expect(
         findUnavailableCapabilityReferences(fixture(`Use ${capability} now.`)),
       ).toContainEqual({
@@ -682,7 +682,7 @@ describe("gateway stream lifecycle", () => {
     expect(findUnavailableCapabilityReferences(installSkillCurrent)).toEqual([]);
 
     const excludedText = [
-      "Use terminal and web_search.",
+      "Use exec_command and web_search.",
       AMBIGUOUS_CAPABILITY_CLAUSES.subagent[0],
       AMBIGUOUS_CAPABILITY_CLAUSES.skill[0],
       AMBIGUOUS_CAPABILITY_CLAUSES.memory[0],
@@ -702,7 +702,7 @@ describe("gateway stream lifecycle", () => {
     })).toEqual([]);
   });
 
-  test("no-save ask sends status text with the exec-only terminal surface", async () => {
+  test("no-save ask sends status text with the Unified Exec surface", async () => {
     const root = createFixtureRoot("status-text-ask");
     const tracePath = join(root.root, "trace.log");
     const gateway = startGateway(() => fakeGatewayFinalText("STATUS_TEXT_ASK_COMPLETE"));
@@ -728,11 +728,11 @@ describe("gateway stream lifecycle", () => {
       expect(serializedToolNames(oracleRequest)).toEqual(
         AUTO_RESPONSES_WITHOUT_DURABLE_TOOLS_SERIALIZED_TOOL_NAMES,
       );
-      expect(request.tools).toHaveLength(23);
+      expect(request.tools).toHaveLength(24);
       expect(findUnavailableCapabilityReferences(oracleRequest)).toEqual([]);
       expect(request.instructions).toContain("# Identity and context");
-      expect(toolByName(oracleRequest, "terminal")?.description).toContain(
-        "required finite timeout_ms",
+      expect(toolByName(oracleRequest, "exec_command")?.description).toContain(
+        "yield window",
       );
       expect(toolByName(oracleRequest, "skill")?.description).toContain(
         "the task clearly matches one",
@@ -2521,7 +2521,7 @@ describe("gateway stream lifecycle", () => {
     const responses = [
       fakeGatewaySerializedToolCall(
         callId,
-        "terminal",
+        "exec_command",
         malformedArguments,
         "Trying the saved command.",
       ),
@@ -2604,7 +2604,7 @@ describe("gateway stream lifecycle", () => {
       const historicalCalls = resumedRequest.input.filter((item) =>
         item.type === "function_call" &&
         item.call_id === callId &&
-        item.name === "terminal"
+        item.name === "exec_command"
       );
       const historicalResults = resumedRequest.input.filter((item) =>
         item.type === "function_call_output" && item.call_id === callId
@@ -2645,10 +2645,8 @@ describe("gateway stream lifecycle", () => {
     const command = `cat <<'FX_LONG_COMMAND' > long-command-output.txt\n${payload}\nFX_LONG_COMMAND\n`;
     expect(Buffer.byteLength(command)).toBeGreaterThan(20 * 1024);
     const responses = [
-      fakeGatewayToolCall(callId, "terminal", {
-        action: "exec",
-        timeout_ms: 600_000,
-        command,
+      fakeGatewayToolCall(callId, "exec_command", {
+        cmd: command,
       }),
       fakeGatewayFinalText("Long command fixture written."),
     ];
@@ -2671,7 +2669,7 @@ describe("gateway stream lifecycle", () => {
       expect(gateway.requestCount()).toBe(2);
       expect(json.tool_calls).toContainEqual(
         expect.objectContaining({
-          name: "terminal",
+          name: "exec_command",
           status: "success",
         }),
       );
@@ -2682,86 +2680,6 @@ describe("gateway stream lifecycle", () => {
       rmSync(root.root, { recursive: true, force: true });
     }
   });
-
-  test("SIGTERM drains an active headless terminal command without panic or survivors", async () => {
-    const root = createFixtureRoot("headless-sigterm");
-    const tracePath = join(root.root, "trace.log");
-    const pidPath = join(root.workspace, "active-command.pid");
-    const command = [
-      'trap "" TERM',
-      `printf "%s %s" "$$" "$PPID" > ${JSON.stringify(pidPath)}`,
-      "while :; do sleep 1; done",
-    ].join("; ");
-    const gateway = startGateway(() =>
-      fakeGatewayToolCall("headless_sigterm_1", "terminal", {
-        action: "exec",
-        timeout_ms: 600_000,
-        command,
-      })
-    );
-    const proc = Bun.spawn([
-      FX_BIN,
-      "ask",
-      "--json",
-      "--yolo",
-      "--no-save",
-      "Run the active command fixture.",
-    ], {
-      cwd: root.workspace,
-      env: {
-        ...process.env,
-        ...fixtureEnv(root, gateway, tracePath),
-      },
-      stdin: "ignore",
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-
-    let targetPid: number | null = null;
-    let helperPid: number | null = null;
-    try {
-      const startDeadline = Date.now() + 10_000;
-      while (!existsSync(pidPath)) {
-        if (Date.now() >= startDeadline) {
-          throw new Error("active terminal command did not start");
-        }
-        await Bun.sleep(10);
-      }
-      const pids = readFileSync(pidPath, "utf8").trim().split(/\s+/).map(Number);
-      expect(pids).toHaveLength(2);
-      [targetPid, helperPid] = pids;
-      expect(Number.isSafeInteger(targetPid) && targetPid > 0).toBe(true);
-      expect(Number.isSafeInteger(helperPid) && helperPid > 0).toBe(true);
-
-      const signalAt = Date.now();
-      proc.kill("SIGTERM");
-      const exitCode = await proc.exited;
-      const elapsedMs = Date.now() - signalAt;
-
-      await waitForProcessExit(targetPid, 3_000);
-      await waitForProcessExit(helperPid, 3_000);
-      const stderr = await new Response(proc.stderr).text();
-
-      expect(exitCode).toBe(143);
-      expect(proc.signalCode).toBe("SIGTERM");
-      expect(elapsedMs).toBeLessThan(3_000);
-      expect(stderr).not.toContain("panic: reached unreachable code");
-    } finally {
-      proc.kill("SIGKILL");
-      if (helperPid !== null && isProcessAlive(helperPid)) {
-        try {
-          process.kill(-helperPid, "SIGKILL");
-        } catch {}
-      }
-      if (targetPid !== null && isProcessAlive(targetPid)) {
-        try {
-          process.kill(targetPid, "SIGKILL");
-        } catch {}
-      }
-      gateway.stop();
-      rmSync(root.root, { recursive: true, force: true });
-    }
-  }, 20_000);
 
   test(
     "nine saved turns stay canonical while the next request uses bounded context",
@@ -3488,10 +3406,8 @@ describe("gateway stream lifecycle", () => {
     let responseIndex = 0;
     const gateway = startGateway(() => {
       if (responseIndex++ === 0) {
-        return fakeGatewayToolCall("prompt_too_long_tool_1", "terminal", {
-          action: "exec",
-          timeout_ms: 600_000,
-          command: `printf 'once\\n' >> '${sideEffectPath}'`,
+        return fakeGatewayToolCall("prompt_too_long_tool_1", "exec_command", {
+          cmd: `printf 'once\\n' >> '${sideEffectPath}'`,
         });
       }
       return new Response(
@@ -3521,7 +3437,7 @@ describe("gateway stream lifecycle", () => {
       expect(serializedError).toContain("prompt_too_long=true");
       expect(serializedError).toContain("no local tool actions were replayed");
       expect(output.tool_calls).toHaveLength(1);
-      expect(output.tool_calls[0]?.name).toBe("terminal");
+      expect(output.tool_calls[0]?.name).toBe("exec_command");
       expect(output.tool_calls[0]?.status).toBe("success");
       expect(readFileSync(sideEffectPath, "utf8")).toBe("once\n");
       expect(gateway.requestCount()).toBeGreaterThanOrEqual(2);
@@ -3709,7 +3625,7 @@ describe("gateway stream lifecycle", () => {
         });
       }
       return fakeGatewayToolCall("parent_subagent_create_1", "subagent", {
-        command: {
+        cmd: {
           create: {
             name: "mcp-child",
             mode: "one_off",
@@ -3780,7 +3696,7 @@ describe("gateway stream lifecycle", () => {
       }
       if (body.includes(inspectPrompt)) {
         return fakeGatewayToolCall("host_exit_inspect_1", "subagent", {
-          command: {
+          cmd: {
             inspect: {
               id: childId,
               sections: ["status"],
@@ -3801,7 +3717,7 @@ describe("gateway stream lifecycle", () => {
         return delayedSuccessfulResponse();
       }
       return fakeGatewayToolCall("host_exit_create_1", "subagent", {
-        command: {
+        cmd: {
           create: {
             name: "host-exit-child",
             mode: "persistent",
@@ -4520,7 +4436,7 @@ describe("gateway stream lifecycle", () => {
             type: "function_call",
             id: "command_item_1",
             call_id: "command_1",
-            name: "terminal",
+            name: "exec_command",
           },
         },
         {
@@ -4529,9 +4445,7 @@ describe("gateway stream lifecycle", () => {
           call_id: "command_1",
           output_index: 0,
           arguments: JSON.stringify({
-            action: "exec",
-            timeout_ms: 600_000,
-            command: "printf executed > command-must-not-run.txt",
+            cmd: "printf executed > command-must-not-run.txt",
           }),
         },
         {

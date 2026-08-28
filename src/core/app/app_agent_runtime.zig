@@ -252,8 +252,8 @@ pub fn Runtime(comptime App: type) type {
                 .cancel_flag = &app.worker.worker_cancel_requested,
                 .background = &app.background,
                 .session_child_capability = child_capability,
-                .terminal_client = if (comptime @hasField(App, "terminal_client"))
-                    &app.terminal_client
+                .unified_exec = if (comptime @hasField(App, "unified_exec"))
+                    &app.unified_exec
                 else
                     null,
                 .session = &app.session,
@@ -266,7 +266,6 @@ pub fn Runtime(comptime App: type) type {
                 .on_output_chunk = app_callbacks.Bindings(App).onCommandOutputChunk,
                 .background_url_ctx = @ptrCast(app),
                 .on_background_url_ready = app_callbacks.Bindings(App).onBackgroundUrlReady,
-                .workspace_executor = if (comptime @hasDecl(App, "workspaceExecutor")) app.workspaceExecutor() else null,
                 .host_sandbox_default = if (host_workspace) |info| switch (info.permission) {
                     .allow_sandboxed => .allow_sandboxed,
                     .prompt => .prompt,
@@ -492,42 +491,18 @@ pub fn Runtime(comptime App: type) type {
             gateway_retry_count: usize,
             gateway_chat_url: []const u8,
         ) !?[]const u8 {
-            const ctx = toolContext(app, ignored_list_entries, max_list_entries, max_read_file_bytes, max_read_file_lines, max_read_file_line_len, max_command_output_bytes, gateway_retry_count, gateway_chat_url);
-            return tool_presentation.resolveTerminalDisplayTarget(
-                arena,
-                ctx.tool_registry,
-                ctx.workspace_root,
-                ctx.terminal_client,
-                call,
-            );
-        }
-
-        pub fn releaseAgentTerminalLease(
-            app: *App,
-            session_id: []const u8,
-            ignored_list_entries: []const []const u8,
-            max_list_entries: usize,
-            max_read_file_bytes: usize,
-            max_read_file_lines: usize,
-            max_read_file_line_len: usize,
-            max_command_output_bytes: usize,
-            gateway_retry_count: usize,
-            gateway_chat_url: []const u8,
-        ) !void {
-            return tool_runtime.release_agent_terminal_lease(
-                toolContext(
-                    app,
-                    ignored_list_entries,
-                    max_list_entries,
-                    max_read_file_bytes,
-                    max_read_file_lines,
-                    max_read_file_line_len,
-                    max_command_output_bytes,
-                    gateway_retry_count,
-                    gateway_chat_url,
-                ),
-                session_id,
-            );
+            _ = app;
+            _ = arena;
+            _ = call;
+            _ = ignored_list_entries;
+            _ = max_list_entries;
+            _ = max_read_file_bytes;
+            _ = max_read_file_lines;
+            _ = max_read_file_line_len;
+            _ = max_command_output_bytes;
+            _ = gateway_retry_count;
+            _ = gateway_chat_url;
+            return null;
         }
 
         pub fn describeToolAction(
@@ -1300,7 +1275,7 @@ const test_ignored_list_entries = [_][]const u8{ ".git", "zig-out" };
 const test_gateway_chat_url = "https://gateway.test/chat";
 const test_tools = [_]tool_dispatch.Tool{
     test_builtin_tools.web_search,
-    test_builtin_tools.terminal,
+    test_builtin_tools.exec_command,
     test_builtin_tools.memory,
     test_builtin_tools.semantic_search,
     test_builtin_tools.skill,
@@ -1940,8 +1915,8 @@ test "app agent runtime formats active completed denied and MCP tool actions" {
 
     const run_call: ToolCall = .{
         .id = "1",
-        .name = "terminal",
-        .arguments_json = "{\"action\":\"exec\",\"command\":\"zig build\"}",
+        .name = "exec_command",
+        .arguments_json = "{\"cmd\":\"zig build\"}",
     };
 
     const active = try app.describeToolAction(arena, run_call);
@@ -2020,7 +1995,7 @@ test "app agent runtime formats active completed denied and MCP tool actions" {
     try std.testing.expectEqual(@as(usize, 1), app.mcp_has_tool_calls);
 
     app.mcp_has_tool_calls = 0;
-    const builtin_advertised = [_][]const u8{"terminal"};
+    const builtin_advertised = [_][]const u8{"exec_command"};
     _ = try Runtime(FakeApp).describeToolActionCompleted(&app, arena, run_call, null, &builtin_advertised, &test_ignored_list_entries, 100, 1024, 40, 120, 2048, 2, test_gateway_chat_url);
     try std.testing.expectEqual(@as(usize, 0), app.mcp_has_tool_calls);
 }
@@ -2058,11 +2033,10 @@ test "app agent runtime bounds a large multiline run command activity" {
     var app = try FakeApp.init(alloc);
     defer app.deinit();
 
-    const arguments_json = "{\"action\":\"exec\",\"command\":\"" ++ ("x\\n" ** 20_000) ++ "\"}";
     const label = try app.describeToolAction(arena, .{
         .id = "large_command",
-        .name = "terminal",
-        .arguments_json = arguments_json,
+        .name = "exec_command",
+        .arguments_json = "{\"cmd\":\"" ++ ("x\\n" ** 20_000) ++ "\"}",
     });
 
     try std.testing.expect(label.len <= 180);

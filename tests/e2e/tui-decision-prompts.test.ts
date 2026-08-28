@@ -166,8 +166,8 @@ function outerCommandCall() {
   return outerToolCalls([
     {
       id: "command_outer_1",
-      name: "terminal",
-      input: { action: "exec", timeout_ms: 600_000, command: "touch generic-preview-accepted.txt" },
+      name: "exec_command",
+      input: { cmd: "touch generic-preview-accepted.txt" },
     },
   ]);
 }
@@ -185,8 +185,8 @@ function outerLongCommandCall() {
   return outerToolCalls([
     {
       id: "long_command_outer_1",
-      name: "terminal",
-      input: { action: "exec", timeout_ms: 600_000, command },
+      name: "exec_command",
+      input: { cmd: command },
     },
   ]);
 }
@@ -202,8 +202,8 @@ function outerScrollableLongCommandCall() {
   return outerToolCalls([
     {
       id: "scrollable_long_command_outer_1",
-      name: "terminal",
-      input: { action: "exec", timeout_ms: 600_000, command },
+      name: "exec_command",
+      input: { cmd: command },
     },
   ]);
 }
@@ -215,8 +215,8 @@ function outerFittingCommandCall() {
   return outerToolCalls([
     {
       id: "fitting_command_outer_1",
-      name: "terminal",
-      input: { action: "exec", timeout_ms: 600_000, command },
+      name: "exec_command",
+      input: { cmd: command },
     },
   ]);
 }
@@ -1451,7 +1451,7 @@ describe.skipIf(SKIP)("tui: decision prompt input isolation", () => {
         "Would you like to run the following command?",
         TIMEOUT,
       );
-      expect(pane).toContain("# terminal.exec profile=user shell=");
+      expect(pane).toContain("# exec_command profile=user shell=");
       expect(pane).toContain("touch generic-preview-accepted.txt");
       expectApprovalSelection(pane, 1, COMMAND_YES_CHOICE);
 

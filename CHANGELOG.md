@@ -4,19 +4,23 @@
 
 <!-- release:start -->
 
-**Foreground commands require timeouts, auto mode reviews exact pending actions, and the macOS arm64 binary is 0.3% smaller (6.12 MiB vs 6.13 MiB).**
+**Model commands use Unified Exec sessions, auto mode reviews exact pending actions, and the macOS arm64 binary is 0.3% smaller (6.12 MiB vs 6.13 MiB).**
 
 ### Breaking Changes
 
 - **Terminal presentation**: `/appearance`, `/input`, and `/maxxing` have been removed along with their saved settings. fx now uses the same input and transcript layout everywhere.
-- **Foreground command timeouts**: `terminal.exec` calls now require `timeout_ms` between 1 millisecond and 10 minutes. Use `terminal.start` for services, watchers, GUI apps, and other long-running work.
+- **Model execution tools**: The old model-facing `terminal` action is removed. Use `exec_command` for shell commands and `write_stdin` to poll or provide input to a long-running session.
 
 ### New Features
+
+- **Unified Exec commands:** Model turns now use separate `exec_command` and `write_stdin` tools with numeric sessions for long-running and interactive commands. Output remains bounded while processes survive turn boundaries until they finish or the session closes.
 
 - **Remote MCP servers**: `/mcp add --transport http <name> <url>` now saves or replaces a remote Streamable HTTP server and reloads MCP immediately. The existing local stdio form is unchanged.
 - **Retained command output**: Captured command output can now be read later with `read_tool_result`, including after a saved session resumes. With `--no-save`, output remains available until fx exits.
 
 ### Improvements
+
+- **Non-blocking compaction and streaming:** Manual and automatic remote compaction keep the composer responsive, queue the next prompt safely, and preserve immediate streamed token rendering while the compacting activity is visible.
 
 - **Auto mode review prompts**: Auto mode now uses fewer tokens when reviewing unresolved actions.
 - **Native binary size**: The macOS arm64 binary is 0.3% smaller (6.12 MiB vs 6.13 MiB).

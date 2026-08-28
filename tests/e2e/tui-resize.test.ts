@@ -1618,7 +1618,7 @@ describe.skipIf(SKIP)("tui: resize", () => {
       const command =
         "for i in $(seq 1 96); do printf 'resize-stream-marker %03d\\n' \"$i\"; sleep 0.03; done";
       const gateway = startFakeGateway([
-        fakeGatewayToolCall("resize-live-command", "terminal", { action: "exec", timeout_ms: 600_000, command }),
+        fakeGatewayToolCall("resize-live-command", "exec_command", { cmd: command }),
         fakeGatewayFinalText(finalResponse),
       ]);
       gateways.push(gateway);
@@ -1739,7 +1739,7 @@ describe.skipIf(SKIP)("tui: resize", () => {
       const command =
         `awk 'BEGIN { for (i = 0; i < 13500; i++) printf "RETENTION_SEED_%05d alpha beta gamma delta epsilon zeta eta theta iota kappa lambda\\n", i }'`;
       const gateway = startFakeGateway([
-        fakeGatewayToolCall("retention-seed", "terminal", { action: "exec", timeout_ms: 600_000, command }),
+        fakeGatewayToolCall("retention-seed", "exec_command", { cmd: command }),
         response,
       ]);
       gateways.push(gateway);
@@ -1836,10 +1836,8 @@ describe.skipIf(SKIP)("tui: resize", () => {
 
       const gateway = startFakeGateway([
         fakeGatewayFinalText(seedMarker),
-        fakeGatewayToolCall("approval-cancel-resize", "terminal", {
-          action: "exec",
-          timeout_ms: 600_000,
-          command,
+        fakeGatewayToolCall("approval-cancel-resize", "exec_command", {
+          cmd: command,
         }),
       ]);
       gateways.push(gateway);

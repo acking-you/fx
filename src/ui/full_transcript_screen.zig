@@ -1470,11 +1470,11 @@ test "full projection preserves semantic arguments clipped from a tool heading" 
     } }};
     var details = [_]ToolDetailRecord{.{
         .entry_id = 1,
-        .tool_name = try alloc.dupe(u8, "terminal"),
+        .tool_name = try alloc.dupe(u8, "exec_command"),
         .captured_command = true,
         .arguments_json = try std.fmt.allocPrint(
             alloc,
-            "{{\"action\":\"exec\",\"command\":\"{s}\",\"profile\":\"clean\"}}",
+            "{{\"cmd\":\"{s}\"}}",
             .{command},
         ),
         .outcome = .completed,

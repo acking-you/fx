@@ -88,22 +88,22 @@ pub fn formatApprovalCommand(
     return switch (environment) {
         .legacy => std.fmt.allocPrint(
             alloc,
-            "# terminal.exec profile=omitted (legacy)\n{s}",
+            "# exec_command profile=omitted (legacy)\n{s}",
             .{command},
         ),
         .workspace_clean => std.fmt.allocPrint(
             alloc,
-            "# terminal.exec profile=clean workspace=root-fixed\n{s}",
+            "# exec_command profile=clean workspace=root-fixed\n{s}",
             .{command},
         ),
         .clean => |path| std.fmt.allocPrint(
             alloc,
-            "# terminal.exec profile=clean shell={s}\n{s}",
+            "# exec_command profile=clean shell={s}\n{s}",
             .{ path, command },
         ),
         .user => |path| std.fmt.allocPrint(
             alloc,
-            "# terminal.exec profile=user shell={s}\n{s}",
+            "# exec_command profile=user shell={s}\n{s}",
             .{ path, command },
         ),
     };

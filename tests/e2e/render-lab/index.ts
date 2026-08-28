@@ -1714,12 +1714,10 @@ function startActiveToolGatewayFixture(): LocalGatewayFixture {
         if (responsesRequestCount === 2) await responseGate;
         if (responsesRequestCount === 1) {
           return fakeGatewaySse([
-            ...responseFunctionCall("active_tool_1", "terminal", {
-              action: "exec",
-              command:
+            ...responseFunctionCall("active_tool_1", "exec_command", {
+              cmd:
                 "sleep 1; i=1; while [ \"$i\" -le 32 ]; do printf 'ACTIVE_TOOL_LINE_%02d\\n' \"$i\"; i=$((i+1)); sleep 0.03; done; while [ ! -f .active-tool-release ]; do sleep 0.05; done",
-              timeout_ms: 600_000,
-            }),
+              }),
             responseCompleted(1, 1),
           ]);
         }
@@ -1793,8 +1791,8 @@ function startObservabilityGatewayFixture(
               responseTextDelta(transcript, "observability-transcript"),
               ...responseFunctionCall(
                 "observability-tool-1",
-                "terminal",
-                { action: "exec", command, timeout_ms: 600_000 },
+                "exec_command",
+                { cmd: command },
                 1,
               ),
               responseCompleted(1, 1),

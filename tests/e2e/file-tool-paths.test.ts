@@ -446,8 +446,8 @@ describe("filesystem path handling", () => {
           },
           {
             id: "added_cwd_1",
-            name: "terminal",
-            input: { action: "exec", timeout_ms: 600_000, command: "pwd", cwd: root.external },
+            name: "exec_command",
+            input: { cmd: "pwd", workdir: root.external },
             expected: root.external,
           },
         ];
@@ -628,11 +628,9 @@ describe("filesystem path handling", () => {
       const root = createIsolatedRoot();
       const marker = join(root.external, "command-proof.txt");
       const gateway = startFakeGateway([
-        toolCall("added_command_write_1", "terminal", {
-          action: "exec",
-          timeout_ms: 600_000,
-          command: "printf COMMAND_ADDED_WRITE > command-proof.txt",
-          cwd: root.external,
+        toolCall("added_command_write_1", "exec_command", {
+          cmd: "printf COMMAND_ADDED_WRITE > command-proof.txt",
+          workdir: root.external,
         }),
         finalText("command write complete"),
       ]);
@@ -657,7 +655,7 @@ describe("filesystem path handling", () => {
         const json = parseFxJson(result);
         expect(readFileSync(marker, "utf8")).toBe("COMMAND_ADDED_WRITE");
         expect(json.tool_calls.map(({ name, status }) => ({ name, status }))).toEqual([
-          { name: "terminal", status: "success" },
+          { name: "exec_command", status: "success" },
         ]);
         expect(gateway.classifierRequests).toHaveLength(1);
       } finally {
@@ -783,11 +781,9 @@ describe("filesystem path handling", () => {
         for (const scenario of cases) {
           const marker = join(scenario.canonical, `${scenario.id}.txt`);
           const gateway = startFakeGateway([
-            toolCall(scenario.id, "terminal", {
-              action: "exec",
-              timeout_ms: 600_000,
-              command: `pwd; printf ${scenario.id} > ${scenario.id}.txt`,
-              cwd: scenario.cwd,
+            toolCall(scenario.id, "exec_command", {
+              cmd: `pwd; printf ${scenario.id} > ${scenario.id}.txt`,
+              workdir: scenario.cwd,
             }),
             finalText("external cwd complete"),
           ]);
@@ -812,7 +808,7 @@ describe("filesystem path handling", () => {
             expect(readFileSync(marker, "utf8")).toBe(scenario.id);
             expect(
               json.tool_calls.map(({ name, status }) => ({ name, status })),
-            ).toEqual([{ name: "terminal", status: "success" }]);
+            ).toEqual([{ name: "exec_command", status: "success" }]);
           } finally {
             gateway.stop();
           }

@@ -386,45 +386,6 @@ export function assertNoAskUserQuestionMatching(
   expect(matchingOrUninspectable).toBe(false);
 }
 
-export function assertTerminalExecMatches(
-  result: EvalResult,
-  pattern: RegExp,
-): void {
-  const matched = recordedTerminalExecCommands(result).some((command) => pattern.test(command));
-  expect(matched).toBe(true);
-}
-
-export function assertNoTerminalExecMatches(
-  result: EvalResult,
-  pattern: RegExp,
-): void {
-  const matched = recordedTerminalExecCommands(result).some((command) => pattern.test(command));
-  expect(matched).toBe(false);
-}
-
-function recordedTerminalExecCommands(result: EvalResult): string[] {
-  const commands = new Set<string>();
-  for (const tc of result.json.tool_calls ?? []) {
-    if (tc.name !== "terminal") continue;
-    const command = tc.command_result?.command;
-    if (command) commands.add(command);
-  }
-  for (const match of result.stderr.matchAll(/^Running (.+)$/gm)) {
-    const command = match[1]?.trim();
-    if (command) commands.add(command);
-  }
-  return [...commands];
-}
-
-export function assertFirstTerminalExecMatches(
-  result: EvalResult,
-  pattern: RegExp,
-): void {
-  const first = result.json.tool_calls?.[0];
-  expect(first?.name).toBe("terminal");
-  expect(pattern.test(first?.command_result?.command ?? "")).toBe(true);
-}
-
 // Generic fx CLI runner for deterministic command coverage.
 
 export interface FxRunResult {

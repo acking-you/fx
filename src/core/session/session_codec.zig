@@ -1549,15 +1549,14 @@ fn writePersistedToolResult(writer: *std.Io.Writer, result: session.PersistedToo
     }
     try writer.writeAll(",\"command_output_replay\":");
     try writeOptionalCommandOutputReplay(writer, result.command_output_replay);
+    if (result.command_artifact_handle) |handle| {
+        try writer.writeAll(",\"command_artifact_handle\":");
+        try writeDurableBytes(writer, handle);
+    }
     try writer.writeAll(",\"command_process_presentation\":");
     try writeOptionalCommandProcessPresentation(
         writer,
         result.command_process_presentation,
-    );
-    try writer.writeAll(",\"terminal_action_presentation\":");
-    try writeOptionalTerminalActionPresentation(
-        writer,
-        result.terminal_action_presentation,
     );
     try writer.writeByte('}');
 }
@@ -1632,49 +1631,6 @@ fn writeOptionalCommandProcessPresentation(
         ),
         .timed_out => try writer.writeAll("{\"kind\":\"timed_out\",\"value\":null}"),
         .output_capture_failed => try writer.writeAll("{\"kind\":\"output_capture_failed\",\"value\":null}"),
-    }
-}
-
-fn writeOptionalTerminalActionPresentation(
-    writer: *std.Io.Writer,
-    presentation: ?types.TerminalActionPresentation,
-) !void {
-    const value = presentation orelse {
-        try writer.writeAll("null");
-        return;
-    };
-    switch (value) {
-        .returned => |returned| {
-            try writer.writeAll("{\"kind\":\"returned\",\"outcome\":");
-            try writeTerminalReturnPresentation(writer, returned);
-            try writer.writeByte('}');
-        },
-        .failed => |failed| {
-            try writer.writeAll("{\"kind\":\"failed\",\"code\":");
-            try writeJsonString(writer, @tagName(failed));
-            try writer.writeByte('}');
-        },
-    }
-}
-
-fn writeTerminalReturnPresentation(
-    writer: *std.Io.Writer,
-    outcome: types.TerminalReturnPresentation,
-) !void {
-    switch (outcome) {
-        .started, .condition_met, .safety_ceiling, .cancelled => {
-            try writer.writeAll("{\"kind\":");
-            try writeJsonString(writer, @tagName(outcome));
-            try writer.writeAll(",\"value\":null}");
-        },
-        .exited => |code| try writer.print(
-            "{{\"kind\":\"exited\",\"value\":{d}}}",
-            .{code},
-        ),
-        .signal => |signal| try writer.print(
-            "{{\"kind\":\"signal\",\"value\":{d}}}",
-            .{signal},
-        ),
     }
 }
 
@@ -2189,14 +2145,34 @@ fn parseToolResult(
         "committed_file_presentation",
         "command_output_replay",
         "command_process_presentation",
-        "terminal_action_presentation",
+    };
+    const v4_artifact_keys = &.{
+        "tool_call_id",
+        "tool_name",
+        "status",
+        "output",
+        "output_handle",
+        "preview",
+        "output_bytes",
+        "stored_output_bytes",
+        "truncated",
+        "provider_native",
+        "created_at_ms",
+        "permission_feedback",
+        "committed_file_presentation",
+        "command_output_replay",
+        "command_artifact_handle",
+        "command_process_presentation",
     };
     const result_shape: ExactVariantObject = switch (schema_version) {
         1 => .{ .object = try exactObject(value, v1_keys), .extended = false },
         2 => try exactVariantObject(value, v2_keys, v2_extended_keys),
         3 => .{ .object = try exactObject(value, v3_keys), .extended = true },
         4, 5, 6 => try exactVariantObject(value, v3_keys, v4_keys),
-        7 => .{ .object = try exactObject(value, v4_keys), .extended = true },
+        7 => blk: {
+            const shape = try exactVariantObject(value, v4_keys, v4_artifact_keys);
+            break :blk .{ .object = shape.object, .extended = true };
+        },
         else => return error.InvalidSessionFormat,
     };
     const object = result_shape.object;
@@ -2244,15 +2220,17 @@ fn parseToolResult(
     errdefer if (command_output_replay) |replay| {
         types.freeCommandOutputReplay(alloc, replay);
     };
-    const command_process_presentation = if (schema_version >= 3)
-        try parseOptionalCommandProcessPresentation(
-            object.get("command_process_presentation") orelse return error.InvalidSessionFormat,
+    const command_artifact_handle = if (schema_version >= 7)
+        try parseOptionalDurableBytes(
+            alloc,
+            object.get("command_artifact_handle") orelse .null,
         )
     else
         null;
-    const terminal_action_presentation = if (schema_version >= 4)
-        try parseOptionalTerminalActionPresentation(
-            object.get("terminal_action_presentation") orelse return error.InvalidSessionFormat,
+    errdefer if (command_artifact_handle) |handle| alloc.free(handle);
+    const command_process_presentation = if (schema_version >= 3)
+        try parseOptionalCommandProcessPresentation(
+            object.get("command_process_presentation") orelse return error.InvalidSessionFormat,
         )
     else
         null;
@@ -2274,8 +2252,8 @@ fn parseToolResult(
         .permission_feedback = permission_feedback,
         .committed_file_presentation = committed_file_presentation,
         .command_output_replay = command_output_replay,
+        .command_artifact_handle = command_artifact_handle,
         .command_process_presentation = command_process_presentation,
-        .terminal_action_presentation = terminal_action_presentation,
     };
 }
 
@@ -2324,59 +2302,6 @@ fn parseOptionalCommandProcessPresentation(
     if (std.mem.eql(u8, kind, "output_capture_failed")) {
         if (object.get("value").? != .null) return error.InvalidSessionFormat;
         return .output_capture_failed;
-    }
-    return error.InvalidSessionFormat;
-}
-
-fn parseOptionalTerminalActionPresentation(
-    value: std.json.Value,
-) !?types.TerminalActionPresentation {
-    if (value == .null) return null;
-    const object = switch (value) {
-        .object => |object| object,
-        else => return error.InvalidSessionFormat,
-    };
-    const kind = try requireString(object, "kind");
-    if (std.mem.eql(u8, kind, "returned")) {
-        _ = try exactObject(value, &.{ "kind", "outcome" });
-        return .{ .returned = try parseTerminalReturnPresentation(
-            object.get("outcome") orelse return error.InvalidSessionFormat,
-        ) };
-    }
-    if (std.mem.eql(u8, kind, "failed")) {
-        _ = try exactObject(value, &.{ "kind", "code" });
-        const code = std.meta.stringToEnum(
-            types.TerminalFailurePresentation,
-            try requireString(object, "code"),
-        ) orelse return error.InvalidSessionFormat;
-        return .{ .failed = code };
-    }
-    return error.InvalidSessionFormat;
-}
-
-fn parseTerminalReturnPresentation(
-    value: std.json.Value,
-) !types.TerminalReturnPresentation {
-    const object = try exactObject(value, &.{ "kind", "value" });
-    const kind = try requireString(object, "kind");
-    if (std.mem.eql(u8, kind, "started") or
-        std.mem.eql(u8, kind, "condition_met") or
-        std.mem.eql(u8, kind, "safety_ceiling") or
-        std.mem.eql(u8, kind, "cancelled"))
-    {
-        if (object.get("value").? != .null) return error.InvalidSessionFormat;
-        if (std.mem.eql(u8, kind, "started")) return .started;
-        if (std.mem.eql(u8, kind, "condition_met")) return .condition_met;
-        if (std.mem.eql(u8, kind, "safety_ceiling")) return .safety_ceiling;
-        return .cancelled;
-    }
-    if (std.mem.eql(u8, kind, "exited")) {
-        return .{ .exited = std.math.cast(i32, try requireI64(object, "value")) orelse
-            return error.InvalidSessionFormat };
-    }
-    if (std.mem.eql(u8, kind, "signal")) {
-        return .{ .signal = std.math.cast(u32, try requireU64(object, "value")) orelse
-            return error.InvalidSessionFormat };
     }
     return error.InvalidSessionFormat;
 }
@@ -3501,6 +3426,7 @@ test "execution memory codec preserves feedback and reads v1 results without it"
             .handle = "fx-command-replay-private.bin",
             .framed_bytes = 321,
         } },
+        .command_artifact_handle = @constCast("fx-command-output.log"),
         .command_process_presentation = .{ .exit_code = 7 },
     }};
     var steps = [_]session.ToolExecutionStep{.{
@@ -3546,6 +3472,10 @@ test "execution memory codec preserves feedback and reads v1 results without it"
     };
     try std.testing.expectEqualStrings("fx-command-replay-private.bin", descriptor.handle);
     try std.testing.expectEqual(@as(usize, 321), descriptor.framed_bytes);
+    try std.testing.expectEqualStrings(
+        "fx-command-output.log",
+        decoded_result.command_artifact_handle.?,
+    );
     try std.testing.expectEqual(
         types.CommandProcessPresentation{ .exit_code = 7 },
         decoded_result.command_process_presentation.?,
@@ -3792,32 +3722,6 @@ test "command process presentation codec preserves every terminal cause" {
         try std.testing.expectEqual(
             case,
             (try parseOptionalCommandProcessPresentation(parsed.value)).?,
-        );
-    }
-}
-
-test "terminal action presentation codec preserves return and failure causes" {
-    const alloc = std.testing.allocator;
-    const cases = [_]types.TerminalActionPresentation{
-        .{ .returned = .started },
-        .{ .returned = .condition_met },
-        .{ .returned = .safety_ceiling },
-        .{ .returned = .cancelled },
-        .{ .returned = .{ .exited = 7 } },
-        .{ .returned = .{ .signal = 9 } },
-        .{ .failed = .session_not_found },
-        .{ .failed = .capacity_exceeded },
-    };
-    for (cases) |case| {
-        var encoded: std.Io.Writer.Allocating = .init(alloc);
-        defer encoded.deinit();
-        try writeOptionalTerminalActionPresentation(&encoded.writer, case);
-
-        var parsed = try std.json.parseFromSlice(std.json.Value, alloc, encoded.written(), .{});
-        defer parsed.deinit();
-        try std.testing.expectEqual(
-            case,
-            (try parseOptionalTerminalActionPresentation(parsed.value)).?,
         );
     }
 }

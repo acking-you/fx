@@ -412,11 +412,11 @@ test "remote compaction trims oversized tool outputs to the model budget" {
     @memset(&oversized_output, 'x');
     const messages = [_]types.ChatMessage{
         .{ .role = .system, .content = "stable instructions" },
-        .{ .role = .assistant, .tool_calls = &.{.{ .id = "call", .name = "terminal", .arguments_json = "{}" }} },
+        .{ .role = .assistant, .tool_calls = &.{.{ .id = "call", .name = "exec_command", .arguments_json = "{\"cmd\":\"true\"}" }} },
         .{
             .role = .tool,
             .tool_call_id = "call",
-            .tool_name = "terminal",
+            .tool_name = "exec_command",
             .content = &oversized_output,
             .tool_result_status = .success,
         },
@@ -469,11 +469,11 @@ test "remote compaction provider receives context-safe tool output" {
     @memset(&oversized_output, 'x');
     const messages = [_]types.ChatMessage{
         .{ .role = .system, .content = "stable instructions" },
-        .{ .role = .assistant, .tool_calls = &.{.{ .id = "call", .name = "terminal", .arguments_json = "{}" }} },
+        .{ .role = .assistant, .tool_calls = &.{.{ .id = "call", .name = "exec_command", .arguments_json = "{\"cmd\":\"true\"}" }} },
         .{
             .role = .tool,
             .tool_call_id = "call",
-            .tool_name = "terminal",
+            .tool_name = "exec_command",
             .content = &oversized_output,
         },
         .{ .role = .user, .content = "retain the newest user intent" },

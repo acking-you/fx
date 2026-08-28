@@ -62,7 +62,6 @@ const tool_mcp_registry = @import("tool_mcp_registry.zig");
 const tool_mcp_runtime = @import("tool_mcp_runtime.zig");
 const tool_mcp_feature_dispatch = @import("tool_mcp_feature_dispatch.zig");
 const tool_presentation = @import("tool_presentation.zig");
-const terminal_impl = @import("../../tools/terminal/terminal.zig");
 const web_fetch_runtime = @import("web_fetch_runtime.zig");
 const web_search_contract = @import("web_search_contract.zig");
 const web_fetch_artifacts = @import("../session/web_fetch_artifacts.zig");
@@ -79,11 +78,6 @@ const test_builtin_gateway = if (builtin.is_test)
     @import("../../builtins/responses.zig")
 else
     struct {};
-const test_browser_workspace_tools = if (builtin.is_test)
-    @import("../../builtins/browser_workspace_tools.zig")
-else
-    struct {};
-const js_host_workspace = @import("../hosts/js_host_workspace.zig");
 
 const agent_test_support = if (builtin.is_test)
     @import("../agent/runtime/tests/support.zig")
@@ -113,8 +107,7 @@ const optionalIntArg = tool_args.optionalIntArg;
 const parseToolArgsObject = helpers.parseToolArgsObject;
 const context_limits = @import("../config/context_limits.zig");
 const workspace_access = @import("../workspace/workspace_access.zig");
-const host_capabilities = @import("../hosts/host.zig");
-const terminal_client_runtime = @import("../terminal/client.zig");
+const unified_exec_runtime = @import("../execution/unified_exec.zig");
 
 test {
     _ = tool_admission;
@@ -189,7 +182,7 @@ pub const Context = struct {
     tool_result_dir: ?[]const u8 = null,
     session_child_capability: ?*session_child_store.SessionChildCapability = null,
     ephemeral_command_replay: ?*command_replay_store.EphemeralStore = null,
-    terminal_client: ?*terminal_client_runtime.Runtime = null,
+    unified_exec: ?*unified_exec_runtime.Manager = null,
     command_timeout_ms: ?usize = null,
     command_timeout_started_ms: ?i64 = null,
     command_replay_capture: ?*command_replay_store.Capture = null,
@@ -219,7 +212,6 @@ pub const Context = struct {
     on_web_search_progress: ?tool_dispatch.WebSearchProgressFn = null,
     web_fetch_progress_ctx: ?*anyopaque = null,
     on_web_fetch_progress: ?tool_dispatch.WebFetchProgressFn = null,
-    workspace_executor: ?js_host_workspace.Executor = null,
     host_sandbox_default: tool_admission.HostSandboxDefault = .none,
     model_capability_resolver: ?model_capabilities.Resolver = null,
     /// False when running outside an interactive TUI (e.g. ACP). Tools
@@ -403,15 +395,7 @@ pub fn executeToolCallAuthorized(
         spec.take_file_mutation_input_fn != null
     else
         false;
-    const result = (if (comptime builtin.os.tag == .wasi)
-        executeWorkspaceToolCallInner(
-            execution_ctx,
-            request.result_allocator,
-            request.call,
-            request.authority,
-            request.classification_complete,
-        )
-    else if (uses_file_mutation_contract)
+    const result = (if (uses_file_mutation_contract)
         file_mutation_execution.execute(.{
             .call_allocator = request.call_allocator,
             .result_allocator = request.result_allocator,
@@ -423,6 +407,8 @@ pub fn executeToolCallAuthorized(
             .maybe_cancel_flag = execution_ctx.cancel_flag,
             .lifecycle_id = request.lifecycle_id,
         })
+    else if (comptime builtin.os.tag == .wasi)
+        semanticFailure(try request.result_allocator.dupe(u8, "Unified Exec is unavailable on this host."))
     else
         executeToolCallInner(
             execution_ctx,
@@ -540,52 +526,6 @@ fn executeToolCallInner(
     };
 }
 
-fn executeWorkspaceToolCallInner(
-    ctx: Context,
-    arena: Allocator,
-    call: ToolCall,
-    authority: command_admission.ToolExecutionAuthority,
-    classification_complete: bool,
-) !ToolExecutionResult {
-    if (!classification_complete) {
-        if (try checkToolAvailability(ctx, arena, call)) |reason| {
-            return semanticFailure(reason);
-        }
-    }
-    const spec = registeredToolSpec(ctx, call.name) orelse
-        return semanticFailure(try std.fmt.allocPrint(arena, "Unsupported tool: {s}", .{call.name}));
-    if (ctx.tool_registry.tools.len != 1 or
-        !std.mem.eql(u8, spec.name, "terminal") or
-        spec.executor_kind != .run_command or
-        spec.runtime_provider != .run_command)
-    {
-        return semanticFailure(try std.fmt.allocPrint(arena, "Unsupported tool: {s}", .{call.name}));
-    }
-
-    var command_backend = RunCommandBackendState{ .runtime = ctx };
-    var dispatch_ctx = typedDispatchContextForCall(ctx, arena, call);
-    dispatch_ctx.execution_authority = authority;
-    dispatch_ctx.captured_command_host = spec.captured_command_host;
-    dispatch_ctx.run_command_backend = .{
-        .ctx = &command_backend,
-        .execute_fn = executeRunCommandBackend,
-    };
-    const dispatched = try tool_dispatch.dispatchAuthorizedToolCall(
-        dispatch_ctx,
-        ctx.tool_registry,
-        call,
-    );
-    if (command_backend.execution_error) |err| {
-        dispatched.deinit(arena);
-        return err;
-    }
-    var execution = command_backend.completion orelse
-        toolExecutionResultFromDispatch(dispatched);
-    execution.model_output = dispatched.body;
-    if (dispatched.status_detail) |detail| execution.status_detail = detail;
-    return execution;
-}
-
 fn resolveToolDispatchPrelude(
     ctx: Context,
     arena: Allocator,
@@ -675,8 +615,10 @@ fn executeRegisteredTool(
     var mcp_progress_bridge = McpProgressBridge{ .ctx = ctx };
     var mcp_call_status: ?tool_mcp_runtime.CallStatus = null;
     var mcp_execution_error: ?anyerror = null;
+    var command_result_json: ?[]const u8 = null;
     var dispatch_ctx = typedDispatchContextForCall(ctx, arena, call);
     dispatch_ctx.execution_authority = authority;
+    dispatch_ctx.command_result_json_sink = &command_result_json;
     dispatch_ctx.mcp_call_options = .{
         .cancel_flag = dispatch_ctx.cancel_flag,
         .progress = .{
@@ -737,6 +679,7 @@ fn executeRegisteredTool(
     else
         toolExecutionResultFromDispatch(dispatched);
     execution.model_output = dispatched.body;
+    if (command_result_json) |json| execution.command_result_json = json;
     if (dispatched.status_detail) |detail| execution.status_detail = detail;
     if (mcp_call_status == .input_required or
         (execution.status == .failure and
@@ -859,9 +802,7 @@ fn recordSelectedDynamicToolForDispatch(
 }
 
 fn typedDispatchContext(ctx: Context, arena: Allocator) tool_dispatch.DispatchContext {
-    var capabilities = tool_dispatch.ToolCapabilities.for_host(
-        host_capabilities.current(),
-    );
+    var capabilities = tool_dispatch.ToolCapabilities{};
     capabilities.web_search_runtime_ready =
         ctx.web_search_runtime_ready and ctx.web_search_backend != null;
     return .{
@@ -877,20 +818,16 @@ fn typedDispatchContext(ctx: Context, arena: Allocator) tool_dispatch.DispatchCo
         .max_read_file_bytes = ctx.max_read_file_bytes,
         .max_read_file_lines = ctx.max_read_file_lines,
         .max_read_file_line_len = ctx.max_read_file_line_len,
+        .max_command_output_bytes = ctx.max_command_output_bytes,
         .max_tool_result_bytes = ctx.max_tool_result_bytes,
         .tool_result_dir = ctx.tool_result_dir,
         .session_child_capability = ctx.session_child_capability,
         .ephemeral_command_replay = ctx.ephemeral_command_replay,
-        .terminal_client = ctx.terminal_client,
-        .terminal_owner_session_id = ctx.lifecycle_scope.session_id,
-        .terminal_transport_role = switch (ctx.lifecycle_scope.kind) {
-            .interactive, .subagent => .interactive,
-            .ask => .headless,
-            .acp => .acp,
-        },
+        .unified_exec = ctx.unified_exec,
         .background_lifecycle_allocator = ctx.session_allocator,
         .cancel_flag = runtimeCancelFlag(ctx),
         .output_chunk_lifecycle_id = ctx.output_chunk_lifecycle_id,
+        .session_id = ctx.lifecycle_scope.session_id,
         .output_chunk_ctx = ctx.output_chunk_ctx,
         .on_output_chunk = ctx.on_output_chunk,
         .command_timeout_ms = ctx.command_timeout_ms,
@@ -942,24 +879,6 @@ fn latestCompletedAssistantTurn(history: []const types.HistoryTurn) ?tool_dispat
         }
     }
     return null;
-}
-
-fn terminal_lease_cleanup_dispatch_context(
-    ctx: Context,
-    arena: Allocator,
-) tool_dispatch.DispatchContext {
-    var dispatch = typedDispatchContext(ctx, arena);
-    dispatch.cancel_flag = null;
-    return dispatch;
-}
-
-pub fn release_agent_terminal_lease(ctx: Context, session_id: []const u8) !void {
-    var arena_state = std.heap.ArenaAllocator.init(ctx.session_allocator);
-    defer arena_state.deinit();
-    return terminal_impl.release_agent_write_lease(
-        terminal_lease_cleanup_dispatch_context(ctx, arena_state.allocator()),
-        session_id,
-    );
 }
 
 fn requestQuestionBatchWithWorker(
@@ -1296,18 +1215,6 @@ fn toolRunCommand(
         if (ctx.command_replay_capture) |capture| capture.policy() else null,
     );
 
-    if (comptime builtin.os.tag == .wasi or builtin.is_test) {
-        if (ctx.workspace_executor) |executor| {
-            return executeWorkspaceRunCommand(
-                arena,
-                request,
-                command_ctx,
-                authority,
-                executor,
-                timeout.timeout_ms,
-            );
-        }
-    }
     if (comptime builtin.os.tag == .wasi) return error.WorkspaceUnavailable;
 
     try execution_router.validateConfigContext(.{
@@ -1507,81 +1414,6 @@ fn toolRunCommand(
     );
 }
 
-fn executeWorkspaceRunCommand(
-    arena: Allocator,
-    request: tool_dispatch.RunCommandRequest,
-    command_ctx: command_admission.CommandContext,
-    authority: command_admission.CommandExecutionAuthority,
-    executor: js_host_workspace.Executor,
-    configured_timeout_ms: ?usize,
-) !ToolExecutionResult {
-    if (std.meta.activeTag(request.environment) != .workspace_clean) return error.InvalidWorkspaceInput;
-    var route = try execution_router.prepareAuthorizedRoute(
-        arena,
-        command_ctx,
-        authority,
-    );
-    defer route.deinit(arena);
-
-    const timeout_ms: u32 = @intCast(@min(
-        @max(configured_timeout_ms orelse js_host_workspace.max_timeout_ms, js_host_workspace.min_timeout_ms),
-        js_host_workspace.max_timeout_ms,
-    ));
-    const started_ms = io_mod.milliTimestamp();
-    const result = executor.execute(
-        arena,
-        request.command,
-        request.resolved_cwd,
-        timeout_ms,
-    ) catch |err| {
-        if (err == error.WorkspaceDeadline) {
-            return command_result_mapping.Foreground.timeoutFailure(
-                arena,
-                request.command,
-                request.resolved_cwd,
-                timeout_ms,
-                started_ms,
-            );
-        }
-        return err;
-    };
-    var replay_transferred = false;
-    if (try command_result_mapping.Foreground.cancelledFailure(arena, result)) |cancelled| {
-        return finishCommandToolResult(
-            arena,
-            null,
-            false,
-            &replay_transferred,
-            result,
-            cancelled,
-        );
-    }
-    if (try command_result_mapping.Foreground.nonZeroFailure(arena, result)) |failure| {
-        return finishCommandToolResult(
-            arena,
-            null,
-            false,
-            &replay_transferred,
-            result,
-            failure,
-        );
-    }
-    return finishCommandToolResult(
-        arena,
-        null,
-        false,
-        &replay_transferred,
-        result,
-        .{
-            .model_output = result.output,
-            .command_result_json = if (result.command_result) |command_result|
-                try command_result.toJson(arena)
-            else
-                null,
-        },
-    );
-}
-
 const CommandReplayCaptureCallback = struct {
     alloc: Allocator,
     capture: ?*command_replay_store.Capture,
@@ -1709,60 +1541,6 @@ fn commandProcessPresentation(
         if (exit_code != 0) return .{ .exit_code = exit_code };
     }
     return null;
-}
-
-test "file mutations reject ordinary execution authority without mutating" {
-    const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.createDirPath(io_mod.getIo(), "workspace");
-    try writeTestFile(tmp.dir, "workspace/existing.txt", "before\n");
-    const workspace = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "workspace");
-    defer alloc.free(workspace);
-    var rt = TestRuntime{ .workspace_root = workspace };
-    defer rt.deinit(alloc);
-
-    const cases = [_]struct {
-        name: []const u8,
-        arguments_json: []const u8,
-    }{
-        .{
-            .name = "write_file",
-            .arguments_json = "{\"path\":\"created.txt\",\"content\":\"new\\n\"}",
-        },
-        .{
-            .name = "edit_file",
-            .arguments_json = "{\"path\":\"existing.txt\",\"old_string\":\"before\",\"new_string\":\"after\"}",
-        },
-    };
-
-    for (cases) |case| {
-        var arena_state = std.heap.ArenaAllocator.init(alloc);
-        defer arena_state.deinit();
-        const result = try executeToolCall(rt.context(), arena_state.allocator(), .{
-            .id = "runtime-only",
-            .name = case.name,
-            .arguments_json = case.arguments_json,
-        });
-        try std.testing.expectEqual(
-            tool_contracts.ToolExecutionStatus.failure,
-            result.status,
-        );
-        try std.testing.expectEqualStrings(
-            "file mutation execution authority is invalid",
-            result.model_output,
-        );
-    }
-
-    try std.testing.expectError(
-        error.FileNotFound,
-        tmp.dir.statFile(io_mod.getIo(), "workspace/created.txt", .{}),
-    );
-    var existing = try tmp.dir.openFile(io_mod.getIo(), "workspace/existing.txt", .{});
-    defer existing.close(io_mod.getIo());
-    const content = try io_mod.readFileToEnd(alloc, &existing, 64);
-    defer alloc.free(content);
-    try std.testing.expectEqualStrings("before\n", content);
 }
 
 const SubagentProviderState = struct {
@@ -2132,7 +1910,7 @@ const test_tool_registry = tool_dispatch.Registry{ .tools = &.{
     test_builtin_tools.open_file,
     test_builtin_tools.web_fetch,
     test_builtin_tools.web_search,
-    test_builtin_tools.terminal,
+    test_builtin_tools.exec_command,
     test_builtin_tools.skill,
     test_builtin_tools.install_skill,
     test_builtin_tools.subagent,
@@ -2168,7 +1946,7 @@ fn executeFailingRunCommandCompatibility(
 ) tool_dispatch.DispatchError!tool_dispatch.ToolResult {
     return .{ .failure = try tool_result_errors.formatToolExecutionErrorJson(
         ctx.allocator,
-        "terminal",
+        "install_skill",
         error.SkillInstallFailed,
     ) };
 }
@@ -2182,15 +1960,9 @@ const test_failing_compatible_tool = blk: {
     break :blk tool;
 };
 
-const test_compatibility_registry = tool_dispatch.Registry{ .tools = &.{
-    test_builtin_tools.terminal,
-    test_compatible_tool,
-} };
+const test_compatibility_registry = tool_dispatch.Registry{ .tools = &.{test_compatible_tool} };
 
-const test_failing_compatibility_registry = tool_dispatch.Registry{ .tools = &.{
-    test_builtin_tools.terminal,
-    test_failing_compatible_tool,
-} };
+const test_failing_compatibility_registry = tool_dispatch.Registry{ .tools = &.{test_failing_compatible_tool} };
 
 fn gatherNoopTestContext(_: Allocator, _: context_contract.InitialContextInput) context_contract.ProviderError!context_contract.ProviderContext {
     return .{};
@@ -2209,7 +1981,7 @@ const test_context_registry = context_contract.Registry{ .default_provider = .{
 } };
 
 const test_review_calls = [_]ToolCall{
-    .{ .id = "test-review", .name = "terminal", .arguments_json = "{\"action\":\"exec\",\"command\":\"printf test\",\"timeout_ms\":600000}" },
+    .{ .id = "test-review", .name = "exec_command", .arguments_json = "{\"cmd\":\"printf test\"}" },
 };
 const test_review_root_messages = [_][]const u8{"test root request"};
 
@@ -2277,7 +2049,6 @@ const TestRuntime = struct {
     web_fetch_artifact_error: ?anyerror = null,
     web_fetch_progress_ctx: ?*anyopaque = null,
     on_web_fetch_progress: ?tool_dispatch.WebFetchProgressFn = null,
-    workspace_executor: ?js_host_workspace.Executor = null,
     host_sandbox_default: tool_admission.HostSandboxDefault = .none,
 
     fn deinit(self: *TestRuntime, alloc: Allocator) void {
@@ -2352,7 +2123,6 @@ const TestRuntime = struct {
             .on_web_search_progress = self.on_web_search_progress,
             .web_fetch_progress_ctx = self.web_fetch_progress_ctx,
             .on_web_fetch_progress = self.on_web_fetch_progress,
-            .workspace_executor = self.workspace_executor,
             .host_sandbox_default = self.host_sandbox_default,
             .interactive = self.interactive,
         };
@@ -3161,292 +2931,6 @@ test "subagent identity evidence prefers canonical active-turn results and authe
     }
 }
 
-test "subagent production identity replays persisted invocation across restart without effects" {
-    const alloc = std.testing.allocator;
-    const root_id = "01J00000000000000000000000";
-    const invocation_id = "production-adapter-replay";
-    const create_args =
-        \\{"command":{"create":{"name":"replayed-worker","mode":"persistent"}}}
-    ;
-    const call = ToolCall{
-        .id = invocation_id,
-        .name = "subagent",
-        .arguments_json = create_args,
-    };
-    var env = try SubagentTestEnvironment.init(alloc);
-    defer env.deinit(alloc);
-    try env.createSession(alloc, root_id);
-    var test_authority = SubagentTestAuthority{ .root_id = root_id };
-    var first_output: []u8 = undefined;
-    var child_id: []u8 = undefined;
-    var history: []session_runtime.HistoryTurn = undefined;
-    {
-        const host = try subagent_tool_host.Runtime.create(
-            alloc,
-            &env.store,
-            root_id,
-            test_authority.resolver(),
-            .{},
-        );
-        defer host.deinit();
-        var runtime = TestRuntime{
-            .workspace_root = env.workspace,
-            .subagent_host = host,
-            .subagent_caller_id = root_id,
-            .model = "test/model",
-        };
-        defer runtime.deinit(alloc);
-
-        var first_arena = std.heap.ArenaAllocator.init(alloc);
-        defer first_arena.deinit();
-        const first = try executeToolCall(
-            runtime.context(),
-            first_arena.allocator(),
-            call,
-        );
-        try std.testing.expectEqual(
-            tool_contracts.ToolExecutionStatus.success,
-            first.status,
-        );
-        first_output = try alloc.dupe(u8, first.model_output);
-        errdefer alloc.free(first_output);
-        child_id = try subagentResultStringAlloc(alloc, first.model_output, "child_id");
-        errdefer alloc.free(child_id);
-        try persistSubagentToolResult(&runtime, alloc, call, first);
-
-        var replay_arena = std.heap.ArenaAllocator.init(alloc);
-        defer replay_arena.deinit();
-        const replay = try executeToolCall(
-            runtime.context(),
-            replay_arena.allocator(),
-            call,
-        );
-        try std.testing.expectEqualStrings(first_output, replay.model_output);
-        try expectSingleSubagentCreateEffects(alloc, &env, child_id);
-        history = try runtime.session.snapshotHistory(alloc);
-    }
-    defer alloc.free(first_output);
-    defer alloc.free(child_id);
-    defer session_runtime.freeHistoryTurnSlice(alloc, history);
-
-    const restarted_host = try subagent_tool_host.Runtime.create(
-        alloc,
-        &env.store,
-        root_id,
-        test_authority.resolver(),
-        .{},
-    );
-    defer restarted_host.deinit();
-    var resumed = TestRuntime{
-        .workspace_root = env.workspace,
-        .subagent_host = restarted_host,
-        .subagent_caller_id = root_id,
-        .model = "test/model",
-    };
-    defer resumed.deinit(alloc);
-    try resumed.session.restore(
-        alloc,
-        session_runtime.ConversationLanguage.literal("en"),
-        history,
-    );
-
-    var resumed_arena = std.heap.ArenaAllocator.init(alloc);
-    defer resumed_arena.deinit();
-    const durable_replay = try executeToolCall(
-        resumed.context(),
-        resumed_arena.allocator(),
-        call,
-    );
-    try std.testing.expectEqualStrings(first_output, durable_replay.model_output);
-    try expectSingleSubagentCreateEffects(alloc, &env, child_id);
-
-    var conflict_arena = std.heap.ArenaAllocator.init(alloc);
-    defer conflict_arena.deinit();
-    const conflict = try executeToolCall(
-        resumed.context(),
-        conflict_arena.allocator(),
-        .{
-            .id = invocation_id,
-            .name = "subagent",
-            .arguments_json =
-            \\{"command":{"create":{"name":"different-worker","mode":"persistent"}}}
-            ,
-        },
-    );
-    try expectContains(conflict.model_output, "\"error_code\":\"operation_conflict\"");
-    try expectSingleSubagentCreateEffects(alloc, &env, child_id);
-
-    {
-        var capability = try env.store.openSubagentControlCapabilityWritable(
-            alloc,
-            root_id,
-            .{},
-        );
-        defer capability.deinit();
-        const store = subagent_create_store.Store{
-            .capability = &capability,
-            .expected_root_id = root_id,
-        };
-        var lock = try store.acquireLock();
-        defer lock.release();
-        var record = (try store.loadOptional(alloc)).?;
-        defer record.deinit(alloc);
-        const operation_id = try subagentResultStringAlloc(
-            alloc,
-            first_output,
-            "operation_id",
-        );
-        defer alloc.free(operation_id);
-        const identity = subagent_tool_result.parseBoundOperationId(operation_id).?;
-        for (record.entries) |entry| {
-            alloc.free(entry.operation_id);
-            alloc.free(entry.child_id);
-        }
-        alloc.free(record.entries);
-        record.entries = try alloc.alloc(subagent_create_store.Entry, 0);
-        record.model_replay_floor = identity.epoch +| 1;
-        try store.save(alloc, record);
-    }
-
-    var expired_arena = std.heap.ArenaAllocator.init(alloc);
-    defer expired_arena.deinit();
-    const expired = try executeToolCall(
-        resumed.context(),
-        expired_arena.allocator(),
-        call,
-    );
-    try expectContains(
-        expired.model_output,
-        "\"error_code\":\"operation_replay_expired\"",
-    );
-    try expectSingleSubagentCreateEffects(alloc, &env, child_id);
-}
-
-const CancelTestCommandOnOutput = struct {
-    flag: *std.atomic.Value(bool),
-    needle: []const u8,
-    seen: bool = false,
-
-    fn onChunk(ctx: *anyopaque, _: ?types.ToolLifecycleId, _: command_contract.CommandOutputStream, chunk: []const u8) !void {
-        const self: *@This() = @ptrCast(@alignCast(ctx));
-        if (std.mem.find(u8, chunk, self.needle) == null) return;
-        self.seen = true;
-        self.flag.store(true, .seq_cst);
-    }
-};
-
-const TestCommandOutputCapture = struct {
-    alloc: Allocator,
-    bytes: std.ArrayList(u8) = .empty,
-    stdout_chunks: usize = 0,
-    stderr_chunks: usize = 0,
-
-    fn deinit(self: *@This()) void {
-        self.bytes.deinit(self.alloc);
-    }
-
-    fn onChunk(
-        raw_ctx: *anyopaque,
-        _: ?types.ToolLifecycleId,
-        stream: command_contract.CommandOutputStream,
-        chunk: []const u8,
-    ) !void {
-        const self: *@This() = @ptrCast(@alignCast(raw_ctx));
-        try self.bytes.appendSlice(self.alloc, chunk);
-        switch (stream) {
-            .stdout => self.stdout_chunks += 1,
-            .stderr => self.stderr_chunks += 1,
-        }
-    }
-};
-
-fn runCommandArgsForTest(alloc: Allocator, command: []const u8) ![]u8 {
-    var out: std.Io.Writer.Allocating = .init(alloc);
-    defer out.deinit();
-    try out.writer.writeAll("{\"action\":\"exec\",\"command\":");
-    try std.json.Stringify.value(command, .{}, &out.writer);
-    try out.writer.writeAll(",\"timeout_ms\":600000}");
-    return out.toOwnedSlice();
-}
-
-fn runCommandArgsWithCleanProfileForTest(alloc: Allocator, command: []const u8) ![]u8 {
-    var out: std.Io.Writer.Allocating = .init(alloc);
-    defer out.deinit();
-    try out.writer.writeAll("{\"action\":\"exec\",\"command\":");
-    try std.json.Stringify.value(command, .{}, &out.writer);
-    try out.writer.writeAll(",\"profile\":\"clean\",\"timeout_ms\":600000}");
-    return out.toOwnedSlice();
-}
-
-fn executeTestRunCommand(
-    ctx: Context,
-    arena: Allocator,
-    call: ToolCall,
-) !ToolExecutionResult {
-    const terminal_call = try terminalExecCallForTest(arena, call);
-    const command_ctx = try tool_admission.runCommandContext(ctx.admissionInput(), arena, terminal_call);
-    return executeToolCallAuthorized(ctx, .{
-        .call_allocator = arena,
-        .result_allocator = arena,
-        .call = terminal_call,
-        .authority = .{ .run_command = .{ .shell_allowed = .{
-            .fingerprint = .init(command_ctx),
-            .source = .configured_rule,
-        } } },
-        .session_grants = ctx.session_grants,
-        .advertised_dynamic_tool_names = ctx.advertised_dynamic_tool_names,
-        .max_tool_result_bytes = ctx.max_tool_result_bytes,
-    });
-}
-
-fn terminalExecCallForTest(arena: Allocator, call: ToolCall) !ToolCall {
-    if (std.mem.eql(u8, call.name, "terminal")) return call;
-    if (!std.mem.eql(u8, call.name, "run_command")) return call;
-    var args = try std.json.parseFromSliceLeaky(
-        std.json.Value,
-        arena,
-        call.arguments_json,
-        .{ .allocate = .alloc_always },
-    );
-    if (args != .object) return error.InvalidToolArguments;
-    try args.object.put(arena, "action", .{ .string = "exec" });
-    try args.object.put(arena, "timeout_ms", .{ .integer = 600_000 });
-    var out: std.Io.Writer.Allocating = .init(arena);
-    defer out.deinit();
-    try std.json.Stringify.value(args, .{}, &out.writer);
-    var migrated = call;
-    migrated.name = "terminal";
-    migrated.arguments_json = try out.toOwnedSlice();
-    return migrated;
-}
-
-test "registered terminal exec preserves invalid execution authority error" {
-    var rt = TestRuntime{};
-    defer rt.deinit(std.testing.allocator);
-
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-    const call = ToolCall{
-        .id = "invalid-authority",
-        .name = "terminal",
-        .arguments_json = "{\"action\":\"exec\",\"command\":\"printf should-not-run\",\"timeout_ms\":600000}",
-    };
-
-    try std.testing.expectError(
-        error.InvalidRunCommandExecutionAuthority,
-        executeToolCallAuthorized(rt.context(), .{
-            .call_allocator = arena,
-            .result_allocator = arena,
-            .call = call,
-            .authority = .ordinary,
-            .session_grants = &.{},
-            .advertised_dynamic_tool_names = &.{},
-            .max_tool_result_bytes = rt.max_tool_result_bytes,
-        }),
-    );
-}
-
 test "captured command compatibility bypasses compound commands" {
     var rt = TestRuntime{ .tool_registry = test_compatibility_registry };
     defer rt.deinit(std.testing.allocator);
@@ -3501,7 +2985,7 @@ test "run command compatibility returns installer failure without shell fallback
 
     const failure = result.failure;
     try expectToolErrorField(failure, "type", "tool_execution_failed");
-    try expectToolErrorField(failure, "tool_name", "terminal");
+    try expectToolErrorField(failure, "tool_name", "install_skill");
     try expectToolErrorDetailString(failure, "error", "SkillInstallFailed");
 }
 
@@ -3796,20 +3280,6 @@ test "tool runtime explicit cancellation source overrides worker fallback" {
     try std.testing.expect(typedDispatchContext(rt.context(), arena_state.allocator()).cancel_flag.? == &cancel_flag);
 }
 
-test "agent terminal lease cleanup ignores preexisting turn cancellation" {
-    var cancel_flag = std.atomic.Value(bool).init(true);
-    var rt = TestRuntime{ .cancel_flag = &cancel_flag };
-    defer rt.deinit(std.testing.allocator);
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-
-    const cleanup = terminal_lease_cleanup_dispatch_context(
-        rt.context(),
-        arena_state.allocator(),
-    );
-    try std.testing.expect(cleanup.cancel_flag == null);
-}
-
 test "read-only local runtime tools are registered in built-in registry" {
     const cases = [_]struct {
         name: []const u8,
@@ -3830,8 +3300,9 @@ test "read-only local runtime tools are registered in built-in registry" {
         const found = registry.lookup(case.name) orelse return error.TestExpectedEqual;
         try std.testing.expectEqual(case.kind, found.executor_kind);
     }
-    const terminal_tool = registry.lookup("terminal") orelse return error.TestExpectedEqual;
-    try std.testing.expectEqual(tool_specs.ExecutorKind.terminal, terminal_tool.executor_kind);
+    const exec_tool = registry.lookup("exec_command") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(tool_specs.ExecutorKind.exec_command, exec_tool.executor_kind);
+    try std.testing.expect(registry.lookup("terminal") == null);
     try std.testing.expect(registry.lookup("run_command") == null);
 }
 
@@ -3880,14 +3351,6 @@ fn registryOwnedWebSearchCall(
 ) tool_dispatch.DispatchError!tool_dispatch.ToolResult {
     _ = input;
     return .{ .success = try ctx.allocator.dupe(u8, "registry-owned web_search") };
-}
-
-fn registryOwnedTerminalExecCall(
-    ctx: tool_dispatch.DispatchContext,
-    input: tool_dispatch.ToolInput,
-) tool_dispatch.DispatchError!tool_dispatch.ToolResult {
-    _ = input;
-    return .{ .success = try ctx.allocator.dupe(u8, "registry-owned terminal exec") };
 }
 
 fn registryOwnedFileInfoCall(
@@ -4353,43 +3816,6 @@ test "web_search execution uses supplied registry entry" {
     try std.testing.expectEqual(@as(usize, 0), backend.calls);
 }
 
-test "terminal exec execution uses supplied registry entry" {
-    const alloc = std.testing.allocator;
-    var arena_state = std.heap.ArenaAllocator.init(alloc);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-
-    var registered_run_command = test_builtin_tools.terminal;
-    registered_run_command.call = registryOwnedTerminalExecCall;
-    const tools = [_]tool_dispatch.Tool{registered_run_command};
-    const registry = tool_dispatch.Registry{ .tools = tools[0..] };
-    const call = ToolCall{
-        .id = "run-command-registry",
-        .name = "terminal",
-        .arguments_json = "{\"action\":\"exec\",\"command\":\"printf bypassed\",\"timeout_ms\":600000}",
-    };
-
-    var rt = TestRuntime{ .tool_registry = registry };
-    defer rt.deinit(alloc);
-    const ctx = rt.context();
-    const command_ctx = try tool_admission.runCommandContext(ctx.admissionInput(), arena, call);
-    const result = try executeToolCallAuthorized(ctx, .{
-        .call_allocator = arena,
-        .result_allocator = arena,
-        .call = call,
-        .authority = .{ .run_command = .{ .shell_allowed = .{
-            .fingerprint = .init(command_ctx),
-            .source = .configured_rule,
-        } } },
-        .session_grants = &.{},
-        .advertised_dynamic_tool_names = &.{},
-        .max_tool_result_bytes = rt.max_tool_result_bytes,
-    });
-
-    try std.testing.expectEqual(tool_contracts.ToolExecutionStatus.success, result.status);
-    try std.testing.expectEqualStrings("registry-owned terminal exec", result.model_output);
-}
-
 test "stateful local tool execution uses supplied registry entries" {
     const alloc = std.testing.allocator;
     var arena_state = std.heap.ArenaAllocator.init(alloc);
@@ -4518,22 +3944,6 @@ test "validateToolCall rejects malformed registered input without claiming unkno
         .name = "dynamic_tool",
         .arguments_json = "{}",
     }));
-}
-
-test "validateToolCall preserves the registered captured command host" {
-    var rt = TestRuntime{ .tool_registry = test_browser_workspace_tools.registry };
-    defer rt.deinit(std.testing.allocator);
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-
-    try std.testing.expectEqual(
-        tool_contracts.ToolCallValidationResult.valid,
-        try validateToolCall(rt.context(), arena_state.allocator(), .{
-            .id = "workspace-terminal",
-            .name = "terminal",
-            .arguments_json = "{\"action\":\"exec\",\"command\":\"printf ok\"}",
-        }),
-    );
 }
 
 test "validateToolCall rejects selected MCP arguments through runtime capability" {
@@ -4915,112 +4325,6 @@ test "CLI headless ordinary admission preserves multi-target deny precedence" {
         try std.testing.expectEqual(ToolPermissionDecision.policy_denied, outcome.decision);
         try std.testing.expect(outcome.execution_authority == null);
     }
-}
-
-test "run_command default user profile requires configured or reviewed shell authority" {
-    const alloc = std.testing.allocator;
-    var reviewer = TestAutoReview{};
-    var rt = TestRuntime{
-        .workspace_root = "/tmp/workspace",
-        .interactive = false,
-        .auto_classifier = reviewer.classifier(),
-    };
-    defer rt.deinit(alloc);
-    var arena_state = std.heap.ArenaAllocator.init(alloc);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-
-    const direct = (try tool_admission.requestPermissionOutcome(rt.context().admissionInput(), arena, .{
-        .id = "direct",
-        .name = "terminal",
-        .arguments_json = "{\"action\":\"exec\",\"command\":\"pwd\"}",
-    }, .ask, &.{}));
-    try std.testing.expectEqual(ToolPermissionDecision.permission_required, direct.decision);
-    try std.testing.expect(direct.execution_authority == null);
-
-    const blocked = (try tool_admission.requestPermissionOutcome(rt.context().admissionInput(), arena, .{
-        .id = "blocked",
-        .name = "terminal",
-        .arguments_json = "{\"action\":\"exec\",\"command\":\"touch blocked.txt\"}",
-    }, .ask, &.{}));
-    try std.testing.expectEqual(ToolPermissionDecision.permission_required, blocked.decision);
-    try std.testing.expect(blocked.execution_authority == null);
-
-    var rules = [_]types.PermissionRule{
-        .{ .permission = @constCast("bash"), .pattern = @constCast("touch *"), .action = .allow },
-    };
-    rt.permission_rules = .{ .rules = &rules };
-    const configured = (try tool_admission.requestPermissionOutcome(rt.context().admissionInput(), arena, .{
-        .id = "configured",
-        .name = "terminal",
-        .arguments_json = "{\"action\":\"exec\",\"command\":\"touch configured.txt\"}",
-    }, .ask, &.{}));
-    switch ((configured.execution_authority orelse return error.TestExpectedEqual).run_command) {
-        .direct_only => return error.TestExpectedShellAllowed,
-        .shell_allowed => |authority| try std.testing.expectEqual(command_admission.ShellAuthorizationSource.configured_rule, authority.source),
-    }
-    try std.testing.expectEqual(@as(usize, 0), reviewer.calls);
-
-    rt.permission_rules = .{};
-    const automatic = (try tool_admission.requestPermissionOutcome(rt.context().admissionInput(), arena, .{
-        .id = "automatic",
-        .name = "terminal",
-        .arguments_json = "{\"action\":\"exec\",\"command\":\"touch automatic.txt\"}",
-    }, .auto, &.{}));
-    switch ((automatic.execution_authority orelse return error.TestExpectedEqual).run_command) {
-        .direct_only => return error.TestExpectedShellAllowed,
-        .shell_allowed => |authority| try std.testing.expectEqual(command_admission.ShellAuthorizationSource.auto_classifier, authority.source),
-    }
-    try std.testing.expectEqual(@as(usize, 1), reviewer.calls);
-    try std.testing.expectEqual(
-        std.meta.Tag(permission_auto_classifier.Action).command,
-        reviewer.action_tag.?,
-    );
-    try std.testing.expectEqualStrings("touch automatic.txt", reviewer.exact_command.?);
-}
-
-test "tool context projects immutable session permission state into admission" {
-    const alloc = std.testing.allocator;
-    var rt = TestRuntime{ .workspace_root = "/tmp/workspace", .interactive = false };
-    defer rt.deinit(alloc);
-    var rules = [_]types.PermissionRule{.{
-        .permission = @constCast("bash"),
-        .pattern = @constCast("touch *"),
-        .action = .allow,
-    }};
-    rt.permission_rules = .{ .rules = &rules };
-    var arena_state = std.heap.ArenaAllocator.init(alloc);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-    const call = ToolCall{
-        .id = "runtime-session-deny",
-        .name = "terminal",
-        .arguments_json = "{\"action\":\"exec\",\"command\":\"touch configured.txt\"}",
-    };
-    const key = try tool_admission.permissionStateKeyForCall(
-        rt.context().admissionInput(),
-        arena,
-        call,
-    );
-    try std.testing.expectEqual(
-        session_permission_state.ApplyStatus.applied,
-        try rt.session.applyPermissionEvent(alloc, .{ .set = .{
-            .key = key,
-            .display_identity = "touch configured.txt",
-            .decision = .deny,
-            .expected_generation = null,
-        } }),
-    );
-
-    const outcome = try tool_admission.requestPermissionOutcome(
-        rt.context().admissionInput(),
-        arena,
-        call,
-        .auto,
-        &.{},
-    );
-    try std.testing.expectEqual(ToolPermissionDecision.policy_denied, outcome.decision);
-    try std.testing.expect(outcome.execution_authority == null);
 }
 
 test "local file mutations bypass review while external mutations use exact review" {
@@ -6292,412 +5596,6 @@ test "command replay policy is decided once from typed execution context" {
     }
 }
 
-test "terminal exec request timeout reaches execution without an ambient timeout" {
-    if (builtin.os.tag == .windows or builtin.os.tag == .wasi) return;
-
-    const alloc = std.testing.allocator;
-    var rt = TestRuntime{};
-    defer rt.deinit(alloc);
-    var arena_state = std.heap.ArenaAllocator.init(alloc);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-
-    const result = try executeTestRunCommand(rt.context(), arena, .{
-        .id = "request-timeout",
-        .name = "terminal",
-        .arguments_json = "{\"action\":\"exec\",\"command\":\"sleep 1\",\"profile\":\"clean\",\"timeout_ms\":25}",
-    });
-
-    try std.testing.expectEqual(tool_contracts.ToolExecutionStatus.failure, result.status);
-    try expectContains(result.model_output, "timeout=true\n");
-    try expectContains(result.model_output, "timeout_ms=25\n");
-    const structured = result.command_result_json orelse return error.TestExpectedEqual;
-    try expectCommandResultBool(structured, "timed_out", true);
-}
-
-test "saved noninteractive terminal exec captures replay by capability" {
-    if (builtin.os.tag == .windows or builtin.os.tag == .wasi) return;
-
-    const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.createDir(
-        io_mod.getIo(),
-        "session",
-        std.Io.File.Permissions.fromMode(0o700),
-    );
-    var session_dir = try tmp.dir.openDir(io_mod.getIo(), "session", .{
-        .iterate = true,
-        .follow_symlinks = false,
-    });
-    defer session_dir.close(io_mod.getIo());
-    const session_path = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "session");
-    defer alloc.free(session_path);
-    var capability = try session_child_store.SessionChildCapability.initForTesting(
-        alloc,
-        session_dir,
-        session_path,
-        .writable,
-        .{},
-    );
-    defer capability.deinit();
-
-    var rt = TestRuntime{
-        .interactive = false,
-        .session_child_capability = &capability,
-    };
-    defer rt.deinit(alloc);
-    var arena_state = std.heap.ArenaAllocator.init(alloc);
-    defer arena_state.deinit();
-
-    const result = try executeTestRunCommand(rt.context(), arena_state.allocator(), .{
-        .id = "saved-noninteractive",
-        .name = "terminal",
-        .arguments_json = "{\"action\":\"exec\",\"command\":\"printf replay\",\"profile\":\"clean\",\"timeout_ms\":600000}",
-    });
-    defer if (result.command_replay_capture) |capture| {
-        capture.abort(arena_state.allocator());
-    };
-
-    try std.testing.expectEqual(tool_contracts.ToolExecutionStatus.success, result.status);
-    try std.testing.expectEqual(
-        command_replay_store.CapturePolicy.required,
-        result.command_replay_capture.?.policy(),
-    );
-}
-
-test "no-save terminal exec publishes one readable ephemeral replay" {
-    if (builtin.os.tag == .windows or builtin.os.tag == .wasi) return;
-
-    const runtime_execution_memory = @import("../agent/runtime/execution_memory.zig");
-    const read_tool_result = @import("../../tools/session/read_tool_result.zig");
-    const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const temp_path = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
-    defer alloc.free(temp_path);
-    var store = command_replay_store.EphemeralStore.initForTesting(alloc, temp_path);
-    defer store.deinit();
-    var rt = TestRuntime{
-        .interactive = false,
-        .ephemeral_command_replay = &store,
-    };
-    defer rt.deinit(alloc);
-    var arena_state = std.heap.ArenaAllocator.init(alloc);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-    const tool_call = ToolCall{
-        .id = "no-save-replay",
-        .name = "terminal",
-        .arguments_json = "{\"action\":\"exec\",\"command\":\"printf ephemeral-needle\",\"profile\":\"clean\",\"timeout_ms\":600000}",
-    };
-
-    const result = try executeTestRunCommand(rt.context(), arena, tool_call);
-    const capture = result.command_replay_capture orelse return error.TestExpectedReplay;
-    var handed_off = false;
-    defer if (!handed_off) capture.discard(arena);
-    var cancel = std.atomic.Value(bool).init(false);
-    var prepared = try runtime_execution_memory.prepareCapturedToolModelOutput(
-        arena,
-        .{
-            .system_prompt = "",
-            .gateway_retry_count = 0,
-            .gateway_chat_url = "",
-            .agent_step_limit = 1,
-            .cancel_flag = &cancel,
-            .ephemeral_command_replay = &store,
-        },
-        tool_call,
-        result.model_output,
-        capture,
-    );
-    try std.testing.expect(prepared.memory.output_handle == null);
-    try runtime_execution_memory.finalizeCommandReplay(
-        arena,
-        tool_call,
-        &prepared,
-        null,
-        capture,
-    );
-    const replay = prepared.memory.command_output_replay orelse
-        return error.TestExpectedReplay;
-    const descriptor = switch (replay) {
-        .available => |value| value,
-        .unavailable => return error.TestExpectedReplay,
-    };
-    try std.testing.expect(std.mem.find(u8, prepared.model_output, descriptor.handle) != null);
-    const read_arguments = try std.fmt.allocPrint(
-        arena,
-        "{{\"handle\":\"{s}\",\"start_byte\":1,\"byte_count\":4096}}",
-        .{descriptor.handle},
-    );
-    const read_ctx = tool_dispatch.DispatchContext{
-        .allocator = arena,
-        .ephemeral_command_replay = &store,
-    };
-    const decoded = try read_tool_result.decode(read_ctx, read_arguments);
-    const read_input = switch (decoded) {
-        .input => |value| value,
-        .failure => return error.TestUnexpectedDecodeFailure,
-    };
-    defer read_input.deinit(arena);
-    const read_result = try read_tool_result.call(read_ctx, read_input);
-    defer read_result.deinit(arena);
-    switch (read_result) {
-        .success => |page| try expectContains(page, "ephemeral-needle"),
-        .failure => return error.TestExpectedReplay,
-    }
-    capture.releaseRetained(arena);
-    handed_off = true;
-
-    var inspect_dir = try std.Io.Dir.openDirAbsolute(io_mod.getIo(), temp_path, .{
-        .iterate = true,
-        .follow_symlinks = false,
-    });
-    defer inspect_dir.close(io_mod.getIo());
-    var entries = inspect_dir.iterate();
-    try std.testing.expect(try entries.next(io_mod.getIo()) == null);
-}
-
-test "required replay spill failure returns recoverable capture failure" {
-    if (builtin.os.tag == .windows or builtin.os.tag == .wasi) return;
-
-    const alloc = std.testing.allocator;
-    var store = command_replay_store.EphemeralStore.initForTesting(
-        alloc,
-        "/definitely/missing/fx-replay-dir",
-    );
-    defer store.deinit();
-    var rt = TestRuntime{
-        .interactive = false,
-        .ephemeral_command_replay = &store,
-        .max_command_output_bytes = 1,
-    };
-    defer rt.deinit(alloc);
-    var arena_state = std.heap.ArenaAllocator.init(alloc);
-    defer arena_state.deinit();
-
-    const result = try executeTestRunCommand(rt.context(), arena_state.allocator(), .{
-        .id = "capture-failure",
-        .name = "terminal",
-        .arguments_json = "{\"action\":\"exec\",\"command\":\"printf xx\",\"profile\":\"clean\",\"timeout_ms\":600000}",
-    });
-    defer if (result.command_replay_capture) |capture| {
-        capture.abort(arena_state.allocator());
-    };
-
-    try std.testing.expectEqual(tool_contracts.ToolExecutionStatus.failure, result.status);
-    try expectContains(result.model_output, "\"output_capture_failed\":true");
-}
-
-test "run_command timeout returns model-visible failure" {
-    if (builtin.os.tag == .windows or builtin.os.tag == .wasi) return;
-
-    const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.createDir(
-        io_mod.getIo(),
-        "session",
-        std.Io.File.Permissions.fromMode(0o700),
-    );
-    var session_dir = try tmp.dir.openDir(io_mod.getIo(), "session", .{
-        .iterate = true,
-        .follow_symlinks = false,
-    });
-    defer session_dir.close(io_mod.getIo());
-    const session_path = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "session");
-    defer alloc.free(session_path);
-    var capability = try session_child_store.SessionChildCapability.initForTesting(
-        alloc,
-        session_dir,
-        session_path,
-        .writable,
-        .{},
-    );
-    defer capability.deinit();
-
-    var rt = TestRuntime{
-        .command_timeout_ms = 1000,
-        .session_child_capability = &capability,
-    };
-    defer rt.deinit(std.testing.allocator);
-
-    var arena_state = std.heap.ArenaAllocator.init(alloc);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-    const tool_call: ToolCall = .{
-        .id = "cmd",
-        .name = "terminal",
-        .arguments_json = "{\"action\":\"exec\",\"command\":\"printf 'PRE-TIMEOUT-OUT\\n'; printf 'PRE-TIMEOUT-ERR\\n' >&2; sleep 5\",\"profile\":\"clean\",\"timeout_ms\":5000}",
-    };
-
-    const result = try executeTestRunCommand(rt.context(), arena, tool_call);
-
-    try std.testing.expectEqual(tool_contracts.ToolExecutionStatus.failure, result.status);
-    try expectContains(result.model_output, "timeout=true\n");
-    try expectContains(result.model_output, "timeout_ms=1000\n");
-    try expectContains(
-        result.model_output,
-        "cleanup_scope=process_group_and_tracked_descendants\n",
-    );
-    try expectContains(result.model_output, "cleanup_guarantee=best_effort\n");
-    try expectContains(result.model_output, "fully detached descendants may remain\n");
-    try expectNotContains(result.model_output, "command timed out and was terminated");
-    try expectNotContains(result.model_output, "PRE-TIMEOUT-OUT");
-    try expectNotContains(result.model_output, "PRE-TIMEOUT-ERR");
-    const structured = result.command_result_json orelse return error.TestExpectedEqual;
-    try expectCommandResultField(structured, "kind", "foreground");
-    try expectCommandResultField(
-        structured,
-        "command",
-        "printf 'PRE-TIMEOUT-OUT\n'; printf 'PRE-TIMEOUT-ERR\n' >&2; sleep 5",
-    );
-    try expectCommandResultBool(structured, "timed_out", true);
-    try expectCommandResultInt(structured, "stdout_bytes", 0);
-    try expectCommandResultInt(structured, "stderr_bytes", 0);
-
-    const capture = result.command_replay_capture orelse
-        return error.TestExpectedReplay;
-    var canonical = (try capture.canonicalizeForComparison(
-        arena_state.allocator(),
-    )) orelse return error.TestExpectedReplay;
-    defer canonical.deinit(arena_state.allocator());
-    var saw_stdout = false;
-    var saw_stderr = false;
-    for (canonical.records.items) |record| {
-        if (record.stream == .stdout and
-            std.mem.eql(u8, record.text.items, "PRE-TIMEOUT-OUT")) saw_stdout = true;
-        if (record.stream == .stderr and
-            std.mem.eql(u8, record.text.items, "PRE-TIMEOUT-ERR")) saw_stderr = true;
-    }
-    try std.testing.expect(saw_stdout);
-    try std.testing.expect(saw_stderr);
-
-    const runtime_execution_memory = @import("../agent/runtime/execution_memory.zig");
-    const runtime_config = @import("../agent/runtime/config.zig");
-    const execution_memory = @import("../agent/execution_memory.zig");
-    const session_codec = @import("../session/session_codec.zig");
-
-    var cancel = std.atomic.Value(bool).init(false);
-    const config = runtime_config.Config{
-        .system_prompt = "",
-        .gateway_retry_count = 0,
-        .gateway_chat_url = "",
-        .agent_step_limit = 1,
-        .cancel_flag = &cancel,
-        .session_child_capability = &capability,
-    };
-    var prepared = try runtime_execution_memory.prepareCapturedToolModelOutput(
-        arena,
-        config,
-        tool_call,
-        result.model_output,
-        capture,
-    );
-    runtime_execution_memory.applyToolResultMemory(
-        &prepared.memory,
-        result.tool_result_memory,
-    );
-    var replay_finalized = false;
-    defer if (!replay_finalized) capture.abort(arena);
-    try runtime_execution_memory.finalizeCommandReplay(
-        arena,
-        tool_call,
-        &prepared,
-        &capability,
-        capture,
-    );
-    replay_finalized = true;
-
-    const terminal_replay = prepared.memory.command_output_replay orelse
-        return error.TestExpectedReplay;
-    const terminal_descriptor = switch (terminal_replay) {
-        .available => |value| value,
-        .unavailable => return error.TestExpectedReplay,
-    };
-    var terminal_reader = try command_replay_store.Reader.open(
-        alloc,
-        &capability,
-        terminal_descriptor,
-    );
-    defer terminal_reader.deinit();
-    var terminal_stdout: std.ArrayList(u8) = .empty;
-    defer terminal_stdout.deinit(alloc);
-    var terminal_stderr: std.ArrayList(u8) = .empty;
-    defer terminal_stderr.deinit(alloc);
-    while (try terminal_reader.next(alloc)) |frame| {
-        defer alloc.free(frame.payload);
-        switch (frame.stream) {
-            .stdout => try terminal_stdout.appendSlice(alloc, frame.payload),
-            .stderr => try terminal_stderr.appendSlice(alloc, frame.payload),
-        }
-    }
-    try expectContains(terminal_stdout.items, "PRE-TIMEOUT-OUT\n");
-    try expectContains(terminal_stderr.items, "PRE-TIMEOUT-ERR\n");
-
-    const persisted = try execution_memory.makePersistedToolResult(
-        alloc,
-        tool_call.id,
-        tool_call.name,
-        .failure,
-        prepared.model_output,
-        prepared.memory,
-    );
-    defer execution_memory.freeTransientPersistedToolResult(alloc, persisted);
-    var calls = [_]types.ToolCall{tool_call};
-    var results = [_]types.PersistedToolResult{persisted};
-    var steps = [_]types.ToolExecutionStep{.{
-        .tool_calls = calls[0..],
-        .tool_results = results[0..],
-    }};
-    const turn: types.HistoryTurn = .{ .assistant = .{
-        .user = .{ .text = @constCast("run the timeout fixture") },
-        .assistant = @constCast(""),
-        .execution = .{ .tool_steps = steps[0..] },
-    } };
-    var encoded: std.Io.Writer.Allocating = .init(alloc);
-    defer encoded.deinit();
-    try session_codec.writeHistoryTurn(&encoded.writer, turn);
-    var parsed = try std.json.parseFromSlice(
-        std.json.Value,
-        alloc,
-        encoded.written(),
-        .{},
-    );
-    defer parsed.deinit();
-    const decoded = try session_codec.parseHistoryTurn(alloc, parsed.value);
-    defer session_runtime.freeHistoryTurn(alloc, decoded);
-    const decoded_result = decoded.assistant.execution.tool_steps[0].tool_results[0];
-    try expectNotContains(decoded_result.output, "PRE-TIMEOUT-OUT");
-    try expectNotContains(decoded_result.output, "PRE-TIMEOUT-ERR");
-    const decoded_replay = decoded_result.command_output_replay orelse
-        return error.TestExpectedReplay;
-    const decoded_descriptor = switch (decoded_replay) {
-        .available => |value| value,
-        .unavailable => return error.TestExpectedReplay,
-    };
-    var resumed_reader = try command_replay_store.Reader.open(
-        alloc,
-        &capability,
-        decoded_descriptor,
-    );
-    defer resumed_reader.deinit();
-    var resumed_stdout: std.ArrayList(u8) = .empty;
-    defer resumed_stdout.deinit(alloc);
-    var resumed_stderr: std.ArrayList(u8) = .empty;
-    defer resumed_stderr.deinit(alloc);
-    while (try resumed_reader.next(alloc)) |frame| {
-        defer alloc.free(frame.payload);
-        switch (frame.stream) {
-            .stdout => try resumed_stdout.appendSlice(alloc, frame.payload),
-            .stderr => try resumed_stderr.appendSlice(alloc, frame.payload),
-        }
-    }
-    try std.testing.expectEqualStrings(terminal_stdout.items, resumed_stdout.items);
-    try std.testing.expectEqualStrings(terminal_stderr.items, resumed_stderr.items);
-}
-
 test "interactive command replay capture allocation fails open" {
     var failing = std.testing.FailingAllocator.init(
         std.testing.allocator,
@@ -6778,467 +5676,6 @@ test "required replay finalizer overrides every recoverable command result" {
         try std.testing.expectEqual(tool_contracts.ToolExecutionStatus.failure, result.status);
         try expectContains(result.model_output, "\"output_capture_failed\":true");
     }
-}
-
-test "run_command post-spawn cancellation returns structured evidence in every mode" {
-    if (builtin.os.tag == .windows or builtin.os.tag == .wasi) return;
-
-    const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.createDirPath(io_mod.getIo(), "workspace");
-    try tmp.dir.createDirPath(io_mod.getIo(), "artifacts");
-    const workspace = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "workspace");
-    defer alloc.free(workspace);
-    const artifact_dir = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "artifacts");
-    defer alloc.free(artifact_dir);
-
-    var cancel = std.atomic.Value(bool).init(false);
-    var rt = TestRuntime{
-        .workspace_root = workspace,
-        .cancel_flag = &cancel,
-        .permission_mode = .auto,
-        .command_artifact_dir = artifact_dir,
-    };
-    defer rt.deinit(alloc);
-    var arena_state = std.heap.ArenaAllocator.init(alloc);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-
-    const interactive_marker = try std.fs.path.join(arena, &.{ workspace, "interactive-ready" });
-    const interactive_command = try std.fmt.allocPrint(
-        arena,
-        "trap 'exit 0' TERM; printf ready > '{s}'; printf 'RUNTIME-READY\\n'; while :; do :; done",
-        .{interactive_marker},
-    );
-    const interactive_args = try runCommandArgsForTest(arena, interactive_command);
-    var interactive_trigger = CancelTestCommandOnOutput{
-        .flag = &cancel,
-        .needle = "RUNTIME-READY",
-    };
-    var interactive_ctx = rt.context();
-    interactive_ctx.output_chunk_ctx = @ptrCast(&interactive_trigger);
-    interactive_ctx.on_output_chunk = CancelTestCommandOnOutput.onChunk;
-    const interactive = try executeTestRunCommand(interactive_ctx, arena, .{
-        .id = "cancel-interactive",
-        .name = "terminal",
-        .arguments_json = interactive_args,
-    });
-
-    try std.testing.expect(interactive_trigger.seen);
-    try std.testing.expect(absolutePathExists(interactive_marker));
-    try std.testing.expectEqual(tool_contracts.ToolExecutionStatus.failure, interactive.status);
-    try std.testing.expect(interactive.cancelled);
-    try std.testing.expectEqualStrings("command cancelled\n", interactive.model_output);
-    const structured = interactive.command_result_json orelse return error.TestExpectedEqual;
-    try expectCommandResultField(structured, "kind", "foreground");
-    try expectCommandResultBool(structured, "truncated", false);
-    try expectCommandResultStringPrefix(structured, "output_file", artifact_dir);
-
-    cancel.store(false, .seq_cst);
-    rt.interactive = false;
-    const headless_marker = try std.fs.path.join(arena, &.{ workspace, "headless-ready" });
-    const headless_command = try std.fmt.allocPrint(
-        arena,
-        "trap 'exit 0' TERM; printf ready > '{s}'; printf 'HEADLESS-READY\\n'; while :; do :; done",
-        .{headless_marker},
-    );
-    const headless_args = try runCommandArgsForTest(arena, headless_command);
-    var headless_trigger = CancelTestCommandOnOutput{
-        .flag = &cancel,
-        .needle = "HEADLESS-READY",
-    };
-    var headless_ctx = rt.context();
-    headless_ctx.output_chunk_ctx = @ptrCast(&headless_trigger);
-    headless_ctx.on_output_chunk = CancelTestCommandOnOutput.onChunk;
-    const headless = try executeTestRunCommand(headless_ctx, arena, .{
-        .id = "cancel-headless",
-        .name = "terminal",
-        .arguments_json = headless_args,
-    });
-    try std.testing.expect(headless_trigger.seen);
-    try std.testing.expect(absolutePathExists(headless_marker));
-    try std.testing.expectEqual(tool_contracts.ToolExecutionStatus.failure, headless.status);
-    try std.testing.expect(headless.cancelled);
-    try std.testing.expectEqualStrings("command cancelled\n", headless.model_output);
-    const headless_structured = headless.command_result_json orelse return error.TestExpectedEqual;
-    try expectCommandResultField(headless_structured, "kind", "foreground");
-    try expectCommandResultField(headless_structured, "command", headless_command);
-    try expectCommandResultBool(headless_structured, "truncated", false);
-    try expectCommandResultStringPrefix(headless_structured, "output_file", artifact_dir);
-
-    diagnostics.resetForTest();
-    defer diagnostics.resetForTest();
-    cancel.store(false, .seq_cst);
-    headless_trigger.seen = false;
-    var retry_ctx = rt.context();
-    retry_ctx.output_chunk_ctx = @ptrCast(&headless_trigger);
-    retry_ctx.on_output_chunk = CancelTestCommandOnOutput.onChunk;
-    const command_ctx = try tool_admission.runCommandContext(
-        retry_ctx.admissionInput(),
-        arena,
-        .{
-            .id = "cancel-broader-retry",
-            .name = "terminal",
-            .arguments_json = headless_args,
-        },
-    );
-    const retry = try executeToolCallAuthorized(retry_ctx, .{
-        .call_allocator = arena,
-        .result_allocator = arena,
-        .call = .{
-            .id = "cancel-broader-retry",
-            .name = "terminal",
-            .arguments_json = headless_args,
-        },
-        .authority = .{ .run_command = .{ .shell_allowed = .{
-            .fingerprint = .init(command_ctx),
-            .source = .auto_classifier,
-        } } },
-        .session_grants = &.{},
-        .advertised_dynamic_tool_names = &.{},
-        .max_tool_result_bytes = rt.max_tool_result_bytes,
-    });
-    try std.testing.expect(headless_trigger.seen);
-    try std.testing.expect(retry.cancelled);
-    var metrics: [1]diagnostics.ToolCallMetric = undefined;
-    try std.testing.expectEqual(@as(usize, 1), diagnostics.snapshotToolCalls(&metrics));
-}
-
-test "run_command success exposes structured foreground metadata" {
-    if (builtin.os.tag == .windows or builtin.os.tag == .wasi) return;
-
-    var rt = TestRuntime{
-        .permission_mode = .auto,
-    };
-    defer rt.deinit(std.testing.allocator);
-
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-
-    const result = try executeTestRunCommand(rt.context(), arena, .{
-        .id = "cmd",
-        .name = "terminal",
-        .arguments_json = try runCommandArgsWithCleanProfileForTest(arena, "printf '\\150\\145\\154\\154\\157'"),
-    });
-
-    try std.testing.expectEqual(tool_contracts.ToolExecutionStatus.success, result.status);
-    const structured = result.command_result_json orelse return error.TestExpectedEqual;
-    try expectCommandResultField(structured, "kind", "foreground");
-    try expectCommandResultField(structured, "command", "printf '\\150\\145\\154\\154\\157'");
-    try expectCommandResultField(structured, "cwd", "/tmp");
-    try expectCommandResultInt(structured, "exit_code", 0);
-    try expectCommandResultNull(structured, "signal");
-    try expectCommandResultBool(structured, "timed_out", false);
-    try expectCommandResultInt(structured, "stdout_bytes", 5);
-    try expectCommandResultInt(structured, "stderr_bytes", 0);
-    try expectCommandResultBool(structured, "truncated", false);
-    try std.testing.expect(std.mem.find(u8, structured, "hello") == null);
-}
-
-fn fakeWorkspaceNonzero(
-    alloc: Allocator,
-    command: []const u8,
-    cwd: []const u8,
-    timeout_ms: u32,
-) js_host_workspace.ExecuteError!command_contract.RunCommandResult {
-    if (timeout_ms != js_host_workspace.max_timeout_ms) return error.InvalidWorkspaceResult;
-    return command_contract.formatForegroundCommandResult(alloc, .{
-        .command = command,
-        .cwd = cwd,
-        .status = .{ .exit_code = 7 },
-        .stdout_display = "partial",
-        .stderr_display = "failed",
-        .stdout_bytes = 7,
-        .stderr_bytes = 6,
-        .duration_ms = 12,
-    });
-}
-
-fn fakeWorkspaceTruncated(
-    alloc: Allocator,
-    command: []const u8,
-    cwd: []const u8,
-    _: u32,
-) js_host_workspace.ExecuteError!command_contract.RunCommandResult {
-    var result = try command_contract.formatForegroundCommandResult(alloc, .{
-        .command = command,
-        .cwd = cwd,
-        .status = .{ .exit_code = 0 },
-        .stdout_display = "preview",
-        .stderr_display = "",
-        .stdout_bytes = 70_000,
-        .stderr_bytes = 0,
-        .duration_ms = 4,
-    });
-    var metadata = result.command_result.?.foreground;
-    metadata.truncated = true;
-    result.command_result = .{ .foreground = metadata };
-    return result;
-}
-
-fn fakeWorkspaceCancelled(
-    _: Allocator,
-    command: []const u8,
-    cwd: []const u8,
-    _: u32,
-) js_host_workspace.ExecuteError!command_contract.RunCommandResult {
-    return .{
-        .output = "",
-        .cancelled = true,
-        .command_result = .{ .foreground = .{
-            .command = command,
-            .cwd = cwd,
-            .duration_ms = 3,
-        } },
-    };
-}
-
-fn fakeWorkspaceDeadline(
-    _: Allocator,
-    _: []const u8,
-    _: []const u8,
-    timeout_ms: u32,
-) js_host_workspace.ExecuteError!command_contract.RunCommandResult {
-    if (timeout_ms != js_host_workspace.max_timeout_ms) return error.InvalidWorkspaceResult;
-    return error.WorkspaceDeadline;
-}
-
-test "browser run_command uses only the admitted host executor for nonzero and truncated results" {
-    var rt = TestRuntime{
-        .workspace_root = "/virtual/workspace",
-        .tool_registry = test_browser_workspace_tools.registry,
-        .workspace_executor = .{ .execute_fn = fakeWorkspaceNonzero },
-    };
-    defer rt.deinit(std.testing.allocator);
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-
-    const failed = try executeTestRunCommand(rt.context(), arena, .{
-        .id = "browser-failed",
-        .name = "terminal",
-        .arguments_json = "{\"action\":\"exec\",\"command\":\"exit 7\"}",
-    });
-    try std.testing.expectEqual(tool_contracts.ToolExecutionStatus.failure, failed.status);
-    try expectToolErrorDetailInt(failed.model_output, "exit_code", 7);
-    const failed_json = failed.command_result_json orelse return error.TestExpectedEqual;
-    try expectCommandResultField(failed_json, "cwd", "/virtual/workspace");
-    try expectCommandResultNull(failed_json, "signal");
-    try expectCommandResultNull(failed_json, "output_file");
-
-    rt.workspace_executor = .{ .execute_fn = fakeWorkspaceTruncated };
-    const truncated = try executeTestRunCommand(rt.context(), arena, .{
-        .id = "browser-truncated",
-        .name = "terminal",
-        .arguments_json = "{\"action\":\"exec\",\"command\":\"generate output\"}",
-    });
-    try std.testing.expectEqual(tool_contracts.ToolExecutionStatus.success, truncated.status);
-    const truncated_json = truncated.command_result_json orelse return error.TestExpectedEqual;
-    try expectCommandResultBool(truncated_json, "truncated", true);
-    try expectCommandResultInt(truncated_json, "stdout_bytes", 70_000);
-    try expectCommandResultNull(truncated_json, "output_file");
-}
-
-test "browser run_command maps host cancellation and deadline without signal or fallback" {
-    var rt = TestRuntime{
-        .workspace_root = "/virtual/workspace",
-        .tool_registry = test_browser_workspace_tools.registry,
-        .workspace_executor = .{ .execute_fn = fakeWorkspaceCancelled },
-    };
-    defer rt.deinit(std.testing.allocator);
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-
-    const cancelled = try executeTestRunCommand(rt.context(), arena, .{
-        .id = "browser-cancelled",
-        .name = "terminal",
-        .arguments_json = "{\"action\":\"exec\",\"command\":\"long command\"}",
-    });
-    try std.testing.expectEqual(tool_contracts.ToolExecutionStatus.failure, cancelled.status);
-    try std.testing.expect(cancelled.cancelled);
-    const cancelled_json = cancelled.command_result_json orelse return error.TestExpectedEqual;
-    try expectCommandResultNull(cancelled_json, "signal");
-    try expectCommandResultBool(cancelled_json, "timed_out", false);
-
-    rt.workspace_executor = .{ .execute_fn = fakeWorkspaceDeadline };
-    const timed_out = try executeTestRunCommand(rt.context(), arena, .{
-        .id = "browser-timeout",
-        .name = "terminal",
-        .arguments_json = "{\"action\":\"exec\",\"command\":\"long command\"}",
-    });
-    try std.testing.expectEqual(tool_contracts.ToolExecutionStatus.failure, timed_out.status);
-    try expectContains(timed_out.model_output, "timeout=true\n");
-    try expectContains(timed_out.model_output, "timeout_ms=30000\n");
-    const timeout_json = timed_out.command_result_json orelse return error.TestExpectedEqual;
-    try expectCommandResultBool(timeout_json, "timed_out", true);
-    try expectCommandResultNull(timeout_json, "signal");
-}
-
-test "run_command propagates output callback failure" {
-    if (builtin.os.tag == .windows or builtin.os.tag == .wasi) return;
-
-    const FailOutput = struct {
-        fn write(_: *anyopaque, _: ?types.ToolLifecycleId, _: command_contract.CommandOutputStream, _: []const u8) error{OutOfMemory}!void {
-            return error.OutOfMemory;
-        }
-    };
-
-    var rt = TestRuntime{
-        .permission_mode = .auto,
-    };
-    defer rt.deinit(std.testing.allocator);
-
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-
-    var ctx = rt.context();
-    ctx.output_chunk_ctx = @ptrCast(&rt);
-    ctx.on_output_chunk = FailOutput.write;
-    try std.testing.expectError(
-        error.OutOfMemory,
-        executeTestRunCommand(ctx, arena_state.allocator(), .{
-            .id = "cmd",
-            .name = "terminal",
-            .arguments_json = "{\"action\":\"exec\",\"command\":\"printf 'handoff\\\\n'\",\"timeout_ms\":600000}",
-        }),
-    );
-}
-
-test "run_command returns model output and structured metadata" {
-    if (builtin.os.tag == .windows or builtin.os.tag == .wasi) return;
-
-    var rt = TestRuntime{
-        .permission_mode = .auto,
-    };
-    defer rt.deinit(std.testing.allocator);
-
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-
-    const result = try executeTestRunCommand(rt.context(), arena, .{
-        .id = "cmd",
-        .name = "terminal",
-        .arguments_json = try runCommandArgsWithCleanProfileForTest(arena, "printf 'quiet-stdout\\n'; printf 'quiet-stderr\\n' >&2"),
-    });
-
-    try std.testing.expectEqual(tool_contracts.ToolExecutionStatus.success, result.status);
-    try expectContains(result.model_output, "exit_code=0\n");
-    try expectContains(result.model_output, "<stdout>\nquiet-stdout\n</stdout>\n");
-    try expectContains(result.model_output, "<stderr>\nquiet-stderr\n</stderr>\n");
-
-    const structured = result.command_result_json orelse return error.TestExpectedEqual;
-    try expectCommandResultField(structured, "kind", "foreground");
-    try expectCommandResultInt(structured, "exit_code", 0);
-    try expectCommandResultInt(structured, "stdout_bytes", 13);
-    try expectCommandResultInt(structured, "stderr_bytes", 13);
-    try expectCommandResultBool(structured, "timed_out", false);
-    try expectCommandResultBool(structured, "truncated", false);
-}
-
-test "run_command nonzero exit returns structured masked failure" {
-    if (builtin.os.tag == .windows or builtin.os.tag == .wasi) return;
-
-    var rt = TestRuntime{
-        .permission_mode = .auto,
-    };
-    defer rt.deinit(std.testing.allocator);
-
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-
-    const result = try executeTestRunCommand(rt.context(), arena, .{
-        .id = "cmd",
-        .name = "terminal",
-        .arguments_json = try runCommandArgsWithCleanProfileForTest(arena, "printf 'bad AKIA0123456789ABCDEF\\n' >&2; exit 7"),
-    });
-
-    try std.testing.expectEqual(tool_contracts.ToolExecutionStatus.failure, result.status);
-    try expectToolErrorField(result.model_output, "type", "tool_execution_failed");
-    try expectToolErrorField(result.model_output, "tool_name", "terminal");
-    try expectToolErrorDetailString(result.model_output, "command", "printf 'bad [redacted]\\n' >&2; exit 7");
-    try expectToolErrorDetailString(result.model_output, "cwd", "/tmp");
-    try expectToolErrorDetailInt(result.model_output, "exit_code", 7);
-    try expectToolErrorDetailString(result.model_output, "stderr", "bad [redacted]");
-    try expectContains(result.model_output, "Inspect stderr");
-    try expectNotContains(result.model_output, "AKIA0123456789ABCDEF");
-    const structured = result.command_result_json orelse return error.TestExpectedEqual;
-    try expectCommandResultField(structured, "kind", "foreground");
-    try expectCommandResultInt(structured, "exit_code", 7);
-    try expectCommandResultInt(structured, "stdout_bytes", 0);
-    try expectCommandResultInt(structured, "stderr_bytes", 25);
-    try std.testing.expect(std.mem.find(u8, structured, "\"stdout\":") == null);
-    try std.testing.expect(std.mem.find(u8, structured, "\"stderr\":") == null);
-    try std.testing.expectEqual(
-        types.CommandProcessPresentation{ .exit_code = 7 },
-        result.tool_result_memory.?.command_process_presentation.?,
-    );
-}
-
-test "run_command huge output exposes truncation and artifact paths without stdout body" {
-    if (builtin.os.tag == .windows or builtin.os.tag == .wasi) return;
-
-    const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.createDirPath(io_mod.getIo(), "workspace");
-    try tmp.dir.createDirPath(io_mod.getIo(), "session/logs/commands");
-    const workspace = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "workspace");
-    defer alloc.free(workspace);
-    const artifact_dir = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "session/logs/commands");
-    defer alloc.free(artifact_dir);
-
-    var rt = TestRuntime{
-        .workspace_root = workspace,
-        .permission_mode = .auto,
-    };
-    rt.max_command_output_bytes = 16;
-    rt.command_artifact_dir = artifact_dir;
-    defer rt.deinit(alloc);
-
-    var arena_state = std.heap.ArenaAllocator.init(alloc);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-
-    const result = try executeTestRunCommand(rt.context(), arena, .{
-        .id = "cmd",
-        .name = "terminal",
-        .arguments_json = try runCommandArgsWithCleanProfileForTest(arena, "printf %026d 0"),
-    });
-
-    try std.testing.expectEqual(tool_contracts.ToolExecutionStatus.success, result.status);
-    const structured = result.command_result_json orelse return error.TestExpectedEqual;
-    try expectCommandResultBool(structured, "truncated", true);
-    try expectCommandResultInt(structured, "stdout_bytes", 26);
-    try expectCommandResultInt(structured, "stderr_bytes", 0);
-    try expectCommandResultStringPrefix(structured, "output_file", artifact_dir);
-    try expectCommandResultStringPrefix(structured, "stdout_file", artifact_dir);
-    try expectCommandResultStringPrefix(structured, "stderr_file", artifact_dir);
-    try std.testing.expect(std.mem.find(u8, structured, "00000000000000000000000000") == null);
-}
-
-test "terminal exec rejects legacy background input without creating state" {
-    var rt = TestRuntime{};
-    defer rt.deinit(std.testing.allocator);
-
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const result = try executeToolCall(rt.context(), arena_state.allocator(), .{
-        .id = "cmd",
-        .name = "terminal",
-        .arguments_json = "{\"action\":\"exec\",\"command\":\"printf row07-headless-bg\",\"background\":true}",
-    });
-
-    try std.testing.expectEqual(tool_contracts.ToolExecutionStatus.failure, result.status);
-    try expectContains(result.model_output, "\"code\":\"invalid_action_fields\"");
-    try expectContains(result.model_output, "\"invalid_fields\":[\"background\"]");
-    var tasks = try rt.background.snapshotTasks(std.testing.allocator);
-    defer tasks.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(usize, 0), tasks.items.len);
 }
 
 const PermissionThreadState = struct {
@@ -7814,76 +6251,6 @@ test "MCP unadvertised dynamic names do not receive permission targets" {
     const ctx = rt.context();
 
     try std.testing.expectEqual(ToolPermissionDecision.once, (try tool_admission.requestPermissionOutcome(ctx.admissionInput(), arena, .{ .id = "1", .name = "mcp_fs_write", .arguments_json = "{}" }, .auto, &.{})).decision);
-}
-
-test "terminal exec cannot reuse or replace a persisted legacy background task" {
-    const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.createDirPath(io_mod.getIo(), "background");
-    {
-        var file = try tmp.dir.createFile(io_mod.getIo(), "server.log", .{ .truncate = true });
-        defer file.close(io_mod.getIo());
-        try file.writeStreamingAll(io_mod.getIo(), "ready on http://localhost:49123\n");
-    }
-
-    const background_dir = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "background");
-    defer alloc.free(background_dir);
-    const log_path = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "server.log");
-    defer alloc.free(log_path);
-
-    const Stub = struct {
-        fn match(
-            pid_text: []const u8,
-            _: process_supervisor.ProcessInstanceToken,
-        ) process_supervisor.TokenMatch {
-            return if (std.mem.eql(u8, pid_text, "12345"))
-                .matched
-            else
-                .missing;
-        }
-    };
-    process_supervisor.process_token_match_for_test = Stub.match;
-    defer process_supervisor.process_token_match_for_test = null;
-    const token = try process_supervisor.ProcessInstanceToken.parse(
-        "linux:00112233445566778899aabbccddeeff:12345",
-    );
-    const pid_text = "12345";
-
-    var rt = TestRuntime{
-        .workspace_root = "/tmp/fx",
-        .interactive = false,
-        .background = BackgroundRuntime.init(
-            background_process_provider.process_supervisor_test_provider,
-        ),
-    };
-    defer rt.deinit(alloc);
-    try rt.background.enablePersistence(alloc, background_dir);
-    const task_id = try rt.background.registerBackgroundDurably(alloc, .{
-        .pid = pid_text,
-        .process_token = token,
-        .command = "npm run dev",
-        .cwd = "/tmp/fx",
-        .log_path = log_path,
-        .expect_url = true,
-        .url = "http://localhost:49123",
-    });
-
-    var arena_state = std.heap.ArenaAllocator.init(alloc);
-    defer arena_state.deinit();
-    const result = try executeToolCall(rt.context(), arena_state.allocator(), .{
-        .id = "1",
-        .name = "terminal",
-        .arguments_json = "{\"action\":\"exec\",\"command\":\"npm run dev\",\"background\":true}",
-    });
-
-    try std.testing.expectEqual(tool_contracts.ToolExecutionStatus.failure, result.status);
-    try expectContains(result.model_output, "\"code\":\"invalid_action_fields\"");
-    try expectContains(result.model_output, "\"invalid_fields\":[\"background\"]");
-    var tasks = try rt.background.snapshotTasks(alloc);
-    defer tasks.deinit(alloc);
-    try std.testing.expectEqual(@as(usize, 1), tasks.items.len);
-    try std.testing.expectEqual(task_id, tasks.items[0].id);
 }
 
 test "external absolute non-write tracked mutations capture resolved paths" {

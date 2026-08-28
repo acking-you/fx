@@ -152,7 +152,7 @@ function lengthLimitedCommandCall(command: string) {
         type: "function_call",
         id: "command_item_1",
         call_id: "command_1",
-        name: "terminal",
+        name: "exec_command",
       },
     },
     {
@@ -160,7 +160,7 @@ function lengthLimitedCommandCall(command: string) {
       item_id: "command_item_1",
       call_id: "command_1",
       output_index: 1,
-      arguments: JSON.stringify({ action: "exec", command, timeout_ms: 30_000 }),
+      arguments: JSON.stringify({ cmd: command }),
     },
     {
       type: "response.incomplete",
@@ -1530,7 +1530,7 @@ describe("acp: model-independent", () => {
         expect(toolNames).toEqual(
           AUTO_RESPONSES_SERIALIZED_TOOL_NAMES,
         );
-        expect(toolNames.filter((name) => name === "terminal")).toHaveLength(1);
+        expect(toolNames.filter((name) => name === "exec_command")).toHaveLength(1);
         expect(findUnavailableCapabilityReferences(oracleRequest)).toEqual([]);
         expect(gateway.requests[0]!.body).not.toContain(
           "Treat it as interrupting any previous tool plan.",
@@ -1746,41 +1746,27 @@ describe("acp: model-independent", () => {
   );
 
   test(
-    "ACP executes the shared public terminal tool through the native backend",
+    "ACP executes exec_command through the native backend",
     async () => {
       const root = createShortIsolatedRoot("fx-acp-terminal-");
       const toolCallId = "acp_terminal_native_1";
       const gateway = startFakeGateway([
-        fakeGatewayToolCall(toolCallId, "terminal", {
-          action: "start",
-          cwd: root.workspace,
-          command: "printf ACP_PUBLIC_TERMINAL_NATIVE",
-          shell: {
-            kind: "executable",
-            path: TERMINAL_FIXTURE_SHELL,
-            clean_start: true,
-          },
-          backend: "native",
-          return_when: { kind: "exit" },
-          wait_ceiling_ms: 5_000,
-          dimensions: { rows: 24, columns: 80 },
+        fakeGatewayToolCall(toolCallId, "exec_command", {
+          cmd: "printf ACP_PUBLIC_EXEC_NATIVE",
         }),
-        finalText("ACP public terminal complete"),
+        finalText("ACP exec complete"),
       ]);
       try {
         client = await AcpClient.create({
           cwd: root.workspace,
-          env: {
-            ...fakeGatewayEnv(root, gateway),
-            FX_TERMINAL_HOST_IDLE_MS: "200",
-          },
+          env: fakeGatewayEnv(root, gateway),
         });
         client.setPermissionOption("allow_once");
         await startCodeSession(client);
         await client.request("session/set_mode", { modeId: "ask" }, 4);
         const result = await runPrompt(
           client,
-          "Run the native public terminal fixture.",
+          "Run the native exec fixture.",
           TIMEOUT,
         );
 
@@ -1790,86 +1776,13 @@ describe("acp: model-independent", () => {
           gateway.requests[1]!.body,
           toolCallId,
         );
-        expect(toolResult).toContain('"success":{"start"');
-        expect(toolResult).toContain('"backend":"native"');
-        expect(toolResult).toContain('"exited":0');
-        expect(toolResult).not.toContain("owner_authority");
-        expect(toolResult).not.toContain("proof");
+        expect(toolResult).toContain("ACP_PUBLIC_EXEC_NATIVE");
+        expect(toolResult).toContain('"exit_code":0');
+        expect(toolResult).not.toContain("session_id");
         expect(client.stderr).toBe("");
       } finally {
         await client?.close();
         gateway.stop();
-        await waitForTerminalHostExit(root.root);
-        rmSync(root.root, { recursive: true, force: true });
-      }
-    },
-    TIMEOUT,
-  );
-
-  test(
-    "ACP process status lists a persistent terminal",
-    async () => {
-      const root = createShortIsolatedRoot("fx-acp-terminal-status-");
-      const command = "printf ACP_PERSISTENT_TERMINAL; sleep 5";
-      const gateway = startFakeGateway([
-        fakeGatewayToolCall("acp_terminal_status_1", "terminal", {
-          action: "start",
-          cwd: root.workspace,
-          command,
-          profile: "clean",
-        }),
-        finalText("ACP persistent terminal started"),
-      ]);
-      try {
-        client = await AcpClient.create({
-          cwd: root.workspace,
-          env: {
-            ...fakeGatewayEnv(root, gateway),
-            FX_TERMINAL_HOST_IDLE_MS: "200",
-          },
-        });
-        client.setPermissionOption("allow_once");
-        const sessionId = await startCodeSession(client);
-        await client.request("session/set_mode", { modeId: "ask" }, 4);
-        const result = await runPrompt(
-          client,
-          "Start the long terminal fixture.",
-          TIMEOUT,
-        );
-        expect(result.promptResult.result.stopReason).toBe("end_turn");
-
-        const listed = await client.request(
-          "fx/backgroundTerminals/list",
-          { sessionId },
-          5,
-        ) as any;
-        expect(listed.error).toBeUndefined();
-        expect(listed.result.data).toEqual(
-          expect.arrayContaining([
-            expect.objectContaining({
-              kind: "terminal",
-              command,
-              state: "running",
-              backend: "native",
-            }),
-          ]),
-        );
-
-        sendPrompt(client, 6, "/ps");
-        const messages: any[] = [];
-        let response: any = null;
-        while (!response) {
-          const message = await client.readLine(TIMEOUT) as any;
-          if (message.id === 6) response = message;
-          else messages.push(message);
-        }
-        expect(response.result.stopReason).toBe("end_turn");
-        expect(JSON.stringify(messages)).toContain("ACP_PERSISTENT_TERMINAL");
-        expect(client.stderr).toBe("");
-      } finally {
-        await client?.close();
-        gateway.stop();
-        await waitForTerminalHostExit(root.root);
         rmSync(root.root, { recursive: true, force: true });
       }
     },
@@ -6454,11 +6367,8 @@ describe("acp: model-independent", () => {
         JSON.stringify({ permission: { bash: { "printf *": "ask" } } }),
       );
       const gateway = startFakeGateway([
-        fakeGatewayToolCall("approved_command_1", "terminal", {
-          action: "exec",
-          command: `printf approved > '${marker}'`,
-          profile: "clean",
-          timeout_ms: 30_000,
+        fakeGatewayToolCall("approved_command_1", "exec_command", {
+          cmd: `printf approved > '${marker}'`,
         }),
         finalText("command approval complete"),
       ]);
@@ -6507,7 +6417,7 @@ describe("acp: model-independent", () => {
       };
       const gateway = startFakeGateway([
         fakeGatewayToolCall("acp_create_1", "subagent", {
-          command: { create: {
+          cmd: { create: {
             name: "workspace-inspector",
             mode: "one_off",
             prompt: childPrompt,
@@ -6613,7 +6523,7 @@ describe("acp: model-independent", () => {
           }
           expect(acpPromptText(body)).toContain(parentPrompt);
           return fakeGatewayToolCall(parentCreateId, "subagent", {
-            command: { create: {
+            cmd: { create: {
               name: `acp-${label}-mcp-child`,
               mode: childMode,
               prompt: childPrompt,
@@ -6711,7 +6621,7 @@ describe("acp: model-independent", () => {
           return childCompletion.response;
         }
         return fakeGatewayToolCall("acp_one_off_load_create", "subagent", {
-          command: { create: {
+          cmd: { create: {
             name: childName,
             mode: "one_off",
             prompt: childPrompt,
@@ -6907,7 +6817,7 @@ describe("acp: model-independent", () => {
           secondInitialChecked = true;
           parentPhase = "inspect_result";
           return fakeGatewayToolCall("acp_delivery_inspect_1", "subagent", {
-            command: {
+            cmd: {
               inspect: {
                 id: childId,
                 sections: ["status", "configuration", "relationship"],
@@ -6956,7 +6866,7 @@ describe("acp: model-independent", () => {
             text.includes("Create the ACP delivery fixture.")) {
           parentPhase = "create_result";
           return fakeGatewayToolCall("acp_delivery_create_1", "subagent", {
-            command: { create: {
+            cmd: { create: {
               name: "acp-delivery-child",
               mode: "persistent",
               prompt: childPrompt,
@@ -7096,7 +7006,7 @@ describe("acp: model-independent", () => {
               TIMEOUT,
             );
             return fakeGatewayToolCall("acp_64k_send_1", "subagent", {
-              command: {
+              cmd: {
                 message: {
                   send: { id: parentSessionId, content: largeMessage },
                 },
@@ -7105,7 +7015,7 @@ describe("acp: model-independent", () => {
           })();
         }
         return fakeGatewayToolCall("acp_64k_create_1", "subagent", {
-          command: { create: {
+          cmd: { create: {
             name: "acp-64k-delivery-child",
             mode: "persistent",
             prompt: childPrompt,
@@ -7243,11 +7153,9 @@ describe("acp: model-independent", () => {
       const heldReview = deferred<Response>();
       const gateway = startFakeGateway(
         [
-          fakeGatewayToolCall("cancelled_review_command", "terminal", {
-            action: "exec",
-            command: `printf cancelled > ${JSON.stringify(marker)}`,
-            timeout_ms: 30_000,
-          }),
+          fakeGatewayToolCall("cancelled_review_command", "exec_command", {
+            cmd: `printf cancelled > ${JSON.stringify(marker)}`,
+            }),
           finalText("follow-up after ACP review cancellation"),
         ],
         { classifierResponses: [() => heldReview.promise] },

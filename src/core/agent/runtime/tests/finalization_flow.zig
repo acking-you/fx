@@ -1701,14 +1701,11 @@ test "TurnFinalizationGuard runs PostTurnEnd once for every terminal outcome and
             lifecycle,
         );
         defer finalization.deinit();
-        try finalization.track_agent_terminal_lease("terminal-owned");
-        try finalization.track_agent_terminal_lease("terminal-owned");
         try finalization.finish(case.outcome, case.disposition, null);
         try finalization.finish(.failed, null, null);
     }
 
     try std.testing.expectEqual(cases.len, deps.finalization_count);
-    try std.testing.expectEqual(cases.len, deps.terminal_lease_cleanup_ids.items.len);
     try std.testing.expectEqual(cases.len, hook_capture.calls);
     for (cases, 0..) |case, index| {
         try std.testing.expectEqual(@as(u64, @intCast(index + 1)), hook_capture.turn_ids[index]);
@@ -1717,38 +1714,6 @@ test "TurnFinalizationGuard runs PostTurnEnd once for every terminal outcome and
         try std.testing.expectEqual(case.outcome, hook_capture.outcomes[index]);
         try std.testing.expectEqual(case.disposition, hook_capture.dispositions[index]);
     }
-}
-
-test "TurnFinalizationGuard attempts every tracked lease and returns the first cleanup error" {
-    const alloc = std.testing.allocator;
-    const cleanup_errors = [_]?anyerror{
-        error.TestFirstCleanupFailed,
-        null,
-    };
-    var deps = FakeAgentRuntimeDeps.init(alloc);
-    deps.terminal_lease_cleanup_errors = &cleanup_errors;
-    defer deps.deinit();
-    const runtime_deps = deps.deps();
-    var finalization = TurnFinalizationGuard.init(
-        &runtime_deps,
-        41,
-        testLifecycleContext(lifecycle_hooks.RuntimeView.empty(), alloc, "/tmp/workspace"),
-    );
-    defer finalization.deinit();
-
-    try finalization.track_agent_terminal_lease("terminal-one");
-    try finalization.track_agent_terminal_lease("terminal-two");
-    finalization.remove_agent_terminal_lease("terminal-missing");
-
-    try std.testing.expectError(
-        error.TestFirstCleanupFailed,
-        finalization.finish(.failed, null, null),
-    );
-    try std.testing.expectEqual(TurnFinalizationGuard.State.fatal, finalization.state);
-    try std.testing.expectEqual(@as(usize, 2), deps.terminal_lease_cleanup_ids.items.len);
-    try std.testing.expectEqualStrings("terminal-one", deps.terminal_lease_cleanup_ids.items[0]);
-    try std.testing.expectEqualStrings("terminal-two", deps.terminal_lease_cleanup_ids.items[1]);
-    try std.testing.expectEqual(@as(usize, 0), deps.finalization_count);
 }
 
 test "TurnFinalizationGuard removes explicit release without cleanup" {
@@ -1763,11 +1728,8 @@ test "TurnFinalizationGuard removes explicit release without cleanup" {
     );
     defer finalization.deinit();
 
-    try finalization.track_agent_terminal_lease("terminal-released");
-    finalization.remove_agent_terminal_lease("terminal-released");
     try finalization.finish(.completed, null, null);
 
-    try std.testing.expectEqual(@as(usize, 0), deps.terminal_lease_cleanup_ids.items.len);
     try std.testing.expectEqual(@as(usize, 1), deps.finalization_count);
 }
 

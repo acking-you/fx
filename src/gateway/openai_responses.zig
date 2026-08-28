@@ -31,6 +31,16 @@ fn fetchCompaction(
         return error.UnsupportedCredentialSource;
     const route = provider_route.fromCredentialSource(source) orelse
         return error.UnsupportedCredentialSource;
+    debug_trace.logf(
+        "compaction",
+        "event=prepare_remote route={s} model={s} account_id_present={s} credential_present={s}",
+        .{
+            @tagName(route),
+            input.build_request.model,
+            if (input.account_id != null) "true" else "false",
+            if (input.credential.len > 0) "true" else "false",
+        },
+    );
     if (route.contract().remote_compaction == .unsupported) return .unsupported;
     try responses_compaction_binding.validate(source, input.provider_binding);
     if (!responses_compaction_binding.credentialMatches(
@@ -85,6 +95,17 @@ fn fetchCompaction(
             input.provider_binding.normalized_origin,
         );
     defer alloc.free(endpoint);
+    debug_trace.logf(
+        "compaction",
+        "event=send_remote route={s} endpoint={s} model={s} payload_bytes={d} stream={s}",
+        .{
+            @tagName(route),
+            endpoint,
+            wire_model,
+            payload.len,
+            if (use_v2_trigger) "true" else "false",
+        },
+    );
 
     if (route == .codex_responses_oauth) {
         var local_cancel = std.atomic.Value(bool).init(false);
@@ -109,6 +130,11 @@ fn fetchCompaction(
             cancel_flag,
         );
         defer response.deinit(alloc);
+        debug_trace.logf(
+            "compaction",
+            "event=remote_response route={s} status={d} output_items={d}",
+            .{ @tagName(route), @intFromEnum(response.status), response.completion.responses_provider_output_items.len },
+        );
         if (response.status.class() != .success) return .{ .rejected = response.status };
 
         const input_json = try responses_compaction.replayInputJsonFromOutputItemsAlloc(
@@ -135,6 +161,11 @@ fn fetchCompaction(
         .max_response_bytes = compact_response_max_bytes,
     });
     defer response.deinit(alloc);
+    debug_trace.logf(
+        "compaction",
+        "event=remote_response route={s} status={d} body_bytes={d}",
+        .{ @tagName(route), @intFromEnum(response.status), response.body.len },
+    );
     if (response.status.class() != .success) return .{ .rejected = response.status };
 
     var decoded = responses_compaction.decodeResponse(alloc, response.body) catch |err| {

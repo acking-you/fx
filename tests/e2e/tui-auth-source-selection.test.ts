@@ -750,8 +750,8 @@ function startFakeCodexAutoReview() {
       mainRequests += 1;
       if (mainRequests === 1) {
         return new Response(
-          'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","call_id":"call_terminal","name":"terminal"}}\n\n' +
-            'data: {"type":"response.function_call_arguments.done","output_index":0,"arguments":"{\\"action\\":\\"exec\\",\\"command\\":\\"rm auto-review-fixture\\",\\"timeout_ms\\":60000}"}\n\n' +
+          'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","call_id":"call_terminal","name":"exec_command"}}\n\n' +
+            'data: {"type":"response.function_call_arguments.done","output_index":0,"arguments":"{\\"cmd\\":\\"rm auto-review-fixture\\"}"}\n\n' +
             'data: {"type":"response.completed","response":{"id":"gen_main_1","status":"completed","usage":{"input_tokens":5,"output_tokens":2}}}\n\n',
           { headers: { "content-type": "text/event-stream" } },
         );
@@ -816,8 +816,8 @@ function startFakeGrokAutoReview() {
       mainRequests += 1;
       if (mainRequests === 1) {
         return new Response(
-          'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","call_id":"call_terminal","name":"terminal"}}\n\n' +
-            'data: {"type":"response.function_call_arguments.done","output_index":0,"arguments":"{\\"action\\":\\"exec\\",\\"command\\":\\"rm auto-review-fixture\\",\\"timeout_ms\\":60000}"}\n\n' +
+          'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","call_id":"call_terminal","name":"exec_command"}}\n\n' +
+            'data: {"type":"response.function_call_arguments.done","output_index":0,"arguments":"{\\"cmd\\":\\"rm auto-review-fixture\\"}"}\n\n' +
             'data: {"type":"response.completed","response":{"id":"gen_main_1","status":"completed","usage":{"input_tokens":5,"output_tokens":2}}}\n\n',
           { headers: { "content-type": "text/event-stream" } },
         );
@@ -1434,11 +1434,22 @@ tmuxTest(
     await session.waitForText("Remote context compaction started.", TIMEOUT);
     await session.waitForText("Compacting context", TIMEOUT);
     await session.sendText("BLOCKED_DURING_COMPACTION");
-    expect(await session.capturePane()).not.toContain("BLOCKED_DURING_COMPACTION");
+    const duringCompaction = await session.capturePane();
+    expect(duringCompaction).toContain("BLOCKED_DURING_COMPACTION");
+    expect(
+      chatgptOauth.requests.filter((request) => request.path === "/chatgpt/responses"),
+    ).toHaveLength(3);
+    expect(duringCompaction.match(/CHATGPT_DIRECT_RESPONSE/g)?.length ?? 0).toBe(2);
     chatgptOauth.releaseCompaction();
     await session.waitForText("Context compacted with the active Responses provider.", TIMEOUT);
+    await session.waitForPane(
+      (pane) => (pane.match(/CHATGPT_DIRECT_RESPONSE/g) ?? []).length === 3,
+      TIMEOUT,
+    );
     await session.waitForComposer(TIMEOUT);
-    expect(await session.capturePane()).not.toContain("BLOCKED_DURING_COMPACTION");
+    expect(
+      chatgptOauth.requests.filter((request) => request.path === "/chatgpt/responses"),
+    ).toHaveLength(4);
     await session.sendText("/quit");
     await session.waitForSessionEnd(TIMEOUT);
     session = null;

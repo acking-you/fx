@@ -113,10 +113,8 @@ async function runTtyPromptPermissionsCase(
   );
   writeFileSync(stdoutPath, "");
   const gateway = startFakeGateway([
-    fakeGatewayToolCall(`${decision}_${outputMode}_call`, "terminal", {
-      action: "exec",
-      timeout_ms: 600_000,
-      command: `touch ${JSON.stringify(marker)}`,
+      fakeGatewayToolCall(`${decision}_${outputMode}_call`, "exec_command", {
+      cmd: `touch ${JSON.stringify(marker)}`,
     }),
     fakeGatewayFinalText(`${decision} ${outputMode} complete`),
   ]);
@@ -141,7 +139,7 @@ async function runTtyPromptPermissionsCase(
       expect(json.exit_code).toBe(0);
       expect(json.tool_calls).toContainEqual(
         expect.objectContaining({
-          name: "terminal",
+          name: "exec_command",
           status: decision === "approve" ? "success" : "error",
         }),
       );
@@ -159,16 +157,14 @@ async function runTtyPromptPermissionsCase(
 
 describe("generic permission typed errors", () => {
   test(
-    "returns typed JSON for denied terminal",
+    "returns typed JSON for denied exec_command",
     async () => {
       const root = createIsolatedRoot("fx-permission-error-");
       const marker = join(root.workspace, "denied-marker.txt");
       const toolCallId = "permission_denied_call";
       const gateway = startFakeGateway([
-        fakeGatewayToolCall(toolCallId, "terminal", {
-          action: "exec",
-          timeout_ms: 600_000,
-          command: `touch ${JSON.stringify(marker)}`,
+        fakeGatewayToolCall(toolCallId, "exec_command", {
+          cmd: `touch ${JSON.stringify(marker)}`,
         }),
         fakeGatewayFinalText("permission error observed"),
       ]);
@@ -199,7 +195,7 @@ describe("generic permission typed errors", () => {
           timeoutMs: TIMEOUT,
         });
         const json = parseFxJson(result);
-        expect(json.tool_calls).toContainEqual({ name: "terminal", status: "error" });
+        expect(json.tool_calls).toContainEqual({ name: "exec_command", status: "error" });
         expect(existsSync(marker)).toBe(false);
         expect(gateway.requests).toHaveLength(2);
 
@@ -208,7 +204,7 @@ describe("generic permission typed errors", () => {
         ) as { error: PermissionEcho };
         const echo = toolResult.error;
         expect(echo.type).toBe("tool_permission_denied");
-        expect(echo.tool_name).toBe("terminal");
+        expect(echo.tool_name).toBe("exec_command");
         expect(echo.message).toBe("Tool access was denied by configured policy");
         expect(echo.reason).toBe("policy_denied");
         expect(echo.denied).toBe(true);
@@ -248,10 +244,8 @@ describe("generic permission typed errors", () => {
         [
           ...markers.map((marker, index) => (body?: string) => {
             if (index > 0) expect(body).toContain("review_caution");
-            return fakeGatewayToolCall(`auto_call_${index + 1}`, "terminal", {
-              action: "exec",
-              timeout_ms: 600_000,
-              command: `touch ${JSON.stringify(marker)}`,
+            return fakeGatewayToolCall(`auto_call_${index + 1}`, "exec_command", {
+              cmd: `touch ${JSON.stringify(marker)}`,
             });
           }),
           fakeGatewayFinalText("Advisory cautions handled normally."),
@@ -327,10 +321,8 @@ describe("generic permission typed errors", () => {
           JSON.stringify({ permission_mode: "ask", sandbox: "none" }),
         );
         const gateway = startFakeGateway([
-          fakeGatewayToolCall("non_tty_call", "terminal", {
-            action: "exec",
-            timeout_ms: 600_000,
-            command: `touch ${JSON.stringify(marker)}`,
+          fakeGatewayToolCall("non_tty_call", "exec_command", {
+            cmd: `touch ${JSON.stringify(marker)}`,
           }),
         ]);
         try {

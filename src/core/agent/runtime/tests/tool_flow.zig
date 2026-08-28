@@ -6,7 +6,6 @@ const types = @import("../../../shared/types.zig");
 const worker_runtime = @import("../../worker_runtime.zig");
 const session_runtime = @import("../../../session/session.zig");
 const session_codec = @import("../../../session/session_codec.zig");
-const session_child_store = @import("../../../session/session_child_store.zig");
 const result_store = @import("../../../session/result_store.zig");
 const debug_trace = @import("../../../shared/debug_trace.zig");
 const image_attachments = @import("../../../images/image_attachments.zig");
@@ -64,23 +63,10 @@ const toolCall = test_support.toolCall;
 const vision_agent_test_tools = test_support.vision_agent_test_tools;
 const VisionAgentToolRuntime = test_support.VisionAgentToolRuntime;
 
-const PostEffectTerminalFailure = struct {
-    effect_count: usize = 0,
-
-    fn execute(
-        raw: *anyopaque,
-        _: runtime_tool_contracts.ToolExecutionRequest,
-    ) !runtime_tool_contracts.ToolExecutionResult {
-        const self: *PostEffectTerminalFailure = @ptrCast(@alignCast(raw));
-        self.effect_count += 1;
-        return error.OutOfMemory;
-    }
-};
-
 const read_file_advertised_names = [_][]const u8{"read_file"};
-const terminal_advertised_names = [_][]const u8{"terminal"};
+const exec_advertised_names = [_][]const u8{"exec_command"};
 const read_file_advertised_functions = [_]model_tool_schema.FunctionSchema{builtin_tools.read_file.model_schema};
-const terminal_advertised_functions = [_]model_tool_schema.FunctionSchema{builtin_tools.terminal.model_schema};
+const exec_advertised_functions = [_]model_tool_schema.FunctionSchema{builtin_tools.exec_command.model_schema};
 
 fn makeOwnedVisionCatalog(
     alloc: std.mem.Allocator,
@@ -965,7 +951,7 @@ test "denied web_fetch is presented without dns http or cache work" {
 
 test "accepted automatic review remains internal before ordinary tool execution" {
     const alloc = std.testing.allocator;
-    const calls = [_]ToolCall{toolCall("call_1", "terminal", "{\"action\":\"exec\",\"command\":\"printf done\"}")};
+    const calls = [_]ToolCall{toolCall("call_1", "exec_command", "{\"cmd\":\"printf done\"}")};
     const completions = [_]FakeCompletion{
         .{ .tool_calls = &calls },
         .{ .content = "Final" },
@@ -990,185 +976,11 @@ test "accepted automatic review remains internal before ordinary tool execution"
     try std.testing.expectEqual(@as(usize, 0), hooks.system_notices.items.len);
     try std.testing.expect(
         logIndex(&hooks, "status:started").? <
-            logIndex(&hooks, "execute:terminal").?,
+            logIndex(&hooks, "execute:exec_command").?,
     );
     try std.testing.expect(
         !hooks.lifecycle_events.items[0].authoritative_started.place_after_current_transcript,
     );
-}
-
-test "borrowed nested terminal completion is flat before authority execution and memory" {
-    const alloc = std.testing.allocator;
-    const flat_arguments = "{\"action\":\"exec\",\"command\":\"printf done\"}";
-    const calls = [_]ToolCall{toolCall(
-        "call_nested_terminal",
-        "terminal",
-        "{\"request\":{\"action\":\"exec\",\"command\":\"printf done\"}}",
-    )};
-    const completions = [_]FakeCompletion{
-        .{ .tool_calls = &calls },
-        .{ .content = "Final" },
-    };
-    var gateway = FakeGateway.init(alloc, &completions);
-    defer gateway.deinit();
-    var hooks = FakeAgentRuntimeDeps.init(alloc);
-    defer hooks.deinit();
-    hooks.permission_decisions = &.{.once};
-    var fixture = PromptFixture{};
-    var config = fixture.config();
-    config.advertised_tool_names = &terminal_advertised_names;
-    config.advertised_functions = &terminal_advertised_functions;
-
-    try runFakePrompt(&gateway, &hooks, config, fixture.job());
-
-    try std.testing.expectEqual(@as(usize, 1), hooks.executed_names.items.len);
-    try std.testing.expectEqualStrings("terminal", hooks.executed_names.items[0]);
-    try std.testing.expectEqualStrings(flat_arguments, hooks.last_validated_arguments.?);
-    try std.testing.expectEqualStrings(flat_arguments, hooks.last_permission_arguments.?);
-    try std.testing.expectEqualStrings(flat_arguments, hooks.last_executed_arguments.?);
-    try std.testing.expectEqual(@as(usize, 1), hooks.history_turns.items.len);
-    const execution = hooks.history_turns.items[0].assistant.execution;
-    try std.testing.expectEqual(@as(usize, 1), execution.tool_steps.len);
-    try std.testing.expectEqualStrings(
-        flat_arguments,
-        execution.tool_steps[0].tool_calls[0].arguments_json,
-    );
-}
-
-test "terminal acquire stays tracked when execution fails after its effect" {
-    const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.createDir(
-        io_mod.getIo(),
-        "session",
-        std.Io.File.Permissions.fromMode(0o700),
-    );
-    var session_dir = try tmp.dir.openDir(io_mod.getIo(), "session", .{
-        .iterate = true,
-        .follow_symlinks = false,
-    });
-    defer session_dir.close(io_mod.getIo());
-    const session_path = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "session");
-    defer alloc.free(session_path);
-    var capability = try session_child_store.SessionChildCapability.initForTesting(
-        alloc,
-        session_dir,
-        session_path,
-        .writable,
-        .{},
-    );
-    defer capability.deinit();
-
-    const calls = [_]ToolCall{toolCall(
-        "terminal_acquire",
-        "terminal",
-        "{\"action\":\"write\",\"session_id\":\"terminal-one\",\"write\":null,\"lease\":\"acquire\"}",
-    )};
-    var gateway = FakeGateway.init(alloc, &.{.{ .tool_calls = &calls }});
-    defer gateway.deinit();
-    var post_effect = PostEffectTerminalFailure{};
-    var hooks = FakeAgentRuntimeDeps.init(alloc);
-    hooks.permission_decisions = &.{.once};
-    hooks.tool_execution_override = .{
-        .context = &post_effect,
-        .execute_fn = PostEffectTerminalFailure.execute,
-    };
-    defer hooks.deinit();
-    var fixture = PromptFixture{};
-    var config = fixture.config();
-    config.session_child_capability = &capability;
-
-    try std.testing.expectError(
-        error.OutOfMemory,
-        runFakePrompt(&gateway, &hooks, config, fixture.job()),
-    );
-
-    try std.testing.expectEqual(@as(usize, 1), post_effect.effect_count);
-    try std.testing.expectEqual(@as(usize, 1), hooks.terminal_lease_cleanup_ids.items.len);
-    try std.testing.expectEqualStrings(
-        "terminal-one",
-        hooks.terminal_lease_cleanup_ids.items[0],
-    );
-}
-
-test "terminal lifecycle resolves one display target before execution" {
-    const alloc = std.testing.allocator;
-    const calls = [_]ToolCall{toolCall(
-        "inspect_call",
-        "terminal",
-        "{\"action\":\"inspect\",\"session_id\":\"terminal-cold-session\"}",
-    )};
-    const completions = [_]FakeCompletion{
-        .{ .tool_calls = &calls },
-        .{ .content = "done" },
-    };
-    var gateway = FakeGateway.init(alloc, &completions);
-    defer gateway.deinit();
-    var hooks = FakeAgentRuntimeDeps.init(alloc);
-    defer hooks.deinit();
-    hooks.tool_display_target = "session terminal-cold-session";
-    hooks.tool_display_target_after_execute = "npm run dev";
-    hooks.exec_plans = &.{.{ .result = .{
-        .status = .success,
-        .model_output = "{}",
-    } }};
-    const PermissionFixture = struct {
-        fn request(
-            _: *anyopaque,
-            _: std.mem.Allocator,
-            _: ToolCall,
-            _: permission_auto_classifier.ReviewTurnContext,
-            _: types.PermissionMode,
-            _: []const PermissionGrant,
-            _: ?runtime_tool_contracts.LiveToolAuthority,
-            _: ?runtime_tool_contracts.LivePermissionRevalidation,
-            _: []const []const u8,
-        ) !command_admission.PermissionOutcome {
-            return .{
-                .decision = .once,
-                .execution_authority = .ordinary,
-                .human_approval = .once,
-            };
-        }
-    };
-    var permission_fixture = PermissionFixture{};
-    hooks.permission_request_override = .{
-        .context = &permission_fixture,
-        .request_fn = PermissionFixture.request,
-    };
-    var fixture = PromptFixture{};
-    var config = fixture.config();
-    config.advertised_tool_names = &terminal_advertised_names;
-    config.advertised_functions = &terminal_advertised_functions;
-
-    try runFakePrompt(&gateway, &hooks, config, fixture.job());
-
-    try std.testing.expectEqual(@as(usize, 1), hooks.tool_display_target_resolve_count);
-    var active_count: usize = 0;
-    var completed_count: usize = 0;
-    for (hooks.lifecycle_events.items) |event| switch (event) {
-        .progress => |progress| {
-            if (!std.mem.eql(u8, progress.id.call_id, "inspect_call")) continue;
-            try std.testing.expectEqualStrings(
-                "start terminal session terminal-cold-session",
-                progress.text,
-            );
-            active_count += 1;
-        },
-        .terminal => |terminal| {
-            if (!std.mem.eql(u8, terminal.id.call_id, "inspect_call")) continue;
-            try std.testing.expectEqualStrings(
-                "done terminal session terminal-cold-session",
-                terminal.outcome.summary,
-            );
-            completed_count += 1;
-        },
-        else => {},
-    };
-    try std.testing.expectEqual(@as(usize, 1), active_count);
-    try std.testing.expectEqual(@as(usize, 1), completed_count);
-    try std.testing.expectEqualStrings("npm run dev", hooks.tool_display_target.?);
 }
 
 test "processQueuedPrompt keeps sampled root mode through permission and execution" {
@@ -1260,7 +1072,7 @@ test "automatic review does not reposition deferred web fetch lifecycle" {
 
 test "deterministic auto permission preserves lifecycle placement" {
     const alloc = std.testing.allocator;
-    const calls = [_]ToolCall{toolCall("call_1", "terminal", "{\"action\":\"exec\",\"command\":\"pwd\"}")};
+    const calls = [_]ToolCall{toolCall("call_1", "exec_command", "{\"cmd\":\"pwd\"}")};
     const completions = [_]FakeCompletion{
         .{ .tool_calls = &calls },
         .{ .content = "Final" },
@@ -1377,7 +1189,7 @@ test "automatic review cancellation remains interrupted and a later turn starts 
 test "cancellation returned with permission allow starts no serial or parallel execution" {
     const alloc = std.testing.allocator;
     const serial_calls = [_]ToolCall{
-        toolCall("serial", "terminal", "{\"action\":\"exec\",\"command\":\"touch must-not-run\"}"),
+        toolCall("serial", "exec_command", "{\"cmd\":\"touch must-not-run\"}"),
     };
     const parallel_calls = [_]ToolCall{
         toolCall("parallel_1", "read_file", "{\"path\":\"README.md\"}"),
@@ -3768,60 +3580,6 @@ test "committed file result is appended before degraded secondary publication" {
     });
 }
 
-test "terminal publication failure deletes retained command replay" {
-    const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.createDir(
-        io_mod.getIo(),
-        "session",
-        std.Io.File.Permissions.fromMode(0o700),
-    );
-    var session_dir = try tmp.dir.openDir(io_mod.getIo(), "session", .{
-        .iterate = true,
-        .follow_symlinks = false,
-    });
-    defer session_dir.close(io_mod.getIo());
-    const session_path = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "session");
-    defer alloc.free(session_path);
-    var capability = try session_child_store.SessionChildCapability.initForTesting(
-        alloc,
-        session_dir,
-        session_path,
-        .writable,
-        .{},
-    );
-    defer capability.deinit();
-
-    var baseline = try capability.iterate(alloc, .command_artifacts);
-    defer baseline.deinit();
-    const calls = [_]ToolCall{toolCall(
-        "call_command",
-        "terminal",
-        "{\"action\":\"exec\",\"command\":\"printf replay\"}",
-    )};
-    var gateway = FakeGateway.init(alloc, &.{.{ .tool_calls = &calls }});
-    defer gateway.deinit();
-    var hooks = FakeAgentRuntimeDeps.init(alloc);
-    defer hooks.deinit();
-    hooks.exec_plans = &.{.{ .result = .{ .model_output = "ordinary result" } }};
-    hooks.command_replay_output = "raw replay output\n";
-    hooks.command_replay_capability = &capability;
-    hooks.fail_status_finished = true;
-    var fixture = PromptFixture{};
-    var config = fixture.config();
-    config.session_child_capability = &capability;
-
-    try std.testing.expectError(
-        error.TestStatusPublicationFailure,
-        runFakePrompt(&gateway, &hooks, config, fixture.job()),
-    );
-
-    var after = try capability.iterate(alloc, .command_artifacts);
-    defer after.deinit();
-    try std.testing.expectEqual(baseline.names.len, after.names.len);
-}
-
 test "processQueuedPrompt denied normal permission appends structured denial without execution" {
     const alloc = std.testing.allocator;
     const calls = [_]ToolCall{toolCall("call_1", "write_file", "{\"path\":\"a\",\"content\":\"x\"}")};
@@ -3871,51 +3629,6 @@ test "processQueuedPrompt denied normal permission appends structured denial wit
         "Inspect the file before changing it.",
     });
     try expectBodyNotContains(&gateway, 1, "Permission denied by user.");
-}
-
-test "processQueuedPrompt denied registered run command compatibility never reaches execution" {
-    const alloc = std.testing.allocator;
-    const Compatibility = struct {
-        fn matches(command: []const u8) bool {
-            return std.mem.startsWith(u8, command, "npx skills add ");
-        }
-
-        fn execute(
-            ctx: tool_dispatch.DispatchContext,
-            _: []const u8,
-        ) tool_dispatch.DispatchError!tool_dispatch.ToolResult {
-            return .{ .success = try ctx.allocator.dupe(u8, "unexpected execution") };
-        }
-    };
-    var compatible_install = builtin_tools.install_skill;
-    compatible_install.run_command_compatibility = .{
-        .matches = Compatibility.matches,
-        .execute = Compatibility.execute,
-    };
-    const tools = [_]tool_dispatch.Tool{ builtin_tools.terminal, compatible_install };
-    const calls = [_]ToolCall{toolCall(
-        "call_1",
-        "terminal",
-        "{\"action\":\"exec\",\"command\":\"npx skills add example/agent-skills --skill workflow -g -y\"}",
-    )};
-    const completions = [_]FakeCompletion{
-        .{ .tool_calls = &calls },
-        .{ .content = "Final" },
-    };
-    var gateway = FakeGateway.init(alloc, &completions);
-    defer gateway.deinit();
-    var hooks = FakeAgentRuntimeDeps.init(alloc);
-    hooks.permission_decisions = &.{.deny};
-    hooks.tool_registry = .{ .tools = &tools };
-    defer hooks.deinit();
-    var fixture = PromptFixture{};
-
-    try runFakePrompt(&gateway, &hooks, fixture.config(), fixture.job());
-
-    try std.testing.expectEqual(@as(usize, 1), hooks.permission_names.items.len);
-    try std.testing.expectEqualStrings("terminal", hooks.permission_names.items[0]);
-    try std.testing.expectEqual(@as(usize, 0), hooks.executed_names.items.len);
-    try expectPermissionDeniedToolResult(&gateway, 1, "terminal", .user_denied);
 }
 
 test "processQueuedPrompt legacy auto denial retains lifecycle source" {
@@ -4208,8 +3921,8 @@ test "permission feedback follows the matching tool result" {
 test "batched permission feedback follows every tool result before the next gateway request" {
     const alloc = std.testing.allocator;
     const calls = [_]ToolCall{
-        toolCall("call_first", "terminal", "{\"action\":\"exec\",\"command\":\"printf first\"}"),
-        toolCall("call_second", "terminal", "{\"action\":\"exec\",\"command\":\"printf second\"}"),
+        toolCall("call_first", "exec_command", "{\"cmd\":\"printf first\"}"),
+        toolCall("call_second", "exec_command", "{\"cmd\":\"printf second\"}"),
     };
     const completions = [_]FakeCompletion{
         .{ .tool_calls = &calls },
@@ -4491,159 +4204,6 @@ test "processQueuedPrompt returns ordinary results for repeated calls" {
     try expectBodyNotContains(&gateway, 3, "Repeated identical tool call blocked");
 }
 
-test "processQueuedPrompt stops repeated distinct terminal corrections after the complete second batch" {
-    const alloc = std.testing.allocator;
-    const correction_s = try tool_result_errors.terminalActionFieldCorrectionJson(alloc, .{
-        .action = "start",
-        .invalid_fields = &.{"session_id"},
-        .missing_fields = &.{},
-        .allowed_fields = &.{ "action", "command" },
-        .conflicts = &.{},
-    });
-    defer alloc.free(correction_s);
-    const correction_t = try tool_result_errors.terminalActionFieldCorrectionJson(alloc, .{
-        .action = "read",
-        .invalid_fields = &.{"command"},
-        .missing_fields = &.{},
-        .allowed_fields = &.{ "action", "session_id", "cursor_segment" },
-        .conflicts = &.{},
-    });
-    defer alloc.free(correction_t);
-
-    const first_calls = [_]ToolCall{
-        toolCall("terminal_s_1", "terminal", "{\"action\":\"start\",\"session_id\":\"terminal-a\"}"),
-        toolCall("terminal_t_1", "terminal", "{\"action\":\"read\",\"command\":\"wrong\"}"),
-    };
-    const second_calls = [_]ToolCall{
-        toolCall("terminal_s_2", "terminal", "{\"action\":\"start\",\"session_id\":\"terminal-b\"}"),
-        toolCall("terminal_t_2", "terminal", "{\"action\":\"read\",\"command\":\"still wrong\"}"),
-    };
-    const completions = [_]FakeCompletion{
-        .{ .tool_calls = &first_calls },
-        .{ .tool_calls = &second_calls },
-        .{ .content = "A third request must not be sent." },
-    };
-    var gateway = FakeGateway.init(alloc, &completions);
-    defer gateway.deinit();
-    var deps = FakeAgentRuntimeDeps.init(alloc);
-    deps.context_enabled = true;
-    deps.validation_results = &.{ correction_s, correction_t, correction_s, correction_t };
-    defer deps.deinit();
-    var fixture = PromptFixture{};
-
-    try runFakePrompt(&gateway, &deps, fixture.config(), fixture.job());
-
-    try std.testing.expectEqual(@as(usize, 2), gateway.request_bodies.items.len);
-    try std.testing.expectEqual(@as(usize, 4), deps.rejected_names.items.len);
-    try std.testing.expectEqual(@as(usize, 0), deps.permission_names.items.len);
-    try std.testing.expectEqual(@as(usize, 0), deps.executed_names.items.len);
-    try std.testing.expectEqual(@as(usize, 1), deps.history_turns.items.len);
-    const execution = deps.history_turns.items[0].assistant.execution;
-    try std.testing.expectEqual(@as(usize, 2), execution.tool_steps.len);
-    for (execution.tool_steps) |step| {
-        try std.testing.expectEqual(@as(usize, 2), step.tool_calls.len);
-        try std.testing.expectEqual(@as(usize, 2), step.tool_results.len);
-    }
-    try std.testing.expectEqual(@as(usize, 1), deps.system_notices.items.len);
-    try std.testing.expect(
-        std.mem.find(u8, deps.system_notices.items[0], "no terminal effect") != null,
-    );
-}
-
-test "processQueuedPrompt retains a terminal correction across valid neighboring calls" {
-    const alloc = std.testing.allocator;
-    const correction = try tool_result_errors.terminalActionFieldCorrectionJson(alloc, .{
-        .action = "start",
-        .invalid_fields = &.{"session_id"},
-        .missing_fields = &.{},
-        .allowed_fields = &.{ "action", "command" },
-        .conflicts = &.{},
-    });
-    defer alloc.free(correction);
-
-    const first_calls = [_]ToolCall{
-        toolCall("terminal_s_1", "terminal", "{\"action\":\"start\",\"session_id\":\"terminal-a\"}"),
-        toolCall("terminal_valid_1", "terminal", "{\"action\":\"exec\",\"command\":\"true\"}"),
-    };
-    const second_calls = [_]ToolCall{
-        toolCall("terminal_s_2", "terminal", "{\"action\":\"start\",\"session_id\":\"terminal-b\"}"),
-        toolCall("terminal_valid_2", "terminal", "{\"action\":\"exec\",\"command\":\"true\"}"),
-    };
-    const completions = [_]FakeCompletion{
-        .{ .tool_calls = &first_calls },
-        .{ .tool_calls = &second_calls },
-        .{ .content = "A third request must not be sent." },
-    };
-    var gateway = FakeGateway.init(alloc, &completions);
-    defer gateway.deinit();
-    var deps = FakeAgentRuntimeDeps.init(alloc);
-    deps.validation_results = &.{ correction, null, correction, null };
-    defer deps.deinit();
-    var fixture = PromptFixture{};
-
-    try runFakePrompt(&gateway, &deps, fixture.config(), fixture.job());
-
-    try std.testing.expectEqual(@as(usize, 2), gateway.request_bodies.items.len);
-    try std.testing.expectEqual(@as(usize, 2), deps.rejected_names.items.len);
-    try std.testing.expectEqual(@as(usize, 2), deps.permission_names.items.len);
-    try std.testing.expectEqual(@as(usize, 2), deps.executed_names.items.len);
-    try std.testing.expectEqualStrings("terminal_valid_1", deps.executed_call_ids.items[0]);
-    try std.testing.expectEqualStrings("terminal_valid_2", deps.executed_call_ids.items[1]);
-    const execution = deps.history_turns.items[0].assistant.execution;
-    try std.testing.expectEqual(@as(usize, 2), execution.tool_steps.len);
-    for (execution.tool_steps) |step| {
-        try std.testing.expectEqual(@as(usize, 2), step.tool_results.len);
-    }
-}
-
-test "processQueuedPrompt command output completion fires on command success and error" {
-    const alloc = std.testing.allocator;
-    const calls = [_]ToolCall{toolCall("call_1", "terminal", "{\"action\":\"exec\",\"command\":\"echo hi\"}")};
-    const success_completions = [_]FakeCompletion{
-        .{ .tool_calls = &calls },
-        .{ .content = "Final" },
-    };
-    var success_gateway = FakeGateway.init(alloc, &success_completions);
-    defer success_gateway.deinit();
-    var success_hooks = FakeAgentRuntimeDeps.init(alloc);
-    defer success_hooks.deinit();
-    var fixture = PromptFixture{};
-    try runFakePrompt(&success_gateway, &success_hooks, fixture.config(), fixture.job());
-    try std.testing.expectEqual(@as(usize, 1), success_hooks.command_complete_count);
-    try expectLogOrder(
-        &success_hooks,
-        "status:finished:done terminal",
-        "command_output_complete:",
-    );
-
-    const error_completions = [_]FakeCompletion{
-        .{ .tool_calls = &calls },
-        .{ .content = "Final" },
-    };
-    var error_gateway = FakeGateway.init(alloc, &error_completions);
-    defer error_gateway.deinit();
-    var error_hooks = FakeAgentRuntimeDeps.init(alloc);
-    error_hooks.exec_plans = &.{.{ .err = error.AccessDenied }};
-    defer error_hooks.deinit();
-    var error_fixture = PromptFixture{};
-    try runFakePrompt(&error_gateway, &error_hooks, error_fixture.config(), error_fixture.job());
-    try std.testing.expectEqual(@as(usize, 1), error_hooks.command_complete_count);
-    try expectLogOrder(
-        &error_hooks,
-        "status:finished:Failed terminal",
-        "command_output_complete:",
-    );
-    try expectBodyContains(&error_gateway, 1, "Tool terminal failed: AccessDenied");
-    try std.testing.expectEqualStrings(
-        "Failed terminal",
-        error_hooks.lifecycle_events.items[2].terminal.outcome.summary,
-    );
-    try std.testing.expectEqual(
-        types.ToolOutcomeKind.failed,
-        error_hooks.lifecycle_events.items[2].terminal.outcome.kind,
-    );
-}
-
 fn expectLogOrder(
     hooks: *const FakeAgentRuntimeDeps,
     earlier: []const u8,
@@ -4742,7 +4302,7 @@ test "processQueuedPrompt caps chatty grep_files model output" {
 
 test "processQueuedPrompt caps chatty terminal exec result with explicit marker" {
     const alloc = std.testing.allocator;
-    const calls = [_]ToolCall{toolCall("call_1", "terminal", "{\"action\":\"exec\",\"command\":\"printf x\"}")};
+    const calls = [_]ToolCall{toolCall("call_1", "exec_command", "{\"cmd\":\"printf x\"}")};
     const completions = [_]FakeCompletion{
         .{ .tool_calls = &calls },
         .{ .content = "Final" },
@@ -5457,7 +5017,7 @@ test "processQueuedPrompt interrupted active call preserves prior completed exec
 test "execution cancellation closes every later streamed tool action" {
     const alloc = std.testing.allocator;
     const calls = [_]ToolCall{
-        toolCall("active_command", "terminal", "{\"action\":\"exec\",\"command\":\"sleep 10\"}"),
+        toolCall("active_command", "exec_command", "{\"cmd\":\"sleep 10\"}"),
         toolCall("later_read", "read_file", "{\"path\":\"README.md\"}"),
         .{
             .id = "later_search",
@@ -5479,7 +5039,7 @@ test "execution cancellation closes every later streamed tool action" {
     deps.exec_plans = &.{.{ .err = error.Cancelled }};
     var fixture = PromptFixture{};
     deps.cancel_on_execute = &fixture.cancel_flag;
-    deps.cancel_on_execute_name = "terminal";
+    deps.cancel_on_execute_name = "exec_command";
     var job = fixture.job();
     job.permission_mode = .ask;
 

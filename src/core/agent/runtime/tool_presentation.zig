@@ -40,10 +40,7 @@ fn fallbackToolDisplay(
     registry: tool_dispatch.Registry,
     tool_name: []const u8,
 ) []const u8 {
-    const lookup_name = if (std.mem.eql(u8, tool_name, "run_command"))
-        "terminal"
-    else
-        tool_name;
+    const lookup_name = tool_name;
     return if (registry.lookup(lookup_name) != null) "tool call" else tool_name;
 }
 
@@ -81,12 +78,7 @@ pub const ProvisionalToolStatuses = struct {
     }
 
     pub fn preflight(registry: tool_dispatch.Registry, tool_name: []const u8) ?StartPreflight {
-        const lookup_name = if (std.mem.eql(u8, tool_name, "run_command"))
-            "terminal"
-        else
-            tool_name;
-        const spec = registry.lookup(lookup_name) orelse return null;
-        if (spec.executor_kind == .terminal) return .ineligible;
+        const spec = registry.lookup(tool_name) orelse return null;
         return switch (spec.activity_kind) {
             .ask, .write, .edit => .ineligible,
             else => .{ .eligible = .{
@@ -925,11 +917,7 @@ pub fn finishExecutedToolStatus(
         try commandOutcomeDecision(arena, result_memory.command_process_presentation)
     else
         null;
-    const terminal_action_decision = if (std.mem.eql(u8, call.name, "terminal"))
-        try terminalActionOutcomeDecision(arena, result_memory.terminal_action_presentation)
-    else
-        null;
-    const outcome_decision = command_decision orelse terminal_action_decision;
+    const outcome_decision = command_decision;
     const base_line = if (outcome_decision) |decision| blk: {
         const base = try hooks.describe_tool_action_denied(
             hooks.ctx,
@@ -963,22 +951,6 @@ pub fn finishExecutedToolStatus(
                 "Failed",
                 advertised_dynamic_tool_names,
             );
-            if (std.mem.eql(u8, call.name, "terminal")) {
-                if (try tool_result_errors.inspectTerminalActionFieldCorrection(
-                    arena,
-                    safe_result,
-                )) |correction| {
-                    break :blk try std.fmt.allocPrint(
-                        arena,
-                        "{s} · {d} invalid field{s}",
-                        .{
-                            base,
-                            correction.invalid_field_count,
-                            if (correction.invalid_field_count == 1) "" else "s",
-                        },
-                    );
-                }
-            }
             const detail = (try failureStatusDetail(
                 arena,
                 call,
@@ -1050,37 +1022,6 @@ pub fn commandOutcomeDecision(
             .outcome = .failed,
             .label = "Output capture failed",
         },
-    };
-}
-
-pub fn terminalActionOutcomeDecision(
-    arena: Allocator,
-    presentation: ?types.TerminalActionPresentation,
-) !?ToolOutcomeDecision {
-    const value = presentation orelse return null;
-    return switch (value) {
-        .returned => |returned| switch (returned) {
-            .started => .{ .outcome = .completed, .label = "Started" },
-            .condition_met => .{ .outcome = .completed, .label = "Condition met for" },
-            .safety_ceiling => .{ .outcome = .completed, .label = "Wait limit reached for" },
-            .cancelled => .{ .outcome = .cancelled, .label = "Cancelled" },
-            .exited => |code| .{
-                .outcome = if (code == 0) .completed else .failed,
-                .label = try std.fmt.allocPrint(arena, "Exited {d}", .{code}),
-            },
-            .signal => |signal| .{
-                .outcome = .failed,
-                .label = try std.fmt.allocPrint(arena, "Terminated by signal {d}", .{signal}),
-            },
-        },
-        .failed => |failed| if (failed == .cancelled)
-            .{ .outcome = .cancelled, .label = "Cancelled" }
-        else
-            .{
-                .outcome = .failed,
-                .label = "Failed",
-                .detail = failed.detail(),
-            },
     };
 }
 
@@ -1297,7 +1238,7 @@ const test_tools = [_]tool_dispatch.Tool{
     test_builtin_tools.read_file,
     test_builtin_tools.write_file,
     test_builtin_tools.edit_file,
-    test_builtin_tools.terminal,
+    test_builtin_tools.exec_command,
     test_builtin_tools.ask_user_question,
 };
 const test_tool_registry = tool_dispatch.Registry{ .tools = test_tools[0..] };
@@ -1426,7 +1367,7 @@ test "formatToolStatusWithStats accents the +/- counts and falls back to neutral
 test "provisional lifecycle preflight distinguishes unknown eligible and ineligible tools" {
     try std.testing.expect(ProvisionalToolStatuses.preflight(test_tool_registry, "unknown_tool") == null);
 
-    for ([_][]const u8{ "ask_user_question", "write_file", "edit_file", "terminal", "run_command" }) |name| {
+    for ([_][]const u8{ "ask_user_question", "write_file", "edit_file", "exec_command", "run_command" }) |name| {
         const preflight = ProvisionalToolStatuses.preflight(test_tool_registry, name) orelse return error.TestExpectedEqual;
         switch (preflight) {
             .ineligible => {},
@@ -2064,59 +2005,6 @@ test "dynamic MCP failure derives a bounded terminal-safe detail from the safe r
     );
 }
 
-test "terminal path scope failure appends the exact status detail" {
-    const alloc = std.testing.allocator;
-    var arena_state = std.heap.ArenaAllocator.init(alloc);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-    var capture = ProvisionalStatusTestCapture{ .alloc = alloc };
-    defer capture.deinit();
-    var hooks = capture.hooks();
-    hooks.describe_tool_action_denied = struct {
-        fn describe(
-            _: *anyopaque,
-            target: Allocator,
-            _: ToolCall,
-            _: ?[]const u8,
-            label: []const u8,
-            _: []const []const u8,
-        ) ![]const u8 {
-            return std.fmt.allocPrint(target, "{s} start", .{label});
-        }
-    }.describe;
-    const failure = "{\"failure\":{\"action\":\"start\",\"code\":\"path_outside_workspace\"}}";
-
-    try finishExecutedToolStatus(
-        &hooks,
-        arena,
-        5,
-        .{
-            .id = "terminal_path_scope",
-            .name = "terminal",
-            .arguments_json = "{\"action\":\"start\"}",
-        },
-        true,
-        null,
-        .{
-            .status = .failure,
-            .model_output = failure,
-            .status_detail = "path is outside the workspace",
-        },
-        failure,
-        .{ .output_bytes = failure.len, .stored_output_bytes = failure.len },
-        null,
-        &.{},
-    );
-
-    try std.testing.expectEqual(@as(usize, 1), capture.events.items.len);
-    const terminal = capture.events.items[0].terminal;
-    try std.testing.expectEqual(types.ToolOutcomeKind.failed, terminal.outcome.kind);
-    try std.testing.expectEqualStrings(
-        "Failed start: path is outside the workspace",
-        terminal.outcome.summary,
-    );
-}
-
 test "command completion publishes its combined artifact handle" {
     const alloc = std.testing.allocator;
     var arena_state = std.heap.ArenaAllocator.init(alloc);
@@ -2145,7 +2033,7 @@ test "command completion publishes its combined artifact handle" {
             .stored_output_bytes = 128_000,
             .truncated = true,
             .command_output_replay = .{ .available = .{
-                .handle = "fx-command-replay-terminal.bin",
+                .handle = "fx-command-replay-exec.bin",
                 .framed_bytes = 123,
             } },
         },
@@ -2170,7 +2058,7 @@ test "command completion publishes its combined artifact handle" {
                 .unavailable => return error.TestExpectedReplay,
             };
             try std.testing.expectEqualStrings(
-                "fx-command-replay-terminal.bin",
+                "fx-command-replay-exec.bin",
                 descriptor.handle,
             );
             try std.testing.expectEqual(@as(usize, 123), descriptor.framed_bytes);
@@ -2292,80 +2180,6 @@ test "command timeout and output capture failure name their actual cause" {
     );
     for (capture.events.items) |event| {
         try std.testing.expectEqual(types.ToolOutcomeKind.failed, event.terminal.outcome.kind);
-    }
-}
-
-test "terminal action outcomes map to one typed visible decision" {
-    const alloc = std.testing.allocator;
-    var arena_state = std.heap.ArenaAllocator.init(alloc);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-    const cases = [_]struct {
-        presentation: types.TerminalActionPresentation,
-        outcome: types.ToolOutcomeKind,
-        label: []const u8,
-        detail: ?[]const u8 = null,
-    }{
-        .{
-            .presentation = .{ .returned = .started },
-            .outcome = .completed,
-            .label = "Started",
-        },
-        .{
-            .presentation = .{ .returned = .condition_met },
-            .outcome = .completed,
-            .label = "Condition met for",
-        },
-        .{
-            .presentation = .{ .returned = .safety_ceiling },
-            .outcome = .completed,
-            .label = "Wait limit reached for",
-        },
-        .{
-            .presentation = .{ .returned = .cancelled },
-            .outcome = .cancelled,
-            .label = "Cancelled",
-        },
-        .{
-            .presentation = .{ .returned = .{ .exited = 0 } },
-            .outcome = .completed,
-            .label = "Exited 0",
-        },
-        .{
-            .presentation = .{ .returned = .{ .exited = 7 } },
-            .outcome = .failed,
-            .label = "Exited 7",
-        },
-        .{
-            .presentation = .{ .returned = .{ .signal = 9 } },
-            .outcome = .failed,
-            .label = "Terminated by signal 9",
-        },
-        .{
-            .presentation = .{ .failed = .session_not_found },
-            .outcome = .failed,
-            .label = "Failed",
-            .detail = "terminal session not found",
-        },
-        .{
-            .presentation = .{ .failed = .cancelled },
-            .outcome = .cancelled,
-            .label = "Cancelled",
-        },
-    };
-
-    for (cases) |case| {
-        const decision = (try terminalActionOutcomeDecision(
-            arena,
-            case.presentation,
-        )).?;
-        try std.testing.expectEqual(case.outcome, decision.outcome);
-        try std.testing.expectEqualStrings(case.label, decision.label);
-        if (case.detail) |expected| {
-            try std.testing.expectEqualStrings(expected, decision.detail.?);
-        } else {
-            try std.testing.expect(decision.detail == null);
-        }
     }
 }
 

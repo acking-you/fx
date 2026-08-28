@@ -20,15 +20,13 @@ const text_utils = @import("../shared/text_utils.zig");
 const web_fetch_runtime = @import("web_fetch_runtime.zig");
 const web_fetch_artifacts = @import("../session/web_fetch_artifacts.zig");
 const model_tool_schema = @import("model_tool_schema.zig");
-const host = @import("../hosts/host.zig");
 const tool_result_errors = @import("tool_result_errors.zig");
 const tool_result_limits = @import("tool_result_limits.zig");
 const tool_mcp_runtime = @import("tool_mcp_runtime.zig");
 const web_search_contract = @import("web_search_contract.zig");
 const context_limits = @import("../config/context_limits.zig");
 const workspace_access = @import("../workspace/workspace_access.zig");
-const terminal_client_runtime = @import("../terminal/client.zig");
-const terminal_contracts = @import("../terminal/contracts.zig");
+const unified_exec_runtime = @import("../execution/unified_exec.zig");
 const tool_args = @import("tool_args.zig");
 
 const Allocator = std.mem.Allocator;
@@ -50,24 +48,8 @@ pub const default_max_read_file_line_len: usize = 2000;
 
 pub const web_search_unavailable_message = "web_search is unavailable: no local runtime with a configured Gateway transport policy is installed";
 pub const web_fetch_unavailable_message = "web_fetch is unavailable: no local WebFetch runtime is installed";
-pub const terminal_unavailable_message =
-    "{\"error\":{\"tool\":\"terminal\",\"code\":\"unsupported_host\",\"retryable\":false}}";
-const terminal_saved_session_required_message =
-    "Durable terminal actions require a saved fx session.";
-const terminal_saved_session_required_suggestion =
-    "Use terminal.exec, or rerun without --no-save.";
-
 pub const ToolCapabilities = struct {
     web_search_runtime_ready: bool = false,
-    terminal: host.TerminalSupport = .unsupported,
-
-    pub fn for_host(host_capabilities: host.Capabilities) ToolCapabilities {
-        return .{ .terminal = host_capabilities.terminal };
-    }
-
-    pub fn terminalAvailable(self: ToolCapabilities) bool {
-        return self.terminal.isSupported();
-    }
 };
 
 pub const WebSearchProgressFn = *const fn (*anyopaque, []const u8, core_types.WebSearchProgress) void;
@@ -212,6 +194,7 @@ pub const DispatchContext = struct {
     max_read_file_bytes: usize = default_max_read_file_bytes,
     max_read_file_lines: usize = default_max_read_file_lines,
     max_read_file_line_len: usize = default_max_read_file_line_len,
+    max_command_output_bytes: usize = 64 * 1024,
     max_tool_result_bytes: usize = tool_result_limits.default_max_tool_result_bytes,
     skills_dir: []const u8 = "",
     context_limits: context_limits.Values = .{},
@@ -220,8 +203,14 @@ pub const DispatchContext = struct {
     change_tracker: ?*change_tracker.ChangeTracker = null,
     cancel_flag: ?*std.atomic.Value(bool) = null,
     output_chunk_lifecycle_id: ?core_types.ToolLifecycleId = null,
+    /// Stable session identity used by provider-backed requests. This is
+    /// independent from the model-facing execution tools.
+    session_id: ?[]const u8 = null,
     output_chunk_ctx: ?*anyopaque = null,
     on_output_chunk: ?command_runner.CommandOutputCallback = null,
+    /// Optional arena-owned metadata sink used by direct command tools to
+    /// expose retained output artifacts to the presentation layer.
+    command_result_json_sink: ?*?[]const u8 = null,
     background_ctx: ?*background_runtime.BackgroundRuntime = null,
     background_url_ctx: ?*anyopaque = null,
     on_background_url_ready: ?*const fn (*anyopaque, []const u8, []const u8) void = null,
@@ -230,9 +219,9 @@ pub const DispatchContext = struct {
     tool_result_dir: ?[]const u8 = null,
     session_child_capability: ?*session_child_store.SessionChildCapability = null,
     ephemeral_command_replay: ?*command_replay_store.EphemeralStore = null,
-    terminal_client: ?*terminal_client_runtime.Runtime = null,
-    terminal_owner_session_id: ?[]const u8 = null,
-    terminal_transport_role: terminal_contracts.TransportRole = .interactive,
+    /// Core-owned process manager for the model-facing Unified Exec tools.
+    /// It is independent from the hosted terminal engine and survives turns.
+    unified_exec: ?*unified_exec_runtime.Manager = null,
     background_lifecycle_allocator: Allocator = std.heap.c_allocator,
     command_timeout_ms: ?usize = null,
     captured_command_host: command_environment.Host = .native,
@@ -369,6 +358,7 @@ pub const LabelArgKind = enum {
     pattern,
     url,
     command,
+    cmd,
     description,
     source,
     old_path,
@@ -399,7 +389,8 @@ pub const ExecutorKind = enum {
     web_fetch,
     web_search,
     run_command,
-    terminal,
+    exec_command,
+    write_stdin,
     skill,
     install_skill,
     subagent,
@@ -597,6 +588,7 @@ fn labelValueForKind(kind: LabelArgKind, args: std.json.ObjectMap) ?[]const u8 {
         .pattern => optionalStringArg(args, "pattern"),
         .url => optionalStringArg(args, "url"),
         .command => optionalStringArg(args, "command"),
+        .cmd => optionalStringArg(args, "cmd"),
         .description => optionalStringArg(args, "description"),
         .source => optionalStringArg(args, "source"),
         .old_path => optionalStringArg(args, "old_path"),
@@ -721,6 +713,7 @@ pub fn admitToolCall(ctx: DispatchContext, registry: Registry, call: message.Too
             }
 
             const captured_command = input.tool.executor_kind == .run_command or
+                input.tool.executor_kind == .exec_command or
                 if (input.tool.captured_command_fn) |classify|
                     classify(input.value)
                 else
@@ -948,25 +941,18 @@ pub fn reportContextNotice(ctx: DispatchContext, notice: []const u8) error{OutOf
 pub fn localToolAvailabilityFailure(
     ctx: DispatchContext,
     tool: *const Tool,
-    input: ToolInput,
+    _: ToolInput,
 ) DispatchError!?[]u8 {
     return switch (tool.executor_kind) {
         .web_search => if (ctx.tool_capabilities.web_search_runtime_ready)
             null
         else
             try ctx.allocator.dupe(u8, web_search_unavailable_message),
-        .terminal => if (tool.captured_command_fn != null and tool.captured_command_fn.?(input))
-            null
-        else if (!ctx.tool_capabilities.terminalAvailable())
-            try ctx.allocator.dupe(u8, terminal_unavailable_message)
-        else if (ctx.session_child_capability != null)
+        .exec_command, .write_stdin => if (ctx.unified_exec != null and
+            unified_exec_runtime.Manager.supported())
             null
         else
-            try tool_result_errors.toolExecutionFailureJson(ctx.allocator, .{
-                .tool_name = tool.name,
-                .message = terminal_saved_session_required_message,
-                .suggestion = terminal_saved_session_required_suggestion,
-            }),
+            try ctx.allocator.dupe(u8, "Unified Exec is unavailable on this host."),
         else => null,
     };
 }
@@ -1490,25 +1476,4 @@ test "DispatchContext command runner fields default to inactive values" {
     try std.testing.expect(ctx.ask_question_ctx == null);
     try std.testing.expect(ctx.ask_question_batch == null);
     try std.testing.expect(!ctx.tool_capabilities.web_search_runtime_ready);
-    try std.testing.expectEqual(host.TerminalSupport.unsupported, ctx.tool_capabilities.terminal);
-}
-
-test "terminal tool capability facts follow the host support matrix" {
-    const os_tags = [_]std.Target.Os.Tag{
-        .macos,
-        .linux,
-        .windows,
-        .wasi,
-        .freebsd,
-        .emscripten,
-    };
-    for (os_tags) |os_tag| {
-        const expected = host.terminalSupportForOs(os_tag);
-        const capabilities = ToolCapabilities.for_host(host.nativeForOs(os_tag));
-        try std.testing.expectEqual(expected, capabilities.terminal);
-        try std.testing.expectEqual(
-            expected.isSupported(),
-            capabilities.terminalAvailable(),
-        );
-    }
 }

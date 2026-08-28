@@ -18,7 +18,7 @@ pub fn blockedNonLiveBackgroundRestart(
     call: ToolCall,
     prompt: []const u8,
 ) !?[]const u8 {
-    const command = terminalStartCommand(arena, call) orelse return null;
+    const command = execCommand(arena, call) orelse return null;
     if (promptExplicitlyRequestsBackgroundStart(prompt)) return null;
 
     const context = findNonLiveBackgroundContextForCommand(messages, command) orelse
@@ -36,8 +36,8 @@ pub fn blockedNonLiveBackgroundRestart(
     return output;
 }
 
-fn terminalStartCommand(arena: Allocator, call: ToolCall) ?[]const u8 {
-    if (!std.mem.eql(u8, call.name, "terminal")) return null;
+fn execCommand(arena: Allocator, call: ToolCall) ?[]const u8 {
+    if (!std.mem.eql(u8, call.name, "exec_command")) return null;
 
     var parsed = std.json.parseFromSlice(
         std.json.Value,
@@ -48,9 +48,7 @@ fn terminalStartCommand(arena: Allocator, call: ToolCall) ?[]const u8 {
     defer parsed.deinit();
     if (parsed.value != .object) return null;
 
-    const action = parsed.value.object.get("action") orelse return null;
-    if (action != .string or !std.mem.eql(u8, action.string, "start")) return null;
-    const command = parsed.value.object.get("command") orelse return null;
+    const command = parsed.value.object.get("cmd") orelse return null;
     if (command != .string) return null;
     return command.string;
 }
@@ -146,10 +144,10 @@ fn isAsciiWordByte(byte: u8) bool {
 }
 
 fn toolCall(id: []const u8, args: []const u8) ToolCall {
-    return .{ .id = id, .name = "terminal", .arguments_json = args };
+    return .{ .id = id, .name = "exec_command", .arguments_json = args };
 }
 
-test "non-live background restart guard follows terminal start" {
+test "non-live background restart guard follows exec command" {
     const alloc = std.testing.allocator;
     var arena_state = std.heap.ArenaAllocator.init(alloc);
     defer arena_state.deinit();
@@ -164,7 +162,7 @@ test "non-live background restart guard follows terminal start" {
     }};
     const start = toolCall(
         "call_restart",
-        "{\"action\":\"start\",\"command\":\"while true; do echo labs7; sleep 1; done\"}",
+        "{\"cmd\":\"while true; do echo labs7; sleep 1; done\"}",
     );
 
     const blocked = (try blockedNonLiveBackgroundRestart(
@@ -184,7 +182,7 @@ test "non-live background restart guard follows terminal start" {
     try std.testing.expect(try blockedNonLiveBackgroundRestart(
         arena,
         &messages,
-        toolCall("call_exec", "{\"action\":\"exec\",\"command\":\"while true; do echo labs7; sleep 1; done\"}"),
+        .{ .id = "call_write", .name = "write_stdin", .arguments_json = "{\"session_id\":1}" },
         "is it still running?",
     ) == null);
 }

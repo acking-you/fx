@@ -53,13 +53,8 @@ const vision_and_read_file_tools = [_]tool_dispatch.Tool{
     builtin_tools.vision,
     builtin_tools.read_file,
 };
-const vision_read_and_terminal_tools = [_]tool_dispatch.Tool{
-    builtin_tools.vision,
-    builtin_tools.read_file,
-    builtin_tools.terminal,
-};
-const terminal_advertised_names = [_][]const u8{"terminal"};
-const terminal_advertised_functions = [_]model_tool_schema.FunctionSchema{builtin_tools.terminal.model_schema};
+const exec_advertised_names = [_][]const u8{"exec_command"};
+const exec_advertised_functions = [_]model_tool_schema.FunctionSchema{builtin_tools.exec_command.model_schema};
 
 const VisionAndReadExecutor = struct {
     vision: ExecuteDelegate,
@@ -1016,12 +1011,11 @@ test "required Vision rejects non-Vision before effects and stays required until
     defer types.freeImageAttachment(alloc, image);
     var images = [_]types.ImageAttachment{image};
 
-    const wrapped_terminal_arguments =
-        "{\"request\":{\"action\":\"exec\",\"command\":\"printf must-not-run\"}}";
+    const exec_arguments = "{\"cmd\":\"printf must-not-run\"}";
     const blocked_calls = [_]ToolCall{toolCall(
-        "call_terminal_while_vision_required",
-        "terminal",
-        wrapped_terminal_arguments,
+        "call_exec_while_vision_required",
+        "exec_command",
+        exec_arguments,
     )};
     const vision_calls = [_]ToolCall{toolCall(
         "call_required_vision",
@@ -1045,7 +1039,7 @@ test "required Vision rejects non-Vision before effects and stays required until
     var gateway = FakeGateway.init(alloc, &completions);
     defer gateway.deinit();
     var hooks = FakeAgentRuntimeDeps.init(alloc);
-    hooks.tool_registry = .{ .tools = vision_read_and_terminal_tools[0..] };
+    hooks.tool_registry = .{ .tools = vision_and_read_file_tools[0..] };
     defer hooks.deinit();
     var vision_runtime = VisionAgentToolRuntime{
         .alloc = alloc,
@@ -1073,8 +1067,8 @@ test "required Vision rejects non-Vision before effects and stays required until
     job.permission_mode = .ask;
 
     var config = fixture.config();
-    config.advertised_tool_names = &terminal_advertised_names;
-    config.advertised_functions = &terminal_advertised_functions;
+    config.advertised_tool_names = &exec_advertised_names;
+    config.advertised_functions = &exec_advertised_functions;
     var lifecycle = test_support.testLifecycleContext(
         lifecycle_view,
         alloc,
@@ -1096,7 +1090,7 @@ test "required Vision rejects non-Vision before effects and stays required until
     }
     try expectBodyContains(&gateway, 0, "\"tool_choice\":\"required\"");
     try expectBodyContains(&gateway, 1, "\"tool_choice\":\"required\"");
-    try expectBodyContains(&gateway, 1, "call_terminal_while_vision_required");
+    try expectBodyContains(&gateway, 1, "call_exec_while_vision_required");
     try expectBodyContains(&gateway, 1, "Only Vision can be called while attached images are pending.");
     try expectBodyNotContains(&gateway, 3, "\"tool_choice\":\"required\"");
     try expectBodyContains(&gateway, 2, "\"type\":\"input_image\"");
@@ -1119,10 +1113,10 @@ test "required Vision rejects non-Vision before effects and stays required until
     try std.testing.expectEqualStrings("call_read_after_vision", hooks.executed_call_ids.items[1]);
     try expectNoLifecycleForCall(
         hooks.lifecycle_events.items,
-        "call_terminal_while_vision_required",
+        "call_exec_while_vision_required",
     );
     try std.testing.expectEqual(@as(usize, 1), hooks.rejected_names.items.len);
-    try std.testing.expectEqualStrings("terminal", hooks.rejected_names.items[0]);
+    try std.testing.expectEqualStrings("exec_command", hooks.rejected_names.items[0]);
     try std.testing.expectEqual(@as(usize, 1), vision_runtime.execution_count);
     var persisted_arguments: ?[]const u8 = null;
     for (hooks.history_turns.items) |turn| {
@@ -1132,14 +1126,14 @@ test "required Vision rejects non-Vision before effects and stays required until
         };
         for (assistant.execution.tool_steps) |step| {
             for (step.tool_calls) |call| {
-                if (std.mem.eql(u8, call.id, "call_terminal_while_vision_required")) {
+                if (std.mem.eql(u8, call.id, "call_exec_while_vision_required")) {
                     persisted_arguments = call.arguments_json;
                 }
             }
         }
     }
     try std.testing.expectEqualStrings(
-        wrapped_terminal_arguments,
+        exec_arguments,
         persisted_arguments orelse return error.TestExpectedEqual,
     );
     try std.testing.expectEqualStrings("Final after ordinary read", hooks.finish_assistant_text.?);
@@ -3657,48 +3651,6 @@ test "processQueuedPrompt delivers parent context created between tool steps" {
     try std.testing.expectEqual(@as(usize, 1), hooks.parent_turn_ack_count);
     try expectBodyNotContains(&first_gateway, 0, "late child delivery");
     try expectBodyContains(&first_gateway, 1, "late child delivery");
-}
-
-test "processQueuedPrompt blocks accidental terminal restart of non-live background history" {
-    const alloc = std.testing.allocator;
-    const command = "while true; do echo labs7; sleep 1; done";
-    const args = "{\"action\":\"start\",\"command\":\"while true; do echo labs7; sleep 1; done\"}";
-    const calls = [_]ToolCall{toolCall("call_restart", "terminal", args)};
-    const completions = [_]FakeCompletion{
-        .{ .content = "I will check it.", .tool_calls = &calls },
-        .{ .content = "No." },
-    };
-    var gateway = FakeGateway.init(alloc, &completions);
-    defer gateway.deinit();
-    var hooks = FakeAgentRuntimeDeps.init(alloc);
-    defer hooks.deinit();
-    hooks.runtime_context_text =
-        "Runtime context: previous background command history includes command(s) that are no longer live. Treat these as terminal historical records, not running tasks.\n" ++
-        "- command=while true; do echo labs7; sleep 1; done; log=/tmp/labs7.log; state=stopped\n" ++
-        "For any listed command, answer liveness questions from this state; do not assume it is still running or reuse it as a live background task. Restart a listed command only if the user explicitly asks.";
-
-    var fixture = PromptFixture{};
-    var job = fixture.job();
-    job.prompt = @constCast("Is the background command you just started still running? Do not run or restart it unless I ask.");
-    job.permission_mode = .auto;
-
-    try runFakePrompt(&gateway, &hooks, fixture.config(), job);
-
-    try std.testing.expectEqual(@as(usize, 0), hooks.executed_names.items.len);
-    try std.testing.expectEqual(@as(usize, 3), hooks.lifecycle_events.items.len);
-    try std.testing.expect(hooks.lifecycle_events.items[0] == .authoritative_started);
-    try std.testing.expect(hooks.lifecycle_events.items[1] == .progress);
-    try std.testing.expectEqual(
-        types.ToolOutcomeKind.denied,
-        hooks.lifecycle_events.items[2].terminal.outcome.kind,
-    );
-    try std.testing.expectEqualStrings("No.", hooks.finish_assistant_text.?);
-    try expectBodyContains(
-        &gateway,
-        1,
-        "Blocked restarting non-live background command from history",
-    );
-    try expectBodyContains(&gateway, 1, command);
 }
 
 test "processQueuedPrompt projects history exactly once into each gateway request" {

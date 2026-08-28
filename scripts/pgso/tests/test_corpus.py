@@ -21,7 +21,6 @@ from scripts.pgso.runner import CommandResult
 
 TRAINING_E2E_TESTS = (
     "cli.test.ts",
-    "ask-presentation.test.ts",
     "config-persistence.test.ts",
     "prompt-history.test.ts",
     "reasoning-context-replay.test.ts",
@@ -47,7 +46,6 @@ TRAINING_E2E_TESTS = (
     "tui-permissions.test.ts",
     "tui-interrupt-recovery.test.ts",
     "tui-subagent-manager.test.ts",
-    "tui-terminal-tool.test.ts",
     "tui-native-clear-recovery.test.ts",
     "tui-gateway-stream-lifecycle.test.ts",
 )
@@ -75,7 +73,6 @@ EXCLUDED_E2E_TESTS = (
     "notifications.test.ts",
     "tmux-helpers.test.ts",
     "tui-agent.test.ts",
-    "tui-command-permissions.test.ts",
     "tui-direct-write-audit.test.ts",
     "tui-keybindings.test.ts",
     "tui-render-lab.test.ts",
@@ -93,7 +90,6 @@ class PgsoCorpusTests(unittest.TestCase):
         for test_file in (
             "notifications.test.ts",
             "tui-agent.test.ts",
-            "tui-command-permissions.test.ts",
         ):
             (self.root / "tests" / "e2e" / test_file).write_text("test")
         self.manifest_path = self.root / "corpus.json"
@@ -129,7 +125,6 @@ class PgsoCorpusTests(unittest.TestCase):
             "intentional_exclusions": {
                 "notifications.test.ts": "sound-related",
                 "tui-agent.test.ts": "requires a real model credential",
-                "tui-command-permissions.test.ts": "contains a sound scenario",
             },
             "scenarios": self.direct_scenarios(),
             "verification_scenarios": [],
@@ -298,7 +293,6 @@ class PgsoCorpusTests(unittest.TestCase):
         for test_file in (
             "notifications.test.ts",
             "tui-agent.test.ts",
-            "tui-command-permissions.test.ts",
             "provider-live.test.ts",
         ):
             with self.subTest(test_file=test_file):
@@ -359,8 +353,8 @@ class PgsoCorpusTests(unittest.TestCase):
             EXCLUDED_E2E_TESTS,
             tuple(test_file for test_file, _ in corpus.intentional_exclusions),
         )
-        self.assertEqual(36, len(corpus.scenarios))
-        self.assertEqual(50, len(corpus.candidate_scenarios))
+        self.assertEqual(34, len(corpus.scenarios))
+        self.assertEqual(48, len(corpus.candidate_scenarios))
         self.assertEqual(
             100,
             next(
@@ -409,7 +403,6 @@ class PgsoCorpusTests(unittest.TestCase):
             intentional_exclusions=(
                 ("notifications.test.ts", "sound-related"),
                 ("tui-agent.test.ts", "requires a real model credential"),
-                ("tui-command-permissions.test.ts", "contains sound"),
             ),
         )
         binary = self.root / "candidate-fx"
@@ -448,7 +441,6 @@ class PgsoCorpusTests(unittest.TestCase):
             intentional_exclusions=(
                 ("notifications.test.ts", "sound-related"),
                 ("tui-agent.test.ts", "requires a real model credential"),
-                ("tui-command-permissions.test.ts", "contains sound"),
             ),
         )
 
@@ -484,7 +476,6 @@ class PgsoCorpusTests(unittest.TestCase):
             intentional_exclusions=(
                 ("notifications.test.ts", "sound-related"),
                 ("tui-agent.test.ts", "requires a real model credential"),
-                ("tui-command-permissions.test.ts", "contains sound"),
             ),
         )
 

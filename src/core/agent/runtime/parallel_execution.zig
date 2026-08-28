@@ -350,6 +350,11 @@ fn duplicateToolResultMemory(
     else
         null;
     errdefer if (command_output_replay) |replay| types.freeCommandOutputReplay(alloc, replay);
+    const command_artifact_handle = if (memory.command_artifact_handle) |handle|
+        try alloc.dupe(u8, handle)
+    else
+        null;
+    errdefer if (command_artifact_handle) |handle| alloc.free(handle);
 
     return .{
         .output_handle = output_handle,
@@ -359,8 +364,8 @@ fn duplicateToolResultMemory(
         .truncated = memory.truncated,
         .model_view_covers_full_file = memory.model_view_covers_full_file,
         .command_output_replay = command_output_replay,
+        .command_artifact_handle = command_artifact_handle,
         .command_process_presentation = memory.command_process_presentation,
-        .terminal_action_presentation = memory.terminal_action_presentation,
     };
 }
 
@@ -390,6 +395,7 @@ fn freeOwnedToolExecutionResult(alloc: Allocator, result: ToolExecutionResult) v
         if (memory.command_output_replay) |replay| {
             types.freeCommandOutputReplay(alloc, replay);
         }
+        if (memory.command_artifact_handle) |handle| alloc.free(handle);
     }
 }
 
@@ -546,7 +552,7 @@ test "parallel classifier rejects prompts approvals dynamic tools and mutations"
         builtin_tools.mcp_select_tool,
         builtin_tools.subagent,
         builtin_tools.install_skill,
-        builtin_tools.terminal,
+        builtin_tools.exec_command,
         builtin_tools.read_file,
     };
     const registry = tool_dispatch.Registry{ .tools = &tools };

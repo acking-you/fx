@@ -31,7 +31,6 @@ MAX_PROFILE_RUNS = 100
 REQUIRED_EXCLUSIONS = (
     "notifications.test.ts",
     "tui-agent.test.ts",
-    "tui-command-permissions.test.ts",
 )
 
 ISOLATED_ENVIRONMENT_KEYS = (

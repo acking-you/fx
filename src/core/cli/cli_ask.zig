@@ -10,6 +10,7 @@ const credentials = @import("../auth/credentials.zig");
 const oauth_transport = @import("../auth/oauth_transport.zig");
 const background_runtime = @import("../background/background_runtime.zig");
 const terminal_client_runtime = @import("../terminal/client.zig");
+const unified_exec_runtime = @import("../execution/unified_exec.zig");
 const background_store = @import("../background/background_store.zig");
 const process_supervisor = @import("../background/process_supervisor.zig");
 const context_contract = @import("../workspace/context_contract.zig");
@@ -453,43 +454,10 @@ fn buildAskGatewayToolProjection(
     options: tool_projection_mod.Options,
     has_child_capability: bool,
 ) !tool_projection_mod.EffectiveToolProjection {
-    if (has_child_capability) {
-        return registry.buildModelToolProjection(
-            alloc,
-            tool_set,
-            mode_id,
-            options,
-        );
-    }
-
-    const terminal_index = for (tool_set.registry.tools, 0..) |tool, index| {
-        if (tool.executor_kind == .terminal and
-            std.mem.eql(u8, tool.name, "terminal"))
-        {
-            break index;
-        }
-    } else {
-        return registry.buildModelToolProjection(
-            alloc,
-            tool_set,
-            mode_id,
-            options,
-        );
-    };
-
-    const projected_tools = try alloc.dupe(
-        tool_dispatch.Tool,
-        tool_set.registry.tools,
-    );
-    defer alloc.free(projected_tools);
-    projected_tools[terminal_index] = builtin_tools.terminalExecOnlySpec();
+    _ = has_child_capability;
     return registry.buildModelToolProjection(
         alloc,
-        .{
-            .registry = .{ .tools = projected_tools },
-            .order = tool_set.order,
-            .read_only_tool_names = tool_set.read_only_tool_names,
-        },
+        tool_set,
         mode_id,
         options,
     );
@@ -531,6 +499,7 @@ const AskContext = struct {
     use_process_interrupt_flag: bool = false,
     background: BackgroundRuntime = .{},
     terminal_client: terminal_client_runtime.Runtime = .{},
+    unified_exec: unified_exec_runtime.Manager = unified_exec_runtime.Manager.init(std.heap.c_allocator),
     ephemeral_command_replay: command_replay_store.EphemeralStore,
     subagent_host: ?*subagent_tool_host.Runtime = null,
     subagent_skills_prompt: []u8 = &.{},
@@ -683,6 +652,7 @@ const AskContext = struct {
         if (self.subagent_host) |subagent_host| subagent_host.deinit();
         self.subagent_host = null;
         self.terminal_client.deinit();
+        self.unified_exec.deinit();
         self.workspace_access.deinit(self.alloc);
         self.background.deinit(std.heap.c_allocator);
         self.worker.deinit(std.heap.c_allocator);
@@ -999,7 +969,7 @@ const AskContext = struct {
                 &self.ephemeral_command_replay
             else
                 null,
-            .terminal_client = &self.terminal_client,
+            .unified_exec = &self.unified_exec,
             .command_timeout_ms = self.command_timeout_ms,
             .web_fetch_runtime = &self.web_fetch_runtime,
             .web_fetch_artifact_store = self.session.webFetchArtifactStore(),
@@ -1881,7 +1851,6 @@ fn agentRuntimeDeps(ctx: *AskContext) agent_runtime.AgentRuntimeDeps {
         .context_registry = ctx.deps.context_registry,
         .context_enabled = ctx.context_enabled,
         .finalize_turn = finalizeTurn,
-        .release_agent_terminal_lease = releaseAgentTerminalLease,
         .prepare_parent_turn_context = prepareParentTurnContext,
         .acknowledge_parent_turn_context = acknowledgeParentTurnContext,
         .append_runtime_context = appendRuntimeContext,
@@ -1923,11 +1892,6 @@ fn agentRuntimeDeps(ctx: *AskContext) agent_runtime.AgentRuntimeDeps {
         .usage = &ctx.session.usage,
         .usage_allocator = ctx.alloc,
     };
-}
-
-fn releaseAgentTerminalLease(raw_ctx: *anyopaque, session_id: []const u8) !void {
-    const ctx: *AskContext = @ptrCast(@alignCast(raw_ctx));
-    return tool_runtime.release_agent_terminal_lease(ctx.toolContext(), session_id);
 }
 
 fn refreshGatewayCredential(
@@ -2355,14 +2319,10 @@ fn describeToolAction(raw_ctx: *anyopaque, arena: Allocator, call: ToolCall, dis
 }
 
 fn resolveToolActionDisplayTarget(raw_ctx: *anyopaque, arena: Allocator, call: ToolCall) !?[]const u8 {
-    const ctx: *AskContext = @ptrCast(@alignCast(raw_ctx));
-    return tool_presentation.resolveTerminalDisplayTarget(
-        arena,
-        ctx.toolRegistry(),
-        ctx.workspace_root,
-        &ctx.terminal_client,
-        call,
-    );
+    _ = raw_ctx;
+    _ = arena;
+    _ = call;
+    return null;
 }
 
 fn describeToolActionCompleted(raw_ctx: *anyopaque, arena: Allocator, call: ToolCall, display_target: ?[]const u8, advertised_dynamic_tool_names: []const []const u8) ![]const u8 {
@@ -3979,11 +3939,11 @@ fn testProcessQueuedPromptChecksExecOnlyTerminal(deps: *const agent_runtime.Agen
     try std.testing.expect(ctx.toolContext().ephemeral_command_replay != null);
     try std.testing.expectEqualStrings("inspect", ctx.mode_id);
     try std.testing.expect(tool_projection_mod.containsName(cfg.advertised_tool_names, "read_file"));
-    try std.testing.expect(tool_projection_mod.containsName(cfg.advertised_tool_names, "terminal"));
+    try std.testing.expect(tool_projection_mod.containsName(cfg.advertised_tool_names, "exec_command"));
     try std.testing.expect(!tool_projection_mod.containsName(cfg.advertised_tool_names, "run_command"));
     try std.testing.expect(!tool_projection_mod.containsName(cfg.advertised_tool_names, "web_search"));
     const advertised_terminal = for (cfg.advertised_functions) |function| {
-        if (std.mem.eql(u8, function.name, "terminal")) break function;
+        if (std.mem.eql(u8, function.name, "exec_command")) break function;
     } else return error.TestExpectedEqual;
     try std.testing.expect(!model_tool_schema.isSingleRequiredObjectUnionField(
         advertised_terminal.input_schema,
@@ -4001,7 +3961,7 @@ fn testProcessQueuedPromptChecksExecOnlyTerminal(deps: *const agent_runtime.Agen
     ) == null);
     try std.testing.expectEqualStrings("", cfg.custom_tool_guidance);
     try std.testing.expectEqualStrings("test model overlay", cfg.model_prompt_overlay.?);
-    const runtime_terminal = deps.tool_registry.lookup("terminal") orelse
+    const runtime_terminal = deps.tool_registry.lookup("exec_command") orelse
         return error.TestExpectedEqual;
     try std.testing.expect(std.mem.find(u8, runtime_terminal.description, "Use start") != null);
     try testPushAssistantText(deps, "assistant text");
@@ -4010,9 +3970,9 @@ fn testProcessQueuedPromptChecksExecOnlyTerminal(deps: *const agent_runtime.Agen
 fn testProcessQueuedPromptChecksFullTerminal(deps: *const agent_runtime.AgentRuntimeDeps, semantic_presentation: ?agent_runtime.SemanticPresentationSink, _: agent_runtime.LifecycleContext, cfg: agent_runtime.Config, _: worker_runtime.QueuedPrompt) !void {
     try std.testing.expect(semantic_presentation == null);
     try std.testing.expect(cfg.session_child_capability != null);
-    try std.testing.expect(tool_projection_mod.containsName(cfg.advertised_tool_names, "terminal"));
+    try std.testing.expect(tool_projection_mod.containsName(cfg.advertised_tool_names, "exec_command"));
     const advertised_terminal = for (cfg.advertised_functions) |function| {
-        if (std.mem.eql(u8, function.name, "terminal")) break function;
+        if (std.mem.eql(u8, function.name, "exec_command")) break function;
     } else return error.TestExpectedEqual;
     try std.testing.expect(std.mem.find(u8, advertised_terminal.description, "Use start") != null);
     try testPushAssistantText(deps, "assistant text");
@@ -4508,7 +4468,7 @@ test "CLI lifecycle action preserves dynamic MCP availability boundaries" {
     defer alloc.free(missing_label);
     try std.testing.expectEqualStrings("Working: mcp_lookup", missing_label);
 
-    const builtin = dynamicMcpToolAvailable(builtin_tools.registry, "terminal", &.{"terminal"}, @ptrCast(&fixture), Fixture.hasTool, .unrestricted);
+    const builtin = dynamicMcpToolAvailable(builtin_tools.registry, "exec_command", &.{"exec_command"}, @ptrCast(&fixture), Fixture.hasTool, .unrestricted);
     try std.testing.expect(!builtin);
     try std.testing.expectEqual(@as(usize, 1), fixture.calls);
 }
@@ -5227,21 +5187,21 @@ test "fx ask default user commands require configured authority or review" {
 
     try std.testing.expectError(error.NonInteractivePermissionRequired, requestToolPermissionOutcome(&ctx, arena, .{
         .id = "direct",
-        .name = "terminal",
-        .arguments_json = "{\"action\":\"exec\",\"command\":\"pwd\"}",
+        .name = "exec_command",
+        .arguments_json = "{\"cmd\":\"pwd\"}",
     }, .ask, &.{}, &.{}));
 
     try std.testing.expectError(error.NonInteractivePermissionRequired, requestToolPermissionOutcome(&ctx, arena, .{
         .id = "blocked",
-        .name = "terminal",
-        .arguments_json = "{\"action\":\"exec\",\"command\":\"touch blocked.txt\"}",
+        .name = "exec_command",
+        .arguments_json = "{\"cmd\":\"touch blocked.txt\"}",
     }, .ask, &.{}, &.{}));
 
     ctx.permission_rules = try testPermissionRuleSet(alloc, "bash", "touch *", .allow);
     const configured = (try requestToolPermissionOutcome(&ctx, arena, .{
         .id = "configured",
-        .name = "terminal",
-        .arguments_json = "{\"action\":\"exec\",\"command\":\"touch configured.txt\"}",
+        .name = "exec_command",
+        .arguments_json = "{\"cmd\":\"touch configured.txt\"}",
     }, .ask, &.{}, &.{}));
     switch ((configured.execution_authority orelse return error.TestExpectedEqual).run_command) {
         .direct_only => return error.TestExpectedShellAllowed,
@@ -5252,8 +5212,8 @@ test "fx ask default user commands require configured authority or review" {
     ctx.permission_rules = .{};
     const automatic = try requestToolPermissionOutcome(&ctx, arena, .{
         .id = "automatic",
-        .name = "terminal",
-        .arguments_json = "{\"action\":\"exec\",\"command\":\"touch automatic.txt\"}",
+        .name = "exec_command",
+        .arguments_json = "{\"cmd\":\"touch automatic.txt\"}",
     }, .auto, &.{}, &.{});
     try std.testing.expectEqual(ToolPermissionDecision.deny, automatic.decision);
     try std.testing.expectEqual(types.ToolPermissionDenialReason.review_unavailable, automatic.denial_reason.?);
@@ -5293,8 +5253,8 @@ test "fx ask automatic review observes worker cancellation" {
 
     const call: ToolCall = .{
         .id = "cancelled-review",
-        .name = "terminal",
-        .arguments_json = "{\"action\":\"exec\",\"command\":\"touch cancelled.txt\"}",
+        .name = "exec_command",
+        .arguments_json = "{\"cmd\":\"touch cancelled.txt\"}",
     };
     var review_turn = TestReviewTurn.init("Create cancelled.txt.", call);
     try std.testing.expectError(
@@ -5798,8 +5758,8 @@ test "fx ask auto mode applies automatic clear and caution without a prompt" {
 
     const direct_call: ToolCall = .{
         .id = "direct",
-        .name = "terminal",
-        .arguments_json = "{\"action\":\"exec\",\"command\":\"pwd\"}",
+        .name = "exec_command",
+        .arguments_json = "{\"cmd\":\"pwd\"}",
     };
     var direct_review = TestReviewTurn.init("Inspect the workspace.", direct_call);
     const direct = try requestToolPermissionOutcomeWithRequest(
@@ -5821,8 +5781,8 @@ test "fx ask auto mode applies automatic clear and caution without a prompt" {
 
     const accepted_call: ToolCall = .{
         .id = "accepted",
-        .name = "terminal",
-        .arguments_json = "{\"action\":\"exec\",\"command\":\"touch accepted.txt\"}",
+        .name = "exec_command",
+        .arguments_json = "{\"cmd\":\"touch accepted.txt\"}",
     };
     var accepted_review = TestReviewTurn.init("Create accepted.txt.", accepted_call);
     const accepted = try requestToolPermissionOutcomeWithRequest(
@@ -5848,8 +5808,8 @@ test "fx ask auto mode applies automatic clear and caution without a prompt" {
     fake.decision = .caution;
     const check_call: ToolCall = .{
         .id = "check",
-        .name = "terminal",
-        .arguments_json = "{\"action\":\"exec\",\"command\":\"touch check.txt\"}",
+        .name = "exec_command",
+        .arguments_json = "{\"cmd\":\"touch check.txt\"}",
     };
     var check_review = TestReviewTurn.init("Check this command.", check_call);
     const blocked = try requestToolPermissionOutcomeWithRequest(
@@ -5887,8 +5847,8 @@ test "fx ask terminal permission prompt approves and denies run_command" {
 
     const approved = (try requestToolPermissionOutcome(&ctx, arena, .{
         .id = "approved",
-        .name = "terminal",
-        .arguments_json = "{\"action\":\"exec\",\"command\":\"touch approved.txt\"}",
+        .name = "exec_command",
+        .arguments_json = "{\"cmd\":\"touch approved.txt\"}",
     }, .ask, &.{}, &.{}));
     switch ((approved.execution_authority orelse return error.TestExpectedEqual).run_command) {
         .direct_only => return error.TestExpectedShellAllowed,
@@ -5907,8 +5867,8 @@ test "fx ask terminal permission prompt approves and denies run_command" {
 
     const denied = try requestToolPermissionOutcome(&ctx, arena, .{
         .id = "denied",
-        .name = "terminal",
-        .arguments_json = "{\"action\":\"exec\",\"command\":\"touch denied.txt\"}",
+        .name = "exec_command",
+        .arguments_json = "{\"cmd\":\"touch denied.txt\"}",
     }, .ask, &.{}, &.{});
     try std.testing.expectEqual(ToolPermissionDecision.deny, denied.decision);
     try std.testing.expectEqual(types.ToolPermissionDenialReason.user_denied, denied.denial_reason.?);
@@ -5944,8 +5904,8 @@ test "fx ask permission attention fires once after a prompt is published" {
 
     _ = try requestToolPermissionOutcome(&ctx, arena, .{
         .id = "attention",
-        .name = "terminal",
-        .arguments_json = "{\"action\":\"exec\",\"command\":\"touch attention.txt\"}",
+        .name = "exec_command",
+        .arguments_json = "{\"cmd\":\"touch attention.txt\"}",
     }, .ask, &.{}, &.{});
 
     try std.testing.expectEqual(@as(usize, 1), capture.calls);
@@ -5955,8 +5915,8 @@ test "fx ask permission attention fires once after a prompt is published" {
     prompt.result = .unavailable;
     try std.testing.expectError(error.NonInteractivePermissionRequired, requestToolPermissionOutcome(&ctx, arena, .{
         .id = "unavailable",
-        .name = "terminal",
-        .arguments_json = "{\"action\":\"exec\",\"command\":\"touch unavailable.txt\"}",
+        .name = "exec_command",
+        .arguments_json = "{\"cmd\":\"touch unavailable.txt\"}",
     }, .ask, &.{}, &.{}));
     try std.testing.expectEqual(@as(usize, 1), capture.calls);
 }
@@ -6031,12 +5991,12 @@ test "fx ask captured and quiet permission paths bypass terminal prompt" {
     ctx.output_mode = .json;
     try std.testing.expectError(error.NonInteractivePermissionRequired, requestToolPermissionOutcome(&ctx, arena, .{
         .id = "captured",
-        .name = "terminal",
-        .arguments_json = "{\"action\":\"exec\",\"command\":\"touch captured.txt\"}",
+        .name = "exec_command",
+        .arguments_json = "{\"cmd\":\"touch captured.txt\"}",
     }, .ask, &.{}, &.{}));
     try std.testing.expectEqual(@as(usize, 0), prompt.calls);
     try std.testing.expectEqual(@as(usize, 1), ctx.tool_call_records.items.len);
-    try std.testing.expectEqualStrings("terminal", ctx.tool_call_records.items[0].name);
+    try std.testing.expectEqualStrings("exec_command", ctx.tool_call_records.items[0].name);
     try std.testing.expectEqualStrings("error", ctx.tool_call_records.items[0].status);
     try std.testing.expect(std.mem.find(u8, stderr_capture.bytes.items, "noninteractive_permission_prompt_unavailable") != null);
 
@@ -6044,8 +6004,8 @@ test "fx ask captured and quiet permission paths bypass terminal prompt" {
     ctx.output_mode = .quiet;
     try std.testing.expectError(error.NonInteractivePermissionRequired, requestToolPermissionOutcome(&ctx, arena, .{
         .id = "quiet",
-        .name = "terminal",
-        .arguments_json = "{\"action\":\"exec\",\"command\":\"touch quiet.txt\"}",
+        .name = "exec_command",
+        .arguments_json = "{\"cmd\":\"touch quiet.txt\"}",
     }, .ask, &.{}, &.{}));
     try std.testing.expectEqual(@as(usize, 0), prompt.calls);
     try std.testing.expect(std.mem.find(u8, stderr_capture.bytes.items, "noninteractive_permission_prompt_unavailable") != null);
@@ -6103,8 +6063,8 @@ test "fx ask captured permission prompt opt in uses the existing prompter" {
     ctx.output_mode = .json;
     const approved = try requestToolPermissionOutcome(&ctx, arena, .{
         .id = "captured-approved",
-        .name = "terminal",
-        .arguments_json = "{\"action\":\"exec\",\"command\":\"touch captured-approved.txt\"}",
+        .name = "exec_command",
+        .arguments_json = "{\"cmd\":\"touch captured-approved.txt\"}",
     }, .ask, &.{}, &.{});
     try std.testing.expectEqual(ToolPermissionDecision.once, approved.decision);
     try std.testing.expectEqual(@as(usize, 1), prompt.calls);
@@ -6115,8 +6075,8 @@ test "fx ask captured permission prompt opt in uses the existing prompter" {
     ctx.output_mode = .quiet;
     const denied = try requestToolPermissionOutcome(&ctx, arena, .{
         .id = "quiet-denied",
-        .name = "terminal",
-        .arguments_json = "{\"action\":\"exec\",\"command\":\"touch quiet-denied.txt\"}",
+        .name = "exec_command",
+        .arguments_json = "{\"cmd\":\"touch quiet-denied.txt\"}",
     }, .ask, &.{}, &.{});
     try std.testing.expectEqual(ToolPermissionDecision.deny, denied.decision);
     try std.testing.expectEqual(@as(usize, 2), prompt.calls);
@@ -6124,8 +6084,8 @@ test "fx ask captured permission prompt opt in uses the existing prompter" {
     ctx.deps.stdin_is_tty = TestTty.no;
     try std.testing.expectError(error.NonInteractivePermissionRequired, requestToolPermissionOutcome(&ctx, arena, .{
         .id = "quiet-non-tty",
-        .name = "terminal",
-        .arguments_json = "{\"action\":\"exec\",\"command\":\"touch quiet-non-tty.txt\"}",
+        .name = "exec_command",
+        .arguments_json = "{\"cmd\":\"touch quiet-non-tty.txt\"}",
     }, .ask, &.{}, &.{}));
     try std.testing.expectEqual(@as(usize, 2), prompt.calls);
 }
@@ -6159,8 +6119,8 @@ test "fx ask terminal permission prompt propagates prompt hook errors" {
 
     try std.testing.expectError(error.PromptFailure, requestToolPermissionOutcome(&ctx, arena, .{
         .id = "prompt-failure",
-        .name = "terminal",
-        .arguments_json = "{\"action\":\"exec\",\"command\":\"touch prompt-failure.txt\"}",
+        .name = "exec_command",
+        .arguments_json = "{\"cmd\":\"touch prompt-failure.txt\"}",
     }, .ask, &.{}, &.{}));
     try std.testing.expect(std.mem.find(u8, stderr_capture.bytes.items, "noninteractive_permission_prompt_unavailable") == null);
 }
@@ -6345,8 +6305,8 @@ test "fx ask preserves CLI headless blocker diagnostics" {
     ctx.permission_rules = try testPermissionRuleSet(alloc, "bash", "touch configured.txt", .ask);
     const configured_rule_ask = ToolCall{
         .id = "configured-rule-ask",
-        .name = "terminal",
-        .arguments_json = "{\"action\":\"exec\",\"command\":\"touch configured.txt\"}",
+        .name = "exec_command",
+        .arguments_json = "{\"cmd\":\"touch configured.txt\"}",
     };
     const configured_label = try tool_presentation.formatPlainAction(arena, .{ .tool_registry = ctx.toolRegistry(), .call = configured_rule_ask });
     try std.testing.expectError(error.NonInteractivePermissionRequired, requestToolPermissionOutcome(
@@ -6402,8 +6362,8 @@ test "fx ask preserves CLI headless blocker diagnostics" {
 
     const approval_required = ToolCall{
         .id = "approval-required",
-        .name = "terminal",
-        .arguments_json = "{\"action\":\"exec\",\"command\":\"touch approval.txt\"}",
+        .name = "exec_command",
+        .arguments_json = "{\"cmd\":\"touch approval.txt\"}",
     };
     const approval_label = try tool_presentation.formatPlainAction(arena, .{ .tool_registry = ctx.toolRegistry(), .call = approval_required });
     try std.testing.expectError(error.NonInteractivePermissionRequired, requestToolPermissionOutcome(
@@ -6675,7 +6635,7 @@ test "final ask json keeps terminal tool call shape and adds command result" {
     const alloc = std.testing.allocator;
     const records = try alloc.alloc(ToolCallRecord, 1);
     records[0] = .{
-        .name = try alloc.dupe(u8, "terminal"),
+        .name = try alloc.dupe(u8, "exec_command"),
         .status = try alloc.dupe(u8, "success"),
         .command_result_json = try alloc.dupe(u8, "{\"kind\":\"foreground\",\"command\":\"printf ok\",\"cwd\":\"/tmp\",\"exit_code\":0,\"signal\":null,\"timed_out\":false,\"stdout_bytes\":2,\"stderr_bytes\":0,\"truncated\":false}"),
     };
@@ -6694,7 +6654,7 @@ test "final ask json keeps terminal tool call shape and adds command result" {
     var parsed = try std.json.parseFromSlice(std.json.Value, alloc, rendered, .{});
     defer parsed.deinit();
     const tool_call = parsed.value.object.get("tool_calls").?.array.items[0].object;
-    try std.testing.expectEqualStrings("terminal", tool_call.get("name").?.string);
+    try std.testing.expectEqualStrings("exec_command", tool_call.get("name").?.string);
     try std.testing.expectEqualStrings("success", tool_call.get("status").?.string);
     const command_result = tool_call.get("command_result").?.object;
     try std.testing.expectEqualStrings("foreground", command_result.get("kind").?.string);
@@ -8304,12 +8264,12 @@ test "fx ask JSON records permission-denied tool calls as error status" {
 
     try recordToolCallRejected(@ptrCast(&ctx), arena, .{
         .id = "cmd",
-        .name = "terminal",
-        .arguments_json = "{\"action\":\"exec\",\"command\":\"printf secret\"}",
+        .name = "exec_command",
+        .arguments_json = "{\"cmd\":\"printf secret\"}",
     }, "{\"error\":{\"type\":\"tool_permission_denied\"}}", "{\"kind\":\"foreground\"}");
 
     try std.testing.expectEqual(@as(usize, 1), ctx.tool_call_records.items.len);
-    try std.testing.expectEqualStrings("terminal", ctx.tool_call_records.items[0].name);
+    try std.testing.expectEqualStrings("exec_command", ctx.tool_call_records.items[0].name);
     try std.testing.expectEqualStrings("error", ctx.tool_call_records.items[0].status);
     try std.testing.expectEqualStrings(
         "{\"kind\":\"foreground\"}",
@@ -8337,8 +8297,8 @@ test "fx ask JSON permission-denied capture is best effort under allocation fail
 
     try recordToolCallRejected(@ptrCast(&ctx), std.testing.allocator, .{
         .id = "cmd",
-        .name = "terminal",
-        .arguments_json = "{\"action\":\"exec\",\"command\":\"printf secret\"}",
+        .name = "exec_command",
+        .arguments_json = "{\"cmd\":\"printf secret\"}",
     }, "{\"error\":{\"type\":\"tool_permission_denied\"}}", null);
 
     try std.testing.expectEqual(@as(usize, 0), ctx.tool_call_records.items.len);

@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const model_tool_schema = @import("model_tool_schema.zig");
 const mcp_runtime = @import("../mcp/mcp_runtime.zig");
 const permissions = @import("../permissions/permissions.zig");
@@ -449,30 +450,27 @@ const test_web_search = blk: {
     break :blk spec;
 };
 
-const test_terminal = blk: {
+const test_exec_command = blk: {
     var spec = test_read_file;
-    spec.name = "terminal";
-    spec.description = "Test terminal. When to use: exercise registered terminal projection. When NOT to use: assert product-specific terminal behavior.";
+    spec.name = "exec_command";
+    spec.description = "Test exec command.";
     spec.model_schema = .{
-        .name = "terminal",
+        .name = "exec_command",
         .description = spec.description,
         .input_schema = .{
-            .properties = &.{
-                .{ .name = "action", .json_type = .string, .shape = &.{ .enum_values = &.{"exec"} } },
-                .{ .name = "command", .json_type = .string },
-            },
-            .required = &.{ "action", "command" },
+            .properties = &.{.{ .name = "cmd", .json_type = .string }},
+            .required = &.{"cmd"},
             .additional_properties = false,
         },
     };
-    spec.executor_kind = .terminal;
+    spec.executor_kind = .exec_command;
     spec.activity_kind = .command;
     spec.requires_approval = true;
-    spec.action_label = "Using terminal";
-    spec.completed_action_label = "Used terminal";
-    spec.label_arg_kind = .action;
-    spec.label_arg_default = "session";
-    spec.permission_target_kind = .none;
+    spec.action_label = "Running";
+    spec.completed_action_label = "Ran";
+    spec.label_arg_kind = .cmd;
+    spec.label_arg_default = "command";
+    spec.permission_target_kind = .command_cwd;
     break :blk spec;
 };
 
@@ -727,7 +725,7 @@ const test_all_tools = [_]tool_dispatch.Tool{
     test_open_file,
     test_web_fetch,
     test_web_search,
-    test_terminal,
+    test_exec_command,
     test_capability_search,
     test_skill_search,
     test_skill,
@@ -753,7 +751,7 @@ const test_order = [_][]const u8{
     "rename_file",
     "copy_file",
     "create_folder",
-    "terminal",
+    "exec_command",
     "subagent",
     "capability_search",
     "skill",
@@ -853,6 +851,8 @@ fn appendBuiltinTool(
 ) !void {
     if (!tool.model_visible) return;
     if (!includeBuiltinForKind(tool.name, kind, tool_set)) return;
+    if ((tool.executor_kind == .exec_command or tool.executor_kind == .write_stdin) and
+        !unifiedExecSupported()) return;
     if (std.mem.eql(u8, tool.name, "subagent") and !options.subagent_available) return;
     if (std.mem.eql(u8, tool.name, "vision")) return;
     if (std.mem.eql(u8, tool.name, "web_search") and !options.web_search_available) return;
@@ -872,6 +872,10 @@ fn appendBuiltinTool(
         }
         try guidance_writer.writeAll(tool.description);
     }
+}
+
+fn unifiedExecSupported() bool {
+    return std.process.can_spawn and builtin.os.tag != .windows and builtin.os.tag != .wasi;
 }
 
 /// A provider-executed tool is never dispatched locally, so an unsettled `ask`
@@ -1045,7 +1049,7 @@ test "yolo advertisement ignores permission filtering" {
         .permission_rules = .{ .rules = &rules },
     });
     defer projection.deinit(std.testing.allocator);
-    try expectContainsName(projection.advertised_names, "terminal");
+    try expectContainsName(projection.advertised_names, "exec_command");
     try expectContainsName(projection.advertised_names, "write_file");
     try expectContainsName(projection.advertised_names, "web_search");
 }
@@ -1123,12 +1127,12 @@ test "MCP tools stay deferred and base selection is stable across catalog churn"
     }
 }
 
-test "subagent and terminal selection follow host capability" {
+test "subagent and exec selection follow host capability" {
     var unavailable = try buildTestModelToolProjection(std.testing.allocator, .{});
     defer unavailable.deinit(std.testing.allocator);
     try expectNotContainsName(unavailable.advertised_names, "subagent");
     try expectNotContainsName(unavailable.advertised_names, "task");
-    try expectContainsName(unavailable.advertised_names, "terminal");
+    try expectContainsName(unavailable.advertised_names, "exec_command");
 
     var available = try buildTestModelToolProjection(std.testing.allocator, .{
         .subagent_available = true,
@@ -1136,5 +1140,5 @@ test "subagent and terminal selection follow host capability" {
     defer available.deinit(std.testing.allocator);
     try expectContainsName(available.advertised_names, "subagent");
     try expectNotContainsName(available.advertised_names, "task");
-    try expectContainsName(available.advertised_names, "terminal");
+    try expectContainsName(available.advertised_names, "exec_command");
 }

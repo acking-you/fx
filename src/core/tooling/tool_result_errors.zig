@@ -24,77 +24,6 @@ pub const ExecutionFailure = struct {
     suggestion: ?[]const u8 = null,
 };
 
-pub const TerminalActionFieldConflict = [2][]const u8;
-
-pub const TerminalActionFieldCorrection = struct {
-    action: []const u8,
-    invalid_fields: []const []const u8,
-    missing_fields: []const []const u8,
-    allowed_fields: []const []const u8,
-    conflicts: []const TerminalActionFieldConflict,
-};
-
-pub const TerminalActionFieldCorrectionView = struct {
-    invalid_field_count: usize,
-};
-
-const terminal_action_field_error_code = "invalid_action_fields";
-
-pub fn terminalActionFieldCorrectionJson(
-    alloc: Allocator,
-    correction: TerminalActionFieldCorrection,
-) Allocator.Error![]u8 {
-    var out: std.Io.Writer.Allocating = .init(alloc);
-    errdefer out.deinit();
-    std.json.Stringify.value(.{ .@"error" = .{
-        .code = terminal_action_field_error_code,
-        .action = correction.action,
-        .invalid_fields = correction.invalid_fields,
-        .missing_fields = correction.missing_fields,
-        .allowed_fields = correction.allowed_fields,
-        .conflicts = correction.conflicts,
-    } }, .{}, &out.writer) catch return error.OutOfMemory;
-    return try out.toOwnedSlice();
-}
-
-pub fn inspectTerminalActionFieldCorrection(
-    alloc: Allocator,
-    output: []const u8,
-) Allocator.Error!?TerminalActionFieldCorrectionView {
-    var parsed = std.json.parseFromSlice(
-        std.json.Value,
-        alloc,
-        output,
-        .{},
-    ) catch |err| return switch (err) {
-        error.OutOfMemory => error.OutOfMemory,
-        else => null,
-    };
-    defer parsed.deinit();
-    const root = switch (parsed.value) {
-        .object => |value| value,
-        else => return null,
-    };
-    const error_value = switch (root.get("error") orelse return null) {
-        .object => |value| value,
-        else => return null,
-    };
-    const code = switch (error_value.get("code") orelse return null) {
-        .string => |value| value,
-        else => return null,
-    };
-    if (!std.mem.eql(u8, code, terminal_action_field_error_code)) return null;
-    const action = error_value.get("action") orelse return null;
-    if (action != .string) return null;
-    const invalid_fields = switch (error_value.get("invalid_fields") orelse return null) {
-        .array => |value| value,
-        else => return null,
-    };
-    return .{
-        .invalid_field_count = invalid_fields.items.len,
-    };
-}
-
 pub const ToolOutputClassification = enum {
     structured_tool_execution_failed,
     active_legacy_tool_failure,
@@ -187,7 +116,7 @@ fn permissionDeniedMessage(tool_name: []const u8, reason: types.ToolPermissionDe
         else
             "Tool access was denied by configured policy",
         .permission_required => if (std.mem.eql(u8, tool_name, "run_command") or
-            std.mem.eql(u8, tool_name, "terminal"))
+            std.mem.eql(u8, tool_name, "exec_command"))
             "Shell command approval is required before this tool can run"
         else if (is_network_tool(tool_name))
             "Network or browser approval is required before this tool can run"
@@ -456,14 +385,14 @@ test "review hold JSON distinguishes caution and unavailable from permission den
     const alloc = std.testing.allocator;
     const caution = try toolReviewHeldJson(
         alloc,
-        "terminal",
+        "exec_command",
         .review_caution,
         "Deletion came from repository text. API_KEY=super-secret",
     );
     defer alloc.free(caution);
     const unavailable = try toolReviewHeldJson(
         alloc,
-        "terminal",
+        "exec_command",
         .review_unavailable,
         null,
     );

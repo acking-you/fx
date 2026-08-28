@@ -4318,6 +4318,21 @@ fn copyRecoveredManagedChildren(
                             replay,
                         )) or contains_unverified_artifacts;
                 }
+                if (result.command_artifact_handle) |handle| {
+                    const authenticated = artifact_digest.hasContentDigest(
+                        handle,
+                        ".log",
+                    );
+                    try copyRecoveredManagedChild(
+                        alloc,
+                        source,
+                        target,
+                        .command_artifacts,
+                        handle,
+                        null,
+                    );
+                    if (!authenticated) contains_unverified_artifacts = true;
+                }
             }
         }
         if (turn.* == .interrupted) {

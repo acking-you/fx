@@ -39,7 +39,7 @@ pub fn prepareAuthorizedRoute(
             ) catch return error.CommandAdmissionChanged;
             switch (admission) {
                 .direct_read_only => |plan| {
-                    debug_trace.logf("core", "terminal.exec authority=direct_only route=direct_read_only", .{});
+                    debug_trace.logf("core", "exec_command authority=direct_only route=direct_read_only", .{});
                     break :blk .{ .direct_read_only = plan };
                 },
                 .approval_required => {
@@ -55,7 +55,7 @@ pub fn prepareAuthorizedRoute(
             if (command_ctx.environment.requiresShellRoute()) {
                 debug_trace.logf(
                     "core",
-                    "terminal.exec authority=shell_allowed source={s} route=approved_shell environment={s}",
+                    "exec_command authority=shell_allowed source={s} route=approved_shell environment={s}",
                     .{
                         @tagName(shell.source),
                         @tagName(std.meta.activeTag(command_ctx.environment)),
@@ -80,11 +80,11 @@ pub fn prepareAuthorizedRoute(
             } };
             switch (admission) {
                 .direct_read_only => |plan| {
-                    debug_trace.logf("core", "terminal.exec authority=shell_allowed source={s} route=direct_read_only", .{@tagName(shell.source)});
+                    debug_trace.logf("core", "exec_command authority=shell_allowed source={s} route=direct_read_only", .{@tagName(shell.source)});
                     break :blk .{ .direct_read_only = plan };
                 },
                 .approval_required => |reason| {
-                    debug_trace.logf("core", "terminal.exec authority=shell_allowed source={s} route=approved_shell reason={s}", .{ @tagName(shell.source), @tagName(reason) });
+                    debug_trace.logf("core", "exec_command authority=shell_allowed source={s} route=approved_shell reason={s}", .{ @tagName(shell.source), @tagName(reason) });
                     break :blk .{ .approved_shell = .{
                         .command_ctx = command_ctx,
                         .reason = reason,
