@@ -10790,6 +10790,8 @@ fn makeInertResponsesCompactionTask(
     errdefer if (owned_session_id) |id| alloc.free(id);
     const credential = try alloc.dupe(u8, "test-token");
     errdefer secret.zeroAndFree(alloc, credential);
+    const account_id = try alloc.dupe(u8, "account");
+    errdefer alloc.free(account_id);
     const model = try alloc.dupe(u8, "gpt-5.6-sol");
     errdefer alloc.free(model);
     const wire_model = try alloc.dupe(u8, "gpt-5.6-sol");
@@ -10816,7 +10818,7 @@ fn makeInertResponsesCompactionTask(
         .session_id = owned_session_id,
         .credential_source = .chatgpt_subscription,
         .credential = credential,
-        .account_id = null,
+        .account_id = account_id,
         .model = model,
         .wire_model = wire_model,
         .provider_binding = provider_binding,
