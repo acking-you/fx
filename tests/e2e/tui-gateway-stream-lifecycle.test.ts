@@ -5041,7 +5041,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
           }
           if (body.includes(parentPrompt)) {
             return fakeGatewayToolCall(parentCreateId, "subagent", {
-              cmd: {
+              command: {
                 create: {
                   name: `fxc194-${decision}-child`,
                   mode: "one_off",

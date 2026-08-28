@@ -515,7 +515,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
           });
         }
         return fakeGatewayToolCall("isolated_child_create", "subagent", {
-          cmd: {
+          command: {
             create: {
               name: "isolated-child",
               mode: "persistent",
@@ -691,7 +691,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
             "terminal_safe_child_create",
             "subagent",
             {
-              cmd: {
+              command: {
                 create: {
                   name: rawName,
                   mode: "persistent",
@@ -1080,7 +1080,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         if (body.includes(childPrompt)) return stream.response;
         if (body.includes(parentPrompt)) {
           return fakeGatewayToolCall("ctrl_c_child_create", "subagent", {
-            cmd: {
+            command: {
               create: {
                 name: childName,
                 mode: "persistent",
@@ -1273,7 +1273,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
           });
         }
         return fakeGatewayToolCall("ask_write_create", "subagent", {
-          cmd: {
+          command: {
             create: {
               name: "ask-write-child",
               mode: "persistent",
@@ -1351,7 +1351,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
           });
         }
         return fakeGatewayToolCall("auto_write_create", "subagent", {
-          cmd: {
+          command: {
             create: {
               name: "auto-write-child",
               mode: "persistent",
@@ -1425,7 +1425,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
           });
         }
         return fakeGatewayToolCall("auto_delete_create", "subagent", {
-          cmd: {
+          command: {
             create: {
               name: "auto-delete-child",
               mode: "persistent",
@@ -1528,7 +1528,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
           return fakeGatewayFinalText("ALWAYS_WRITE_PARENT_READY");
         }
         return fakeGatewayToolCall(createId, "subagent", {
-          cmd: {
+          command: {
             create: {
               name: childName,
               mode: "persistent",
@@ -1682,7 +1682,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
           });
         }
         return fakeGatewayToolCall("command_stream_create", "subagent", {
-          cmd: {
+          command: {
             create: {
               name: childName,
               mode: "persistent",
@@ -2422,17 +2422,17 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         const responses = phase === "setup"
           ? [
             () => fakeGatewayToolCall(createParentCallId, "subagent", {
-              cmd: {
+              command: {
                 create: { name: parentName, mode: "persistent" },
               },
             }),
             () => fakeGatewayToolCall(createChildCallId, "subagent", {
-              cmd: {
+              command: {
                 create: { name: childName, mode: "persistent" },
               },
             }),
             () => fakeGatewayToolCall(reparentCallId, "subagent", {
-              cmd: {
+              command: {
                 relationship: {
                   action: "reparent",
                   id: controlByName(childName).control.child_id,
@@ -2444,7 +2444,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
           ]
           : [
             () => fakeGatewayToolCall(inspectCallId, "subagent", {
-              cmd: {
+              command: {
                 inspect: {
                   id: controlByName(childName).control.child_id,
                   sections: ["status", "relationship", "events"],
@@ -2575,7 +2575,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         }
         if (body.includes(parentPrompt)) {
           return fakeGatewayToolCall(createChildCallId, "subagent", {
-            cmd: {
+            command: {
               create: {
                 name: childName,
                 mode: "persistent",
@@ -2585,7 +2585,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
           });
         }
         return fakeGatewayToolCall(createParentCallId, "subagent", {
-          cmd: {
+          command: {
             create: {
               name: parentName,
               mode: "persistent",
@@ -2903,7 +2903,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
             );
         }
         return fakeGatewayToolCall("checkpoint3_restart_create", "subagent", {
-          cmd: {
+          command: {
             create: {
               name: "restart-child",
               mode: "persistent",
@@ -3666,7 +3666,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         if (body.includes(parentPrompt)) {
           if (!childId) throw new Error("parent follow-up requested before child ID was known");
           return fakeGatewayToolCall(parentCallId, "subagent", {
-            cmd: {
+            command: {
               message: {
                 send: {
                   id: childId,
@@ -3977,7 +3977,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         if (body.includes(childPrompt)) return childStream.response;
         if (body.includes(mainPrompt)) {
           return fakeGatewayToolCall("create_temporary_result", "subagent", {
-            cmd: {
+            command: {
               create: {
                 name: childName,
                 mode: "one_off",
@@ -4967,7 +4967,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         await pasteVisibleText(active, "700");
 
         releaseExternal(fakeGatewayToolCall("external_configure", "subagent", {
-          cmd: {
+          command: {
             configure: {
               id: initial.child_id,
               name: "external-winner",
@@ -5449,7 +5449,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         if (body.includes(parentPrompt)) {
           if (!childId) throw new Error("visible child ID was not captured");
           return fakeGatewayToolCall(parentCallId, "subagent", {
-            cmd: {
+            command: {
               message: {
                 send: { id: childId, content: parentMessage },
               },
@@ -5824,7 +5824,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         }
         if (body.includes('"call_id":"checkpoint3_root_persistent"')) {
           return fakeGatewayToolCall("checkpoint3_root_one_off", "subagent", {
-            cmd: {
+            command: {
               create: {
                 name: "assembled-one-off",
                 mode: "one_off",
@@ -5842,7 +5842,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         }
         if (body.includes(persistentPrompt)) {
           return fakeGatewayToolCall("checkpoint3_nested_create", "subagent", {
-            cmd: {
+            command: {
               create: {
                 name: "assembled-nested",
                 mode: "one_off",
@@ -5852,7 +5852,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
           });
         }
         return fakeGatewayToolCall("checkpoint3_root_persistent", "subagent", {
-          cmd: {
+          command: {
             create: {
               name: "assembled-persistent",
               mode: "persistent",
@@ -5969,7 +5969,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         }
         if (body.includes(childPrompt)) return childStream.response;
         return fakeGatewayToolCall("checkpoint3_cancel_create", "subagent", {
-          cmd: {
+          command: {
             create: {
               name: "manager-cancel-child",
               mode: "persistent",
@@ -6122,7 +6122,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
           });
         }
         return fakeGatewayToolCall(parentCallId, "subagent", {
-          cmd: {
+          command: {
             create: {
               name: "approval-cancel-child",
               mode: "persistent",
@@ -6322,7 +6322,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
           return childCompletion;
         }
         return fakeGatewayToolCall("selected_child_create", "subagent", {
-          cmd: {
+          command: {
             create: {
               name: "route-child",
               mode: "persistent",
@@ -6429,7 +6429,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         if (body.includes(humanOneLines[0]!)) return humanOneStream.response;
         if (body.includes(childPrompt)) return childStream.response;
         return fakeGatewayToolCall("manager_create_1", "subagent", {
-          cmd: {
+          command: {
             create: {
               name: "live-child",
               mode: "persistent",
@@ -6714,7 +6714,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         );
         expect(active.cursorPosition()).toEqual(mainCursorBeforeManager);
         releaseParent(fakeGatewayToolCall("manager_archive_1", "subagent", {
-          cmd: {
+          command: {
             lifecycle: {
               id: authoritativeChildId!,
               action: "close",
@@ -6782,7 +6782,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
           `manager_bounded_create_${index.toString().padStart(3, "0")}`,
           "subagent",
           {
-            cmd: {
+            command: {
               create: {
                 name: `page-child-${index.toString().padStart(3, "0")}`,
                 mode: "persistent",
@@ -6956,7 +6956,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         }
         if (body.includes(outerPrompt)) {
           return fakeGatewayToolCall("nested_send_inner_create", "subagent", {
-            cmd: {
+            command: {
               create: {
                 name: "nested-send-inner",
                 mode: "persistent",
@@ -6966,7 +6966,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
           });
         }
         return fakeGatewayToolCall("nested_send_root_create", "subagent", {
-          cmd: {
+          command: {
             create: {
               name: "nested-send-outer",
               mode: "persistent",

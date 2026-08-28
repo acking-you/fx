@@ -6417,7 +6417,7 @@ describe("acp: model-independent", () => {
       };
       const gateway = startFakeGateway([
         fakeGatewayToolCall("acp_create_1", "subagent", {
-          cmd: { create: {
+          command: { create: {
             name: "workspace-inspector",
             mode: "one_off",
             prompt: childPrompt,
@@ -6523,7 +6523,7 @@ describe("acp: model-independent", () => {
           }
           expect(acpPromptText(body)).toContain(parentPrompt);
           return fakeGatewayToolCall(parentCreateId, "subagent", {
-            cmd: { create: {
+            command: { create: {
               name: `acp-${label}-mcp-child`,
               mode: childMode,
               prompt: childPrompt,
@@ -6621,7 +6621,7 @@ describe("acp: model-independent", () => {
           return childCompletion.response;
         }
         return fakeGatewayToolCall("acp_one_off_load_create", "subagent", {
-          cmd: { create: {
+          command: { create: {
             name: childName,
             mode: "one_off",
             prompt: childPrompt,
@@ -6817,7 +6817,7 @@ describe("acp: model-independent", () => {
           secondInitialChecked = true;
           parentPhase = "inspect_result";
           return fakeGatewayToolCall("acp_delivery_inspect_1", "subagent", {
-            cmd: {
+            command: {
               inspect: {
                 id: childId,
                 sections: ["status", "configuration", "relationship"],
@@ -6866,7 +6866,7 @@ describe("acp: model-independent", () => {
             text.includes("Create the ACP delivery fixture.")) {
           parentPhase = "create_result";
           return fakeGatewayToolCall("acp_delivery_create_1", "subagent", {
-            cmd: { create: {
+            command: { create: {
               name: "acp-delivery-child",
               mode: "persistent",
               prompt: childPrompt,
@@ -7006,7 +7006,7 @@ describe("acp: model-independent", () => {
               TIMEOUT,
             );
             return fakeGatewayToolCall("acp_64k_send_1", "subagent", {
-              cmd: {
+              command: {
                 message: {
                   send: { id: parentSessionId, content: largeMessage },
                 },
@@ -7015,7 +7015,7 @@ describe("acp: model-independent", () => {
           })();
         }
         return fakeGatewayToolCall("acp_64k_create_1", "subagent", {
-          cmd: { create: {
+          command: { create: {
             name: "acp-64k-delivery-child",
             mode: "persistent",
             prompt: childPrompt,

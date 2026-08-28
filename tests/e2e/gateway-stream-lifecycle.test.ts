@@ -3625,7 +3625,7 @@ describe("gateway stream lifecycle", () => {
         });
       }
       return fakeGatewayToolCall("parent_subagent_create_1", "subagent", {
-        cmd: {
+        command: {
           create: {
             name: "mcp-child",
             mode: "one_off",
@@ -3696,7 +3696,7 @@ describe("gateway stream lifecycle", () => {
       }
       if (body.includes(inspectPrompt)) {
         return fakeGatewayToolCall("host_exit_inspect_1", "subagent", {
-          cmd: {
+          command: {
             inspect: {
               id: childId,
               sections: ["status"],
@@ -3717,7 +3717,7 @@ describe("gateway stream lifecycle", () => {
         return delayedSuccessfulResponse();
       }
       return fakeGatewayToolCall("host_exit_create_1", "subagent", {
-        cmd: {
+        command: {
           create: {
             name: "host-exit-child",
             mode: "persistent",
