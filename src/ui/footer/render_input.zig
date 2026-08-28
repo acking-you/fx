@@ -515,8 +515,14 @@ fn thinkingActivityProjection(
             .label = activity_status.buildWorkingLabel(buf, ctx.stream, ctx.now_ms, "Working"),
         } };
     }
-    if (ctx.writing_response or (ctx.stream.active and ctx.stream.assistant_text_started)) {
+    if (ctx.stream.active and ctx.stream.assistant_text_started) {
         return .none;
+    }
+    if (ctx.writing_response and !ctx.stream.active) {
+        return .{ .turn_thinking = .{
+            .label = activity_status.buildResponseTailLabel(buf, ctx.stream),
+            .tone = .neutral,
+        } };
     }
     if (!ctx.stream.active) {
         return .none;

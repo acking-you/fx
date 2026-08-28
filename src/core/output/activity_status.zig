@@ -214,6 +214,20 @@ pub fn appendTurnTokenSuffix(writer: *std.Io.Writer, stream: StreamState) !void 
     try appendTokenProgressSuffix(writer, stream.token_progress);
 }
 
+/// Keeps the latest usage counters visible while the response pacer drains
+/// its final queued chunks. The response text is the primary progress surface,
+/// so this tail deliberately occupies the marker column without adding a
+/// second activity label.
+pub fn buildResponseTailLabel(buf: []u8, stream: StreamState) []const u8 {
+    var out: std.Io.Writer = .fixed(buf);
+    out.writeAll("  ") catch return "  ";
+    if (stream.token_progress.input_tokens == 0 and stream.token_progress.output_tokens == 0) {
+        return out.buffered();
+    }
+    writeTokenProgress(&out, stream.token_progress) catch return out.buffered();
+    return out.buffered();
+}
+
 test "buildWorkingLabel renders turn token suffix with input only" {
     var buf: [64]u8 = undefined;
     const label = buildWorkingLabel(&buf, .{
@@ -221,6 +235,14 @@ test "buildWorkingLabel renders turn token suffix with input only" {
         .token_progress = .{ .input_tokens = 10 },
     }, 0, "Working");
     try std.testing.expectEqualStrings("⠋ Working (↑10 ↓0)", label);
+}
+
+test "buildResponseTailLabel keeps final token progress in the marker column" {
+    var buf: [64]u8 = undefined;
+    const label = buildResponseTailLabel(&buf, .{
+        .token_progress = .{ .input_tokens = 50_000, .output_tokens = 20_000 },
+    });
+    try std.testing.expectEqualStrings("  (↑50k ↓20k)", label);
 }
 
 test "buildWorkingLabel renders turn token suffix with input and output" {
