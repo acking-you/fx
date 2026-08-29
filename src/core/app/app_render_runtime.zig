@@ -667,7 +667,7 @@ pub fn Runtime(comptime App: type) type {
             const settings_snapshot = app_commands.settingsCatalogSnapshot(app);
             const now_ms = io_mod.milliTimestamp();
             const compacting_context = app_session_runtime.Runtime(App)
-                .responsesCompactionActive(app);
+                .compactionActive(app);
             var visible_stream = app.stream;
             if (!visible_stream.active) {
                 if (app.pacer.completedAssistantPresentationTokenProgress()) |progress| {
@@ -1193,7 +1193,7 @@ pub fn Runtime(comptime App: type) type {
                 .tool_payload_started,
                 // Product-state compaction is installed by the UI worker-event
                 // drain and must never be replayed as transcript presentation.
-                .responses_compaction,
+                .compaction,
                 .finish_prompt,
                 .session_grant,
                 => {},

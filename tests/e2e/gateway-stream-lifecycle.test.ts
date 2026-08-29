@@ -149,6 +149,27 @@ function startGateway(
   });
 }
 
+function fakeLocalCompactionSummary(details: string): Response {
+  return fakeGatewayFinalText(
+    [
+      "## Request lineage",
+      details,
+      "## Completed work",
+      "The prior turns completed successfully and their exact evidence remains relevant.",
+      "## Decisions and constraints",
+      "Continue from the compacted boundary without repeating completed work or inventing state.",
+      "## Current state",
+      "The session is ready for the next user request with the preserved provider and workspace context.",
+      "## Remaining work",
+      "Resume directly from the latest user intent and verify any new work against the current runtime.",
+      "## Next action",
+      "Accept the next turn and continue using the preserved evidence.",
+      "Exact continuation evidence is intentionally repeated to keep this deterministic fixture above the minimum accepted summary size.",
+      "Exact continuation evidence is intentionally repeated to keep this deterministic fixture above the minimum accepted summary size.",
+    ].join("\n\n"),
+  );
+}
+
 function delayedSuccessfulResponse(): Response {
   const encoder = new TextEncoder();
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -2826,6 +2847,9 @@ describe("gateway stream lifecycle", () => {
       const responses = [
         fakeGatewayFinalText("FIRST_REPLY_COMPACTION_SENTINEL"),
         fakeGatewayFinalText("SECOND_REPLY_COMPACTION_SENTINEL"),
+        fakeLocalCompactionSummary(
+          "FIRST_PROMPT_COMPACTION_SENTINEL and FIRST_REPLY_COMPACTION_SENTINEL led to SECOND_PROMPT_COMPACTION_SENTINEL and SECOND_REPLY_COMPACTION_SENTINEL.",
+        ),
         fakeGatewayFinalText("compaction restart complete"),
       ];
       const gateway = startGateway((body) => {
@@ -2854,7 +2878,7 @@ describe("gateway stream lifecycle", () => {
           15_000,
         );
         await tui.sendText("/compact");
-        await tui.waitForText("context was compacted locally.", 15_000);
+        await tui.waitForText("Context compacted locally with the active model.", 15_000);
         await tui.sendText("/quit");
         await tui.waitForSessionEnd(15_000);
         tui = null;
@@ -2906,9 +2930,9 @@ describe("gateway stream lifecycle", () => {
         );
         expect(resumed.code).toBe(0);
         expect(resumed.stderr).toBe("");
-        expect(gateway.requests).toHaveLength(4);
+        expect(gateway.requests).toHaveLength(5);
 
-        const request = gatewayRequest(gateway.requests[3].body);
+        const request = gatewayRequest(gateway.requests[4].body);
         const userTexts = request.input
           .filter((item) => item.role === "user")
           .map(contentText);
@@ -2971,6 +2995,9 @@ describe("gateway stream lifecycle", () => {
         fakeGatewayToolCall(beforeCallId, "skill", { name: skillName }),
         fakeGatewayFinalText("SKILL_BEFORE_COMPACTION_COMPLETE"),
         fakeGatewayFinalText("SECOND_COMPACTION_TURN_COMPLETE"),
+        fakeLocalCompactionSummary(
+          "The explicit skill completed with skill success before compaction; preserve that result without embedding loaded skill instructions.",
+        ),
         fakeGatewayToolCall(afterCallId, "skill", { name: skillName }),
         fakeGatewayFinalText("SKILL_AFTER_COMPACTION_COMPLETE"),
       ];
@@ -3005,7 +3032,7 @@ describe("gateway stream lifecycle", () => {
           20_000,
         );
         await tui.sendText("/compact");
-        await tui.waitForText("context was compacted locally.", 15_000);
+        await tui.waitForText("Context compacted locally with the active model.", 15_000);
         await tui.sendText("Read the explicit skill after compaction.");
         await tui.waitForPane(
           (pane) =>
@@ -3017,7 +3044,7 @@ describe("gateway stream lifecycle", () => {
         await tui.waitForSessionEnd(15_000);
         tui = null;
 
-        expect(gateway.requests).toHaveLength(6);
+        expect(gateway.requests).toHaveLength(7);
         const beforeRequest = gateway.requests.find((request) =>
           hasToolResult(request.body, beforeCallId)
         );
@@ -3027,7 +3054,7 @@ describe("gateway stream lifecycle", () => {
         expect(beforeRequest).toBeDefined();
         expect(afterRequest).toBeDefined();
         const before = toolResultOutput(beforeRequest!.body, beforeCallId);
-        const postCompactionRequest = promptText(gateway.requests[4]!.body);
+        const postCompactionRequest = promptText(gateway.requests[5]!.body);
         const after = toolResultOutput(afterRequest!.body, afterCallId);
 
         expect(before).toContain(bodySentinel);

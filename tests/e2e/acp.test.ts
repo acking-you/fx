@@ -136,6 +136,25 @@ function fileToolCall(id: string, path: string, content: string) {
   return fakeGatewayToolCall(id, "write_file", { path, content });
 }
 
+function localCompactionText(details: string): string {
+  return [
+    "## Primary user goal and intent",
+    details,
+    "## Completed work",
+    "The seed turn completed and its exact outcome is preserved for continuation.",
+    "## Decisions and constraints",
+    "Use the active provider without tools and do not repeat completed work.",
+    "## Current state",
+    "The ACP session is ready to continue from the installed portable summary.",
+    "## Remaining work",
+    "Wait for the next explicit user request and verify new work against current state.",
+    "## Next action",
+    "Continue directly from the next turn.",
+    "This deterministic fixture repeats relevant continuation evidence so the valid compaction summary remains above the minimum accepted size.",
+    "This deterministic fixture repeats relevant continuation evidence so the valid compaction summary remains above the minimum accepted size.",
+  ].join("\n\n");
+}
+
 function lengthLimitedCommandCall(command: string) {
   return fakeGatewaySse([
     {
@@ -1843,6 +1862,88 @@ describe("acp: model-independent", () => {
         await client?.close();
         gateway.stop();
         codex.stop();
+        rmSync(root.root, { recursive: true, force: true });
+      }
+    },
+    TIMEOUT,
+  );
+
+  test(
+    "ACP remote rejection uses active-model compaction and persists one portable replacement",
+    async () => {
+      const root = createIsolatedRoot("fx-acp-local-model-compact-");
+      let phase = 0;
+      const gateway = startDynamicFakeGateway((body) => {
+        const parsed = JSON.parse(body) as {
+          input?: Array<{ type?: string }>;
+          tool_choice?: string;
+        };
+        if (parsed.input?.at(-1)?.type === "compaction_trigger") {
+          return new Response("native compaction unavailable", { status: 400 });
+        }
+        if (phase === 0) {
+          phase = 1;
+          return finalText("ACP_LOCAL_COMPACTION_SEED_REPLY");
+        }
+        expect(parsed.tool_choice).toBe("none");
+        phase = 2;
+        return finalText(localCompactionText(
+          "Preserve ACP_LOCAL_COMPACTION_SEED and ACP_LOCAL_COMPACTION_SEED_REPLY after native compaction is rejected.",
+        ));
+      });
+      try {
+        client = await AcpClient.create({
+          cwd: root.workspace,
+          env: fakeGatewayEnv(root, gateway),
+        });
+        const sessionId = await startCodeSession(client);
+        const seeded = await runPrompt(
+          client,
+          "ACP_LOCAL_COMPACTION_SEED",
+          TIMEOUT,
+        );
+        expect(seeded.promptResult.result.stopReason).toBe("end_turn");
+
+        const compacted = await runPrompt(client, "/compact", TIMEOUT);
+        expect(compacted.promptResult.result.stopReason).toBe("end_turn");
+        expect(JSON.stringify(compacted.messages)).toContain(
+          "Context compacted locally with the active model.",
+        );
+        expect(phase).toBe(2);
+        expect(gateway.requests).toHaveLength(3);
+
+        const events = readFileSync(
+          join(root.home, ".fx", "sessions", sessionId, "events.jsonl"),
+          "utf8",
+        ).trim().split("\n").map((line) => JSON.parse(line) as any);
+        const committed = events.findLast((event) =>
+          event.kind === "state_replacement_committed"
+        );
+        const replacementId = committed.payload.replacement_id as string;
+        const chunks = events
+          .filter((event) =>
+            event.kind === "state_replacement_chunk" &&
+            event.payload.replacement_id === replacementId
+          )
+          .sort((a, b) => a.payload.chunk_index - b.payload.chunk_index);
+        const state = JSON.parse(Buffer.concat(chunks.map((event) =>
+          Buffer.from(event.payload.base64, "base64")
+        )).toString("utf8")) as {
+          context_history_start: number;
+          history: Array<{
+            kind: string;
+            summary?: string;
+            responses_compaction?: unknown;
+          }>;
+        };
+        const active = state.history[state.context_history_start];
+        expect(active?.kind).toBe("compacted_summary");
+        expect(active?.summary).toContain("ACP_LOCAL_COMPACTION_SEED_REPLY");
+        expect(active?.responses_compaction).toBeUndefined();
+        expect(client.stderr).toBe("");
+      } finally {
+        await client?.close();
+        gateway.stop();
         rmSync(root.root, { recursive: true, force: true });
       }
     },

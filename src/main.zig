@@ -417,6 +417,10 @@ const App = struct {
             .agent_stream_or_unavailable();
     }
 
+    pub fn gatewayRetryCount(_: *const Self) usize {
+        return builtin_gateway.retry_count;
+    }
+
     pub fn responsesCompactionProvider(
         self: *const Self,
     ) ?responses_compaction_provider.Provider {
@@ -425,11 +429,11 @@ const App = struct {
             .responses_compaction;
     }
 
-    pub fn applyResponsesCompactionEvent(
+    pub fn applyCompactionEvent(
         self: *Self,
-        event: types.ResponsesCompactionWorkerEvent,
+        event: types.CompactionWorkerEvent,
     ) !void {
-        SessionAppRuntime.applyResponsesCompactionEvent(self, event);
+        SessionAppRuntime.applyCompactionEvent(self, event);
     }
 
     pub fn fetchProviderCatalog(
@@ -485,11 +489,11 @@ const App = struct {
         return self.stream.active or self.pacer.hasPending() or
             self.worker.isProcessing() or
             self.provider_switch.isRunning() or self.provider_logout.isRunning() or
-            SessionAppRuntime.responsesCompactionActive(self);
+            SessionAppRuntime.compactionActive(self);
     }
 
     pub fn backgroundActivityActive(self: *const Self) bool {
-        return SessionAppRuntime.responsesCompactionActive(self);
+        return SessionAppRuntime.compactionActive(self);
     }
 
     pub fn setTerminalTitleBase(self: *Self, label: []const u8) void {

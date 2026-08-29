@@ -120,6 +120,23 @@ also retain the provider and connection route captured for each child turn.
 Changing the parent provider does not reroute an existing child, and replacing
 the connection binding does not alter a child turn already in progress.
 
+## Compact a session
+
+Send the exact local command `/compact` through `session/prompt`:
+
+```json
+{"jsonrpc":"2.0","id":25,"method":"session/prompt","params":{"sessionId":"SESSION_ID","prompt":[{"type":"text","text":"/compact"}]}}
+```
+
+ACP uses the same strategy module and session installation path as the TUI and
+inline overflow recovery. Eligible Responses routes try native remote
+compaction first. Other routes, and rejected or unavailable remote requests,
+use the active model to create a structured local replacement. The bounded
+deterministic projection is used only when model compaction cannot complete.
+The response arrives as an `agent_message_chunk`, followed by the normal
+`session/prompt` completion. The installed portable summary and optional opaque
+provider checkpoint are persisted together.
+
 ## Query the active turn
 
 Use `fx/turn/status` at any time after initialization:
