@@ -3874,7 +3874,7 @@ test "app_input_runtime auth stage Escape pops before closing the picker" {
     app.auth.source_inventory = auth_runtime.SourceSet.initOne(.openai_api_key);
     app.auth.openPicker(alloc);
 
-    for (0..3) |_| _ = app.auth.movePicker(1);
+    for (0..2) |_| _ = app.auth.movePicker(1);
     try std.testing.expect((auth_runtime.Choice{ .action = .switch_credential }).eql(
         app.auth.pickerView().selected_choice.?,
     ));
@@ -7603,7 +7603,7 @@ fn openRoutingAuthPicker(app: *RoutingFakeApp) !void {
     app.auth.source_inventory.insert(.openai_api_key);
     app.auth.openPicker(app.alloc);
     try std.testing.expect(app.auth.movePicker(1));
-    try std.testing.expectEqual(@as(usize, 4), app.auth.pickerView().choiceCount());
+    try std.testing.expectEqual(@as(usize, 3), app.auth.pickerView().choiceCount());
     try std.testing.expectEqual(@as(usize, 1), app.auth.pickerView().selectedIndex());
 }
 

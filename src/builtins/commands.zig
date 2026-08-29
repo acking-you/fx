@@ -486,6 +486,7 @@ test "built-in slash commands register exact active order" {
         "/continue",
         "/rename",
         "/login",
+        "/provider",
         "/logout",
         "/stats",
         "/usage",

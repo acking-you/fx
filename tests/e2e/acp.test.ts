@@ -5514,7 +5514,7 @@ describe("acp: model-independent", () => {
   );
 
   test(
-    "missing API key returns JSON-RPC error on initialize",
+    "missing API key permits provider control but rejects prompting",
     async () => {
       const root = createIsolatedRoot("fx-acp-missing-auth-");
       try {
@@ -5526,10 +5526,20 @@ describe("acp: model-independent", () => {
             FX_DISABLE_KEYCHAIN: "1",
           },
         });
-        const resp = await client.request("initialize", { protocolVersion: 1 }, 1) as any;
-        expect(resp.error).toBeDefined();
-        expect(resp.error.message).toContain("fx login");
-        expect(resp.error.message).toContain("OPENAI_API_KEY");
+        const initialized = await client.request("initialize", { protocolVersion: 1 }, 1) as any;
+        expect(initialized.error).toBeUndefined();
+        expect(initialized.result._meta.fx.providerControl).toBeDefined();
+        const session = await client.request("session/new", {}, 2) as any;
+        expect(session.error).toBeUndefined();
+        await client.readLine();
+        const prompt = await client.request(
+          "session/prompt",
+          { prompt: [{ type: "text", text: "This must not reach a provider." }] },
+          3,
+        ) as any;
+        expect(prompt.error).toBeDefined();
+        expect(prompt.error.message).toContain("fx login");
+        expect(prompt.error.message).toContain("OPENAI_API_KEY");
         expect(client.stderr).toBe("");
       } finally {
         await client?.close();
