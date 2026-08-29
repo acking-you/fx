@@ -89,8 +89,26 @@ pub const TerminalOutcome = union(enum) {
 
 const max_acp_command_preview_bytes: usize = 64 * 1024;
 
+const AcpCommandOutputSink = struct {
+    alloc: Allocator,
+    bytes: *std.ArrayList(u8),
+
+    pub fn appendText(self: *AcpCommandOutputSink, text: []const u8) !void {
+        try self.bytes.appendSlice(self.alloc, text);
+    }
+
+    pub fn finishLine(self: *AcpCommandOutputSink) !void {
+        try self.bytes.append(self.alloc, '\n');
+    }
+
+    pub fn replaceLine(self: *AcpCommandOutputSink) !void {
+        try self.bytes.append(self.alloc, '\r');
+    }
+};
+
 const AcpCommandOutputPreview = struct {
     bytes: std.ArrayList(u8) = .empty,
+    decoders: [2]command_output_content.Decoder = .{ .{}, .{} },
     truncated: bool = false,
 
     fn deinit(self: *AcpCommandOutputPreview, alloc: Allocator) void {
@@ -98,29 +116,62 @@ const AcpCommandOutputPreview = struct {
         self.* = undefined;
     }
 
-    fn append(self: *AcpCommandOutputPreview, alloc: Allocator, chunk: []const u8) !void {
+    fn decode(
+        self: *AcpCommandOutputPreview,
+        alloc: Allocator,
+        stream: command_output_content.Stream,
+        raw: []const u8,
+    ) ![]u8 {
+        var visible: std.ArrayList(u8) = .empty;
+        errdefer visible.deinit(alloc);
+        var sink = AcpCommandOutputSink{ .alloc = alloc, .bytes = &visible };
+        try self.decoders[@intFromEnum(stream)].append(raw, &sink);
+        return visible.toOwnedSlice(alloc);
+    }
+
+    fn finishDecoder(
+        self: *AcpCommandOutputPreview,
+        alloc: Allocator,
+        stream: command_output_content.Stream,
+    ) ![]u8 {
+        var visible: std.ArrayList(u8) = .empty;
+        errdefer visible.deinit(alloc);
+        var sink = AcpCommandOutputSink{ .alloc = alloc, .bytes = &visible };
+        try self.decoders[@intFromEnum(stream)].finish(&sink);
+        return visible.toOwnedSlice(alloc);
+    }
+
+    fn appendVisible(self: *AcpCommandOutputPreview, alloc: Allocator, chunk: []const u8) !void {
         if (chunk.len >= max_acp_command_preview_bytes) {
             self.bytes.clearRetainingCapacity();
+            var start = chunk.len - max_acp_command_preview_bytes;
+            while (start < chunk.len and isUtf8Continuation(chunk[start])) : (start += 1) {}
             try self.bytes.appendSlice(
                 alloc,
-                chunk[chunk.len - max_acp_command_preview_bytes ..],
+                chunk[start..],
             );
             self.truncated = true;
             return;
         }
         const overflow = self.bytes.items.len +| chunk.len -| max_acp_command_preview_bytes;
         if (overflow > 0) {
+            var drop = overflow;
+            while (drop < self.bytes.items.len and isUtf8Continuation(self.bytes.items[drop])) : (drop += 1) {}
             std.mem.copyForwards(
                 u8,
-                self.bytes.items[0 .. self.bytes.items.len - overflow],
-                self.bytes.items[overflow..],
+                self.bytes.items[0 .. self.bytes.items.len - drop],
+                self.bytes.items[drop..],
             );
-            self.bytes.items.len -= overflow;
+            self.bytes.items.len -= drop;
             self.truncated = true;
         }
         try self.bytes.appendSlice(alloc, chunk);
     }
 };
+
+fn isUtf8Continuation(byte: u8) bool {
+    return byte & 0xc0 == 0x80;
+}
 
 const AcpContext = struct {
     const GatewayRouteView = union(enum) {
@@ -137,9 +188,9 @@ const AcpContext = struct {
     published_tool_calls: std.StringHashMapUnmanaged(void) = .empty,
     /// Bounded accumulated command output for ACP's replace-semantics
     /// ToolCallUpdate.content field. Keys borrow published_tool_calls keys.
-    /// Unified Exec serializes both pipe readers through the process mutex and
-    /// detaches this callback before the tool returns, so the map has one
-    /// active writer for the lifetime of each model command operation.
+    /// Unified Exec queues both pipe readers and drains their owned chunks on
+    /// the model operation thread, so this map has one writer and transport
+    /// backpressure never holds a process-control lock.
     command_output_previews: std.StringHashMapUnmanaged(AcpCommandOutputPreview) = .empty,
     stop_reason: acp_types.StopReason = .end_turn,
     auto_classifier: permission_auto_classifier.Classifier =
@@ -251,12 +302,23 @@ const AcpContext = struct {
         stream: command_output_content.Stream,
         chunk: []const u8,
     ) !void {
-        const plain = try stripAnsiAlloc(self.alloc, chunk);
-        defer if (plain.ptr != chunk.ptr) self.alloc.free(plain);
         const stable_id = self.published_tool_calls.getKey(tool_call_id) orelse return;
         const entry = try self.command_output_previews.getOrPut(self.alloc, stable_id);
         if (!entry.found_existing) entry.value_ptr.* = .{};
-        try entry.value_ptr.append(self.alloc, plain);
+        const visible = try entry.value_ptr.decode(self.alloc, stream, chunk);
+        defer self.alloc.free(visible);
+        if (visible.len == 0) return;
+        try self.sendVisibleCommandOutputDelta(stable_id, stream, visible, entry.value_ptr);
+    }
+
+    fn sendVisibleCommandOutputDelta(
+        self: *AcpContext,
+        stable_id: []const u8,
+        stream: command_output_content.Stream,
+        visible: []const u8,
+        preview: *AcpCommandOutputPreview,
+    ) !void {
+        try preview.appendVisible(self.alloc, visible);
 
         var out: std.Io.Writer.Allocating = .init(self.alloc);
         defer out.deinit();
@@ -264,11 +326,22 @@ const AcpContext = struct {
             &out.writer,
             stable_id,
             @tagName(stream),
-            plain,
-            entry.value_ptr.bytes.items,
-            entry.value_ptr.truncated,
+            visible,
+            preview.bytes.items,
+            preview.truncated,
         );
         try self.sendUpdate(out.writer.buffered());
+    }
+
+    fn flushCommandOutputPreview(self: *AcpContext, tool_call_id: []const u8) !void {
+        const stable_id = self.published_tool_calls.getKey(tool_call_id) orelse return;
+        const preview = self.command_output_previews.getPtr(stable_id) orelse return;
+        for ([_]command_output_content.Stream{ .stdout, .stderr }) |stream| {
+            const visible = try preview.finishDecoder(self.alloc, stream);
+            defer self.alloc.free(visible);
+            if (visible.len == 0) continue;
+            try self.sendVisibleCommandOutputDelta(stable_id, stream, visible, preview);
+        }
     }
 
     fn clearCommandOutputPreview(self: *AcpContext, tool_call_id: []const u8) void {
@@ -292,6 +365,7 @@ const AcpContext = struct {
     }
 
     fn sendToolCallCompletedWithCommandResult(self: *AcpContext, tool_call_id: []const u8, result_text: ?[]const u8, command_result_json: ?[]const u8) !void {
+        try self.flushCommandOutputPreview(tool_call_id);
         self.clearCommandOutputPreview(tool_call_id);
         var out: std.Io.Writer.Allocating = .init(self.alloc);
         defer out.deinit();
@@ -304,6 +378,7 @@ const AcpContext = struct {
     }
 
     fn sendToolCallErrorWithCommandResult(self: *AcpContext, tool_call_id: []const u8, err_text: []const u8, command_result_json: ?[]const u8) !void {
+        try self.flushCommandOutputPreview(tool_call_id);
         self.clearCommandOutputPreview(tool_call_id);
         var out: std.Io.Writer.Allocating = .init(self.alloc);
         defer out.deinit();
@@ -3944,6 +4019,64 @@ test "acp exposes web_search progress updates" {
     try std.testing.expect(std.mem.find(u8, out.written(), "\"status\":\"in_progress\"") != null);
     try std.testing.expect(std.mem.find(u8, out.written(), "Found 4 results for current news") != null);
     try std.testing.expectEqual(acp_types.ToolCallKind.search, mapToolKind("web_search"));
+}
+
+test "ACP command output preview repairs split and invalid UTF-8" {
+    const alloc = std.testing.allocator;
+    var preview = AcpCommandOutputPreview{};
+    defer preview.deinit(alloc);
+
+    const partial = try preview.decode(alloc, .stdout, "\xe4\xb8");
+    defer alloc.free(partial);
+    try std.testing.expectEqual(@as(usize, 0), partial.len);
+
+    const completed = try preview.decode(alloc, .stdout, "\xad\xff");
+    defer alloc.free(completed);
+    try std.testing.expectEqualStrings("中\\xff", completed);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(completed));
+    try preview.appendVisible(alloc, completed);
+    var notification: std.Io.Writer.Allocating = .init(alloc);
+    defer notification.deinit();
+    try acp_types.writeCommandOutputUpdate(
+        &notification.writer,
+        "call_utf8",
+        "stdout",
+        completed,
+        preview.bytes.items,
+        preview.truncated,
+    );
+    var parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        alloc,
+        notification.written(),
+        .{},
+    );
+    defer parsed.deinit();
+
+    const trailing = try preview.decode(alloc, .stderr, "\xe4");
+    defer alloc.free(trailing);
+    try std.testing.expectEqual(@as(usize, 0), trailing.len);
+    const flushed = try preview.finishDecoder(alloc, .stderr);
+    defer alloc.free(flushed);
+    try std.testing.expectEqualStrings("\\xe4", flushed);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(flushed));
+}
+
+test "ACP command output preview truncates only at UTF-8 boundaries" {
+    const alloc = std.testing.allocator;
+    var preview = AcpCommandOutputPreview{};
+    defer preview.deinit(alloc);
+    const repeated_len = ((max_acp_command_preview_bytes / 3) + 2) * 3;
+    const repeated = try alloc.alloc(u8, repeated_len);
+    defer alloc.free(repeated);
+    var index: usize = 0;
+    while (index < repeated.len) : (index += 3) {
+        @memcpy(repeated[index .. index + 3], "中");
+    }
+    try preview.appendVisible(alloc, repeated);
+    try std.testing.expect(preview.truncated);
+    try std.testing.expect(preview.bytes.items.len <= max_acp_command_preview_bytes);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(preview.bytes.items));
 }
 
 test "ACP tool notifications preserve UTF-8 for clipped and unsafe output" {

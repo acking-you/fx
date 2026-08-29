@@ -269,8 +269,8 @@ validated structured input:
 {"sessionUpdate":"tool_call","toolCallId":"CALL_ID","title":"Running zig build","kind":"execute","status":"pending","rawInput":{"cmd":"zig build","workdir":"."}}
 ```
 
-While the process runs, fx sends `tool_call_update` notifications immediately
-for both stdout and stderr. ACP replaces a tool call's `content`, so each update
+While the process runs, fx sends `tool_call_update` notifications as stdout and
+stderr become available. ACP replaces a tool call's `content`, so each update
 contains a bounded accumulated preview rather than only the latest fragment.
 `rawOutput` also preserves the current stream and exact new chunk for clients
 that render their own incremental command view:
@@ -280,10 +280,15 @@ that render their own incremental command view:
 ```
 
 The preview retains at most 64 KiB per active call and sets `truncated` after
-discarding older bytes. ANSI controls are removed before publication. The
-terminal result update includes standard `rawOutput` with the rendered output
-and structured command result. The top-level `command_result` field remains as
-an fx compatibility extension for existing clients.
+discarding older bytes at a UTF-8 boundary. ANSI controls are removed,
+multibyte characters split across pipe reads are buffered, and invalid bytes
+are rendered as visible `\xNN` text so every notification remains valid JSON.
+Pipe readers place owned chunks in a bounded queue; transport writes happen
+outside the process-control lock, so client backpressure cannot block polling,
+input, or termination. The terminal result update includes standard
+`rawOutput` with the rendered output and structured command result. The
+top-level `command_result` field remains as an fx compatibility extension for
+existing clients.
 
 ### Direct Unified Exec interaction
 

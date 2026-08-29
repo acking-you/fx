@@ -69,9 +69,9 @@ pub const Manager = struct {
         output_sink: ?OutputSink = null,
     };
 
-    /// Borrowed for one exec or write_stdin operation. The process stores a
-    /// cloned lifecycle identity and detaches the sink before the operation
-    /// returns, so no output callback can outlive its tool call.
+    /// Borrowed for one exec or write_stdin operation. Pipe readers only queue
+    /// owned chunks; the calling operation drains them outside process locks,
+    /// so no callback can outlive the tool call or block process control.
     pub const OutputSink = struct {
         context: *anyopaque,
         lifecycle_id: ?types.ToolLifecycleId = null,
@@ -114,10 +114,10 @@ pub const Manager = struct {
         if (!supported()) return error.UnsupportedHost;
         const process = try self.createProcess(request);
         defer self.releaseActive(process);
-        defer process.clearOutputSink();
+        defer process.finishOutputProjection(request.output_sink);
         const id = process.id;
         const yield_ms = clampInitialYield(request.yield_time_ms);
-        if (!process.waitUntilDone(yield_ms)) {
+        if (!process.waitUntilDone(yield_ms, request.output_sink)) {
             return process.snapshot(alloc, id, .running, request.max_output_tokens, .model);
         }
         if (!self.detachHeld(id, process)) return error.ProcessUnavailable;
@@ -131,15 +131,14 @@ pub const Manager = struct {
     pub fn writeStdin(self: *Manager, alloc: Allocator, request: WriteRequest) !Result {
         const process = self.acquire(request.process_id) orelse return error.UnknownProcessId;
         defer self.releaseActive(process);
-        try process.setOutputSink(request.output_sink);
-        defer process.clearOutputSink();
-        process.replayBufferedOutputToSink();
+        try process.beginOutputProjection(request.output_sink, true);
+        defer process.finishOutputProjection(request.output_sink);
         try process.write(request.chars);
         const yield_ms = if (request.chars.len == 0)
             clampPollYield(request.yield_time_ms)
         else
             clampInitialYield(request.yield_time_ms);
-        if (!process.waitUntilDone(yield_ms)) {
+        if (!process.waitUntilDone(yield_ms, request.output_sink)) {
             return process.snapshot(alloc, request.process_id, .running, request.max_output_tokens, .model);
         }
         if (!self.detachHeld(request.process_id, process)) return error.ProcessUnavailable;
@@ -371,6 +370,8 @@ const empty_min_yield_ms: u64 = 5_000;
 const max_yield_ms: u64 = 30_000;
 const max_poll_yield_ms: u64 = 300_000;
 const output_limit: usize = 1024 * 1024;
+const output_projection_limit: usize = 1024 * 1024;
+const output_projection_omitted = "\n[... live output omitted while the consumer was unavailable ...]\n";
 
 fn clampInitialYield(value: u64) u64 {
     return @max(initial_min_yield_ms, @min(max_yield_ms, value));
@@ -380,21 +381,22 @@ fn clampPollYield(value: u64) u64 {
     return @max(empty_min_yield_ms, @min(max_poll_yield_ms, value));
 }
 
-fn cloneOutputSink(alloc: Allocator, requested: ?Manager.OutputSink) !?Manager.OutputSink {
-    var sink = requested orelse return null;
-    if (sink.lifecycle_id) |id| {
-        sink.lifecycle_id = .{
-            .turn_id = id.turn_id,
-            .call_id = try alloc.dupe(u8, id.call_id),
-        };
-    }
-    return sink;
-}
+const OutputProjectionChunk = struct {
+    stream: command_contract.CommandOutputStream,
+    bytes: []u8,
+};
 
-fn freeOutputSink(alloc: Allocator, owned: ?Manager.OutputSink) void {
-    const sink = owned orelse return;
-    if (sink.lifecycle_id) |id| alloc.free(@constCast(id.call_id));
-}
+const OutputProjectionBatch = struct {
+    chunks: std.ArrayList(OutputProjectionChunk) = .empty,
+    stdout_omitted: bool = false,
+    stderr_omitted: bool = false,
+
+    fn deinit(self: *OutputProjectionBatch, alloc: Allocator) void {
+        for (self.chunks.items) |chunk| alloc.free(chunk.bytes);
+        self.chunks.deinit(alloc);
+        self.* = undefined;
+    }
+};
 
 const Process = struct {
     const SnapshotConsumer = enum { model, observer };
@@ -409,7 +411,11 @@ const Process = struct {
     mutex: std.Io.Mutex = .init,
     stdout_buffer: HeadTailBuffer = .{},
     stderr_buffer: HeadTailBuffer = .{},
-    output_sink: ?Manager.OutputSink = null,
+    output_projection_active: bool = false,
+    output_projection_chunks: std.ArrayList(OutputProjectionChunk) = .empty,
+    output_projection_bytes: usize = 0,
+    output_projection_stdout_omitted: bool = false,
+    output_projection_stderr_omitted: bool = false,
     observer_stdout_buffer: HeadTailBuffer = .{},
     observer_stderr_buffer: HeadTailBuffer = .{},
     observer_active: bool = false,
@@ -450,7 +456,6 @@ const Process = struct {
         errdefer alloc.free(command);
         const cwd = try alloc.dupe(u8, request.cwd);
         errdefer alloc.free(cwd);
-        const output_sink = try cloneOutputSink(alloc, request.output_sink);
         return .{
             .alloc = alloc,
             .id = id,
@@ -459,7 +464,7 @@ const Process = struct {
             .stdin = stdin,
             .stdout = stdout,
             .stderr = stderr,
-            .output_sink = output_sink,
+            .output_projection_active = request.output_sink != null,
             .artifact_threshold = if (request.command_artifact_threshold == 0)
                 0
             else
@@ -489,9 +494,14 @@ const Process = struct {
         };
     }
 
-    fn waitUntilDone(self: *Process, yield_ms: u64) bool {
+    fn waitUntilDone(
+        self: *Process,
+        yield_ms: u64,
+        output_sink: ?Manager.OutputSink,
+    ) bool {
         const deadline = io_mod.milliTimestamp() + @as(i64, @intCast(yield_ms));
         while (true) {
+            self.drainOutputProjection(output_sink);
             self.mutex.lockUncancelable(io_mod.getIo());
             const finished = self.done;
             self.mutex.unlock(io_mod.getIo());
@@ -529,48 +539,121 @@ const Process = struct {
         }
     }
 
-    fn setOutputSink(self: *Process, requested: ?Manager.OutputSink) !void {
-        const owned = try cloneOutputSink(self.alloc, requested);
-        errdefer freeOutputSink(self.alloc, owned);
+    fn beginOutputProjection(
+        self: *Process,
+        requested: ?Manager.OutputSink,
+        replay_buffered: bool,
+    ) !void {
+        if (requested == null) return;
         self.mutex.lockUncancelable(io_mod.getIo());
         defer self.mutex.unlock(io_mod.getIo());
-        if (self.output_sink != null) return error.OutputSinkBusy;
-        self.output_sink = owned;
+        if (self.output_projection_active) return error.OutputSinkBusy;
+        self.output_projection_active = true;
+        if (!replay_buffered) return;
+        self.queueReplayBufferLocked(.stdout, self.stdout_buffer);
+        self.queueReplayBufferLocked(.stderr, self.stderr_buffer);
     }
 
-    fn clearOutputSink(self: *Process) void {
+    fn finishOutputProjection(self: *Process, sink: ?Manager.OutputSink) void {
+        if (sink == null) return;
         self.mutex.lockUncancelable(io_mod.getIo());
-        const owned = self.output_sink;
-        self.output_sink = null;
+        self.output_projection_active = false;
+        var batch = self.takeOutputProjectionLocked();
         self.mutex.unlock(io_mod.getIo());
-        freeOutputSink(self.alloc, owned);
+        self.emitOutputProjection(sink.?, &batch);
     }
 
-    fn replayBufferedOutputToSink(self: *Process) void {
+    fn drainOutputProjection(self: *Process, requested: ?Manager.OutputSink) void {
+        const sink = requested orelse return;
         self.mutex.lockUncancelable(io_mod.getIo());
-        defer self.mutex.unlock(io_mod.getIo());
-        self.replayBufferLocked(.stdout, self.stdout_buffer);
-        self.replayBufferLocked(.stderr, self.stderr_buffer);
+        var batch = self.takeOutputProjectionLocked();
+        self.mutex.unlock(io_mod.getIo());
+        self.emitOutputProjection(sink, &batch);
     }
 
-    fn replayBufferLocked(
+    fn queueReplayBufferLocked(
         self: *Process,
         stream: command_contract.CommandOutputStream,
         buffer: HeadTailBuffer,
     ) void {
-        if (buffer.head.items.len > 0) self.emitOutputLocked(stream, buffer.head.items);
+        if (buffer.head.items.len > 0) self.queueOutputLocked(stream, buffer.head.items);
         if (buffer.total > buffer.head.items.len +| buffer.tail.items.len) {
-            self.emitOutputLocked(stream, "\n[... output omitted before observation ...]\n");
+            self.queueOutputLocked(stream, "\n[... output omitted before observation ...]\n");
         }
-        if (buffer.tail.items.len > 0) self.emitOutputLocked(stream, buffer.tail.items);
+        if (buffer.tail.items.len > 0) self.queueOutputLocked(stream, buffer.tail.items);
     }
 
-    fn emitOutputLocked(
+    fn queueOutputLocked(
         self: *Process,
         stream: command_contract.CommandOutputStream,
         bytes: []const u8,
     ) void {
-        const sink = self.output_sink orelse return;
+        if (!self.output_projection_active or bytes.len == 0) return;
+        if (bytes.len > output_projection_limit -| self.output_projection_bytes) {
+            self.markOutputProjectionOmittedLocked(stream);
+            return;
+        }
+        const owned = self.alloc.dupe(u8, bytes) catch {
+            self.markOutputProjectionOmittedLocked(stream);
+            return;
+        };
+        self.output_projection_chunks.append(self.alloc, .{
+            .stream = stream,
+            .bytes = owned,
+        }) catch {
+            self.alloc.free(owned);
+            self.markOutputProjectionOmittedLocked(stream);
+            return;
+        };
+        self.output_projection_bytes += owned.len;
+    }
+
+    fn markOutputProjectionOmittedLocked(
+        self: *Process,
+        stream: command_contract.CommandOutputStream,
+    ) void {
+        switch (stream) {
+            .stdout => self.output_projection_stdout_omitted = true,
+            .stderr => self.output_projection_stderr_omitted = true,
+        }
+    }
+
+    fn takeOutputProjectionLocked(self: *Process) OutputProjectionBatch {
+        const batch = OutputProjectionBatch{
+            .chunks = self.output_projection_chunks,
+            .stdout_omitted = self.output_projection_stdout_omitted,
+            .stderr_omitted = self.output_projection_stderr_omitted,
+        };
+        self.output_projection_chunks = .empty;
+        self.output_projection_bytes = 0;
+        self.output_projection_stdout_omitted = false;
+        self.output_projection_stderr_omitted = false;
+        return batch;
+    }
+
+    fn emitOutputProjection(
+        self: *Process,
+        sink: Manager.OutputSink,
+        batch: *OutputProjectionBatch,
+    ) void {
+        defer batch.deinit(self.alloc);
+        for (batch.chunks.items) |chunk| {
+            self.emitOutputChunk(sink, chunk.stream, chunk.bytes);
+        }
+        if (batch.stdout_omitted) {
+            self.emitOutputChunk(sink, .stdout, output_projection_omitted);
+        }
+        if (batch.stderr_omitted) {
+            self.emitOutputChunk(sink, .stderr, output_projection_omitted);
+        }
+    }
+
+    fn emitOutputChunk(
+        _: *Process,
+        sink: Manager.OutputSink,
+        stream: command_contract.CommandOutputStream,
+        bytes: []const u8,
+    ) void {
         sink.callback(sink.context, sink.lifecycle_id, stream, bytes) catch |err| {
             debug_trace.logf(
                 "command_output",
@@ -730,7 +813,8 @@ const Process = struct {
         self.artifact_stderr_pending.deinit(self.alloc);
         self.alloc.free(self.command);
         self.alloc.free(self.cwd);
-        freeOutputSink(self.alloc, self.output_sink);
+        var projection = self.takeOutputProjectionLocked();
+        projection.deinit(self.alloc);
         self.stdout_buffer.deinit(self.alloc);
         self.stderr_buffer.deinit(self.alloc);
         self.observer_stdout_buffer.deinit(self.alloc);
@@ -764,7 +848,7 @@ const Process = struct {
                     self.observer_stdout_buffer.append(self.alloc, buffer[0..count]) catch {};
             }
             self.appendArtifactLocked(stderr, buffer[0..count]);
-            self.emitOutputLocked(if (stderr) .stderr else .stdout, buffer[0..count]);
+            self.queueOutputLocked(if (stderr) .stderr else .stdout, buffer[0..count]);
             self.mutex.unlock(io_mod.getIo());
         }
         self.mutex.lockUncancelable(io_mod.getIo());
@@ -926,7 +1010,7 @@ fn utf8SafeTail(bytes: []const u8, limit: usize) []const u8 {
 
 const TestOutputCapture = struct {
     mutex: std.Io.Mutex = .init,
-    bytes: [256]u8 = undefined,
+    bytes: [4096]u8 = undefined,
     len: usize = 0,
     saw_expected_lifecycle: bool = false,
 
@@ -961,10 +1045,68 @@ const TestOutputCapture = struct {
         try std.testing.expectEqualStrings(expected, self.bytes[0..self.len]);
     }
 
+    fn expectPrefix(self: *TestOutputCapture, expected: []const u8) !void {
+        self.mutex.lockUncancelable(std.testing.io);
+        defer self.mutex.unlock(std.testing.io);
+        try std.testing.expect(self.len >= expected.len);
+        try std.testing.expectEqualStrings(expected, self.bytes[0..expected.len]);
+    }
+
     fn expectLifecycle(self: *TestOutputCapture) !void {
         self.mutex.lockUncancelable(std.testing.io);
         defer self.mutex.unlock(std.testing.io);
         try std.testing.expect(self.saw_expected_lifecycle);
+    }
+};
+
+const BlockingOutputCapture = struct {
+    started: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    release: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
+    fn callback(
+        raw: *anyopaque,
+        _: ?types.ToolLifecycleId,
+        _: command_contract.CommandOutputStream,
+        _: []const u8,
+    ) !void {
+        const self: *BlockingOutputCapture = @ptrCast(@alignCast(raw));
+        self.started.store(true, .release);
+        while (!self.release.load(.acquire)) io_mod.sleep(std.time.ns_per_ms);
+    }
+};
+
+const BlockingExecContext = struct {
+    manager: *Manager,
+    capture: *BlockingOutputCapture,
+    finished: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
+    fn run(self: *BlockingExecContext) void {
+        var result = self.manager.exec(std.heap.c_allocator, .{
+            .command = "printf blocked; sleep 5",
+            .cwd = "/tmp",
+            .yield_time_ms = 5_000,
+            .output_sink = .{
+                .context = @ptrCast(self.capture),
+                .callback = BlockingOutputCapture.callback,
+            },
+        }) catch {
+            self.finished.store(true, .release);
+            return;
+        };
+        result.deinit(std.heap.c_allocator);
+        self.finished.store(true, .release);
+    }
+};
+
+const TerminateContext = struct {
+    manager: *Manager,
+    process_id: u64,
+    result: bool = false,
+    finished: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
+    fn run(self: *TerminateContext) void {
+        self.result = self.manager.terminate(self.process_id);
+        self.finished.store(true, .release);
     }
 };
 
@@ -1002,7 +1144,7 @@ test "unified exec projects live and between-poll output through one sink" {
     };
 
     var first = try manager.exec(std.testing.allocator, .{
-        .command = "printf ready; sleep 1; printf late; sleep 1",
+        .command = "printf ready; sleep 1; i=1; while [ \"$i\" -le 60 ]; do printf 'chunk_%02d\\n' \"$i\"; sleep 0.01; i=$((i+1)); done; sleep 1",
         .cwd = "/tmp",
         .yield_time_ms = 250,
         .output_sink = sink,
@@ -1013,7 +1155,7 @@ test "unified exec projects live and between-poll output through one sink" {
     try capture.expectLifecycle();
 
     capture.reset();
-    io_mod.sleep(1100 * std.time.ns_per_ms);
+    io_mod.sleep(1050 * std.time.ns_per_ms);
     try capture.expect("");
 
     var second = try manager.writeStdin(std.testing.allocator, .{
@@ -1023,10 +1165,51 @@ test "unified exec projects live and between-poll output through one sink" {
         .output_sink = sink,
     });
     defer second.deinit(std.testing.allocator);
-    try std.testing.expectEqualStrings("late", second.stdout);
-    try capture.expect("late");
+    try std.testing.expect(std.mem.find(u8, second.stdout, "chunk_") != null);
+    try capture.expectPrefix(second.stdout);
     try capture.expectLifecycle();
     try std.testing.expect(manager.terminate(process_id));
+}
+
+test "blocked output sink does not hold process control or reader threads" {
+    if (!Manager.supported()) return error.SkipZigTest;
+    var manager = Manager.init(std.heap.c_allocator);
+    defer manager.deinit();
+    var capture = BlockingOutputCapture{};
+    var exec_context = BlockingExecContext{
+        .manager = &manager,
+        .capture = &capture,
+    };
+    const exec_thread = try std.Thread.spawn(.{}, BlockingExecContext.run, .{&exec_context});
+
+    const started_deadline = io_mod.milliTimestamp() + 2_000;
+    while (!capture.started.load(.acquire) and io_mod.milliTimestamp() < started_deadline) {
+        io_mod.sleep(std.time.ns_per_ms);
+    }
+    if (!capture.started.load(.acquire)) {
+        capture.release.store(true, .release);
+        exec_thread.join();
+        return error.TestExpectedEqual;
+    }
+
+    var terminate_context = TerminateContext{ .manager = &manager, .process_id = 1 };
+    const terminate_thread = std.Thread.spawn(.{}, TerminateContext.run, .{&terminate_context}) catch |err| {
+        capture.release.store(true, .release);
+        exec_thread.join();
+        return err;
+    };
+    const control_deadline = io_mod.milliTimestamp() + 2_000;
+    while (!terminate_context.finished.load(.acquire) and io_mod.milliTimestamp() < control_deadline) {
+        io_mod.sleep(std.time.ns_per_ms);
+    }
+    const control_finished_before_sink_release = terminate_context.finished.load(.acquire);
+    capture.release.store(true, .release);
+    terminate_thread.join();
+    exec_thread.join();
+
+    try std.testing.expect(control_finished_before_sink_release);
+    try std.testing.expect(terminate_context.result);
+    try std.testing.expect(exec_context.finished.load(.acquire));
 }
 
 test "unified exec returns short commands synchronously" {

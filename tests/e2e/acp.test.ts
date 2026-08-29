@@ -2253,9 +2253,11 @@ describe("acp: model-independent", () => {
     async () => {
       const root = createShortIsolatedRoot("fx-acp-terminal-");
       const toolCallId = "acp_terminal_native_1";
+      const command =
+        "printf ACP_PUBLIC_EXEC_; sleep 0.1; printf NATIVE; printf '\\344\\270'; sleep 0.1; printf '\\255\\377'";
       const gateway = startFakeGateway([
         fakeGatewayToolCall(toolCallId, "exec_command", {
-          cmd: "printf ACP_PUBLIC_EXEC_; sleep 0.1; printf NATIVE",
+          cmd: command,
         }),
         finalText("ACP exec complete"),
       ]);
@@ -2288,7 +2290,7 @@ describe("acp: model-independent", () => {
         const started = updates.find((update: any) => update.sessionUpdate === "tool_call");
         expect(started.title).toContain("printf ACP_PUBLIC_EXEC_");
         expect(started.rawInput).toEqual({
-          cmd: "printf ACP_PUBLIC_EXEC_; sleep 0.1; printf NATIVE",
+          cmd: command,
         });
         const outputUpdates = updates.filter(
           (update: any) => update.rawOutput?.stream === "stdout",
@@ -2296,6 +2298,10 @@ describe("acp: model-independent", () => {
         expect(outputUpdates.length).toBeGreaterThanOrEqual(2);
         expect(outputUpdates.map((update: any) => update.rawOutput.chunk).join(""))
           .toContain("ACP_PUBLIC_EXEC_NATIVE");
+        expect(outputUpdates.map((update: any) => update.rawOutput.chunk).join(""))
+          .toContain("中");
+        expect(outputUpdates.map((update: any) => update.rawOutput.chunk).join(""))
+          .toContain("\\xff");
         expect(outputUpdates.at(-1)?.rawOutput.aggregatedOutput)
           .toContain("ACP_PUBLIC_EXEC_NATIVE");
         expect(outputUpdates.at(-1)?.content?.[0]?.content?.text)
