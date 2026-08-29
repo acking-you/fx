@@ -115,6 +115,15 @@ pub fn run(terminal: anytype, should_exit: *bool, poll_timeout_ms: i32, callback
             return .input_closed;
         }
 
+        // A worker wake is already drained by TerminalState.pollInput. Commit
+        // any pending UI mutations, then immediately return to fact
+        // collection instead of waiting for another cadence timeout.
+        if (poll_result.woken) {
+            try callbacks.settle_delivery_epoch(callbacks.ctx);
+            try callbacks.commit_frame(callbacks.ctx);
+            continue;
+        }
+
         try callbacks.settle_delivery_epoch(callbacks.ctx);
         try callbacks.commit_frame(callbacks.ctx);
     }
@@ -349,6 +358,36 @@ test "event loop settles a facts-only delivery epoch before committing" {
 
     try std.testing.expectEqual(ExitCause.requested_exit, exit_cause);
     try std.testing.expectEqualStrings("tsc", trace.bytes[0..trace.len]);
+}
+
+test "event loop returns to fact collection immediately after a worker wake" {
+    const Terminal = struct {
+        polls: *usize,
+
+        fn pollInput(self: @This(), _: i32) !shell_runtime.PollResult {
+            self.polls.* += 1;
+            return if (self.polls.* == 1) .{ .woken = true } else .{ .hung_up = true };
+        }
+
+        fn read(_: @This(), _: []u8) !usize {
+            return error.UnexpectedRead;
+        }
+    };
+
+    var should_exit = false;
+    var polls: usize = 0;
+    var trace = EventLoopTestTrace{ .should_exit = &should_exit };
+    const exit_cause = try run(Terminal{ .polls = &polls }, &should_exit, 50, .{
+        .ctx = &trace,
+        .collect_facts = collectEventLoopTestFacts,
+        .next_collected_byte = noCollectedEventLoopByte,
+        .handle_byte = rejectUnexpectedEventLoopByte,
+        .settle_delivery_epoch = settleEventLoopTestDeliveryEpoch,
+        .commit_frame = commitEventLoopTestFrameWithoutExit,
+    });
+
+    try std.testing.expectEqual(ExitCause.input_closed, exit_cause);
+    try std.testing.expectEqualStrings("tsct", trace.bytes[0..trace.len]);
 }
 
 test "event loop resolves a dynamic poll timeout" {

@@ -1519,7 +1519,7 @@ test "surface footer measurement preserves the narrow tool activity projection" 
     switch (measurement.activity_projection) {
         .turn_thinking => |thinking| {
             try std.testing.expectEqual(ActivityProjection.Tone.thinking, thinking.tone);
-            try std.testing.expectEqualStrings("• Thinking", thinking.label);
+            try std.testing.expectEqualStrings("⠋ Working", thinking.label);
         },
         .none, .tool_slot => return error.TestUnexpectedResult,
     }
@@ -1629,7 +1629,7 @@ test "surface footer measurement keeps clipped command status transcript-owned" 
     switch (measurement.activity_projection) {
         .turn_thinking => |thinking| {
             try std.testing.expectEqual(ActivityProjection.Tone.thinking, thinking.tone);
-            try std.testing.expectEqualStrings("• Thinking (↑10 ↓20)", thinking.label);
+            try std.testing.expectEqualStrings("⠋ Working (↑10 ↓20)", thinking.label);
         },
         .none, .tool_slot => return error.TestUnexpectedResult,
     }

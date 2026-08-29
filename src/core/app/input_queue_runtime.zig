@@ -505,6 +505,12 @@ pub fn Runtime(comptime App: type) type {
             defer worker_runtime.freeQueuedPromptDrafts(app.alloc, drafts);
             if (drafts.len == 0) return true;
             if (!try app.worker.replaceQueuedPromptDrafts(app.alloc, drafts)) return false;
+            // The queued preview is cached by the render coordinator and must
+            // be refreshed when a draft is edited without changing the queue
+            // length.
+            if (comptime @hasField(App, "queued_prompt_preview_count")) {
+                app.queued_prompt_preview_count = 0;
+            }
             debug_trace.eventf("input", "queue_review_batch_committed", .{}, "updated={d}", .{drafts.len});
             return true;
         }

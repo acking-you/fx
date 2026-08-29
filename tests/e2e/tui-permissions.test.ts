@@ -321,8 +321,7 @@ async function sendHexUntilPane(
 
 function normalizeVolatileStatusRows(grid: string[]): string[] {
   return grid.map((line) =>
-    /^• Streaming \([^)]*\)$/.test(line) ||
-      isVolatileTokenStatusRow(line)
+    isVolatileTokenStatusRow(line)
       ? "<status>"
       : line
   );

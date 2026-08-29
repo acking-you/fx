@@ -28,6 +28,7 @@ const session_log = @import("../core/session/session_log.zig");
 const session_store = @import("../core/session/session_store.zig");
 const session_runtime = @import("../core/session/session.zig");
 const session_usage = @import("../core/session/session_usage.zig");
+const image_attachments = @import("../core/images/image_attachments.zig");
 const runtime_compaction = @import("../core/agent/runtime/compaction.zig");
 const subagent_agent_adapter = @import("../core/subagent/agent_adapter.zig");
 const subagent_domain = @import("../core/subagent/domain.zig");
@@ -63,6 +64,7 @@ else
     struct {};
 const types = @import("../core/shared/types.zig");
 const worker_runtime = @import("../core/agent/worker_runtime.zig");
+const unified_exec_runtime = @import("../core/execution/unified_exec.zig");
 
 const Allocator = std.mem.Allocator;
 const ErrorCode = jsonrpc.ErrorCode;
@@ -459,6 +461,24 @@ fn handleCompactCommand(
     defer types.freeHistoryTurnSlice(ctx.alloc, history);
     var messages: std.ArrayList(ChatMessage) = .empty;
     defer messages.deinit(ctx.alloc);
+    // Keep ACP's compaction input aligned with the interactive TUI: the
+    // provider-owned checkpoint represents the conversation, while the
+    // current system prompt and model-specific overlay remain stable context
+    // that must be included when the remote summary is generated.
+    if (ctx.state.cfg.prompt_policy.system_prompt.len > 0) {
+        try messages.append(ctx.alloc, .{
+            .role = .system,
+            .content = ctx.state.cfg.prompt_policy.system_prompt,
+        });
+    }
+    if (ctx.state.cfg.prompt_policy.modelPromptOverlay(session.model)) |overlay| {
+        if (overlay.len > 0) {
+            try messages.append(ctx.alloc, .{
+                .role = .system,
+                .content = overlay,
+            });
+        }
+    }
     try session_runtime.appendHistoryChatMessages(ctx.alloc, &messages, history);
 
     var tool_projection = try ctx.state.cfg.mode_registry.buildModelToolProjection(
@@ -563,10 +583,12 @@ pub fn handlePrompt(
     };
 
     var prompt_input = parsePromptInput(alloc, params) catch |err| switch (err) {
-        error.UnsupportedPromptImage => return .{
+        error.InvalidPromptImage,
+        error.ImageTooLarge,
+        => return .{
             .rpc_error = .{
                 .code = ErrorCode.invalid_params,
-                .message = "Image prompt blocks are not supported",
+                .message = "Invalid image prompt block",
             },
         },
         else => return err,
@@ -574,7 +596,7 @@ pub fn handlePrompt(
     defer prompt_input.deinit(alloc);
     const prompt_text = prompt_input.text;
 
-    if (prompt_input.continue_recovery and prompt_text.len != 0) {
+    if (prompt_input.continue_recovery and (prompt_text.len != 0 or prompt_input.images.len != 0)) {
         return .{
             .rpc_error = .{
                 .code = ErrorCode.invalid_params,
@@ -582,13 +604,21 @@ pub fn handlePrompt(
             },
         };
     }
-    if (!prompt_input.continue_recovery and prompt_text.len == 0) {
+    if (!prompt_input.continue_recovery and prompt_text.len == 0 and prompt_input.images.len == 0) {
         return .{
             .rpc_error = .{
                 .code = ErrorCode.invalid_params,
                 .message = "Empty prompt",
             },
         };
+    }
+    if (comptime host_target.is_wasm) {
+        if (prompt_input.images.len > 0) {
+            return .{ .rpc_error = .{
+                .code = ErrorCode.invalid_params,
+                .message = "Image prompts are unavailable in this WASM runtime",
+            } };
+        }
     }
 
     try refreshProjectContext(
@@ -676,7 +706,25 @@ pub fn handlePrompt(
     );
     defer alloc.free(root_user_intent_context);
 
-    const current_images = if (recovery_checkpoint) |checkpoint| checkpoint.user.images else &.{};
+    var current_images: []types.ImageAttachment = if (recovery_checkpoint) |checkpoint| checkpoint.user.images else &.{};
+    var current_images_owned = false;
+    if (recovery_checkpoint == null and prompt_input.images.len > 0) {
+        current_images = materializeAcpImages(alloc, session, prompt_input.images) catch |err| switch (err) {
+            error.ImageTooLarge,
+            error.UnsupportedImageType,
+            error.ImagePreparationFailed,
+            error.ImageSnapshotMediaTypeMismatch,
+            => return .{ .rpc_error = .{
+                .code = ErrorCode.invalid_params,
+                .message = "Image prompt could not be prepared",
+            } },
+            else => return err,
+        };
+        current_images_owned = true;
+    }
+    defer if (current_images_owned) {
+        image_attachments.discardImageAttachmentSlice(alloc, current_images);
+    };
     const authorized_image_catalog = try session.session_rt.snapshotImageCatalog(alloc, current_images);
     defer types.freeImageAttachmentSlice(alloc, authorized_image_catalog);
 
@@ -727,6 +775,7 @@ pub fn handlePrompt(
         writable.childCapability() catch null
     else
         null;
+    var process_succeeded = false;
     agent_runtime.processQueuedPrompt(&deps, null, .{
         .view = state.lifecycle_view,
         .scope = .{
@@ -742,6 +791,14 @@ pub fn handlePrompt(
             return err;
         }
     };
+    process_succeeded = ctx.stop_reason != .refused;
+
+    if (current_images_owned and process_succeeded) {
+        // The completed turn has persisted the snapshot metadata in history;
+        // release only the temporary attachment structure here.
+        types.freeImageAttachmentSlice(alloc, current_images);
+        current_images_owned = false;
+    }
 
     if (session.cancel_flag.load(.seq_cst)) {
         ctx.stop_reason = .cancelled;
@@ -842,19 +899,21 @@ pub fn handleTurnSteer(
             .{ .code = ErrorCode.invalid_params, .message = "Invalid expectedTurnId" },
         );
     var prompt_input = parsePromptInput(alloc, params_raw) catch |err| switch (err) {
-        error.UnsupportedPromptImage => return state.writer.writeError(
+        error.InvalidPromptImage,
+        error.ImageTooLarge,
+        => return state.writer.writeError(
             alloc,
             msg.id,
-            .{ .code = ErrorCode.invalid_params, .message = "Image steer blocks are not supported" },
+            .{ .code = ErrorCode.invalid_params, .message = "Invalid image steer block" },
         ),
         else => return err,
     };
     defer prompt_input.deinit(alloc);
-    if (prompt_input.continue_recovery or prompt_input.text.len == 0) {
+    if (prompt_input.continue_recovery or prompt_input.text.len == 0 or prompt_input.images.len > 0) {
         return state.writer.writeError(
             alloc,
             msg.id,
-            .{ .code = ErrorCode.invalid_params, .message = "Steer input must contain text" },
+            .{ .code = ErrorCode.invalid_params, .message = "Steer input must contain text only" },
         );
     }
 
@@ -937,6 +996,209 @@ pub fn handleTurnStatus(
     var response: std.Io.Writer.Allocating = .init(alloc);
     defer response.deinit();
     try writeTurnStatusJson(&response.writer, state);
+    try state.writer.writeResponse(alloc, msg.id, response.writer.buffered());
+}
+
+const UnifiedExecWriteInput = struct {
+    session_id: []u8,
+    process_id: u64,
+    chars: []u8,
+    yield_time_ms: u64 = 250,
+    max_output_tokens: ?u64 = null,
+
+    fn deinit(self: *UnifiedExecWriteInput, alloc: Allocator) void {
+        alloc.free(self.session_id);
+        alloc.free(self.chars);
+        self.* = undefined;
+    }
+};
+
+fn parseUnifiedExecWriteInput(
+    alloc: Allocator,
+    state: *server.ServerState,
+    raw: ?[]const u8,
+) !UnifiedExecWriteInput {
+    const params_raw = raw orelse return error.MissingParams;
+    const parsed = std.json.parseFromSlice(std.json.Value, alloc, params_raw, .{}) catch
+        return error.InvalidParams;
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidParams;
+
+    const session_value = parsed.value.object.get("sessionId") orelse return error.MissingSessionId;
+    if (session_value != .string) return error.InvalidSessionId;
+    const active = state.active_session orelse return error.NoActiveSession;
+    if (!std.mem.eql(u8, active.session_id, session_value.string)) return error.SessionMismatch;
+
+    const process_value = parsed.value.object.get("processId") orelse return error.MissingProcessId;
+    if (process_value != .integer or process_value.integer < 1) return error.InvalidProcessId;
+    const process_id = std.math.cast(u64, process_value.integer) orelse return error.InvalidProcessId;
+
+    if (parsed.value.object.get("chars")) |value| {
+        if (value != .string) return error.InvalidChars;
+    }
+    const chars = if (parsed.value.object.get("chars")) |value| value.string else "";
+
+    var yield_time_ms: u64 = 250;
+    if (parsed.value.object.get("yieldTimeMs")) |value| {
+        if (value != .integer or value.integer < 0) return error.InvalidYieldTime;
+        yield_time_ms = std.math.cast(u64, value.integer) orelse return error.InvalidYieldTime;
+    }
+
+    var max_output_tokens: ?u64 = null;
+    if (parsed.value.object.get("maxOutputTokens")) |value| {
+        if (value != .integer or value.integer < 0) return error.InvalidMaxOutputTokens;
+        max_output_tokens = std.math.cast(u64, value.integer) orelse return error.InvalidMaxOutputTokens;
+    }
+
+    const owned_session_id = try alloc.dupe(u8, session_value.string);
+    errdefer alloc.free(owned_session_id);
+    const owned_chars = try alloc.dupe(u8, chars);
+    errdefer alloc.free(owned_chars);
+    return .{
+        .session_id = owned_session_id,
+        .process_id = process_id,
+        .chars = owned_chars,
+        .yield_time_ms = yield_time_ms,
+        .max_output_tokens = max_output_tokens,
+    };
+}
+
+fn writeUnifiedExecError(
+    state: *server.ServerState,
+    alloc: Allocator,
+    msg: *jsonrpc.Message,
+    err: anyerror,
+) !void {
+    const code = switch (err) {
+        error.NoActiveSession,
+        error.SessionMismatch,
+        error.UnknownProcessId,
+        error.ProcessExited,
+        error.ProcessStdinClosed,
+        error.WriteWouldBlock,
+        => ErrorCode.invalid_request,
+        else => ErrorCode.invalid_params,
+    };
+    const message = switch (err) {
+        error.NoActiveSession => "No active session",
+        error.SessionMismatch => "Session does not match the active session",
+        error.UnknownProcessId => "Unknown Unified Exec process id",
+        error.ProcessExited => "Unified Exec process has already exited",
+        error.ProcessStdinClosed => "Unified Exec process stdin is closed",
+        error.WriteWouldBlock => "Unified Exec process stdin is not ready",
+        error.MissingParams => "Missing params",
+        error.MissingSessionId => "Missing sessionId",
+        error.InvalidSessionId => "sessionId must be a string",
+        error.MissingProcessId => "Missing processId",
+        error.InvalidProcessId => "processId must be a positive integer",
+        error.InvalidChars => "chars must be a string",
+        error.InvalidYieldTime => "yieldTimeMs must be a non-negative integer",
+        error.InvalidMaxOutputTokens => "maxOutputTokens must be a non-negative integer",
+        error.InvalidParams => "Invalid params",
+        else => @errorName(err),
+    };
+    try state.writer.writeError(alloc, msg.id, .{ .code = code, .message = message });
+}
+
+fn writeUnifiedExecOptionalInt(writer: *std.Io.Writer, value: anytype) !void {
+    if (value) |number| {
+        try writer.print("{d}", .{number});
+    } else {
+        try writer.writeAll("null");
+    }
+}
+
+fn writeUnifiedExecResult(
+    writer: *std.Io.Writer,
+    alloc: Allocator,
+    session_id: []const u8,
+    requested_process_id: u64,
+    result: unified_exec_runtime.Manager.Result,
+) !void {
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(alloc);
+    try output.appendSlice(alloc, result.stdout);
+    if (result.stderr.len > 0) {
+        if (output.items.len > 0) try output.append(alloc, '\n');
+        try output.appendSlice(alloc, result.stderr);
+    }
+
+    try writer.writeAll("{\"sessionId\":");
+    try jsonrpc.writeJsonStr(session_id, writer);
+    try writer.print(",\"processId\":{d},\"status\":\"{s}\",\"output\":", .{
+        requested_process_id,
+        @tagName(result.status),
+    });
+    try jsonrpc.writeJsonStr(output.items, writer);
+    try writer.writeAll(",\"wallTimeSeconds\":");
+    try writer.print("{d:.3}", .{result.wall_time_seconds});
+    try writer.writeAll(",\"exitCode\":");
+    try writeUnifiedExecOptionalInt(writer, result.exit_code);
+    try writer.writeAll(",\"signal\":");
+    try writeUnifiedExecOptionalInt(writer, result.signal);
+    try writer.print(",\"stdoutBytes\":{d},\"stderrBytes\":{d},\"truncated\":{s}", .{
+        result.stdout_bytes,
+        result.stderr_bytes,
+        if (result.stdout_truncated or result.stderr_truncated) "true" else "false",
+    });
+    if (result.command) |command| {
+        try writer.writeAll(",\"command\":");
+        try jsonrpc.writeJsonStr(command, writer);
+    }
+    if (result.cwd) |cwd| {
+        try writer.writeAll(",\"cwd\":");
+        try jsonrpc.writeJsonStr(cwd, writer);
+    }
+    try writer.writeByte('}');
+}
+
+/// Writes to or polls an existing Unified Exec process without routing the
+/// request through the model. This is intentionally an fx extension: the
+/// native manager owns numeric process IDs and plain pipes, not Codex's
+/// connection-scoped PTY handles.
+pub fn handleUnifiedExecWriteStdin(
+    state: *server.ServerState,
+    alloc: Allocator,
+    msg: *jsonrpc.Message,
+) !void {
+    var input = parseUnifiedExecWriteInput(alloc, state, msg.params_raw) catch |err| {
+        return writeUnifiedExecError(state, alloc, msg, err);
+    };
+    defer input.deinit(alloc);
+    var result = state.unified_exec.writeStdin(alloc, .{
+        .process_id = input.process_id,
+        .chars = input.chars,
+        .yield_time_ms = input.yield_time_ms,
+        .max_output_tokens = input.max_output_tokens,
+    }) catch |err| {
+        return writeUnifiedExecError(state, alloc, msg, err);
+    };
+    defer result.deinit(alloc);
+
+    var response: std.Io.Writer.Allocating = .init(alloc);
+    defer response.deinit();
+    try writeUnifiedExecResult(&response.writer, alloc, input.session_id, input.process_id, result);
+    try state.writer.writeResponse(alloc, msg.id, response.writer.buffered());
+}
+
+pub fn handleUnifiedExecKill(
+    state: *server.ServerState,
+    alloc: Allocator,
+    msg: *jsonrpc.Message,
+) !void {
+    var input = parseUnifiedExecWriteInput(alloc, state, msg.params_raw) catch |err| {
+        return writeUnifiedExecError(state, alloc, msg, err);
+    };
+    defer input.deinit(alloc);
+    if (!state.unified_exec.terminate(input.process_id)) {
+        return writeUnifiedExecError(state, alloc, msg, error.UnknownProcessId);
+    }
+
+    var response: std.Io.Writer.Allocating = .init(alloc);
+    defer response.deinit();
+    try response.writer.writeAll("{\"sessionId\":");
+    try jsonrpc.writeJsonStr(input.session_id, &response.writer);
+    try response.writer.print(",\"processId\":{d},\"terminated\":true}}", .{input.process_id});
     try state.writer.writeResponse(alloc, msg.id, response.writer.buffered());
 }
 
@@ -1221,6 +1483,7 @@ fn buildAgentConfig(state: *server.ServerState, session: *server.ActiveSessionSt
 
 const ParsedPromptInput = struct {
     text: []u8,
+    images: []AcpImageInput = &.{},
     continue_recovery: bool = false,
     targets: []context_contract.ApplicableTarget = &.{},
     omissions: []context_contract.ContextOmissionInput = &.{},
@@ -1228,6 +1491,8 @@ const ParsedPromptInput = struct {
 
     fn deinit(self: *ParsedPromptInput, alloc: Allocator) void {
         alloc.free(self.text);
+        for (self.images) |*image| image.deinit(alloc);
+        if (self.images.len > 0) alloc.free(self.images);
         for (self.targets) |target| alloc.free(@constCast(target.path));
         if (self.targets.len > 0) alloc.free(self.targets);
         for (self.omissions) |omission| alloc.free(@constCast(omission.source));
@@ -1235,6 +1500,54 @@ const ParsedPromptInput = struct {
         self.* = undefined;
     }
 };
+
+const AcpImageInput = struct {
+    data: []u8,
+    media_type: ?[]u8 = null,
+
+    fn deinit(self: *AcpImageInput, alloc: Allocator) void {
+        alloc.free(self.data);
+        if (self.media_type) |value| alloc.free(value);
+        self.* = undefined;
+    }
+};
+
+fn materializeAcpImages(
+    alloc: Allocator,
+    session: *server.ActiveSessionState,
+    inputs: []const AcpImageInput,
+) ![]types.ImageAttachment {
+    const catalog = try session.session_rt.snapshotImageCatalog(alloc, &.{});
+    defer types.freeImageAttachmentSlice(alloc, catalog);
+    const bounds = try image_attachments.calculate_next_image_id(catalog);
+    const snapshot_dir = try session_store.imageSnapshotStorageDir(
+        alloc,
+        if (session.store) |*store| store.sessions_dir else null,
+        if (session.writable) |*writable| writable.active_id else null,
+        &session.image_snapshot_temp_dir,
+    );
+    defer alloc.free(snapshot_dir);
+
+    const attachments = try alloc.alloc(types.ImageAttachment, inputs.len);
+    var materialized: usize = 0;
+    errdefer {
+        image_attachments.discardImageAttachmentSlice(alloc, attachments[0..materialized]);
+        alloc.free(attachments);
+    }
+    for (inputs, 0..) |input, index| {
+        const image_id = std.math.add(usize, bounds.next_id, index) catch
+            return error.InvalidImageId;
+        attachments[index] = try image_attachments.createImageAttachmentFromBytes(
+            alloc,
+            snapshot_dir,
+            image_id,
+            input.data,
+            if (input.media_type) |value| value else null,
+        );
+        materialized += 1;
+    }
+    return attachments;
+}
 
 fn parsePromptInput(alloc: Allocator, params_json: []const u8) !ParsedPromptInput {
     const parsed = std.json.parseFromSlice(std.json.Value, alloc, params_json, .{}) catch
@@ -1270,6 +1583,11 @@ fn parsePromptInput(alloc: Allocator, params_json: []const u8) !ParsedPromptInpu
         for (omissions.items) |omission| alloc.free(@constCast(omission.source));
         omissions.deinit(alloc);
     }
+    var images: std.ArrayList(AcpImageInput) = .empty;
+    defer {
+        for (images.items) |*image| image.deinit(alloc);
+        images.deinit(alloc);
+    }
 
     for (prompt_arr.array.items) |block| {
         if (block != .object) continue;
@@ -1284,7 +1602,32 @@ fn parsePromptInput(alloc: Allocator, params_json: []const u8) !ParsedPromptInpu
                 }
             }
         } else if (std.mem.eql(u8, block_type.string, "image")) {
-            return error.UnsupportedPromptImage;
+            const data_value = block.object.get("data") orelse
+                return error.InvalidPromptImage;
+            if (data_value != .string or data_value.string.len == 0) {
+                return error.InvalidPromptImage;
+            }
+            const encoded = data_value.string;
+            const decoded_len = std.base64.standard.Decoder.calcSizeForSlice(encoded) catch
+                return error.InvalidPromptImage;
+            if (decoded_len == 0 or decoded_len > image_attachments.max_image_bytes) {
+                return error.ImageTooLarge;
+            }
+            const decoded = try alloc.alloc(u8, decoded_len);
+            var decoded_owned = true;
+            errdefer if (decoded_owned) alloc.free(decoded);
+            std.base64.standard.Decoder.decode(decoded, encoded) catch
+                return error.InvalidPromptImage;
+
+            var media_type: ?[]u8 = null;
+            if (block.object.get("mimeType") orelse block.object.get("mediaType")) |value| {
+                if (value != .string or value.string.len == 0) return error.InvalidPromptImage;
+                media_type = try alloc.dupe(u8, value.string);
+            }
+            errdefer if (media_type) |value| alloc.free(value);
+            try images.append(alloc, .{ .data = decoded, .media_type = media_type });
+            decoded_owned = false;
+            media_type = null;
         } else if (std.mem.eql(u8, block_type.string, "resource")) {
             if (block.object.get("resource")) |resource| {
                 if (resource == .object) {
@@ -1336,6 +1679,7 @@ fn parsePromptInput(alloc: Allocator, params_json: []const u8) !ParsedPromptInpu
 
     var result = ParsedPromptInput{
         .text = try alloc.dupe(u8, text_buf.items),
+        .images = try images.toOwnedSlice(alloc),
         .continue_recovery = continue_recovery,
     };
     errdefer result.deinit(alloc);
@@ -3226,10 +3570,15 @@ test "parsePromptInput accepts explicit recovery continuation metadata" {
     try std.testing.expect(result.continue_recovery);
 }
 
-test "parsePromptInput rejects image blocks" {
+test "parsePromptInput accepts image blocks" {
     const alloc = std.testing.allocator;
     const params = "{\"sessionId\":\"s1\",\"prompt\":[{\"type\":\"text\",\"text\":\"Only text\"},{\"type\":\"image\",\"data\":\"aGVsbG8=\",\"mimeType\":\"image/png\"}]}";
-    try std.testing.expectError(error.UnsupportedPromptImage, parsePromptInput(alloc, params));
+    var result = try parsePromptInput(alloc, params);
+    defer result.deinit(alloc);
+    try std.testing.expectEqualStrings("Only text", result.text);
+    try std.testing.expectEqual(@as(usize, 1), result.images.len);
+    try std.testing.expectEqualStrings("hello", result.images[0].data);
+    try std.testing.expectEqualStrings("image/png", result.images[0].media_type.?);
 }
 
 test "parsePromptInput preserves resource text and accepts only local absolute file targets" {

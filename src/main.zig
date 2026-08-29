@@ -146,6 +146,7 @@ const transcript_runtime = @import("ui/transcript/runtime.zig");
 const resume_projection = @import("ui/transcript/resume_projection.zig");
 const assistant_pacer = @import("ui/assistant/pacer.zig");
 const poll_cadence = @import("ui/poll_cadence.zig");
+const terminal_title_runtime = @import("ui/terminal_title_runtime.zig");
 const approval_prompt = @import("core/permissions/approval_prompt.zig");
 
 const Allocator = std.mem.Allocator;
@@ -474,6 +475,33 @@ const App = struct {
         return ui_render.terminalTitleFor(&self.shell.stdout_file);
     }
 
+    fn terminalTitleBusy(self: *Self) bool {
+        return self.stream.active or self.pacer.hasPending() or
+            self.worker.isProcessing() or
+            SessionAppRuntime.responsesCompactionActive(self);
+    }
+
+    pub fn backgroundActivityActive(self: *const Self) bool {
+        return SessionAppRuntime.responsesCompactionActive(self);
+    }
+
+    pub fn setTerminalTitleBase(self: *Self, label: []const u8) void {
+        self.terminal_title_state.setBase(
+            self.terminalTitle(),
+            label,
+            self.terminalTitleBusy(),
+            io_mod.milliTimestamp(),
+        );
+    }
+
+    fn refreshTerminalTitleActivity(self: *Self) void {
+        self.terminal_title_state.sync(
+            self.terminalTitle(),
+            self.terminalTitleBusy(),
+            io_mod.milliTimestamp(),
+        );
+    }
+
     alloc: Allocator,
     terminal: TerminalState = .{},
 
@@ -551,6 +579,12 @@ const App = struct {
     /// Resolved display title for the active session. App owns these bytes;
     /// empty means no title has been derived or restored yet.
     session_title: std.ArrayList(u8) = .empty,
+    terminal_title_state: terminal_title_runtime.State = .{},
+    /// First queued follow-up shown in the live pending-input preview. The
+    /// render path refreshes this only when the queue count changes, so the
+    /// preview does not turn every frame into a mutex-held allocation.
+    queued_prompt_preview: std.ArrayList(u8) = .empty,
+    queued_prompt_preview_count: usize = 0,
     total_input_tokens: u64 = 0,
     total_output_tokens: u64 = 0,
     total_web_search_requests: u64 = 0,
@@ -652,6 +686,13 @@ const App = struct {
 
     pub fn rebindAfterInit(self: *App) void {
         SessionAppRuntime.rebindSubagentHost(self);
+        if (comptime !host_target.is_wasm) {
+            self.terminal.initEventWake() catch |err| {
+                debug_trace.logf("event_loop", "worker_wake_init_failed err={s}", .{@errorName(err)});
+                return;
+            };
+            self.worker.setEventWake(&self.terminal, shell_runtime.TerminalState.notifyEventWake);
+        }
     }
 
     pub fn setNotificationPreferences(
@@ -751,6 +792,8 @@ const App = struct {
         self.terminal_takeover.shutdown(App, self);
         self.releaseTerminal();
         if (self.worker_thread) |thread| thread.join();
+        self.worker.setEventWake(null, null);
+        self.terminal.deinitEventWake();
         self.terminal_takeover.deinit(self.alloc);
         const direct_deinit_disposition = if (capture_resume_handoff)
             self.terminal_direct.deinitSettled(self.alloc)
@@ -784,6 +827,7 @@ const App = struct {
         self.pacer.deinit(self.alloc);
         self.provider_selection.deinit();
         self.session_title.deinit(self.alloc);
+        self.queued_prompt_preview.deinit(self.alloc);
         self.thought_body.deinit(self.alloc);
         SessionAppRuntime.deinitPersistence(self);
         if (self.requested_resume) |*target| {
@@ -920,6 +964,7 @@ const App = struct {
             host_target.is_wasm,
             self.stream.active,
             self.pacer.hasPending(),
+            self.terminal.eventWakeAvailable(),
         );
     }
 
@@ -2634,6 +2679,7 @@ const App = struct {
         } else {
             self.pacer.pause(now_ns);
         }
+        self.refreshTerminalTitleActivity();
     }
 
     pub fn loopCommitFrame(ctx: *anyopaque) !void {

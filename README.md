@@ -140,7 +140,7 @@ fx session resume last
 fx session resume --id <id>
 ```
 
-Each interactive session names its terminal tab. The title prefers the session name, falls back to the workspace name, and keeps the active model as secondary context. Renaming or resuming a session updates the tab, and exiting clears the fx-owned title. Noninteractive commands do not emit terminal-title controls.
+Each interactive session names its terminal tab. The title prefers the session name, falls back to the workspace name, and keeps the active model as secondary context. While a turn is running, the title uses a low-frequency spinner so terminal tabs expose unfinished work without forcing full-frame redraws. Renaming or resuming a session updates the tab, and exiting clears the fx-owned title. Noninteractive commands do not emit terminal-title controls. Submitting another prompt during an active turn adds a queued follow-up for the next turn; it does not steer or interrupt the current request.
 
 Run `/trace` to create a private Markdown diagnostic with logs, session context, runtime state, permissions, and recent activity. On macOS, fx copies the `.md` file to the clipboard; on other platforms, it saves the file and prints its path. Review and redact the trace before sharing it.
 
@@ -151,7 +151,7 @@ fx ask "explain the changes in this repository"
 fx ask --show-thinking "explain the changes in this repository"
 ```
 
-During a turn, reasoning-capable models show their current activity while they work, then keep a compact recent summary in the transcript. Durable provider summaries are replayed as reasoning context when a session resumes. ACP sessions emit `agent_thought_chunk` updates. `fx ask` writes reasoning to stderr with `--show-thinking`, and `fx ask --json` includes a separate `thinking` field when reasoning is present; it is never merged into `output`.
+During a turn, reasoning-capable models show an animated `Working` activity row while no visible response is available; once assistant text streams, that text becomes the progress surface and the redundant status row is hidden. Durable provider summaries are replayed as reasoning context when a session resumes. ACP sessions emit `agent_thought_chunk` updates. `fx ask` writes reasoning to stderr with `--show-thinking`, and `fx ask --json` includes a separate `thinking` field when reasoning is present; it is never merged into `output`.
 
 Inspect usage recorded locally by fx, or query account-wide limits for the
 signed-in Codex subscription:
@@ -184,6 +184,11 @@ fx builds as a native binary or WebAssembly. Applications embedding fx can provi
 | `createFxTerminal()` | Embed the interactive terminal with `fx-term.wasm`. |
 
 The WebAssembly SDK is experimental. See the [WebAssembly SDK](sdk/README.md) and the repository's [ACP usage and fx extensions guide](docs/acp.md).
+
+Native ACP clients can also interact with a running Unified Exec process
+directly through `fx/unifiedExec/writeStdin` and `fx/unifiedExec/kill`; see the
+ACP guide for the session and process ID contract. Vision-capable models accept
+standard ACP base64 image prompt blocks and persist verified image snapshots.
 
 ## Extend fx
 

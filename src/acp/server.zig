@@ -30,6 +30,7 @@ const session_log = @import("../core/session/session_log.zig");
 const session_store = @import("../core/session/session_store.zig");
 const session_runtime = @import("../core/session/session.zig");
 const session_usage = @import("../core/session/session_usage.zig");
+const image_attachments = @import("../core/images/image_attachments.zig");
 const worker_runtime = @import("../core/agent/worker_runtime.zig");
 const background_runtime = @import("../core/background/background_runtime.zig");
 const terminal_client_runtime = @import("../core/terminal/client.zig");
@@ -65,6 +66,8 @@ const AcpMethod = enum {
     fx_turn_steer,
     fx_turn_status,
     fx_background_terminals_list,
+    fx_unified_exec_write_stdin,
+    fx_unified_exec_kill,
     unknown,
 
     fn parse(method: []const u8) AcpMethod {
@@ -82,6 +85,8 @@ const AcpMethod = enum {
         if (std.mem.eql(u8, method, "fx/turn/steer")) return .fx_turn_steer;
         if (std.mem.eql(u8, method, "fx/turn/status")) return .fx_turn_status;
         if (std.mem.eql(u8, method, "fx/backgroundTerminals/list")) return .fx_background_terminals_list;
+        if (std.mem.eql(u8, method, "fx/unifiedExec/writeStdin")) return .fx_unified_exec_write_stdin;
+        if (std.mem.eql(u8, method, "fx/unifiedExec/kill")) return .fx_unified_exec_kill;
         return .unknown;
     }
 
@@ -97,6 +102,8 @@ const AcpMethod = enum {
             .fx_turn_steer,
             .fx_turn_status,
             .fx_background_terminals_list,
+            .fx_unified_exec_write_stdin,
+            .fx_unified_exec_kill,
             => false,
             .session_list,
             .session_remove,
@@ -182,6 +189,7 @@ pub const ActiveSessionState = struct {
     mcp: ?*mcp_runtime.McpRuntime = null,
     cancel_flag: std.atomic.Value(bool),
     pending_prompt_id: ?jsonrpc.RequestId,
+    image_snapshot_temp_dir: ?[]u8 = null,
 
     pub fn retainGrant(self: *ActiveSessionState, alloc: Allocator, tool_name: []const u8, target_path: []const u8) !void {
         for (self.session_grants) |grant| {
@@ -361,7 +369,6 @@ pub const ServerState = struct {
     pub fn deinit(self: *ServerState) void {
         reapActivePrompt(self, true);
         self.terminal_client.deinit();
-        self.unified_exec.deinit();
         closeActiveSession(self) catch |err| {
             debug_trace.logf(
                 "session",
@@ -369,6 +376,7 @@ pub const ServerState = struct {
                 .{@errorName(err)},
             );
         };
+        self.unified_exec.deinit();
         self.workspace_access.deinit(self.alloc);
         if (self.workspace_root.len > 0) self.alloc.free(self.workspace_root);
         if (self.api_key.len > 0) secret.zeroAndFree(self.alloc, self.api_key);
@@ -541,6 +549,10 @@ fn closeActiveSession(state: *ServerState) !void {
 
 fn destroyActiveSession(state: *ServerState) void {
     const active = if (state.active_session) |*session| session else return;
+    // Unified Exec IDs are scoped to the active ACP session. Stop any yielded
+    // process before releasing the session so an old client handle cannot
+    // reach a process after a session switch.
+    state.unified_exec.terminateAll();
     state.background.detachManagedPersistence(
         std.heap.c_allocator,
         active.session_id,
@@ -560,6 +572,10 @@ fn destroyActiveSession(state: *ServerState) void {
     if (active.store) |*store| store.deinit(state.alloc);
     if (active.wasm_state) |*wasm_state| wasm_state.deinit(state.alloc);
     if (active.wasm_revision) |revision| state.alloc.free(revision);
+    if (active.image_snapshot_temp_dir) |dir| {
+        image_attachments.cleanupSnapshotDir(dir);
+        state.alloc.free(dir);
+    }
     state.active_session = null;
 }
 
@@ -1210,6 +1226,8 @@ fn dispatch(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message) !void 
         .fx_turn_steer => prompt_handler.handleTurnSteer(state, alloc, msg),
         .fx_turn_status => prompt_handler.handleTurnStatus(state, alloc, msg),
         .fx_background_terminals_list => prompt_handler.handleBackgroundTerminalsList(state, alloc, msg),
+        .fx_unified_exec_write_stdin => prompt_handler.handleUnifiedExecWriteStdin(state, alloc, msg),
+        .fx_unified_exec_kill => prompt_handler.handleUnifiedExecKill(state, alloc, msg),
         .initialize,
         .session_cancel,
         .session_remove,
@@ -1531,7 +1549,13 @@ fn handleInitialize(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message
 
     var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();
-    try acp_types.writeInitializeResponse(&out.writer);
+    try acp_types.writeInitializeResponseWithOptions(
+        &out.writer,
+        .{
+            .image_capable = !host_target.is_wasm,
+            .unified_exec_capable = unified_exec_runtime.Manager.supported(),
+        },
+    );
     try state.writer.writeResponse(alloc, msg.id, out.writer.buffered());
 }
 

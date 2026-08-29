@@ -587,6 +587,15 @@ fn pushQueuedPromptBannerRows(
         );
         try pushFooterBandRow(alloc, frame, plan, plan.footer.banner, &summary);
         painted +|= 1;
+        if (ctx.queued_prompt_preview.len > 0 and painted < plan.footer.banner_rows) {
+            var preview = try input_presentation.composeQueuedPreviewRow(
+                alloc,
+                ctx.queued_prompt_preview,
+                width,
+            );
+            try pushFooterBandRow(alloc, frame, plan, plan.footer.banner +| painted, &preview);
+            painted +|= 1;
+        }
         if (ctx.queued_paused and painted < plan.footer.banner_rows) {
             var hint = try input_presentation.composeQueueReviewHintRow(
                 alloc,
