@@ -528,6 +528,13 @@ fn thinkingActivityProjection(
     if (ctx.stream.active and ctx.stream.assistant_text_started) {
         return .none;
     }
+    // A completed assistant tail is already visible in the transcript. It
+    // must win over the pacer's generic "has pending presentation" signal,
+    // otherwise the final drain can briefly resurrect a Working/token row
+    // after the turn has visibly completed.
+    if (ctx.completed_assistant_presentation_tail) {
+        return .none;
+    }
     // The pacer owns the visible response while a turn is active. Keep the
     // activity row hidden across both chunk gaps and token emission; showing
     // a second spinner here causes needless redraws and diverges from the
