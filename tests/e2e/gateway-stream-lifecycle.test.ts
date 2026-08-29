@@ -2813,7 +2813,7 @@ describe("gateway stream lifecycle", () => {
         ]);
         const systemText = request.instructions ?? "";
         expect(systemText).toContain("Conversation summary:");
-        expect(systemText).toContain("read_file success");
+        expect(systemText).toContain("first typed result sentinel");
         expect(request.input.some((item) =>
           item.type === "function_call" && item.call_id === callId
         )).toBe(false);
