@@ -1348,7 +1348,7 @@ fn livePresentationEventBytes(event: worker_runtime.WorkerEvent) ?usize {
         .open_model_picker,
         // `/compact` is owned by the interactive parent session. A child
         // event is not retained or projected into the parent transcript.
-        .responses_compaction,
+        .compaction,
         .session_grant,
         => null,
     };

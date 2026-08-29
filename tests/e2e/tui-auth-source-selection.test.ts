@@ -1497,7 +1497,7 @@ tmuxTest(
     );
     await session.waitForComposer(TIMEOUT);
     await session.sendText("/compact");
-    await session.waitForText("Remote context compaction started.", TIMEOUT);
+    await session.waitForText("Context compaction started.", TIMEOUT);
     await session.waitForText("Compacting context", TIMEOUT);
     await session.sendText("BLOCKED_DURING_COMPACTION");
     const duringCompaction = await session.capturePane();

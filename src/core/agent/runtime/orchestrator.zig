@@ -2698,7 +2698,7 @@ fn processQueuedPromptLoop(
                 overlay_arena,
                 stable_prefix.items,
                 ephemeral_overlay.items,
-                result.message,
+                result.message(),
                 within_turn_suffix.items,
                 inline_compaction_suffix_start,
             )
@@ -2885,7 +2885,7 @@ fn processQueuedPromptLoop(
                     overlay_arena,
                     stable_prefix.items,
                     ephemeral_overlay.items,
-                    result.message,
+                    result.message(),
                     within_turn_suffix.items,
                     inline_compaction_suffix_start,
                 )
@@ -2965,7 +2965,8 @@ fn processQueuedPromptLoop(
                 );
                 defer compaction_tools.deinit(overlay_arena);
                 const compacted = try runtime_compaction.compact(arena, .{
-                    .provider = deps.responses_compaction_provider,
+                    .remote_provider = deps.responses_compaction_provider,
+                    .local_provider = deps.agent_stream_provider,
                     .credential_source = job.credential_source,
                     .credential = active_api_key,
                     .account_id = job.account_id,
@@ -2974,24 +2975,35 @@ fn processQueuedPromptLoop(
                     .serialized_tools = compaction_tools.base_json,
                     .selected_dynamic_tool_schemas = compaction_tools.dynamic_json,
                     .messages = request_messages,
+                    .history_start = @min(
+                        stable_prefix.items.len +| ephemeral_overlay.items.len,
+                        request_messages.len,
+                    ),
                     .capabilities = request_capabilities,
                     .provider_options = provider_opts,
-                    .endpoint_override = config.provider_endpoint_override,
+                    .local_endpoint_override = config.provider_endpoint_override,
+                    .remote_endpoint_override = config.provider_endpoint_override,
+                    .gateway_retry_count = config.gateway_retry_count,
+                    .trace_ctx = step_ctx,
+                    .cooperative_pulse = deps.cooperative_transport_pulse,
+                    .usage = deps.usage,
+                    .usage_allocator = deps.usage_allocator,
                     .cancel_flag = config.cancel_flag,
                 });
                 if (inline_compaction) |*previous| previous.deinit(arena);
-                const used_remote = compacted.used_remote;
+                const used_remote = compacted.strategy == .remote;
                 inline_compaction = compacted;
                 inline_compaction_suffix_start = within_turn_suffix.items.len;
                 inline_auto_compaction_pending = false;
                 finalization.requestAutoCompaction(!used_remote);
                 try pushVisibleCompactionNotice(
                     deps,
-                    if (used_remote) .success else .warning,
-                    if (used_remote)
-                        "Context compacted with the active Responses provider."
-                    else
-                        "Remote context compaction is unavailable; continuing with local compacted context.",
+                    if (compacted.strategy == .local_fallback) .warning else .success,
+                    switch (compacted.strategy) {
+                        .remote => "Context compacted with the active Responses provider.",
+                        .local_model => "Context compacted locally with the active model.",
+                        .local_fallback => "Model compaction is unavailable; continuing with deterministic compacted context.",
+                    },
                 );
                 continue;
             }

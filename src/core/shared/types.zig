@@ -178,49 +178,69 @@ pub const TurnFinished = struct {
     outcome: TurnPresentationOutcome,
 };
 
-pub const ResponsesCompactionWorkerOutcome = union(enum) {
-    compacted: struct {
+pub const CompactionStrategy = enum {
+    remote,
+    local_model,
+    local_fallback,
+};
+
+pub const CompactionWorkerOutcome = union(enum) {
+    remote: struct {
         input_json: []u8,
-        usage: Usage = .{},
+        summary: []u8,
     },
-    rejected: std.http.Status,
+    local: struct {
+        summary: []u8,
+        strategy: CompactionStrategy,
+    },
     failed: []u8,
 };
 
-/// Owned result of one background `/responses/compact` attempt. The UI drain
-/// validates every binding before it may mutate session state.
-pub const ResponsesCompactionWorkerEvent = struct {
+/// Owned result of one background compaction operation. The UI drain validates
+/// the captured history and provider identity before it may mutate session
+/// state. Remote and local strategies share this one completion contract.
+pub const CompactionWorkerEvent = struct {
     generation: u64,
     automatic: bool = false,
     expected_history_generation: u64,
     expected_history_len: usize,
     expected_context_history_start: usize,
     session_id: ?[]u8 = null,
-    credential_source: CredentialSource,
+    credential_source: ?CredentialSource = null,
     wire_model: []u8,
-    provider_binding: ResponsesCompactionProviderBinding,
-    outcome: ResponsesCompactionWorkerOutcome,
+    provider_binding: ?ResponsesCompactionProviderBinding = null,
+    outcome: CompactionWorkerOutcome,
 };
 
-pub fn dupeResponsesCompactionWorkerEvent(
+pub fn dupeCompactionWorkerEvent(
     alloc: std.mem.Allocator,
-    event: ResponsesCompactionWorkerEvent,
-) !ResponsesCompactionWorkerEvent {
+    event: CompactionWorkerEvent,
+) !CompactionWorkerEvent {
     const session_id = if (event.session_id) |id| try alloc.dupe(u8, id) else null;
     errdefer if (session_id) |id| alloc.free(id);
     const wire_model = try alloc.dupe(u8, event.wire_model);
     errdefer alloc.free(wire_model);
-    const provider_binding = try dupeResponsesCompactionProviderBinding(
-        alloc,
-        event.provider_binding.view(),
-    );
-    errdefer freeResponsesCompactionProviderBinding(alloc, provider_binding);
-    const outcome: ResponsesCompactionWorkerOutcome = switch (event.outcome) {
-        .compacted => |completed| .{ .compacted = .{
-            .input_json = try alloc.dupe(u8, completed.input_json),
-            .usage = completed.usage,
+    const provider_binding = if (event.provider_binding) |binding|
+        try dupeResponsesCompactionProviderBinding(alloc, binding.view())
+    else
+        null;
+    errdefer if (provider_binding) |binding| {
+        freeResponsesCompactionProviderBinding(alloc, binding);
+    };
+    const outcome: CompactionWorkerOutcome = switch (event.outcome) {
+        .remote => |completed| remote: {
+            const input_json = try alloc.dupe(u8, completed.input_json);
+            errdefer alloc.free(input_json);
+            const summary = try alloc.dupe(u8, completed.summary);
+            break :remote .{ .remote = .{
+                .input_json = input_json,
+                .summary = summary,
+            } };
+        },
+        .local => |completed| .{ .local = .{
+            .summary = try alloc.dupe(u8, completed.summary),
+            .strategy = completed.strategy,
         } },
-        .rejected => |status| .{ .rejected = status },
         .failed => |name| .{ .failed = try alloc.dupe(u8, name) },
     };
     return .{
@@ -237,17 +257,22 @@ pub fn dupeResponsesCompactionWorkerEvent(
     };
 }
 
-pub fn freeResponsesCompactionWorkerEvent(
+pub fn freeCompactionWorkerEvent(
     alloc: std.mem.Allocator,
-    event: ResponsesCompactionWorkerEvent,
+    event: CompactionWorkerEvent,
 ) void {
     if (event.session_id) |id| alloc.free(id);
     alloc.free(event.wire_model);
-    freeResponsesCompactionProviderBinding(alloc, event.provider_binding);
+    if (event.provider_binding) |binding| {
+        freeResponsesCompactionProviderBinding(alloc, binding);
+    }
     switch (event.outcome) {
-        .compacted => |completed| alloc.free(completed.input_json),
+        .remote => |completed| {
+            alloc.free(completed.input_json);
+            alloc.free(completed.summary);
+        },
+        .local => |completed| alloc.free(completed.summary),
         .failed => |name| alloc.free(name),
-        .rejected => {},
     }
 }
 

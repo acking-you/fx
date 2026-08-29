@@ -57,9 +57,9 @@ fn discardCodeBlock(_: *anyopaque, block: assistant_presentation.CodeBlockPayloa
 
 fn discardThematicRule(_: *anyopaque) !void {}
 
-fn discardResponsesCompaction(
+fn discardCompaction(
     _: *anyopaque,
-    _: types.ResponsesCompactionWorkerEvent,
+    _: types.CompactionWorkerEvent,
 ) !void {}
 
 pub const WorkerEventHandlers = struct {
@@ -77,7 +77,7 @@ pub const WorkerEventHandlers = struct {
     command_output: *const fn (*anyopaque, ?types.ToolLifecycleId, command_output_content.Stream, []const u8) anyerror!void,
     command_output_complete: *const fn (*anyopaque, ?types.ToolLifecycleId) anyerror!void,
     diff_block: *const fn (*anyopaque, diff_mod.DiffEntryPayload) anyerror!void,
-    responses_compaction: *const fn (*anyopaque, types.ResponsesCompactionWorkerEvent) anyerror!void = discardResponsesCompaction,
+    compaction: *const fn (*anyopaque, types.CompactionWorkerEvent) anyerror!void = discardCompaction,
     append_history_turn: *const fn (*anyopaque, types.FinishedPrompt) anyerror!void,
     session_grant: *const fn (*anyopaque, types.PermissionGrant) anyerror!void,
     error_text: *const fn (*anyopaque, types.SemanticNotice) anyerror!void,
@@ -202,7 +202,7 @@ pub fn Runtime(comptime App: type) type {
                 .tool_payload_started,
                 .diff_block,
                 => .drop,
-                .responses_compaction => .admit,
+                .compaction => .admit,
                 .route_recovery_status => |status| if (status.action == .paused)
                     .admit
                 else
@@ -915,8 +915,8 @@ pub fn Runtime(comptime App: type) type {
                         drain_owns_current = false;
                         try handlers.diff_block(handlers.ctx, payload);
                     },
-                    .responses_compaction => |completed| {
-                        try handlers.responses_compaction(handlers.ctx, completed);
+                    .compaction => |completed| {
+                        try handlers.compaction(handlers.ctx, completed);
                     },
                     .tool_lifecycle => |lifecycle| {
                         switch (lifecycle) {

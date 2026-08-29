@@ -533,7 +533,7 @@ pub const WorkerEvent = union(enum) {
     /// arguments. The turn is working, with nothing to print until it lands.
     tool_payload_started,
     diff_block: diff_mod.DiffEntryPayload,
-    responses_compaction: types.ResponsesCompactionWorkerEvent,
+    compaction: types.CompactionWorkerEvent,
     finish_prompt: types.FinishedPrompt,
     session_grant: types.PermissionGrant,
     error_text: types.SemanticNotice,
@@ -3022,8 +3022,8 @@ pub fn dupeWorkerEvent(alloc: std.mem.Allocator, event: WorkerEvent) !WorkerEven
                 .full = full,
             } };
         },
-        .responses_compaction => |completed| .{
-            .responses_compaction = try types.dupeResponsesCompactionWorkerEvent(
+        .compaction => |completed| .{
+            .compaction = try types.dupeCompactionWorkerEvent(
                 alloc,
                 completed,
             ),
@@ -3073,8 +3073,8 @@ pub fn freeWorkerEvent(alloc: std.mem.Allocator, event: WorkerEvent) void {
         },
         .tool_lifecycle => |lifecycle| freeToolLifecycleEvent(alloc, lifecycle),
         .diff_block => |payload| diff_mod.freeDiffEntryPayload(alloc, payload),
-        .responses_compaction => |completed| {
-            types.freeResponsesCompactionWorkerEvent(alloc, completed);
+        .compaction => |completed| {
+            types.freeCompactionWorkerEvent(alloc, completed);
         },
         .finish_prompt => |finished| types.freeFinishedPrompt(alloc, finished),
         .session_grant => |grant| {

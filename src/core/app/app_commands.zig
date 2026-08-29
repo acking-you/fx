@@ -57,21 +57,13 @@ fn compactHistoryNotice(outcome: app_session_runtime.CompactHistoryOutcome) Comp
             .tone = .neutral,
             .body = "Context is already compacted.",
         },
-        .compacted_locally => .{
+        .started => .{
             .tone = .neutral,
-            .body = "Context compacted locally.",
+            .body = "Context compaction started.",
         },
-        .remote_started => .{
+        .busy => .{
             .tone = .neutral,
-            .body = "Remote context compaction started.",
-        },
-        .remote_busy => .{
-            .tone = .neutral,
-            .body = "Remote context compaction is already in progress.",
-        },
-        .local_after_remote_failure => .{
-            .tone = .warning,
-            .body = "Remote context compaction could not be started; context was compacted locally.",
+            .body = "Context compaction is already in progress.",
         },
     };
 }
@@ -2732,10 +2724,8 @@ test "compact command reports asynchronous and settled outcomes accurately" {
         body: []const u8,
     }{
         .{ .outcome = .unchanged, .tone = .neutral, .body = "Context is already compacted." },
-        .{ .outcome = .compacted_locally, .tone = .neutral, .body = "Context compacted locally." },
-        .{ .outcome = .remote_started, .tone = .neutral, .body = "Remote context compaction started." },
-        .{ .outcome = .remote_busy, .tone = .neutral, .body = "Remote context compaction is already in progress." },
-        .{ .outcome = .local_after_remote_failure, .tone = .warning, .body = "Remote context compaction could not be started; context was compacted locally." },
+        .{ .outcome = .started, .tone = .neutral, .body = "Context compaction started." },
+        .{ .outcome = .busy, .tone = .neutral, .body = "Context compaction is already in progress." },
     };
 
     for (cases) |case| {

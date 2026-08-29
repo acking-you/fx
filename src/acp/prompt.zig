@@ -485,13 +485,13 @@ fn handleCompactCommand(
     ctx: *AcpContext,
     session: *server.ActiveSessionState,
 ) !TerminalOutcome {
-    if (!session.session_rt.hasRemoteCompactionCandidate()) {
+    if (!session.session_rt.hasFullCompactionCandidate()) {
         try ctx.sendAgentText("Context is already compacted.");
         return .{ .stop_reason = .end_turn };
     }
 
     try ctx.sendAgentThought("Compacting context.");
-    const history = try session.session_rt.snapshotContextHistory(ctx.alloc);
+    const history = try session.session_rt.snapshotCompactionHistory(ctx.alloc);
     defer types.freeHistoryTurnSlice(ctx.alloc, history);
     var messages: std.ArrayList(ChatMessage) = .empty;
     defer messages.deinit(ctx.alloc);
@@ -513,6 +513,7 @@ fn handleCompactCommand(
             });
         }
     }
+    const history_start = messages.items.len;
     try session_runtime.appendHistoryChatMessages(ctx.alloc, &messages, history);
 
     var tool_projection = try ctx.state.cfg.mode_registry.buildModelToolProjection(
@@ -537,7 +538,8 @@ fn handleCompactCommand(
     session.cancel_flag.store(false, .seq_cst);
     const capabilities = model_capabilities.capabilitiesForModel(session.model);
     var result = try runtime_compaction.compact(ctx.alloc, .{
-        .provider = ctx.state.cfg.provider_set.select(session.provider).responses_compaction,
+        .remote_provider = ctx.state.cfg.provider_set.select(session.provider).responses_compaction,
+        .local_provider = server.streamProviderFor(ctx.state, session.provider),
         .credential_source = session.credential_source,
         .credential = session.api_key,
         .account_id = session.account_id,
@@ -545,30 +547,28 @@ fn handleCompactCommand(
         .model = session.model,
         .serialized_tools = serialized_tools,
         .messages = messages.items,
+        .history_start = history_start,
         .capabilities = capabilities,
         .provider_options = model_capabilities.resolveProviderOptionsForCapabilities(
             capabilities,
             session.effort,
             session.fast_mode,
         ),
-        .endpoint_override = server.providerEndpointOverride(ctx.state, session.provider),
+        .local_endpoint_override = server.providerEndpointOverride(ctx.state, session.provider),
+        .remote_endpoint_override = server.providerEndpointOverride(ctx.state, session.provider),
+        .gateway_retry_count = ctx.state.cfg.gateway_retry_count,
+        .usage = &session.session_rt.usage,
+        .usage_allocator = ctx.alloc,
         .cancel_flag = &session.cancel_flag,
     });
     defer result.deinit(ctx.alloc);
 
-    const changed = if (result.used_remote) remote: {
-        const checkpoint = result.message.responses_compaction orelse
-            return error.MissingResponsesCompactionItem;
-        const binding = checkpoint.provider_binding orelse
-            return error.InvalidResponsesCompactionProviderBinding;
-        break :remote try session.session_rt.installResponsesCompaction(
-            ctx.alloc,
-            checkpoint.credential_source,
-            checkpoint.wire_model,
-            checkpoint.input_json,
-            binding,
-        );
-    } else try session.session_rt.installLocalCompaction(ctx.alloc);
+    const replacement = result.message();
+    const changed = try session.session_rt.installCompaction(
+        ctx.alloc,
+        result.summary,
+        replacement.responses_compaction,
+    );
 
     if (changed) {
         session.session_write_mutex.lockUncancelable(io_mod.getIo());
@@ -579,10 +579,11 @@ fn handleCompactCommand(
     }
     try ctx.sendAgentText(if (!changed)
         "Context is already compacted."
-    else if (result.used_remote)
-        "Context compacted with the active Responses provider."
-    else
-        "Remote context compaction failed; context was compacted locally.");
+    else switch (result.strategy) {
+        .remote => "Context compacted with the active Responses provider.",
+        .local_model => "Context compacted locally with the active model.",
+        .local_fallback => "Model compaction was unavailable; context was compacted with the deterministic fallback.",
+    });
     return .{ .stop_reason = .end_turn };
 }
 

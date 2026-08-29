@@ -419,20 +419,20 @@ pub fn Bindings(comptime App: type) type {
                 .command_output = workerBridgeCommandOutput,
                 .command_output_complete = workerBridgeCommandOutputComplete,
                 .diff_block = workerBridgeDiffBlock,
-                .responses_compaction = workerBridgeResponsesCompaction,
+                .compaction = workerBridgeCompaction,
                 .append_history_turn = workerBridgeAppendHistoryTurn,
                 .session_grant = workerBridgeSessionGrant,
                 .error_text = workerBridgeErrorText,
             };
         }
 
-        fn workerBridgeResponsesCompaction(
+        fn workerBridgeCompaction(
             ctx: *anyopaque,
-            event: types.ResponsesCompactionWorkerEvent,
+            event: types.CompactionWorkerEvent,
         ) !void {
             const app: *App = @ptrCast(@alignCast(ctx));
-            if (comptime @hasDecl(App, "applyResponsesCompactionEvent")) {
-                try app.applyResponsesCompactionEvent(event);
+            if (comptime @hasDecl(App, "applyCompactionEvent")) {
+                try app.applyCompactionEvent(event);
             }
         }
 

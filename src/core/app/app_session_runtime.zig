@@ -65,10 +65,8 @@ const Allocator = std.mem.Allocator;
 
 pub const CompactHistoryOutcome = enum {
     unchanged,
-    compacted_locally,
-    remote_started,
-    remote_busy,
-    local_after_remote_failure,
+    started,
+    busy,
 };
 
 const AutomaticCompactionNotice = struct {
@@ -82,69 +80,49 @@ fn automaticCompactionNotice(outcome: CompactHistoryOutcome) AutomaticCompaction
             .tone = .neutral,
             .body = "Automatic context compaction found no remaining context to compact.",
         },
-        .compacted_locally => .{
-            .tone = .success,
-            .body = "Context limit reached; context compacted locally after the completed turn.",
-        },
-        .remote_started => .{
+        .started => .{
             .tone = .information,
             .body = "Context limit reached; compacting after the completed turn.",
         },
-        .remote_busy => .{
+        .busy => .{
             .tone = .information,
             .body = "Automatic context compaction is already in progress.",
-        },
-        .local_after_remote_failure => .{
-            .tone = .warning,
-            .body = "Remote context compaction could not be started; context was compacted locally.",
         },
     };
 }
 
 pub fn shouldBeginAutomaticCompaction(
-    source: types.CredentialSource,
-    has_remote_candidate: bool,
+    has_candidate: bool,
     active_context_tokens: u64,
     capabilities: model_capabilities.Capabilities,
 ) bool {
-    const route = provider_route.fromCredentialSource(source) orelse return false;
-    if (route.contract().wire_api != .openai_responses or !has_remote_candidate) return false;
+    if (!has_candidate) return false;
     const limit = model_capabilities.autoCompactTokenLimit(capabilities) orelse return false;
     return active_context_tokens >= @as(u64, limit);
 }
 
-test "automatic compaction follows direct Responses total-token threshold" {
+test "automatic compaction follows the model threshold for every provider" {
     const capabilities: model_capabilities.Capabilities = .{
         .context_window = 272_000,
         .auto_compact_token_limit = 244_800,
         .effective_context_window_percent = 95,
     };
     try std.testing.expect(!shouldBeginAutomaticCompaction(
-        .chatgpt_subscription,
         true,
         244_799,
         capabilities,
     ));
     try std.testing.expect(shouldBeginAutomaticCompaction(
-        .chatgpt_subscription,
         true,
         244_800,
         capabilities,
     ));
     try std.testing.expect(shouldBeginAutomaticCompaction(
-        .openai_api_key,
         true,
         244_800,
         capabilities,
     ));
     try std.testing.expect(!shouldBeginAutomaticCompaction(
-        .grok_subscription,
-        true,
-        244_800,
-        capabilities,
-    ));
-    try std.testing.expect(!shouldBeginAutomaticCompaction(
-        .chatgpt_subscription,
         false,
         244_800,
         capabilities,
@@ -158,10 +136,8 @@ test "post-turn automatic compaction reports every settled outcome" {
         body: []const u8,
     }{
         .{ .outcome = .unchanged, .tone = .neutral, .body = "Automatic context compaction found no remaining context to compact." },
-        .{ .outcome = .compacted_locally, .tone = .success, .body = "Context limit reached; context compacted locally after the completed turn." },
-        .{ .outcome = .remote_started, .tone = .information, .body = "Context limit reached; compacting after the completed turn." },
-        .{ .outcome = .remote_busy, .tone = .information, .body = "Automatic context compaction is already in progress." },
-        .{ .outcome = .local_after_remote_failure, .tone = .warning, .body = "Remote context compaction could not be started; context was compacted locally." },
+        .{ .outcome = .started, .tone = .information, .body = "Context limit reached; compacting after the completed turn." },
+        .{ .outcome = .busy, .tone = .information, .body = "Automatic context compaction is already in progress." },
     };
 
     for (cases) |case| {
@@ -1169,16 +1145,17 @@ const PendingCancelledCommand = struct {
     }
 };
 
-const ResponsesCompactionTaskRuntime = struct {
+const CompactionTaskRuntime = struct {
     const PublishFn = *const fn (
         context: *anyopaque,
-        event: types.ResponsesCompactionWorkerEvent,
+        event: types.CompactionWorkerEvent,
     ) anyerror!void;
 
     const Task = struct {
         thread: ?std.Thread = null,
         cancel_requested: std.atomic.Value(bool) = .init(false),
-        provider: responses_compaction_provider.Provider,
+        remote_provider: ?responses_compaction_provider.Provider,
+        local_provider: stream_provider.Provider,
         publish_context: *anyopaque,
         publish_fn: PublishFn,
         generation: u64,
@@ -1187,18 +1164,21 @@ const ResponsesCompactionTaskRuntime = struct {
         expected_history_len: usize,
         expected_context_history_start: usize,
         session_id: ?[]u8,
-        credential_source: types.CredentialSource,
+        credential_source: ?types.CredentialSource,
         credential: []u8,
         account_id: ?[]u8,
         model: []u8,
         wire_model: []u8,
-        provider_binding: types.ResponsesCompactionProviderBinding,
+        provider_binding: ?types.ResponsesCompactionProviderBinding,
         system_prompt: []u8,
         model_prompt_overlay: ?[]u8,
         serialized_tools: []u8,
         history: []types.HistoryTurn,
         capabilities: model_capabilities.Capabilities = .{},
         provider_options: model_capabilities.ResolvedProviderOptions,
+        gateway_retry_count: usize = 1,
+        usage: ?*session_usage.Usage = null,
+        allow_remote: bool = true,
 
         fn deinit(self: *Task) void {
             self.cancel_requested.store(true, .seq_cst);
@@ -1213,7 +1193,9 @@ const ResponsesCompactionTaskRuntime = struct {
             if (self.account_id) |account| alloc.free(account);
             alloc.free(self.model);
             alloc.free(self.wire_model);
-            types.freeResponsesCompactionProviderBinding(alloc, self.provider_binding);
+            if (self.provider_binding) |binding| {
+                types.freeResponsesCompactionProviderBinding(alloc, binding);
+            }
             alloc.free(self.system_prompt);
             if (self.model_prompt_overlay) |overlay| alloc.free(overlay);
             alloc.free(self.serialized_tools);
@@ -1225,14 +1207,14 @@ const ResponsesCompactionTaskRuntime = struct {
     active: ?*Task = null,
     next_generation: u64 = 1,
 
-    fn allocateGeneration(self: *ResponsesCompactionTaskRuntime) u64 {
+    fn allocateGeneration(self: *CompactionTaskRuntime) u64 {
         const generation = self.next_generation;
         self.next_generation +%= 1;
         if (self.next_generation == 0) self.next_generation = 1;
         return generation;
     }
 
-    fn start(self: *ResponsesCompactionTaskRuntime, task: *Task) !void {
+    fn start(self: *CompactionTaskRuntime, task: *Task) !void {
         if (self.active != null) return error.ResponsesCompactionBusy;
         if (comptime builtin.single_threaded) {
             // WASM has no worker threads. Keep the same provider/result event
@@ -1248,12 +1230,12 @@ const ResponsesCompactionTaskRuntime = struct {
         self.active = task;
     }
 
-    fn isActive(self: *const ResponsesCompactionTaskRuntime) bool {
+    fn isActive(self: *const CompactionTaskRuntime) bool {
         return self.active != null;
     }
 
     fn takeCompletedGeneration(
-        self: *ResponsesCompactionTaskRuntime,
+        self: *CompactionTaskRuntime,
         generation: u64,
     ) ?*Task {
         const task = self.active orelse return null;
@@ -1262,7 +1244,7 @@ const ResponsesCompactionTaskRuntime = struct {
         return task;
     }
 
-    fn deinit(self: *ResponsesCompactionTaskRuntime) void {
+    fn deinit(self: *CompactionTaskRuntime) void {
         const task = self.active;
         self.active = null;
         if (task) |active| active.deinit();
@@ -1274,6 +1256,13 @@ const ResponsesCompactionTaskRuntime = struct {
     }
 
     fn run(task: *Task) !void {
+        // Background ownership flow:
+        //
+        //   captured task -> unified compaction -> owned worker event
+        //                                      -> UI drain -> session install
+        //
+        // This thread may perform provider I/O and durable usage accounting.
+        // It never mutates transcript or session history.
         const backing = std.heap.c_allocator;
         var arena_state = std.heap.ArenaAllocator.init(backing);
         defer arena_state.deinit();
@@ -1288,10 +1277,12 @@ const ResponsesCompactionTaskRuntime = struct {
                 try messages.append(arena, .{ .role = .system, .content = overlay });
             }
         }
+        const history_start = messages.items.len;
         try session_runtime.appendHistoryChatMessages(arena, &messages, task.history);
 
         var result = try runtime_compaction.compact(backing, .{
-            .provider = task.provider,
+            .remote_provider = task.remote_provider,
+            .local_provider = task.local_provider,
             .credential_source = task.credential_source,
             .credential = task.credential,
             .account_id = task.account_id,
@@ -1299,36 +1290,33 @@ const ResponsesCompactionTaskRuntime = struct {
             .model = task.model,
             .serialized_tools = task.serialized_tools,
             .messages = messages.items,
+            .history_start = history_start,
             .capabilities = task.capabilities,
             .provider_options = task.provider_options,
-            .provider_binding = task.provider_binding.view(),
+            .provider_binding = if (task.provider_binding) |binding| binding.view() else null,
+            .gateway_retry_count = task.gateway_retry_count,
+            .allow_remote = task.allow_remote,
+            .usage = task.usage,
+            .usage_allocator = backing,
             .cancel_flag = &task.cancel_requested,
         });
         defer result.deinit(backing);
-        if (!result.used_remote) {
-            // The shared runtime owns the provider call and context-safe
-            // message preparation. The worker event still carries the
-            // captured binding so the UI can perform its normal stale-result
-            // validation and local fallback exactly once.
-            return publishFailure(task, "RemoteCompactionFallback");
-        }
-        const completed = result.owned_remote orelse
-            return publishFailure(task, "ResponsesCompactionMissingResult");
-        result.owned_remote = null;
-        return publishCompleted(task, completed);
+        return publishCompleted(task, result);
     }
 
-    fn eventBase(task: *Task) !types.ResponsesCompactionWorkerEvent {
+    fn eventBase(task: *Task) !types.CompactionWorkerEvent {
         const alloc = std.heap.c_allocator;
         const session_id = if (task.session_id) |id| try alloc.dupe(u8, id) else null;
         errdefer if (session_id) |id| alloc.free(id);
         const wire_model = try alloc.dupe(u8, task.wire_model);
         errdefer alloc.free(wire_model);
-        const provider_binding = try types.dupeResponsesCompactionProviderBinding(
-            alloc,
-            task.provider_binding.view(),
-        );
-        errdefer types.freeResponsesCompactionProviderBinding(alloc, provider_binding);
+        const provider_binding = if (task.provider_binding) |binding|
+            try types.dupeResponsesCompactionProviderBinding(alloc, binding.view())
+        else
+            null;
+        errdefer if (provider_binding) |binding| {
+            types.freeResponsesCompactionProviderBinding(alloc, binding);
+        };
         return .{
             .generation = task.generation,
             .automatic = task.automatic,
@@ -1341,7 +1329,7 @@ const ResponsesCompactionTaskRuntime = struct {
             .provider_binding = provider_binding,
             // A valid placeholder keeps allocation failures in callers safe:
             // their errdefer may destroy this event before replacing outcome.
-            .outcome = .{ .rejected = .internal_server_error },
+            .outcome = .{ .failed = try alloc.dupe(u8, "CompactionResultPending") },
         };
     }
 
@@ -1349,46 +1337,65 @@ const ResponsesCompactionTaskRuntime = struct {
         const alloc = std.heap.c_allocator;
         var event = try eventBase(task);
         var owns_event = true;
-        errdefer if (owns_event) types.freeResponsesCompactionWorkerEvent(alloc, event);
-        event.outcome = .{ .failed = try alloc.dupe(u8, error_name) };
-        try task.publish_fn(task.publish_context, event);
-        owns_event = false;
-    }
-
-    fn publishRejected(task: *Task, status: std.http.Status) !void {
-        const alloc = std.heap.c_allocator;
-        var event = try eventBase(task);
-        var owns_event = true;
-        errdefer if (owns_event) types.freeResponsesCompactionWorkerEvent(alloc, event);
-        event.outcome = .{ .rejected = status };
+        errdefer if (owns_event) types.freeCompactionWorkerEvent(alloc, event);
+        const name = try alloc.dupe(u8, error_name);
+        alloc.free(event.outcome.failed);
+        event.outcome = .{ .failed = name };
         try task.publish_fn(task.publish_context, event);
         owns_event = false;
     }
 
     fn publishCompleted(
         task: *Task,
-        completed: responses_compaction_provider.Completed,
+        result: runtime_compaction.Result,
     ) !void {
         const alloc = std.heap.c_allocator;
-        var owns_input = true;
-        defer alloc.free(completed.wire_model);
-        errdefer if (owns_input) alloc.free(completed.input_json);
-        if (completed.credential_source != task.credential_source or
-            !std.mem.eql(u8, completed.wire_model, task.wire_model))
-        {
-            alloc.free(completed.input_json);
-            owns_input = false;
-            return publishFailure(task, "ResponsesCompactionIdentityMismatch");
-        }
-
         var event = try eventBase(task);
         var owns_event = true;
-        errdefer if (owns_event) types.freeResponsesCompactionWorkerEvent(alloc, event);
-        event.outcome = .{ .compacted = .{
-            .input_json = completed.input_json,
-            .usage = completed.usage,
-        } };
-        owns_input = false;
+        errdefer if (owns_event) types.freeCompactionWorkerEvent(alloc, event);
+        const outcome: types.CompactionWorkerOutcome = switch (result.strategy) {
+            .remote => remote: {
+                const completed = result.remote orelse
+                    return publishFailure(task, "RemoteCompactionMissingResult");
+                if (task.credential_source == null or
+                    completed.credential_source != task.credential_source.? or
+                    !std.mem.eql(u8, completed.wire_model, task.wire_model))
+                {
+                    return publishFailure(task, "RemoteCompactionIdentityMismatch");
+                }
+                if (task.provider_binding) |captured| {
+                    if (!responses_compaction_binding.eql(
+                        captured.view(),
+                        completed.provider_binding.view(),
+                    )) {
+                        return publishFailure(task, "RemoteCompactionBindingMismatch");
+                    }
+                }
+                const completed_binding = try types.dupeResponsesCompactionProviderBinding(
+                    alloc,
+                    completed.provider_binding.view(),
+                );
+                if (event.provider_binding) |captured| {
+                    types.freeResponsesCompactionProviderBinding(alloc, captured);
+                }
+                event.provider_binding = completed_binding;
+                const input_json = try alloc.dupe(u8, completed.input_json);
+                var input_owned = true;
+                errdefer if (input_owned) alloc.free(input_json);
+                const summary = try alloc.dupe(u8, result.summary);
+                input_owned = false;
+                break :remote .{ .remote = .{
+                    .input_json = input_json,
+                    .summary = summary,
+                } };
+            },
+            .local_model, .local_fallback => .{ .local = .{
+                .summary = try alloc.dupe(u8, result.summary),
+                .strategy = result.strategy,
+            } },
+        };
+        alloc.free(event.outcome.failed);
+        event.outcome = outcome;
         try task.publish_fn(task.publish_context, event);
         owns_event = false;
     }
@@ -1408,7 +1415,7 @@ pub const Persistence = struct {
     process_model_override: ?[]u8 = null,
     session_picker: SessionPicker = .{},
     session_picker_load: SessionPickerLoad = .{},
-    responses_compaction_tasks: ResponsesCompactionTaskRuntime = .{},
+    compaction_tasks: CompactionTaskRuntime = .{},
     session_picker_current_cache: SessionPickerPageCache = .{},
     session_picker_all_cache: SessionPickerPageCache = .{},
     degraded_warning_emitted: bool = false,
@@ -1441,7 +1448,7 @@ pub const Persistence = struct {
         if (self.process_model_override) |model| alloc.free(model);
         self.session_picker.deinit(alloc);
         self.session_picker_load.deinit();
-        self.responses_compaction_tasks.deinit();
+        self.compaction_tasks.deinit();
         self.session_picker_current_cache.deinit();
         self.session_picker_all_cache.deinit();
         self.* = .{};
@@ -2666,7 +2673,7 @@ pub fn Runtime(comptime App: type) type {
             );
             if (finished.auto_compact_after_finish and
                 comptime @hasField(App, "auth") and
-                    @hasDecl(App, "responsesCompactionProvider"))
+                    @hasDecl(App, "agentStreamProvider"))
             {
                 const turn_start_held = if (comptime @hasField(App, "worker") and
                     @hasDecl(@TypeOf(app.worker), "requestTurnStartHold"))
@@ -2676,39 +2683,24 @@ pub fn Runtime(comptime App: type) type {
                 var keep_turn_start_hold = false;
                 defer if (turn_start_held and !keep_turn_start_hold)
                     app.worker.releaseTurnStartHold();
-                const outcome: CompactHistoryOutcome = blk: {
-                    if (finished.auto_compact_after_finish_local_only) {
-                        const local_outcome: CompactHistoryOutcome = if (compactHistoryFullyLocally(app) catch |err| {
-                            debug_trace.logf(
-                                "session",
-                                "event=post_turn_auto_compaction outcome=failed err={s}",
-                                .{@errorName(err)},
-                            );
-                            writeCompactionNotice(
-                                app,
-                                .warning,
-                                "Automatic post-turn local context compaction failed.",
-                            );
-                            return;
-                        }) .compacted_locally else .unchanged;
-                        break :blk local_outcome;
-                    }
-                    const remote_outcome = autoCompactHistory(app) catch |err| {
-                        debug_trace.logf(
-                            "session",
-                            "event=post_turn_auto_compaction outcome=failed err={s}",
-                            .{@errorName(err)},
-                        );
-                        writeCompactionNotice(
-                            app,
-                            .warning,
-                            "Automatic post-turn context compaction failed.",
-                        );
-                        return;
-                    };
-                    keep_turn_start_hold = remote_outcome == .remote_started;
-                    break :blk remote_outcome;
+                const outcome = compactHistoryWithTrigger(
+                    app,
+                    true,
+                    !finished.auto_compact_after_finish_local_only,
+                ) catch |err| {
+                    debug_trace.logf(
+                        "session",
+                        "event=post_turn_auto_compaction outcome=failed err={s}",
+                        .{@errorName(err)},
+                    );
+                    writeCompactionNotice(
+                        app,
+                        .warning,
+                        "Automatic post-turn context compaction failed.",
+                    );
+                    return;
                 };
+                keep_turn_start_hold = outcome == .started;
                 debug_trace.logf(
                     "session",
                     "event=post_turn_auto_compaction outcome={s}",
@@ -3079,7 +3071,7 @@ pub fn Runtime(comptime App: type) type {
         }
 
         pub fn beginAutomaticCompactionIfNeeded(app: *App) !bool {
-            const credential = app.auth.gatewayCredential() orelse return false;
+            _ = app.auth.gatewayCredential() orelse return false;
             const capabilities = model_capabilities.resolveForApp(
                 App,
                 app,
@@ -3087,8 +3079,7 @@ pub fn Runtime(comptime App: type) type {
             );
             const active_context_tokens = app.total_input_tokens +| app.total_output_tokens;
             if (!shouldBeginAutomaticCompaction(
-                credential.source,
-                app.session.hasRemoteCompactionCandidate(),
+                app.session.hasFullCompactionCandidate(),
                 active_context_tokens,
                 capabilities,
             )) return false;
@@ -3096,7 +3087,7 @@ pub fn Runtime(comptime App: type) type {
             errdefer app.worker.releaseTurnStartHold();
 
             const outcome = try autoCompactHistory(app);
-            if (outcome != .remote_started) {
+            if (outcome != .started) {
                 app.worker.releaseTurnStartHold();
                 return false;
             }
@@ -3108,95 +3099,58 @@ pub fn Runtime(comptime App: type) type {
             return true;
         }
 
-        pub fn responsesCompactionActive(app: *const App) bool {
+        pub fn compactionActive(app: *const App) bool {
             if (comptime !@hasField(App, "session_persistence")) return false;
-            return app.session_persistence.responses_compaction_tasks.isActive();
+            return app.session_persistence.compaction_tasks.isActive();
         }
 
         pub fn compactHistory(app: *App) !CompactHistoryOutcome {
-            if (responsesCompactionActive(app)) return .remote_busy;
+            if (compactionActive(app)) return .busy;
             const turn_start_held = if (comptime @hasField(App, "worker") and
                 @hasDecl(@TypeOf(app.worker), "tryHoldTurnStart"))
                 app.worker.tryHoldTurnStart()
             else
                 false;
-            if (!turn_start_held) return .remote_busy;
+            if (!turn_start_held) return .busy;
             errdefer app.worker.releaseTurnStartHold();
 
-            const outcome = try compactHistoryWithTrigger(app, false);
-            if (outcome != .remote_started) app.worker.releaseTurnStartHold();
+            const outcome = try compactHistoryWithTrigger(app, false, true);
+            if (outcome != .started) app.worker.releaseTurnStartHold();
             return outcome;
         }
 
         pub fn autoCompactHistory(app: *App) !CompactHistoryOutcome {
-            return compactHistoryWithTrigger(app, true);
+            return compactHistoryWithTrigger(app, true, true);
         }
 
-        fn compactHistoryWithTrigger(app: *App, automatic: bool) !CompactHistoryOutcome {
-            const credential = app.auth.gatewayCredential() orelse {
-                if (!app.session.hasCompactionCandidate()) return .unchanged;
-                return if (try compactHistoryLocally(app))
-                    .compacted_locally
-                else
-                    .unchanged;
-            };
-            const route = provider_route.fromCredentialSource(credential.source) orelse {
-                if (!app.session.hasCompactionCandidate()) return .unchanged;
-                return if (try compactHistoryLocally(app))
-                    .compacted_locally
-                else
-                    .unchanged;
-            };
-            if (route.contract().remote_compaction == .unsupported) {
-                if (!app.session.hasCompactionCandidate()) return .unchanged;
-                return if (try compactHistoryLocally(app))
-                    .compacted_locally
-                else
-                    .unchanged;
-            }
-            if (!app.session.hasRemoteCompactionCandidate()) return .unchanged;
-            const provider = if (comptime @hasDecl(App, "responsesCompactionProvider"))
+        fn compactHistoryWithTrigger(
+            app: *App,
+            automatic: bool,
+            allow_remote: bool,
+        ) !CompactHistoryOutcome {
+            if (!app.session.hasFullCompactionCandidate()) return .unchanged;
+            if (app.session_persistence.compaction_tasks.isActive()) return .busy;
+
+            const credential = app.auth.gatewayCredential();
+            const route = if (credential) |current|
+                provider_route.fromCredentialSource(current.source)
+            else
+                null;
+            const remote_provider = if (allow_remote and
+                comptime @hasDecl(App, "responsesCompactionProvider"))
                 app.responsesCompactionProvider()
             else
                 null;
-            const remote_provider = provider orelse {
-                return if (try compactHistoryFullyLocally(app))
-                    .compacted_locally
-                else
-                    .unchanged;
-            };
-            if (app.session_persistence.responses_compaction_tasks.isActive()) {
-                return .remote_busy;
-            }
-
-            startResponsesCompactionTask(app, remote_provider, credential, route, automatic) catch |err| {
-                debug_trace.logf(
-                    "session",
-                    "event=responses_compaction_start outcome=local_fallback err={s}",
-                    .{@errorName(err)},
-                );
-                return if (try compactHistoryFullyLocally(app))
-                    .local_after_remote_failure
-                else
-                    .unchanged;
-            };
-            return .remote_started;
-        }
-
-        fn compactHistoryLocally(app: *App) !bool {
-            const previous_start = app.session.contextHistoryStart();
-            app.session.forceCompaction();
-            if (app.session.contextHistoryStart() == previous_start) return false;
-            refreshContextUsageAfterCompaction(app);
-            try persistCompactionState(app);
-            return true;
-        }
-
-        fn compactHistoryFullyLocally(app: *App) !bool {
-            if (!try app.session.installLocalCompaction(app.alloc)) return false;
-            refreshContextUsageAfterCompaction(app);
-            try persistCompactionState(app);
-            return true;
+            try startCompactionTask(
+                app,
+                remote_provider,
+                app.agentStreamProvider(),
+                credential,
+                route,
+                automatic,
+                allow_remote,
+            );
+            return .started;
         }
 
         fn refreshContextUsageAfterCompaction(app: *App) void {
@@ -3222,15 +3176,17 @@ pub fn Runtime(comptime App: type) type {
             try commitCurrentStateReplacement(app, loaded, .compaction, .{}, false);
         }
 
-        fn startResponsesCompactionTask(
+        fn startCompactionTask(
             app: *App,
-            provider: responses_compaction_provider.Provider,
+            remote_provider: ?responses_compaction_provider.Provider,
+            local_provider: stream_provider.Provider,
             credential: anytype,
-            route: provider_route.ProviderRoute,
+            route: ?provider_route.ProviderRoute,
             automatic: bool,
+            allow_remote: bool,
         ) !void {
             const alloc = std.heap.c_allocator;
-            const tasks = &app.session_persistence.responses_compaction_tasks;
+            const tasks = &app.session_persistence.compaction_tasks;
             if (tasks.isActive()) return error.ResponsesCompactionBusy;
 
             var snapshots_owned_by_task = false;
@@ -3241,16 +3197,23 @@ pub fn Runtime(comptime App: type) type {
             errdefer if (!snapshots_owned_by_task) {
                 if (session_id) |id| alloc.free(id);
             };
-            const credential_copy = try alloc.dupe(u8, credential.api_key);
+            const credential_copy = try alloc.dupe(
+                u8,
+                if (credential) |current| current.api_key else "",
+            );
             errdefer if (!snapshots_owned_by_task) secret.zeroAndFree(alloc, credential_copy);
-            const account_id = if (app.auth.accountId()) |id|
-                try alloc.dupe(u8, id)
+            const credential_source: ?types.CredentialSource = if (credential) |current|
+                current.source
+            else
+                null;
+            const account_id = if (credential_source != null and app.auth.accountId() != null)
+                try alloc.dupe(u8, app.auth.accountId().?)
             else
                 null;
             errdefer if (!snapshots_owned_by_task) {
                 if (account_id) |id| alloc.free(id);
             };
-            if (route == .codex_responses_oauth and account_id == null) {
+            if (route != null and route.? == .codex_responses_oauth and account_id == null) {
                 return error.MissingCodexAccountId;
             }
 
@@ -3259,19 +3222,30 @@ pub fn Runtime(comptime App: type) type {
             errdefer if (!snapshots_owned_by_task) alloc.free(model);
             const wire_model = try alloc.dupe(
                 u8,
-                provider_route.wireModel(route, selected_model),
+                if (route) |current| provider_route.wireModel(current, selected_model) else selected_model,
             );
             errdefer if (!snapshots_owned_by_task) alloc.free(wire_model);
-            const provider_binding = try responses_compaction_binding.buildFromEnvironmentAlloc(
-                alloc,
-                credential.source,
-                credential.api_key,
-                app.auth.accountId(),
-            );
-            errdefer if (!snapshots_owned_by_task) {
-                types.freeResponsesCompactionProviderBinding(alloc, provider_binding);
+            const provider_binding: ?types.ResponsesCompactionProviderBinding = binding: {
+                if (!allow_remote or remote_provider == null or credential_source == null) break :binding null;
+                const current_route = route orelse break :binding null;
+                if (current_route.contract().remote_compaction == .unsupported) break :binding null;
+                break :binding responses_compaction_binding.buildFromEnvironmentAlloc(
+                    alloc,
+                    credential_source.?,
+                    credential_copy,
+                    account_id,
+                ) catch |err| {
+                    debug_trace.logf(
+                        "compaction",
+                        "remote binding unavailable before task start err={s}",
+                        .{@errorName(err)},
+                    );
+                    break :binding null;
+                };
             };
-
+            errdefer if (!snapshots_owned_by_task) if (provider_binding) |binding| {
+                types.freeResponsesCompactionProviderBinding(alloc, binding);
+            };
             const prompt_policy = app.promptPolicy();
             const system_prompt = try alloc.dupe(u8, prompt_policy.system_prompt);
             errdefer if (!snapshots_owned_by_task) alloc.free(system_prompt);
@@ -3285,17 +3259,19 @@ pub fn Runtime(comptime App: type) type {
                 if (model_prompt_overlay) |overlay| alloc.free(overlay);
             };
 
-            var projection = try app.snapshotModelToolProjection(
-                alloc,
-                app.permission_engine.mode,
-            );
-            defer projection.deinit(alloc);
-            const serialized_tools = try @import("../tooling/model_tool_schema.zig").functionSchemaArrayJsonAlloc(
-                alloc,
-                projection.advertised_functions,
-            );
+            const serialized_tools = if (remote_provider != null and provider_binding != null) tools: {
+                var projection = try app.snapshotModelToolProjection(
+                    alloc,
+                    app.permission_engine.mode,
+                );
+                defer projection.deinit(alloc);
+                break :tools try @import("../tooling/model_tool_schema.zig").functionSchemaArrayJsonAlloc(
+                    alloc,
+                    projection.advertised_functions,
+                );
+            } else try alloc.dupe(u8, "[]");
             errdefer if (!snapshots_owned_by_task) alloc.free(serialized_tools);
-            const history = try app.session.snapshotContextHistory(alloc);
+            const history = try app.session.snapshotCompactionHistory(alloc);
             errdefer if (!snapshots_owned_by_task) {
                 types.freeHistoryTurnSlice(alloc, history);
             };
@@ -3310,18 +3286,19 @@ pub fn Runtime(comptime App: type) type {
                 app.effort,
                 app.fast_mode,
             );
-            const task = try alloc.create(ResponsesCompactionTaskRuntime.Task);
+            const task = try alloc.create(CompactionTaskRuntime.Task);
             task.* = .{
-                .provider = provider,
+                .remote_provider = remote_provider,
+                .local_provider = local_provider,
                 .publish_context = @ptrCast(app),
-                .publish_fn = publishResponsesCompactionEvent,
+                .publish_fn = publishCompactionEvent,
                 .generation = tasks.allocateGeneration(),
                 .automatic = automatic,
                 .expected_history_generation = app.session.historyGeneration(),
                 .expected_history_len = app.session.historyLen(),
                 .expected_context_history_start = app.session.contextHistoryStart(),
                 .session_id = session_id,
-                .credential_source = credential.source,
+                .credential_source = credential_source,
                 .credential = credential_copy,
                 .account_id = account_id,
                 .model = model,
@@ -3333,6 +3310,12 @@ pub fn Runtime(comptime App: type) type {
                 .history = history,
                 .capabilities = capabilities,
                 .provider_options = provider_options,
+                .gateway_retry_count = if (comptime @hasDecl(App, "gatewayRetryCount"))
+                    app.gatewayRetryCount()
+                else
+                    1,
+                .usage = &app.session.usage,
+                .allow_remote = allow_remote,
             };
             snapshots_owned_by_task = true;
             tasks.start(task) catch |err| {
@@ -3341,33 +3324,37 @@ pub fn Runtime(comptime App: type) type {
             };
             debug_trace.logf(
                 "session",
-                "event=responses_compaction_start outcome=started generation={d} source={s} model={s}",
-                .{ task.generation, @tagName(task.credential_source), task.wire_model },
+                "event=compaction_start outcome=started generation={d} strategy={s} model={s}",
+                .{
+                    task.generation,
+                    if (task.remote_provider != null and task.allow_remote) "remote_preferred" else "local",
+                    task.wire_model,
+                },
             );
         }
 
-        fn publishResponsesCompactionEvent(
+        fn publishCompactionEvent(
             raw: *anyopaque,
-            event: types.ResponsesCompactionWorkerEvent,
+            event: types.CompactionWorkerEvent,
         ) !void {
             const app: *App = @ptrCast(@alignCast(raw));
             // The provider thread only queues owned data. Session and
             // transcript mutation remain exclusively on the UI drain.
             try app.worker.pushOwnedEvent(
                 std.heap.c_allocator,
-                .{ .responses_compaction = event },
+                .{ .compaction = event },
             );
         }
 
-        pub fn applyResponsesCompactionEvent(
+        pub fn applyCompactionEvent(
             app: *App,
-            event: types.ResponsesCompactionWorkerEvent,
+            event: types.CompactionWorkerEvent,
         ) void {
-            const task = app.session_persistence.responses_compaction_tasks
+            const task = app.session_persistence.compaction_tasks
                 .takeCompletedGeneration(event.generation) orelse {
                 debug_trace.logf(
                     "session",
-                    "event=responses_compaction_result outcome=ignored reason=unknown_generation generation={d}",
+                    "event=compaction_result outcome=ignored reason=unknown_generation generation={d}",
                     .{event.generation},
                 );
                 return;
@@ -3384,13 +3371,13 @@ pub fn Runtime(comptime App: type) type {
             if (!optionalStringsEqual(activeSessionId(app), event.session_id)) {
                 debug_trace.logf(
                     "session",
-                    "event=responses_compaction_result outcome=discarded reason=session_changed generation={d}",
+                    "event=compaction_result outcome=discarded reason=session_changed generation={d}",
                     .{event.generation},
                 );
                 writeCompactionNotice(
                     app,
                     .warning,
-                    "Remote context compaction finished after the active session changed; no context was changed.",
+                    "Context compaction finished after the active session changed; no context was changed.",
                 );
                 return;
             }
@@ -3401,8 +3388,10 @@ pub fn Runtime(comptime App: type) type {
                 app.session.contextHistoryStart() ==
                     event.expected_context_history_start;
             const credential = app.auth.gatewayCredential();
-            const source_matches = credential != null and
-                credential.?.source == event.credential_source;
+            const source_matches = if (event.credential_source) |expected|
+                credential != null and credential.?.source == expected
+            else
+                credential == null;
             const route = if (credential) |current|
                 provider_route.fromCredentialSource(current.source)
             else
@@ -3414,12 +3403,12 @@ pub fn Runtime(comptime App: type) type {
                     event.wire_model,
                 )
             else
-                false;
-            const current_binding: ?types.ResponsesCompactionProviderBinding = if (credential) |current|
+                std.mem.eql(u8, provider_runtime.model(app), event.wire_model);
+            const current_binding: ?types.ResponsesCompactionProviderBinding = if (event.provider_binding != null and credential != null)
                 responses_compaction_binding.buildFromEnvironmentAlloc(
                     app.alloc,
-                    current.source,
-                    current.api_key,
+                    credential.?.source,
+                    credential.?.api_key,
                     app.auth.accountId(),
                 ) catch null
             else
@@ -3427,91 +3416,120 @@ pub fn Runtime(comptime App: type) type {
             defer if (current_binding) |binding| {
                 types.freeResponsesCompactionProviderBinding(app.alloc, binding);
             };
-            const binding_matches = if (current_binding) |binding|
-                responses_compaction_binding.eql(
-                    binding.view(),
-                    event.provider_binding.view(),
-                )
+            const binding_matches = if (event.provider_binding) |expected|
+                if (current_binding) |binding|
+                    responses_compaction_binding.eql(binding.view(), expected.view())
+                else
+                    false
             else
-                false;
+                true;
 
             if (!history_matches or !source_matches or !model_matches or !binding_matches) {
                 debug_trace.logf(
                     "session",
-                    "event=responses_compaction_result outcome=local_fallback reason=stale history_match={} source_match={} model_match={} binding_match={}",
+                    "event=compaction_result outcome=discarded reason=stale history_match={} source_match={} model_match={} binding_match={}",
                     .{ history_matches, source_matches, model_matches, binding_matches },
                 );
-                applyRemoteCompactionLocalFallback(app);
+                writeCompactionNotice(
+                    app,
+                    .warning,
+                    "Context compaction finished after its history or provider changed; no context was changed.",
+                );
                 return;
             }
 
-            switch (event.outcome) {
-                .rejected => |status| {
-                    debug_trace.logf(
-                        "session",
-                        "event=responses_compaction_result outcome=local_fallback reason=http_status status={d}",
-                        .{@intFromEnum(status)},
-                    );
-                    applyRemoteCompactionLocalFallback(app);
-                },
+            const installed = switch (event.outcome) {
                 .failed => |name| {
                     debug_trace.logf(
                         "session",
-                        "event=responses_compaction_result outcome=local_fallback reason={s}",
+                        "event=compaction_result outcome=failed reason={s}",
                         .{name},
                     );
-                    applyRemoteCompactionLocalFallback(app);
+                    writeCompactionNotice(
+                        app,
+                        .@"error",
+                        "Context compaction failed before it could produce a safe fallback; no context was changed.",
+                    );
+                    return;
                 },
-                .compacted => |completed| {
-                    const installed = app.session.installResponsesCompaction(
+                .remote => |completed| blk: {
+                    const source = event.credential_source orelse {
+                        writeCompactionNotice(app, .@"error", "Remote compaction returned without a provider identity; no context was changed.");
+                        return;
+                    };
+                    const binding = event.provider_binding orelse {
+                        writeCompactionNotice(app, .@"error", "Remote compaction returned without an endpoint binding; no context was changed.");
+                        return;
+                    };
+                    break :blk app.session.installCompaction(
                         app.alloc,
-                        event.credential_source,
-                        event.wire_model,
-                        completed.input_json,
-                        event.provider_binding.view(),
+                        completed.summary,
+                        .{
+                            .credential_source = source,
+                            .wire_model = event.wire_model,
+                            .input_json = completed.input_json,
+                            .provider_binding = binding.view(),
+                        },
                     ) catch |err| {
                         debug_trace.logf(
                             "session",
-                            "event=responses_compaction_result outcome=install_failed err={s}",
+                            "event=compaction_result outcome=install_failed err={s}",
                             .{@errorName(err)},
                         );
                         writeCompactionNotice(
                             app,
                             .@"error",
-                            "Remote context compaction returned a result, but fx could not install it. No local fallback was applied.",
+                            "Context compaction produced a result, but fx could not install it.",
                         );
                         return;
                     };
-                    if (!installed) {
-                        writeCompactionNotice(
-                            app,
-                            .@"error",
-                            "Remote context compaction returned a result, but its history boundary was no longer installable. No local fallback was applied.",
-                        );
-                        return;
-                    }
-                    refreshContextUsageAfterCompaction(app);
-                    persistCompactionState(app) catch |err| {
-                        debug_trace.logf(
-                            "session",
-                            "event=responses_compaction_result outcome=persist_failed err={s}",
-                            .{@errorName(err)},
-                        );
-                        writeCompactionNotice(
-                            app,
-                            .@"error",
-                            "Remote context compaction was installed in memory, but fx could not persist it. No local fallback was applied.",
-                        );
-                        return;
-                    };
-                    recordResponsesCompactionUsage(
-                        app,
-                        event.wire_model,
-                        completed.usage,
-                    );
+                },
+                .local => |completed| app.session.installCompaction(
+                    app.alloc,
+                    completed.summary,
+                    null,
+                ) catch |err| {
                     debug_trace.logf(
                         "session",
-                        "event=responses_compaction_result outcome=installed generation={d}",
+                        "event=compaction_result outcome=install_failed err={s}",
+                        .{@errorName(err)},
+                    );
+                    writeCompactionNotice(
+                        app,
+                        .@"error",
+                        "Context compaction produced a result, but fx could not install it.",
+                    );
+                    return;
+                },
+            };
+            if (!installed) {
+                writeCompactionNotice(
+                    app,
+                    .@"error",
+                    "Context compaction completed after its install boundary disappeared; no context was changed.",
+                );
+                return;
+            }
+
+            refreshContextUsageAfterCompaction(app);
+            persistCompactionState(app) catch |err| {
+                debug_trace.logf(
+                    "session",
+                    "event=compaction_result outcome=persist_failed err={s}",
+                    .{@errorName(err)},
+                );
+                writeCompactionNotice(
+                    app,
+                    .@"error",
+                    "Context compaction was installed in memory, but fx could not persist it.",
+                );
+                return;
+            };
+            switch (event.outcome) {
+                .remote => {
+                    debug_trace.logf(
+                        "session",
+                        "event=compaction_result outcome=installed strategy=remote generation={d}",
                         .{event.generation},
                     );
                     writeCompactionNotice(
@@ -3520,6 +3538,22 @@ pub fn Runtime(comptime App: type) type {
                         "Context compacted with the active Responses provider.",
                     );
                 },
+                .local => |completed| {
+                    debug_trace.logf(
+                        "session",
+                        "event=compaction_result outcome=installed strategy={s} generation={d}",
+                        .{ @tagName(completed.strategy), event.generation },
+                    );
+                    writeCompactionNotice(
+                        app,
+                        if (completed.strategy == .local_fallback) .warning else .neutral,
+                        if (completed.strategy == .local_fallback)
+                            "Context compacted with the bounded local fallback because the active model was unavailable."
+                        else
+                            "Context compacted locally with the active model.",
+                    );
+                },
+                .failed => unreachable,
             }
         }
 
@@ -3555,58 +3589,6 @@ pub fn Runtime(comptime App: type) type {
             }
         }
 
-        fn applyRemoteCompactionLocalFallback(app: *App) void {
-            const changed = compactHistoryFullyLocally(app) catch |err| {
-                debug_trace.logf(
-                    "session",
-                    "event=responses_compaction_fallback outcome=failed err={s}",
-                    .{@errorName(err)},
-                );
-                writeCompactionNotice(
-                    app,
-                    .@"error",
-                    "Remote context compaction failed, and fx could not persist the local fallback.",
-                );
-                return;
-            };
-            writeCompactionNotice(
-                app,
-                .warning,
-                if (changed)
-                    "Remote context compaction failed; context was compacted locally."
-                else
-                    "Remote context compaction failed; the context was already compacted locally.",
-            );
-        }
-
-        fn recordResponsesCompactionUsage(
-            app: *App,
-            model: []const u8,
-            usage: types.Usage,
-        ) void {
-            if (comptime !@hasField(@TypeOf(app.session), "usage")) return;
-            const observation = session_usage.InvocationObservation.begin(
-                &app.session.usage,
-            ) catch |err| {
-                debug_trace.logf(
-                    "session",
-                    "event=responses_compaction_usage outcome=reserve_failed err={s}",
-                    .{@errorName(err)},
-                );
-                return;
-            };
-            observation.completeDirect(app.alloc, model, usage, .{
-                .http_ok = true,
-                .terminal_finish_reason = null,
-            }) catch |err| {
-                debug_trace.logf(
-                    "session",
-                    "event=responses_compaction_usage outcome=record_failed err={s}",
-                    .{@errorName(err)},
-                );
-            };
-        }
-
         fn optionalStringsEqual(a: ?[]const u8, b: ?[]const u8) bool {
             if (a == null or b == null) return a == null and b == null;
             return std.mem.eql(u8, a.?, b.?);
@@ -3624,7 +3606,7 @@ pub fn Runtime(comptime App: type) type {
             }, true) catch |err| {
                 debug_trace.logf(
                     "session",
-                    "event=responses_compaction_notice outcome=failed err={s}",
+                    "event=compaction_notice outcome=failed err={s}",
                     .{@errorName(err)},
                 );
             };
@@ -3953,7 +3935,7 @@ pub fn Runtime(comptime App: type) type {
         pub fn finalizePersistence(app: *App) void {
             // Cancel and join provider I/O before closing session state. No
             // persistence/session lock is held across the join.
-            app.session_persistence.responses_compaction_tasks.deinit();
+            app.session_persistence.compaction_tasks.deinit();
             if (app.session_persistence.writable) |*loaded| {
                 if (loaded.log.isParked()) {
                     app.session_persistence.resume_handoff_intent = .none;
@@ -3967,7 +3949,7 @@ pub fn Runtime(comptime App: type) type {
         pub fn finalizePersistenceWithResumeHandoff(app: *App) ?ResumeHandoff {
             // See finalizePersistence: the provider task must not outlive the
             // session identity or publish into a destroyed worker queue.
-            app.session_persistence.responses_compaction_tasks.deinit();
+            app.session_persistence.compaction_tasks.deinit();
             if (app.session_persistence.writable) |*loaded| {
                 if (loaded.log.isParked()) {
                     app.session_persistence.resume_handoff_intent = .none;
@@ -5946,13 +5928,13 @@ const FakeWorker = struct {
     effort: types.ReasoningEffort = .auto,
     fast_mode: bool = false,
     turn_start_held: bool = false,
-    responses_compaction_events: std.ArrayList(types.ResponsesCompactionWorkerEvent) = .empty,
+    compaction_events: std.ArrayList(types.CompactionWorkerEvent) = .empty,
 
     fn deinit(self: *FakeWorker, alloc: Allocator) void {
-        for (self.responses_compaction_events.items) |event| {
-            types.freeResponsesCompactionWorkerEvent(alloc, event);
+        for (self.compaction_events.items) |event| {
+            types.freeCompactionWorkerEvent(alloc, event);
         }
-        self.responses_compaction_events.deinit(alloc);
+        self.compaction_events.deinit(alloc);
         self.model.deinit(alloc);
         self.* = .{};
     }
@@ -5963,8 +5945,8 @@ const FakeWorker = struct {
         event: worker_runtime.WorkerEvent,
     ) !void {
         switch (event) {
-            .responses_compaction => |completed| {
-                try self.responses_compaction_events.append(alloc, completed);
+            .compaction => |completed| {
+                try self.compaction_events.append(alloc, completed);
             },
             else => return error.UnsupportedTestWorkerEvent,
         }
@@ -10778,17 +10760,17 @@ fn unsupportedTestResponsesCompaction(
 
 fn discardTestResponsesCompactionEvent(
     _: *anyopaque,
-    event: types.ResponsesCompactionWorkerEvent,
+    event: types.CompactionWorkerEvent,
 ) !void {
-    types.freeResponsesCompactionWorkerEvent(std.heap.c_allocator, event);
+    types.freeCompactionWorkerEvent(std.heap.c_allocator, event);
 }
 
-fn makeInertResponsesCompactionTask(
+fn makeInertCompactionTask(
     generation: u64,
     session_id: ?[]const u8,
-) !*ResponsesCompactionTaskRuntime.Task {
+) !*CompactionTaskRuntime.Task {
     const alloc = std.heap.c_allocator;
-    const task = try alloc.create(ResponsesCompactionTaskRuntime.Task);
+    const task = try alloc.create(CompactionTaskRuntime.Task);
     errdefer alloc.destroy(task);
     const owned_session_id = if (session_id) |id| try alloc.dupe(u8, id) else null;
     errdefer if (owned_session_id) |id| alloc.free(id);
@@ -10812,7 +10794,8 @@ fn makeInertResponsesCompactionTask(
     const history = try alloc.alloc(types.HistoryTurn, 0);
     errdefer alloc.free(history);
     task.* = .{
-        .provider = .{ .fetch_fn = unsupportedTestResponsesCompaction },
+        .remote_provider = .{ .fetch_fn = unsupportedTestResponsesCompaction },
+        .local_provider = stream_provider.unavailable_provider,
         .publish_context = undefined,
         .publish_fn = discardTestResponsesCompactionEvent,
         .generation = generation,
@@ -10831,11 +10814,12 @@ fn makeInertResponsesCompactionTask(
         .serialized_tools = serialized_tools,
         .history = history,
         .provider_options = .{},
+        .usage = null,
     };
     return task;
 }
 
-test "responses compaction provider callback only queues owned result" {
+test "compaction worker callback only queues an owned result" {
     const alloc = std.testing.allocator;
     var app = try TestApp.init(alloc, "/tmp/workspace");
     defer app.deinit();
@@ -10844,7 +10828,7 @@ test "responses compaction provider callback only queues owned result" {
     const generation = app.session.historyGeneration();
     const boundary = app.session.contextHistoryStart();
 
-    const borrowed = types.ResponsesCompactionWorkerEvent{
+    const borrowed = types.CompactionWorkerEvent{
         .generation = 7,
         .expected_history_generation = generation,
         .expected_history_len = app.session.historyLen(),
@@ -10855,28 +10839,75 @@ test "responses compaction provider callback only queues owned result" {
             .normalized_origin = @constCast("https://chatgpt.com/backend-api/codex/responses"),
             .account_id = @constCast("account"),
         },
-        .outcome = .{ .compacted = .{
+        .outcome = .{ .remote = .{
             .input_json = @constCast("[{\"type\":\"compaction\",\"encrypted_content\":\"opaque\"}]"),
+            .summary = @constCast("Conversation summary: one and two."),
         } },
     };
-    const owned = try types.dupeResponsesCompactionWorkerEvent(
+    const owned = try types.dupeCompactionWorkerEvent(
         std.heap.c_allocator,
         borrowed,
     );
     var transferred = false;
     defer if (!transferred) {
-        types.freeResponsesCompactionWorkerEvent(std.heap.c_allocator, owned);
+        types.freeCompactionWorkerEvent(std.heap.c_allocator, owned);
     };
-    try Runtime(TestApp).publishResponsesCompactionEvent(&app, owned);
+    try Runtime(TestApp).publishCompactionEvent(&app, owned);
     transferred = true;
 
-    try std.testing.expectEqual(@as(usize, 1), app.worker.responses_compaction_events.items.len);
+    try std.testing.expectEqual(@as(usize, 1), app.worker.compaction_events.items.len);
     try std.testing.expectEqual(generation, app.session.historyGeneration());
     try std.testing.expectEqual(boundary, app.session.contextHistoryStart());
     try std.testing.expectEqual(@as(usize, 2), app.session.historyLen());
 }
 
-test "same-session stale remote compaction falls back locally exactly once" {
+test "remote compaction event carries the binding returned by the unified core" {
+    const Capture = struct {
+        event: ?types.CompactionWorkerEvent = null,
+
+        fn publish(raw: *anyopaque, event: types.CompactionWorkerEvent) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            try std.testing.expect(self.event == null);
+            self.event = event;
+        }
+    };
+
+    const alloc = std.heap.c_allocator;
+    const task = try makeInertCompactionTask(9, null);
+    defer task.deinit();
+    types.freeResponsesCompactionProviderBinding(alloc, task.provider_binding.?);
+    task.provider_binding = null;
+    var capture: Capture = .{};
+    task.publish_context = &capture;
+    task.publish_fn = Capture.publish;
+
+    var result = runtime_compaction.Result{
+        .summary = try alloc.dupe(u8, "Conversation summary: remote result."),
+        .strategy = .remote,
+        .remote = .{
+            .credential_source = .chatgpt_subscription,
+            .wire_model = try alloc.dupe(u8, "gpt-5.6-sol"),
+            .input_json = try alloc.dupe(u8, "[{\"type\":\"compaction\"}]"),
+            .provider_binding = try types.dupeResponsesCompactionProviderBinding(alloc, .{
+                .normalized_origin = "https://chatgpt.com/backend-api/codex/responses",
+                .account_id = "account",
+            }),
+        },
+    };
+    defer result.deinit(alloc);
+
+    try CompactionTaskRuntime.publishCompleted(task, result);
+    const event = capture.event.?;
+    defer types.freeCompactionWorkerEvent(alloc, event);
+    try std.testing.expect(event.provider_binding != null);
+    try std.testing.expectEqualStrings(
+        "https://chatgpt.com/backend-api/codex/responses",
+        event.provider_binding.?.normalized_origin,
+    );
+    try std.testing.expectEqualStrings("account", event.provider_binding.?.account_id.?);
+}
+
+test "same-session stale compaction result is discarded exactly once" {
     const alloc = std.testing.allocator;
     var app = try TestApp.init(alloc, "/tmp/workspace");
     defer app.deinit();
@@ -10891,10 +10922,10 @@ test "same-session stale remote compaction falls back locally exactly once" {
     try app.session.appendAssistantHistoryTurn(alloc, "three", "reply three");
     const before_generation = app.session.historyGeneration();
 
-    const task = try makeInertResponsesCompactionTask(11, null);
-    app.session_persistence.responses_compaction_tasks.active = task;
+    const task = try makeInertCompactionTask(11, null);
+    app.session_persistence.compaction_tasks.active = task;
     app.worker.turn_start_held = true;
-    const event = types.ResponsesCompactionWorkerEvent{
+    const event = types.CompactionWorkerEvent{
         .generation = 11,
         .expected_history_generation = before_generation + 1,
         .expected_history_len = app.session.historyLen(),
@@ -10905,22 +10936,65 @@ test "same-session stale remote compaction falls back locally exactly once" {
             .normalized_origin = @constCast("https://chatgpt.com/backend-api/codex/responses"),
             .account_id = @constCast("account"),
         },
-        .outcome = .{ .compacted = .{
+        .outcome = .{ .remote = .{
             .input_json = @constCast("[{\"type\":\"compaction\",\"encrypted_content\":\"opaque\"}]"),
+            .summary = @constCast("Conversation summary: one, two, and three."),
         } },
     };
-    Runtime(TestApp).applyResponsesCompactionEvent(&app, event);
+    Runtime(TestApp).applyCompactionEvent(&app, event);
 
-    try std.testing.expectEqual(@as(usize, 4), app.session.historyLen());
-    try std.testing.expectEqual(@as(usize, 3), app.session.contextHistoryStart());
-    try std.testing.expectEqual(before_generation + 1, app.session.historyGeneration());
+    try std.testing.expectEqual(@as(usize, 3), app.session.historyLen());
+    try std.testing.expectEqual(@as(usize, 0), app.session.contextHistoryStart());
+    try std.testing.expectEqual(before_generation, app.session.historyGeneration());
     try std.testing.expectEqual(@as(usize, 1), app.notices.items.len);
     try std.testing.expect(!app.worker.turn_start_held);
 
     // A duplicate result has no active generation to consume and therefore
     // cannot compact or notify a second time.
-    Runtime(TestApp).applyResponsesCompactionEvent(&app, event);
-    try std.testing.expectEqual(before_generation + 1, app.session.historyGeneration());
+    Runtime(TestApp).applyCompactionEvent(&app, event);
+    try std.testing.expectEqual(before_generation, app.session.historyGeneration());
+    try std.testing.expectEqual(@as(usize, 1), app.notices.items.len);
+}
+
+test "local compaction result installs through the shared UI drain" {
+    const alloc = std.testing.allocator;
+    var app = try TestApp.init(alloc, "/tmp/workspace");
+    defer app.deinit();
+    app.auth.credential = .{
+        .api_key = "token",
+        .account_id = null,
+        .source = .openai_api_key,
+    };
+    try app.selected_model.appendSlice(alloc, "gpt-5.4");
+    try app.session.appendAssistantHistoryTurn(alloc, "one", "reply one");
+    try app.session.appendAssistantHistoryTurn(alloc, "two", "reply two");
+    try app.session.appendAssistantHistoryTurn(alloc, "three", "reply three");
+    const generation = app.session.historyGeneration();
+
+    const task = try makeInertCompactionTask(17, null);
+    app.session_persistence.compaction_tasks.active = task;
+    const event = types.CompactionWorkerEvent{
+        .generation = 17,
+        .expected_history_generation = generation,
+        .expected_history_len = app.session.historyLen(),
+        .expected_context_history_start = app.session.contextHistoryStart(),
+        .credential_source = .openai_api_key,
+        .wire_model = @constCast("gpt-5.4"),
+        .provider_binding = null,
+        .outcome = .{ .local = .{
+            .summary = @constCast("Conversation summary: one, two, and three are complete."),
+            .strategy = .local_model,
+        } },
+    };
+    Runtime(TestApp).applyCompactionEvent(&app, event);
+
+    try std.testing.expectEqual(@as(usize, 4), app.session.historyLen());
+    try std.testing.expectEqual(@as(usize, 3), app.session.contextHistoryStart());
+    try std.testing.expectEqual(generation + 1, app.session.historyGeneration());
+    try std.testing.expectEqualStrings(
+        "Conversation summary: one, two, and three are complete.",
+        app.session.lastSummary().?,
+    );
     try std.testing.expectEqual(@as(usize, 1), app.notices.items.len);
 }
 
@@ -10954,7 +11028,7 @@ const CompactionIdentityTestEnvironment = struct {
     }
 };
 
-fn expectInFlightCompactionBindingFallback(
+fn expectInFlightCompactionBindingDiscard(
     credential_source: types.CredentialSource,
     api_key: []const u8,
     account_id: ?[]const u8,
@@ -10975,11 +11049,11 @@ fn expectInFlightCompactionBindingFallback(
     try app.session.appendAssistantHistoryTurn(alloc, "three", "reply three");
     const before_generation = app.session.historyGeneration();
 
-    const task = try makeInertResponsesCompactionTask(21, null);
-    app.session_persistence.responses_compaction_tasks.active = task;
+    const task = try makeInertCompactionTask(21, null);
+    app.session_persistence.compaction_tasks.active = task;
     const owned_binding = try types.dupeResponsesCompactionProviderBinding(alloc, event_binding);
     defer types.freeResponsesCompactionProviderBinding(alloc, owned_binding);
-    const event = types.ResponsesCompactionWorkerEvent{
+    const event = types.CompactionWorkerEvent{
         .generation = 21,
         .expected_history_generation = before_generation,
         .expected_history_len = app.session.historyLen(),
@@ -10987,20 +11061,21 @@ fn expectInFlightCompactionBindingFallback(
         .credential_source = credential_source,
         .wire_model = @constCast(model),
         .provider_binding = owned_binding,
-        .outcome = .{ .compacted = .{
+        .outcome = .{ .remote = .{
             .input_json = @constCast("[{\"type\":\"compaction\",\"encrypted_content\":\"opaque\"}]"),
+            .summary = @constCast("Conversation summary: one, two, and three."),
         } },
     };
-    Runtime(TestApp).applyResponsesCompactionEvent(&app, event);
+    Runtime(TestApp).applyCompactionEvent(&app, event);
 
-    try std.testing.expectEqual(@as(usize, 4), app.session.historyLen());
-    try std.testing.expectEqual(@as(usize, 3), app.session.contextHistoryStart());
-    try std.testing.expectEqual(before_generation + 1, app.session.historyGeneration());
+    try std.testing.expectEqual(@as(usize, 3), app.session.historyLen());
+    try std.testing.expectEqual(@as(usize, 0), app.session.contextHistoryStart());
+    try std.testing.expectEqual(before_generation, app.session.historyGeneration());
     try std.testing.expectEqual(@as(usize, 1), app.notices.items.len);
 }
 
 test "in-flight remote compaction rejects Codex account drift" {
-    try expectInFlightCompactionBindingFallback(
+    try expectInFlightCompactionBindingDiscard(
         .chatgpt_subscription,
         "token-current",
         "account-current",
@@ -11086,7 +11161,7 @@ test "in-flight remote compaction rejects OpenAI key base organization and proje
             case.current_project,
         );
         defer environment.deinit();
-        try expectInFlightCompactionBindingFallback(
+        try expectInFlightCompactionBindingDiscard(
             .openai_api_key,
             case.current_key,
             null,
@@ -11096,7 +11171,7 @@ test "in-flight remote compaction rejects OpenAI key base organization and proje
     }
 }
 
-test "remote compaction result for a previous session never falls back into current session" {
+test "compaction result for a previous session never mutates the current session" {
     const alloc = std.testing.allocator;
     var app = try TestApp.init(alloc, "/tmp/workspace");
     defer app.deinit();
@@ -11111,9 +11186,9 @@ test "remote compaction result for a previous session never falls back into curr
     try app.session.appendAssistantHistoryTurn(alloc, "three", "reply three");
     const generation = app.session.historyGeneration();
 
-    const task = try makeInertResponsesCompactionTask(12, "previous-session");
-    app.session_persistence.responses_compaction_tasks.active = task;
-    const event = types.ResponsesCompactionWorkerEvent{
+    const task = try makeInertCompactionTask(12, "previous-session");
+    app.session_persistence.compaction_tasks.active = task;
+    const event = types.CompactionWorkerEvent{
         .generation = 12,
         .expected_history_generation = generation,
         .expected_history_len = app.session.historyLen(),
@@ -11125,11 +11200,12 @@ test "remote compaction result for a previous session never falls back into curr
             .normalized_origin = @constCast("https://chatgpt.com/backend-api/codex/responses"),
             .account_id = @constCast("account"),
         },
-        .outcome = .{ .compacted = .{
+        .outcome = .{ .remote = .{
             .input_json = @constCast("[{\"type\":\"compaction\",\"encrypted_content\":\"opaque\"}]"),
+            .summary = @constCast("Conversation summary: previous session."),
         } },
     };
-    Runtime(TestApp).applyResponsesCompactionEvent(&app, event);
+    Runtime(TestApp).applyCompactionEvent(&app, event);
 
     try std.testing.expectEqual(@as(usize, 0), app.session.contextHistoryStart());
     try std.testing.expectEqual(generation, app.session.historyGeneration());
@@ -11138,7 +11214,7 @@ test "remote compaction result for a previous session never falls back into curr
     try std.testing.expect(std.mem.find(u8, app.notices.items[0], "active session changed") != null);
 }
 
-test "responses compaction task teardown cancels and joins provider thread" {
+test "compaction task teardown cancels and joins its provider thread" {
     const Fixture = struct {
         const State = struct {
             started: std.atomic.Value(bool) = .init(false),
@@ -11161,19 +11237,19 @@ test "responses compaction task teardown cancels and joins provider thread" {
 
         fn publish(
             raw: *anyopaque,
-            event: types.ResponsesCompactionWorkerEvent,
+            event: types.CompactionWorkerEvent,
         ) !void {
             const state: *State = @ptrCast(@alignCast(raw));
             state.published.store(true, .seq_cst);
-            types.freeResponsesCompactionWorkerEvent(std.heap.c_allocator, event);
+            types.freeCompactionWorkerEvent(std.heap.c_allocator, event);
         }
     };
 
     var state: Fixture.State = .{};
-    var tasks: ResponsesCompactionTaskRuntime = .{};
+    var tasks: CompactionTaskRuntime = .{};
     defer tasks.deinit();
-    const task = try makeInertResponsesCompactionTask(13, null);
-    task.provider = .{ .context = &state, .fetch_fn = Fixture.fetch };
+    const task = try makeInertCompactionTask(13, null);
+    task.remote_provider = .{ .context = &state, .fetch_fn = Fixture.fetch };
     task.publish_context = &state;
     task.publish_fn = Fixture.publish;
     try tasks.start(task);
