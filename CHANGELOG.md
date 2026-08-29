@@ -4,10 +4,11 @@
 
 <!-- release:start -->
 
-**Model commands use Unified Exec sessions, auto mode reviews exact pending actions, and the macOS arm64 binary is 0.3% smaller (6.12 MiB vs 6.13 MiB).**
+**fx is now a provider-independent BYOK distribution with one context-compaction pipeline, Codex-style Unified Exec, direct ACP provider control, visible reasoning, and substantially stronger long-session lifecycle guarantees.**
 
 ### Breaking Changes
 
+- **Vercel product surface**: The BYOK distribution no longer includes Vercel setup, account onboarding, login, gateway defaults, hosted upgrade channels, CDN backfill, or development-release flows. Generic provider contracts remain where they serve direct API-key, Codex, Grok, ACP, or SDK use.
 - **Terminal presentation**: `/appearance`, `/input`, and `/maxxing` have been removed along with their saved settings. fx now uses the same input and transcript layout everywhere.
 - **Model execution tools**: The old model-facing `terminal` action is removed. Use `exec_command` for shell commands and `write_stdin` to poll or provide input to a long-running session.
 
@@ -15,14 +16,24 @@
 
 - **Unified Exec commands:** Model turns now use separate `exec_command` and `write_stdin` tools with numeric sessions for long-running and interactive commands. Output remains bounded while processes survive turn boundaries until they finish or the session closes.
 
+- **Unified context compaction:** Manual `/compact`, automatic threshold compaction, context-overflow recovery, TUI, and ACP now use one strategy module. Eligible Responses routes use native remote compaction first, other providers use the active model for a structured full-history summary, and a bounded deterministic summary remains available when provider compaction cannot complete.
+- **Visible reasoning and replay:** Reasoning-capable models stream reasoning as a separate TUI and ACP surface by default. Signed reasoning is preserved for within-turn tool continuation, provider summaries remain available after resume, and mixed reasoning, text, and tool calls serialize through one valid request path.
+- **Codex account services:** `fx usage --codex` reports subscription limits, while authenticated Codex sessions expose the `web.run` search, open, click, and find workflow with bounded verified context.
+- **Linux and WSL clipboard images:** Ctrl+V and `/paste` can attach clipboard images through `wl-paste`, `xclip`, or the WSL PowerShell bridge in addition to the native macOS pasteboard.
 - **ACP provider control:** Native ACP clients can start and monitor Codex or Grok login, switch providers, and configure a connection-scoped Responses base URL and API key without restarting fx.
+- **ACP image prompts:** Native ACP sessions accept standard base64 image blocks for vision-capable models and persist the verified bounded snapshot with the session.
 
 - **Remote MCP servers**: `/mcp add --transport http <name> <url>` now saves or replaces a remote Streamable HTTP server and reloads MCP immediately. The existing local stdio form is unchanged.
 - **Retained command output**: Captured command output can now be read later with `read_tool_result`, including after a saved session resumes. With `--no-save`, output remains available until fx exits.
 
 ### Improvements
 
-- **Non-blocking compaction and streaming:** Manual and automatic remote compaction keep the composer responsive, queue the next prompt safely, and preserve immediate streamed token rendering while the compacting activity is visible.
+- **Non-blocking compaction and streaming:** Manual and automatic compaction run outside the TUI event loop, keep the composer responsive, queue the next prompt safely, persist the settled replacement before reporting success, and preserve immediate streamed token rendering while compacting activity is visible.
+- **Compaction portability:** Remote checkpoints remain bound to the exact provider identity, endpoint, and wire model, while a portable local summary is stored beside opaque provider state. Switching accounts or endpoints never replays an opaque checkpoint to the wrong provider.
+- **Long-session resource bounds:** Durable file-edit presentation bodies, compaction projections, recovery snapshots, and command output are bounded so large edits and long sessions do not repeatedly inflate checkpoints or replay state.
+- **Event-driven TUI cadence:** Native worker delivery wakes the event loop directly. The short polling cadence is retained only for active response pacing, while idle and network-wait states use a lower-frequency path to reduce CPU use without delaying streamed tokens.
+- **Codex-style activity:** Active turns use a rotating `Working` status with elapsed time and token counts, the terminal title reflects ongoing work, queued prompts remain visible for the next turn, and redundant activity disappears once streamed assistant text becomes the progress surface.
+- **Reasoning presentation:** Long reasoning summaries stay visually bounded without truncating the provider-owned body used for continuation, and reasoning updates are always marshaled onto the UI thread before transcript mutation.
 
 - **Auto mode review prompts**: Auto mode now uses fewer tokens when reviewing unresolved actions.
 - **Native binary size**: The macOS arm64 binary is 0.3% smaller (6.12 MiB vs 6.13 MiB).
@@ -38,6 +49,8 @@
 
 ### Bug Fixes
 
+- **Codex Responses routing:** ChatGPT OAuth uses the shared Responses request path, keeps account-bound headers and compaction state, and always sends valid input, including a synthetic continuation when recovery leaves only system context.
+- **Compaction failures:** Rejected or unavailable remote compaction now falls through to active-model compaction before the deterministic fallback. Manual and automatic compaction share the same installation, persistence, cancellation, and stale-result checks in both TUI and ACP.
 - **ACP process control**: Direct Unified Exec writes, output polls, and termination remain responsive even while a model-side output poll is waiting, without consuming output intended for the model.
 - **ACP provider bindings**: Connection-scoped BYOK endpoints keep their matching API key across temporary provider switches and now apply consistently to model requests, automatic permission reviews, remote compaction, and persistent subagent turns. Reconfiguring the connection cannot redirect or invalidate a child turn already in progress.
 - **Provider logout**: Signing out immediately invalidates a matching provider switch already loading in the background, leaves unrelated provider activation alone, and keeps durable credential removal off the TUI event loop while an in-flight refresh releases its session lock.
@@ -45,6 +58,7 @@
 - **Subscription sign-in**: Codex and Grok sign-ins now survive unrelated, stalled, reset, or stale browser connections. Grok authorization codes can also be pasted when the browser cannot return to fx.
 - **OAuth callback pages**: OAuth callbacks now show a completion or failure page after returning from the browser.
 - **Nested rebuilds**: Interactive terminal helpers continue working after a nested rebuild replaces the fx binary on disk.
+- **Escaped command descendants:** Captured commands and subagent-owned processes track and reap descendants that escape the original process group, including shutdown and cancellation paths.
 - **Terminal recovery**: fx recovery no longer pauses commands already running in tmux.
 - **Terminal cancellation**: Terminal cancellation no longer reports failure when the command exits during cancellation.
 - **MCP resource compatibility**: MCP resources and prompts no longer fail on servers that require their configured name.
@@ -52,6 +66,13 @@
 - **MCP stdio environments**: Configured MCP stdio environment variables now override inherited values without discarding the rest of the child environment.
 - **Captured command failures**: Captured command output remains readable after timeout or cancellation. Output-capture failures now fail the tool call instead of returning an incomplete result.
 - **Resumed review labels**: The `Safety caution` and `Review unavailable` labels now survive session resume.
+
+### Fork and Release Maintenance
+
+- **Smaller supported surface:** Removed Vercel-only runtime, setup, account, updater, telemetry, gateway protocol, credential storage, SDK login, release-channel, and obsolete test/eval code that conflicted with the BYOK product direction. Generic Responses, provider, MCP, ACP, image, SDK, and permission boundaries remain supported.
+- **Focused regression ownership:** Kept deterministic coverage for real crashes, recovery, resource limits, security boundaries, provider routing, streaming, TUI rendering, ACP, and process lifecycle while removing brittle layout counts, duplicate scenarios, and tests owned only by removed features.
+- **Release qualification:** Full CI now runs once on the exact feature commit across Linux and macOS x86_64 and arm64, avoids repeating the same suite after the squash merge, and reserves the expensive macOS arm64 PGSO qualification for stable releases.
+- **Download integrity:** Stable releases build stripped ReleaseSafe archives for Linux x86_64 and arm64 plus signed and notarized macOS x86_64 and PGSO-qualified arm64, with a SHA-256 file beside every downloadable package.
 
 ### Security
 
