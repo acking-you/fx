@@ -36,7 +36,7 @@
 - **Reasoning presentation:** Long reasoning summaries stay visually bounded without truncating the provider-owned body used for continuation, and reasoning updates are always marshaled onto the UI thread before transcript mutation.
 
 - **Auto mode review prompts**: Auto mode now uses fewer tokens when reviewing unresolved actions.
-- **Native binary size**: The macOS arm64 binary is 0.3% smaller (6.12 MiB vs 6.13 MiB).
+- **Native release builds**: Every supported archive is produced directly from the same stripped ReleaseSafe build profile.
 - **Provider model preferences**: Gateway, Codex, and Grok now keep separate saved model selections, so switching providers no longer replaces another provider's preferred model.
 - **Responsive provider switching**: Provider credential refresh and catalog loading no longer block TUI input or ACP control messages. `/provider` is now the direct interactive provider command, while `/login` remains focused on authentication.
 - **Subscription session longevity**: Codex and Grok sessions remain usable beyond 64 consecutive requests.
@@ -71,8 +71,8 @@
 
 - **Smaller supported surface:** Removed Vercel-only runtime, setup, account, updater, telemetry, gateway protocol, credential storage, SDK login, release-channel, and obsolete test/eval code that conflicted with the BYOK product direction. Generic Responses, provider, MCP, ACP, image, SDK, and permission boundaries remain supported.
 - **Focused regression ownership:** Kept deterministic coverage for real crashes, recovery, resource limits, security boundaries, provider routing, streaming, TUI rendering, ACP, and process lifecycle while removing brittle layout counts, duplicate scenarios, and tests owned only by removed features.
-- **Release qualification:** Full CI now runs once on the exact feature commit across Linux and macOS x86_64 and arm64, avoids repeating the same suite after the squash merge, and reserves the expensive macOS arm64 PGSO qualification for stable releases.
-- **Download integrity:** Stable releases build stripped ReleaseSafe archives for Linux x86_64 and arm64 plus PGSO-qualified macOS arm64, with a SHA-256 file beside every downloadable package. macOS binaries use Developer ID signing and notarization when Apple credentials are configured; fork releases without those credentials use a verified ad-hoc signature and state that notarization was skipped.
+- **Release workflow:** Full CI runs once on the exact feature commit and is not repeated after the squash merge. Stable releases only compile, sign, checksum, and package the four native ReleaseSafe binaries; PGSO qualification remains an independently dispatchable size-optimization workflow rather than a release blocker.
+- **Download integrity:** Stable releases provide stripped ReleaseSafe archives for Linux and macOS on x86_64 and arm64, with a SHA-256 file beside every downloadable package. macOS binaries use Developer ID signing and notarization when Apple credentials are configured; fork releases without those credentials use a verified ad-hoc signature and state that notarization was skipped.
 
 ### Security
 
