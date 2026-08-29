@@ -784,6 +784,7 @@ pub const write_stdin = ToolSpec{
     .completed_action_label = "Polled",
     .label_arg_kind = .session_id,
     .label_arg_default = "exec session",
+    .presentation_fn = unified_exec_impl.writePresentation,
     .permission_target_kind = .none,
     .decode = unified_exec_impl.decodeWrite,
     .validate = unified_exec_impl.validateWrite,
@@ -909,10 +910,6 @@ pub const install_skill = ToolSpec{
     .call = install_skill_impl.call,
     .reads_only_fn = install_skill_impl.readsOnly,
     .irreversible_fn = install_skill_impl.isIrreversible,
-    .run_command_compatibility = .{
-        .matches = install_skill_impl.matchesRunCommand,
-        .execute = install_skill_impl.executeRunCommand,
-    },
 };
 
 pub const subagent = ToolSpec{
@@ -1881,16 +1878,6 @@ test "built-in subagent owns product metadata schema and callbacks" {
     try std.testing.expect(subagent.call == subagent_impl.call);
     try std.testing.expect(subagent.reads_only_fn == subagent_impl.readsOnly);
     try std.testing.expect(subagent.irreversible_fn == subagent_impl.isIrreversible);
-}
-
-test "built-in install_skill registers run_command compatibility" {
-    const matched = (try tool_dispatch.matchRunCommandCompatibility(
-        registry,
-        "npx skills add example/agent-skills --skill workflow -g -y",
-    )) orelse return error.TestExpectedEqual;
-
-    try std.testing.expectEqualStrings("install_skill", matched.tool.name);
-    try std.testing.expect(try tool_dispatch.matchRunCommandCompatibility(registry, "zig build") == null);
 }
 
 test "built-in install_skill owns product metadata and schema" {

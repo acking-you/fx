@@ -81,7 +81,7 @@ pub const VisionPathExecutionAuthority = struct {
 
 pub const ToolExecutionAuthority = union(enum) {
     ordinary,
-    run_command: CommandExecutionAuthority,
+    command: CommandExecutionAuthority,
     file_mutation: file_mutation_contract.FileExecutionAuthorization,
     vision_paths: VisionPathExecutionAuthority,
 };
@@ -114,7 +114,7 @@ pub const DefaultApproval = union(enum) {
     approval_required: command_effect.ApprovalReason,
 };
 
-pub fn defaultForRunCommand(
+pub fn defaultForCommand(
     alloc: std.mem.Allocator,
     command_ctx: CommandContext,
     permission_mode: types.PermissionMode,
@@ -149,7 +149,7 @@ test "normalized default emits direct-only only for a direct plan" {
         .background = false,
         .target_os = .macos,
     };
-    const direct = defaultForRunCommand(std.testing.allocator, direct_ctx, .ask);
+    const direct = defaultForCommand(std.testing.allocator, direct_ctx, .ask);
     switch (direct) {
         .direct_only => |fingerprint| try std.testing.expect(fingerprint.matches(direct_ctx)),
         .approval_required => return error.TestExpectedDirectOnly,
@@ -163,7 +163,7 @@ test "normalized default emits direct-only only for a direct plan" {
     };
     try std.testing.expectEqual(
         command_effect.ApprovalReason.filesystem_write,
-        defaultForRunCommand(std.testing.allocator, write_ctx, .ask).approval_required,
+        defaultForCommand(std.testing.allocator, write_ctx, .ask).approval_required,
     );
 }
 
@@ -178,7 +178,7 @@ test "explicit user environment always requires shell authority" {
     for ([_]types.PermissionMode{ .auto, .ask }) |permission_mode| {
         try std.testing.expectEqual(
             command_effect.ApprovalReason.dynamic_shell,
-            defaultForRunCommand(std.testing.allocator, user_ctx, permission_mode).approval_required,
+            defaultForCommand(std.testing.allocator, user_ctx, permission_mode).approval_required,
         );
     }
 }
@@ -191,19 +191,19 @@ test "explicit clean environment is direct only in automatic mode" {
         .target_os = .macos,
         .environment = .{ .clean = "/bin/zsh" },
     };
-    const automatic = defaultForRunCommand(std.testing.allocator, clean_ctx, .auto);
+    const automatic = defaultForCommand(std.testing.allocator, clean_ctx, .auto);
     switch (automatic) {
         .direct_only => |fingerprint| try std.testing.expect(fingerprint.matches(clean_ctx)),
         .approval_required => return error.TestExpectedDirectOnly,
     }
     try std.testing.expectEqual(
         command_effect.ApprovalReason.dynamic_shell,
-        defaultForRunCommand(std.testing.allocator, clean_ctx, .ask).approval_required,
+        defaultForCommand(std.testing.allocator, clean_ctx, .ask).approval_required,
     );
     var write_ctx = clean_ctx;
     write_ctx.command = "touch created.txt";
     try std.testing.expectEqual(
         command_effect.ApprovalReason.filesystem_write,
-        defaultForRunCommand(std.testing.allocator, write_ctx, .auto).approval_required,
+        defaultForCommand(std.testing.allocator, write_ctx, .auto).approval_required,
     );
 }

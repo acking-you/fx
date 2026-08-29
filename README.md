@@ -165,7 +165,7 @@ fx usage --codex
 
 With `--json`, `output` contains accumulated assistant Markdown across the request, while `final_output` contains only a completed final assistant response and is `""` for interrupted, failed, background, or otherwise absent final responses.
 
-Model tool execution uses Codex-style Unified Exec. `exec_command` runs a shell command and returns its output immediately when it finishes within the yield window; a still-running command returns a numeric session ID. The shell defaults to the user's configured shell. Use `write_stdin` with that ID to poll output or send interactive input. Output is continuously drained, bounded, and UTF-8 safe. Yielding never kills the process, and the manager keeps sessions alive across turns until they exit or the owning fx session is closed. Hosts without native process support advertise neither tool and do not fall back to the removed `terminal` API.
+Model shell execution has one Codex-style Unified Exec family: `exec_command` starts a command and `write_stdin` polls or interacts with that same process. There is no second model-facing command executor or command-shaped skill shortcut. `exec_command` returns output immediately when the process finishes within the yield window; a still-running command returns a numeric session ID. The shell defaults to the user's configured shell. Output is continuously drained, bounded, UTF-8 safe, and streamed into the active TUI tool row without waiting for command completion. Yielding never kills the process, and the manager keeps sessions alive across turns until they exit or the owning fx session is closed. Hosts without native process support advertise neither tool and do not fall back to the removed `terminal` API.
 
 The hosted terminal engine remains available for explicit interactive terminal takeover and replay. It is separate from the model-facing command tools and is not used as a shell fallback.
 
@@ -187,7 +187,8 @@ fx builds as a native binary or WebAssembly. Applications embedding fx can provi
 
 The WebAssembly SDK is experimental. See the [WebAssembly SDK](sdk/README.md) and the repository's [ACP usage and fx extensions guide](docs/acp.md).
 
-Native ACP clients can also interact with a running Unified Exec process
+Native ACP clients receive stable command tool-call IDs, structured input,
+stream-aware output updates, and the final command result. They can also interact with a running Unified Exec process
 directly through `fx/unifiedExec/writeStdin` and `fx/unifiedExec/kill`; those
 control requests remain responsive while a model-side output poll is waiting,
 and ACP output observation does not consume the model-facing output stream.

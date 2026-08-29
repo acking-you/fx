@@ -255,6 +255,36 @@ A native writable ACP session advertises `exec_command` and `write_stdin`. `exec
 
 Unified Exec processes are session-local and are not durable terminal catalog entries, so they do not appear in `/ps` or `fx/backgroundTerminals/list`. WASM ACP sessions, read-only sessions, and configurations without native process support do not advertise these tools and do not fall back to the removed model-facing `terminal` tool.
 
+These are the only model-facing shell tools. Internal provider, MCP, search, and
+authentication subprocesses remain service implementation details and are not
+advertised as alternate command tools.
+
+### Tool-call visualization
+
+fx uses one stable `toolCallId` from admission through completion. The initial
+standard ACP `tool_call` notification includes the rendered command title and
+validated structured input:
+
+```json
+{"sessionUpdate":"tool_call","toolCallId":"CALL_ID","title":"Running zig build","kind":"execute","status":"pending","rawInput":{"cmd":"zig build","workdir":"."}}
+```
+
+While the process runs, fx sends `tool_call_update` notifications immediately
+for both stdout and stderr. ACP replaces a tool call's `content`, so each update
+contains a bounded accumulated preview rather than only the latest fragment.
+`rawOutput` also preserves the current stream and exact new chunk for clients
+that render their own incremental command view:
+
+```json
+{"sessionUpdate":"tool_call_update","toolCallId":"CALL_ID","status":"in_progress","content":[{"type":"content","content":{"type":"text","text":"compile step 1\ncompile step 2\n"}}],"rawOutput":{"stream":"stdout","chunk":"compile step 2\n","aggregatedOutput":"compile step 1\ncompile step 2\n","truncated":false}}
+```
+
+The preview retains at most 64 KiB per active call and sets `truncated` after
+discarding older bytes. ANSI controls are removed before publication. The
+terminal result update includes standard `rawOutput` with the rendered output
+and structured command result. The top-level `command_result` field remains as
+an fx compatibility extension for existing clients.
+
 ### Direct Unified Exec interaction
 
 The model-facing `exec_command` result includes a numeric `session_id` whenever
@@ -265,7 +295,7 @@ The ID first appears in the normal `session/update` notification for the
 completed `exec_command` tool call:
 
 ```json
-{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"SESSION_ID","update":{"sessionUpdate":"tool_call_update","toolCallId":"CALL_ID","status":"completed","command_result":{"kind":"foreground","command":"...","cwd":"/workspace","exit_code":null,"signal":null,"timed_out":false,"duration_ms":250,"stdout_bytes":0,"stderr_bytes":0,"truncated":false,"process_id":7}}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"SESSION_ID","update":{"sessionUpdate":"tool_call_update","toolCallId":"CALL_ID","status":"completed","rawOutput":{"output":"Process running with session ID 7","commandResult":{"kind":"foreground","command":"...","cwd":"/workspace","exit_code":null,"signal":null,"timed_out":false,"duration_ms":250,"stdout_bytes":0,"stderr_bytes":0,"truncated":false,"process_id":7}},"command_result":{"kind":"foreground","command":"...","cwd":"/workspace","exit_code":null,"signal":null,"timed_out":false,"duration_ms":250,"stdout_bytes":0,"stderr_bytes":0,"truncated":false,"process_id":7}}}}
 ```
 
 ```json

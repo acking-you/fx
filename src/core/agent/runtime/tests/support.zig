@@ -188,7 +188,7 @@ const test_tool_registry = tool_dispatch.Registry{ .tools = test_tools[0..] };
 
 fn testExecutionAuthority(call: ToolCall) command_admission.ToolExecutionAuthority {
     if (!std.mem.eql(u8, call.name, "exec_command")) return .ordinary;
-    return .{ .run_command = .{ .shell_allowed = .{
+    return .{ .command = .{ .shell_allowed = .{
         .fingerprint = .{
             .command = call.arguments_json,
             .resolved_cwd = "",

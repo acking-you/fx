@@ -13,8 +13,8 @@ else
 
 const Allocator = std.mem.Allocator;
 const ToolCall = types.ToolCall;
-const max_run_command_activity_bytes = 120;
-const max_run_command_activity_source_bytes = max_run_command_activity_bytes * max_run_command_activity_bytes;
+const max_command_activity_bytes = 120;
+const max_command_activity_source_bytes = max_command_activity_bytes * max_command_activity_bytes;
 pub const max_auto_permission_reason_presentation_bytes: usize = 160;
 
 pub const ToolActionInput = struct {
@@ -25,15 +25,14 @@ pub const ToolActionInput = struct {
     is_available_dynamic_mcp_tool: bool = false,
 };
 
-pub const RunCommandActivity = struct {
+pub const CommandActivity = struct {
     detail: []const u8,
-    compatibility_tool: ?*const tool_dispatch.Tool,
 };
 
-fn projectRunCommandActivitySource(
+fn projectCommandActivitySource(
     command: []const u8,
     workspace_root_input: []const u8,
-    storage: *[max_run_command_activity_bytes + 1]u8,
+    storage: *[max_command_activity_bytes + 1]u8,
 ) []const u8 {
     const display_command = stripNoopCurrentDirectoryPrefix(command);
     var workspace_root_end = workspace_root_input.len;
@@ -42,7 +41,7 @@ fn projectRunCommandActivitySource(
     }
     const workspace_root = workspace_root_input[0..workspace_root_end];
     const can_abbreviate_workspace = workspace_root.len > 1 and workspace_root[0] == '/';
-    const source_limit = @min(display_command.len, max_run_command_activity_source_bytes);
+    const source_limit = @min(display_command.len, max_command_activity_source_bytes);
     var source_index: usize = 0;
     var projected_len: usize = 0;
     var line_boundary_pending = false;
@@ -113,7 +112,7 @@ fn isPathTokenByte(byte: u8) bool {
 }
 
 /// The caller owns the returned allocation and must free it with `alloc`.
-pub fn formatRunCommandPermissionLabel(
+pub fn formatCommandPermissionLabel(
     alloc: Allocator,
     command: []const u8,
 ) ![]const u8 {
@@ -123,7 +122,7 @@ pub fn formatRunCommandPermissionLabel(
     const encoded = try text_utils.encodeTerminalSafe(
         scratch,
         command,
-        max_run_command_activity_bytes,
+        max_command_activity_bytes,
     );
     const suffix = try commandApprovalLabelSuffix(scratch, "exec_command", command);
     return std.fmt.allocPrint(alloc, "exec_command {s}{s}", .{ encoded.bytes, suffix });
@@ -138,26 +137,23 @@ pub fn isAdvertisedDynamicMcpName(registry: tool_dispatch.Registry, name: []cons
 }
 
 /// The caller owns `detail` and must free it with `alloc`.
-pub fn formatRunCommandActivity(
+pub fn formatCommandActivity(
     alloc: Allocator,
     registry: tool_dispatch.Registry,
     workspace_root: []const u8,
     call: ToolCall,
-) !?RunCommandActivity {
+) !?CommandActivity {
     var scratch_state = std.heap.ArenaAllocator.init(std.heap.c_allocator);
     defer scratch_state.deinit();
     const scratch = scratch_state.allocator();
 
     const args = tool_args.parseToolArgsObject(scratch, call.arguments_json) catch return null;
-    if (!isCapturedCommandCall(registry, call, args)) return null;
+    if (!isCommandCall(registry, call)) return null;
     const command = tool_args.optionalStringArg(args, if (std.mem.eql(u8, call.name, "exec_command")) "cmd" else "command") orelse return null;
-    var projected_storage: [max_run_command_activity_bytes + 1]u8 = undefined;
-    const projected = projectRunCommandActivitySource(command, workspace_root, &projected_storage);
-    const encoded = try text_utils.encodeTerminalSafe(scratch, projected, max_run_command_activity_bytes);
-    return .{
-        .detail = try alloc.dupe(u8, encoded.bytes),
-        .compatibility_tool = if (try tool_dispatch.matchRunCommandCompatibility(registry, command)) |matched| matched.tool else null,
-    };
+    var projected_storage: [max_command_activity_bytes + 1]u8 = undefined;
+    const projected = projectCommandActivitySource(command, workspace_root, &projected_storage);
+    const encoded = try text_utils.encodeTerminalSafe(scratch, projected, max_command_activity_bytes);
+    return .{ .detail = try alloc.dupe(u8, encoded.bytes) };
 }
 
 /// The caller owns the returned allocation and must free it with `alloc`.
@@ -173,10 +169,9 @@ pub fn formatPlainAction(alloc: Allocator, input: ToolActionInput) ![]const u8 {
         );
     }
 
-    if (try formatRunCommandActivity(alloc, input.tool_registry, input.workspace_root, call)) |activity| {
+    if (try formatCommandActivity(alloc, input.tool_registry, input.workspace_root, call)) |activity| {
         defer alloc.free(activity.detail);
-        const action_label = if (activity.compatibility_tool) |tool| tool.action_label else "Running";
-        return std.fmt.allocPrint(alloc, "{s} {s}", .{ action_label, activity.detail });
+        return std.fmt.allocPrint(alloc, "Running {s}", .{activity.detail});
     }
 
     var scratch_state = std.heap.ArenaAllocator.init(alloc);
@@ -210,16 +205,13 @@ pub fn formatPermissionLabel(alloc: Allocator, registry: tool_dispatch.Registry,
     defer scratch_state.deinit();
     const scratch = scratch_state.allocator();
 
-    if (try runCommandCompatibilitySource(scratch, registry, call)) |source| {
-        return std.fmt.allocPrint(alloc, "{s} {s}", .{ source.tool.name, source.command });
-    }
     const args = tool_args.parseToolArgsObject(scratch, call.arguments_json) catch {
         return try alloc.dupe(u8, call.name);
     };
-    if (isCapturedCommandCall(registry, call, args)) {
+    if (isCommandCall(registry, call)) {
         const command = tool_args.optionalStringArg(args, if (std.mem.eql(u8, call.name, "exec_command")) "cmd" else "command") orelse
             return try alloc.dupe(u8, call.name);
-        return formatRunCommandPermissionLabel(alloc, command);
+        return formatCommandPermissionLabel(alloc, command);
     }
     const spec = registry.lookup(call.name) orelse return try alloc.dupe(u8, call.name);
     if (file_mutation_contract.isToolName(call.name)) {
@@ -326,37 +318,16 @@ fn stripNotePrefix(note: []const u8) []const u8 {
     return note;
 }
 
-const RunCommandCompatibilitySource = struct {
-    tool: *const tool_dispatch.Tool,
-    command: []const u8,
-};
-
-fn runCommandCompatibilitySource(
-    alloc: Allocator,
+fn isCommandCall(
     registry: tool_dispatch.Registry,
     call: ToolCall,
-) !?RunCommandCompatibilitySource {
-    const args = tool_args.parseToolArgsObject(alloc, call.arguments_json) catch return null;
-    if (!isCapturedCommandCall(registry, call, args)) return null;
-    const command = tool_args.optionalStringArg(args, "command") orelse return null;
-    const matched = (try tool_dispatch.matchRunCommandCompatibility(registry, command)) orelse return null;
-    return .{ .tool = matched.tool, .command = command };
-}
-
-fn isCapturedCommandCall(
-    registry: tool_dispatch.Registry,
-    call: ToolCall,
-    args: std.json.ObjectMap,
 ) bool {
     // Historical sessions retain their original tool name. Presentation may
     // interpret those records, but execution remains unavailable because the
     // registry no longer contains a `run_command` tool.
     if (std.mem.eql(u8, call.name, "run_command")) return true;
     const tool = registry.lookup(call.name) orelse return false;
-    if (tool.executor_kind == .run_command or tool.executor_kind == .exec_command) return true;
-    const expected = tool.captured_command_action orelse return false;
-    const action = tool_args.optionalStringArg(args, "action") orelse return false;
-    return std.mem.eql(u8, action, expected);
+    return tool.executor_kind == .exec_command;
 }
 
 fn copyRenameLabel(alloc: Allocator, tool_name: []const u8, args: std.json.ObjectMap) !?[]const u8 {
@@ -372,35 +343,6 @@ fn copyRenameLabel(alloc: Allocator, tool_name: []const u8, args: std.json.Objec
     }
     return null;
 }
-
-fn matchesTestSkillInstall(command: []const u8) bool {
-    return std.mem.startsWith(u8, command, "npx skills add ");
-}
-
-fn executeTestSkillInstall(
-    ctx: tool_dispatch.DispatchContext,
-    _: []const u8,
-) tool_dispatch.DispatchError!tool_dispatch.ToolResult {
-    return .{ .success = try ctx.allocator.dupe(u8, "installed") };
-}
-
-const test_install_skill = blk: {
-    var tool = test_builtin_tools.skill;
-    tool.name = "install_skill";
-    tool.model_schema.name = "install_skill";
-    tool.executor_kind = .install_skill;
-    tool.activity_kind = .write;
-    tool.requires_approval = true;
-    tool.action_label = "Installing skill";
-    tool.completed_action_label = "Installed skill";
-    tool.label_arg_kind = .source;
-    tool.label_arg_default = "skill";
-    tool.run_command_compatibility = .{
-        .matches = matchesTestSkillInstall,
-        .execute = executeTestSkillInstall,
-    };
-    break :blk tool;
-};
 
 const test_web_search = blk: {
     var tool = test_builtin_tools.read_file;
@@ -424,7 +366,7 @@ const test_tools = [_]tool_dispatch.Tool{
     test_builtin_tools.exec_command,
     test_builtin_tools.memory,
     test_builtin_tools.skill,
-    test_install_skill,
+    test_builtin_tools.install_skill,
     test_builtin_tools.ask_user_question,
 };
 const test_tool_registry = tool_dispatch.Registry{ .tools = test_tools[0..] };
@@ -499,29 +441,6 @@ test "tool presentation formats plain web progress variants" {
     }
 }
 
-test "run command presentation resolves registered compatibility" {
-    const alloc = std.testing.allocator;
-    const call = ToolCall{
-        .id = "install",
-        .name = "run_command",
-        .arguments_json = "{\"command\":\"npx skills add example/agent-skills -g -y\"}",
-    };
-    const activity = (try formatRunCommandActivity(alloc, test_tool_registry, "", call)) orelse
-        return error.TestExpectedEqual;
-    defer alloc.free(activity.detail);
-
-    const compatibility_tool = activity.compatibility_tool orelse return error.TestExpectedEqual;
-    try std.testing.expectEqualStrings("install_skill", compatibility_tool.name);
-
-    const action = try formatPlainAction(alloc, .{ .tool_registry = test_tool_registry, .call = call });
-    defer alloc.free(action);
-    try std.testing.expectEqualStrings("Installing skill npx skills add example/agent-skills -g -y", action);
-
-    const permission = try formatPermissionLabel(alloc, test_tool_registry, call);
-    defer alloc.free(permission);
-    try std.testing.expectEqualStrings("install_skill npx skills add example/agent-skills -g -y", permission);
-}
-
 test "run command activity projects line boundaries without changing other bytes" {
     const alloc = std.testing.allocator;
     const cases = [_]struct {
@@ -547,7 +466,7 @@ test "run command activity projects line boundaries without changing other bytes
     };
 
     for (cases) |case| {
-        const activity = (try formatRunCommandActivity(alloc, test_tool_registry, "", .{
+        const activity = (try formatCommandActivity(alloc, test_tool_registry, "", .{
             .id = "projected_command",
             .name = "run_command",
             .arguments_json = case.arguments_json,
@@ -601,7 +520,7 @@ test "run command activity abbreviates only active workspace paths" {
             .name = "run_command",
             .arguments_json = case.arguments_json,
         };
-        const activity = (try formatRunCommandActivity(
+        const activity = (try formatCommandActivity(
             alloc,
             test_tool_registry,
             workspace_root ++ "/",
@@ -641,7 +560,7 @@ test "run command activity hides only a leading no-op current directory prefix" 
     for (cases) |case| {
         const arguments_json = try std.fmt.allocPrint(alloc, "{{\"command\":{f}}}", .{std.json.fmt(case.command, .{})});
         defer alloc.free(arguments_json);
-        const activity = (try formatRunCommandActivity(alloc, test_tool_registry, "", .{
+        const activity = (try formatCommandActivity(alloc, test_tool_registry, "", .{
             .id = "current_directory_command",
             .name = "run_command",
             .arguments_json = arguments_json,

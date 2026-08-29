@@ -5,6 +5,7 @@ const io_mod = @import("../shared/io.zig");
 const command_contract = @import("command_contract.zig");
 const command_runner = @import("command_runner.zig");
 const session_child_store = @import("../session/session_child_store.zig");
+const types = @import("../shared/types.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -57,6 +58,7 @@ pub const Manager = struct {
         command_artifact_capability: ?*session_child_store.SessionChildCapability = null,
         command_artifact_dir: ?[]const u8 = null,
         command_artifact_threshold: usize = 0,
+        output_sink: ?OutputSink = null,
     };
 
     pub const WriteRequest = struct {
@@ -64,6 +66,16 @@ pub const Manager = struct {
         chars: []const u8 = "",
         yield_time_ms: u64 = 250,
         max_output_tokens: ?u64 = null,
+        output_sink: ?OutputSink = null,
+    };
+
+    /// Borrowed for one exec or write_stdin operation. The process stores a
+    /// cloned lifecycle identity and detaches the sink before the operation
+    /// returns, so no output callback can outlive its tool call.
+    pub const OutputSink = struct {
+        context: *anyopaque,
+        lifecycle_id: ?types.ToolLifecycleId = null,
+        callback: command_contract.CommandOutputCallback,
     };
 
     pub const Result = struct {
@@ -102,6 +114,7 @@ pub const Manager = struct {
         if (!supported()) return error.UnsupportedHost;
         const process = try self.createProcess(request);
         defer self.releaseActive(process);
+        defer process.clearOutputSink();
         const id = process.id;
         const yield_ms = clampInitialYield(request.yield_time_ms);
         if (!process.waitUntilDone(yield_ms)) {
@@ -118,6 +131,9 @@ pub const Manager = struct {
     pub fn writeStdin(self: *Manager, alloc: Allocator, request: WriteRequest) !Result {
         const process = self.acquire(request.process_id) orelse return error.UnknownProcessId;
         defer self.releaseActive(process);
+        try process.setOutputSink(request.output_sink);
+        defer process.clearOutputSink();
+        process.replayBufferedOutputToSink();
         try process.write(request.chars);
         const yield_ms = if (request.chars.len == 0)
             clampPollYield(request.yield_time_ms)
@@ -364,6 +380,22 @@ fn clampPollYield(value: u64) u64 {
     return @max(empty_min_yield_ms, @min(max_poll_yield_ms, value));
 }
 
+fn cloneOutputSink(alloc: Allocator, requested: ?Manager.OutputSink) !?Manager.OutputSink {
+    var sink = requested orelse return null;
+    if (sink.lifecycle_id) |id| {
+        sink.lifecycle_id = .{
+            .turn_id = id.turn_id,
+            .call_id = try alloc.dupe(u8, id.call_id),
+        };
+    }
+    return sink;
+}
+
+fn freeOutputSink(alloc: Allocator, owned: ?Manager.OutputSink) void {
+    const sink = owned orelse return;
+    if (sink.lifecycle_id) |id| alloc.free(@constCast(id.call_id));
+}
+
 const Process = struct {
     const SnapshotConsumer = enum { model, observer };
 
@@ -377,6 +409,7 @@ const Process = struct {
     mutex: std.Io.Mutex = .init,
     stdout_buffer: HeadTailBuffer = .{},
     stderr_buffer: HeadTailBuffer = .{},
+    output_sink: ?Manager.OutputSink = null,
     observer_stdout_buffer: HeadTailBuffer = .{},
     observer_stderr_buffer: HeadTailBuffer = .{},
     observer_active: bool = false,
@@ -416,6 +449,8 @@ const Process = struct {
         const command = try alloc.dupe(u8, request.command);
         errdefer alloc.free(command);
         const cwd = try alloc.dupe(u8, request.cwd);
+        errdefer alloc.free(cwd);
+        const output_sink = try cloneOutputSink(alloc, request.output_sink);
         return .{
             .alloc = alloc,
             .id = id,
@@ -424,6 +459,7 @@ const Process = struct {
             .stdin = stdin,
             .stdout = stdout,
             .stderr = stderr,
+            .output_sink = output_sink,
             .artifact_threshold = if (request.command_artifact_threshold == 0)
                 0
             else
@@ -491,6 +527,57 @@ const Process = struct {
                 else => return error.WriteFailed,
             }
         }
+    }
+
+    fn setOutputSink(self: *Process, requested: ?Manager.OutputSink) !void {
+        const owned = try cloneOutputSink(self.alloc, requested);
+        errdefer freeOutputSink(self.alloc, owned);
+        self.mutex.lockUncancelable(io_mod.getIo());
+        defer self.mutex.unlock(io_mod.getIo());
+        if (self.output_sink != null) return error.OutputSinkBusy;
+        self.output_sink = owned;
+    }
+
+    fn clearOutputSink(self: *Process) void {
+        self.mutex.lockUncancelable(io_mod.getIo());
+        const owned = self.output_sink;
+        self.output_sink = null;
+        self.mutex.unlock(io_mod.getIo());
+        freeOutputSink(self.alloc, owned);
+    }
+
+    fn replayBufferedOutputToSink(self: *Process) void {
+        self.mutex.lockUncancelable(io_mod.getIo());
+        defer self.mutex.unlock(io_mod.getIo());
+        self.replayBufferLocked(.stdout, self.stdout_buffer);
+        self.replayBufferLocked(.stderr, self.stderr_buffer);
+    }
+
+    fn replayBufferLocked(
+        self: *Process,
+        stream: command_contract.CommandOutputStream,
+        buffer: HeadTailBuffer,
+    ) void {
+        if (buffer.head.items.len > 0) self.emitOutputLocked(stream, buffer.head.items);
+        if (buffer.total > buffer.head.items.len +| buffer.tail.items.len) {
+            self.emitOutputLocked(stream, "\n[... output omitted before observation ...]\n");
+        }
+        if (buffer.tail.items.len > 0) self.emitOutputLocked(stream, buffer.tail.items);
+    }
+
+    fn emitOutputLocked(
+        self: *Process,
+        stream: command_contract.CommandOutputStream,
+        bytes: []const u8,
+    ) void {
+        const sink = self.output_sink orelse return;
+        sink.callback(sink.context, sink.lifecycle_id, stream, bytes) catch |err| {
+            debug_trace.logf(
+                "command_output",
+                "unified exec output projection failed stream={s} err={s}",
+                .{ @tagName(stream), @errorName(err) },
+            );
+        };
     }
 
     fn activateObserver(self: *Process) !void {
@@ -643,6 +730,7 @@ const Process = struct {
         self.artifact_stderr_pending.deinit(self.alloc);
         self.alloc.free(self.command);
         self.alloc.free(self.cwd);
+        freeOutputSink(self.alloc, self.output_sink);
         self.stdout_buffer.deinit(self.alloc);
         self.stderr_buffer.deinit(self.alloc);
         self.observer_stdout_buffer.deinit(self.alloc);
@@ -676,6 +764,7 @@ const Process = struct {
                     self.observer_stdout_buffer.append(self.alloc, buffer[0..count]) catch {};
             }
             self.appendArtifactLocked(stderr, buffer[0..count]);
+            self.emitOutputLocked(if (stderr) .stderr else .stdout, buffer[0..count]);
             self.mutex.unlock(io_mod.getIo());
         }
         self.mutex.lockUncancelable(io_mod.getIo());
@@ -835,6 +924,50 @@ fn utf8SafeTail(bytes: []const u8, limit: usize) []const u8 {
     return bytes[start..];
 }
 
+const TestOutputCapture = struct {
+    mutex: std.Io.Mutex = .init,
+    bytes: [256]u8 = undefined,
+    len: usize = 0,
+    saw_expected_lifecycle: bool = false,
+
+    fn callback(
+        raw: *anyopaque,
+        lifecycle_id: ?types.ToolLifecycleId,
+        _: command_contract.CommandOutputStream,
+        chunk: []const u8,
+    ) !void {
+        const self: *TestOutputCapture = @ptrCast(@alignCast(raw));
+        self.mutex.lockUncancelable(std.testing.io);
+        defer self.mutex.unlock(std.testing.io);
+        if (lifecycle_id) |id| {
+            self.saw_expected_lifecycle = id.turn_id == 7 and
+                std.mem.eql(u8, id.call_id, "command-7");
+        }
+        if (chunk.len > self.bytes.len - self.len) return error.NoSpaceLeft;
+        @memcpy(self.bytes[self.len .. self.len + chunk.len], chunk);
+        self.len += chunk.len;
+    }
+
+    fn reset(self: *TestOutputCapture) void {
+        self.mutex.lockUncancelable(std.testing.io);
+        defer self.mutex.unlock(std.testing.io);
+        self.len = 0;
+        self.saw_expected_lifecycle = false;
+    }
+
+    fn expect(self: *TestOutputCapture, expected: []const u8) !void {
+        self.mutex.lockUncancelable(std.testing.io);
+        defer self.mutex.unlock(std.testing.io);
+        try std.testing.expectEqualStrings(expected, self.bytes[0..self.len]);
+    }
+
+    fn expectLifecycle(self: *TestOutputCapture) !void {
+        self.mutex.lockUncancelable(std.testing.io);
+        defer self.mutex.unlock(std.testing.io);
+        try std.testing.expect(self.saw_expected_lifecycle);
+    }
+};
+
 test "unified exec keeps long process addressable and polls output" {
     if (!Manager.supported()) return error.SkipZigTest;
     var manager = Manager.init(std.testing.allocator);
@@ -855,6 +988,45 @@ test "unified exec keeps long process addressable and polls output" {
     defer second.deinit(std.testing.allocator);
     try std.testing.expectEqual(Manager.Status.exited, second.status);
     try std.testing.expectEqualStrings("done", second.stdout);
+}
+
+test "unified exec projects live and between-poll output through one sink" {
+    if (!Manager.supported()) return error.SkipZigTest;
+    var manager = Manager.init(std.testing.allocator);
+    defer manager.deinit();
+    var capture = TestOutputCapture{};
+    const sink: Manager.OutputSink = .{
+        .context = @ptrCast(&capture),
+        .lifecycle_id = .{ .turn_id = 7, .call_id = "command-7" },
+        .callback = TestOutputCapture.callback,
+    };
+
+    var first = try manager.exec(std.testing.allocator, .{
+        .command = "printf ready; sleep 1; printf late; sleep 1",
+        .cwd = "/tmp",
+        .yield_time_ms = 250,
+        .output_sink = sink,
+    });
+    const process_id = first.process_id.?;
+    defer first.deinit(std.testing.allocator);
+    try capture.expect("ready");
+    try capture.expectLifecycle();
+
+    capture.reset();
+    io_mod.sleep(1100 * std.time.ns_per_ms);
+    try capture.expect("");
+
+    var second = try manager.writeStdin(std.testing.allocator, .{
+        .process_id = process_id,
+        .chars = "x",
+        .yield_time_ms = 250,
+        .output_sink = sink,
+    });
+    defer second.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("late", second.stdout);
+    try capture.expect("late");
+    try capture.expectLifecycle();
+    try std.testing.expect(manager.terminate(process_id));
 }
 
 test "unified exec returns short commands synchronously" {

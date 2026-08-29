@@ -2249,13 +2249,13 @@ describe("acp: model-independent", () => {
   );
 
   test(
-    "ACP executes exec_command through the native backend",
+    "ACP streams exec_command through the unified native backend",
     async () => {
       const root = createShortIsolatedRoot("fx-acp-terminal-");
       const toolCallId = "acp_terminal_native_1";
       const gateway = startFakeGateway([
         fakeGatewayToolCall(toolCallId, "exec_command", {
-          cmd: "printf ACP_PUBLIC_EXEC_NATIVE",
+          cmd: "printf ACP_PUBLIC_EXEC_; sleep 0.1; printf NATIVE",
         }),
         finalText("ACP exec complete"),
       ]);
@@ -2282,6 +2282,26 @@ describe("acp: model-independent", () => {
         expect(toolResult).toContain("ACP_PUBLIC_EXEC_NATIVE");
         expect(toolResult).toContain('"exit_code":0');
         expect(toolResult).not.toContain("session_id");
+        const updates = result.messages
+          .filter((message: any) => message.params?.update?.toolCallId === toolCallId)
+          .map((message: any) => message.params.update);
+        const started = updates.find((update: any) => update.sessionUpdate === "tool_call");
+        expect(started.title).toContain("printf ACP_PUBLIC_EXEC_");
+        expect(started.rawInput).toEqual({
+          cmd: "printf ACP_PUBLIC_EXEC_; sleep 0.1; printf NATIVE",
+        });
+        const outputUpdates = updates.filter(
+          (update: any) => update.rawOutput?.stream === "stdout",
+        );
+        expect(outputUpdates.length).toBeGreaterThanOrEqual(2);
+        expect(outputUpdates.map((update: any) => update.rawOutput.chunk).join(""))
+          .toContain("ACP_PUBLIC_EXEC_NATIVE");
+        expect(outputUpdates.at(-1)?.rawOutput.aggregatedOutput)
+          .toContain("ACP_PUBLIC_EXEC_NATIVE");
+        expect(outputUpdates.at(-1)?.content?.[0]?.content?.text)
+          .toContain("ACP_PUBLIC_EXEC_NATIVE");
+        const completed = updates.find((update: any) => update.status === "completed");
+        expect(completed.rawOutput.commandResult.exit_code).toBe(0);
         expect(client.stderr).toBe("");
       } finally {
         await client?.close();

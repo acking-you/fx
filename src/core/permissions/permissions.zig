@@ -1507,7 +1507,7 @@ pub fn permissionNameForTool(tool_name: []const u8) []const u8 {
     if (std.mem.eql(u8, tool_name, "list_files")) return "list";
     if (std.mem.eql(u8, tool_name, "glob_files")) return "glob";
     if (std.mem.eql(u8, tool_name, "grep_files")) return "grep";
-    if (std.mem.eql(u8, tool_name, "run_command")) return "bash";
+    if (std.mem.eql(u8, tool_name, "exec_command") or std.mem.eql(u8, tool_name, "run_command")) return "bash";
     if (isWebFetchToolName(tool_name)) return web_fetch_permission;
     if (std.mem.eql(u8, tool_name, "skill") or std.mem.eql(u8, tool_name, "install_skill")) return "skill";
     return tool_name;
@@ -2158,6 +2158,9 @@ test "permissionTargetForCall preserves skill and install skill targets" {
     try std.testing.expectEqualStrings("example/skills", try permissionTargetForCall(arena, "/tmp/workspace", install_source_only_call, .none));
     try std.testing.expectEqualStrings("skill", permissionNameForTool("skill"));
     try std.testing.expectEqualStrings("skill", permissionNameForTool("install_skill"));
+    try std.testing.expectEqualStrings("bash", permissionNameForTool("exec_command"));
+    // Persisted rules from sessions created before Unified Exec remain valid.
+    try std.testing.expectEqualStrings("bash", permissionNameForTool("run_command"));
 }
 
 test "web_search permission target is whole tool name" {

@@ -87,6 +87,41 @@ pub const TerminalOutcome = union(enum) {
     rpc_error: jsonrpc.RpcError,
 };
 
+const max_acp_command_preview_bytes: usize = 64 * 1024;
+
+const AcpCommandOutputPreview = struct {
+    bytes: std.ArrayList(u8) = .empty,
+    truncated: bool = false,
+
+    fn deinit(self: *AcpCommandOutputPreview, alloc: Allocator) void {
+        self.bytes.deinit(alloc);
+        self.* = undefined;
+    }
+
+    fn append(self: *AcpCommandOutputPreview, alloc: Allocator, chunk: []const u8) !void {
+        if (chunk.len >= max_acp_command_preview_bytes) {
+            self.bytes.clearRetainingCapacity();
+            try self.bytes.appendSlice(
+                alloc,
+                chunk[chunk.len - max_acp_command_preview_bytes ..],
+            );
+            self.truncated = true;
+            return;
+        }
+        const overflow = self.bytes.items.len +| chunk.len -| max_acp_command_preview_bytes;
+        if (overflow > 0) {
+            std.mem.copyForwards(
+                u8,
+                self.bytes.items[0 .. self.bytes.items.len - overflow],
+                self.bytes.items[overflow..],
+            );
+            self.bytes.items.len -= overflow;
+            self.truncated = true;
+        }
+        try self.bytes.appendSlice(alloc, chunk);
+    }
+};
+
 const AcpContext = struct {
     const GatewayRouteView = union(enum) {
         live,
@@ -100,6 +135,12 @@ const AcpContext = struct {
     /// copies of provider call ids so the ID stays stable from permission
     /// review through execution.
     published_tool_calls: std.StringHashMapUnmanaged(void) = .empty,
+    /// Bounded accumulated command output for ACP's replace-semantics
+    /// ToolCallUpdate.content field. Keys borrow published_tool_calls keys.
+    /// Unified Exec serializes both pipe readers through the process mutex and
+    /// detaches this callback before the tool returns, so the map has one
+    /// active writer for the lifetime of each model command operation.
+    command_output_previews: std.StringHashMapUnmanaged(AcpCommandOutputPreview) = .empty,
     stop_reason: acp_types.StopReason = .end_turn,
     auto_classifier: permission_auto_classifier.Classifier =
         permission_auto_classifier.Classifier.disabled(),
@@ -109,6 +150,9 @@ const AcpContext = struct {
     captured_permission_mode: ?PermissionMode = null,
 
     fn deinitPublishedToolCalls(self: *AcpContext) void {
+        var previews = self.command_output_previews.valueIterator();
+        while (previews.next()) |preview| preview.deinit(self.alloc);
+        self.command_output_previews.deinit(self.alloc);
         var keys = self.published_tool_calls.keyIterator();
         while (keys.next()) |key| self.alloc.free(key.*);
         self.published_tool_calls.deinit(self.alloc);
@@ -165,12 +209,26 @@ const AcpContext = struct {
         const registry = self.toolRegistry();
         const title = describeToolTitle(registry, arena, call) catch "Tool call";
         const kind = mapToolKind(call.name);
+        var validated_arguments: std.Io.Writer.Allocating = .init(arena);
+        defer validated_arguments.deinit();
+        const raw_input_json: ?[]const u8 = if (writeValidatedToolArguments(
+            arena,
+            &validated_arguments.writer,
+            call.arguments_json,
+        )) |_| validated_arguments.written() else |_| null;
 
         const owned_id = try self.alloc.dupe(u8, call.id);
         errdefer self.alloc.free(owned_id);
         var out: std.Io.Writer.Allocating = .init(self.alloc);
         defer out.deinit();
-        try acp_types.writeToolCall(&out.writer, owned_id, title, kind, .pending);
+        try acp_types.writeToolCall(
+            &out.writer,
+            owned_id,
+            title,
+            kind,
+            .pending,
+            raw_input_json,
+        );
         try self.sendUpdate(out.writer.buffered());
         try self.published_tool_calls.put(self.alloc, owned_id, {});
         return owned_id;
@@ -185,6 +243,38 @@ const AcpContext = struct {
         defer out.deinit();
         try acp_types.writeToolCallUpdate(&out.writer, tool_call_id, .in_progress, plain);
         try self.sendUpdate(out.writer.buffered());
+    }
+
+    fn sendCommandOutputDelta(
+        self: *AcpContext,
+        tool_call_id: []const u8,
+        stream: command_output_content.Stream,
+        chunk: []const u8,
+    ) !void {
+        const plain = try stripAnsiAlloc(self.alloc, chunk);
+        defer if (plain.ptr != chunk.ptr) self.alloc.free(plain);
+        const stable_id = self.published_tool_calls.getKey(tool_call_id) orelse return;
+        const entry = try self.command_output_previews.getOrPut(self.alloc, stable_id);
+        if (!entry.found_existing) entry.value_ptr.* = .{};
+        try entry.value_ptr.append(self.alloc, plain);
+
+        var out: std.Io.Writer.Allocating = .init(self.alloc);
+        defer out.deinit();
+        try acp_types.writeCommandOutputUpdate(
+            &out.writer,
+            stable_id,
+            @tagName(stream),
+            plain,
+            entry.value_ptr.bytes.items,
+            entry.value_ptr.truncated,
+        );
+        try self.sendUpdate(out.writer.buffered());
+    }
+
+    fn clearCommandOutputPreview(self: *AcpContext, tool_call_id: []const u8) void {
+        const removed = self.command_output_previews.fetchRemove(tool_call_id) orelse return;
+        var preview = removed.value;
+        preview.deinit(self.alloc);
     }
 
     fn sendWebSearchProgress(self: *AcpContext, tool_call_id: []const u8, progress: types.WebSearchProgress) !void {
@@ -202,6 +292,7 @@ const AcpContext = struct {
     }
 
     fn sendToolCallCompletedWithCommandResult(self: *AcpContext, tool_call_id: []const u8, result_text: ?[]const u8, command_result_json: ?[]const u8) !void {
+        self.clearCommandOutputPreview(tool_call_id);
         var out: std.Io.Writer.Allocating = .init(self.alloc);
         defer out.deinit();
         try acp_types.writeToolCallUpdateWithCommandResult(&out.writer, tool_call_id, .completed, result_text, command_result_json);
@@ -213,6 +304,7 @@ const AcpContext = struct {
     }
 
     fn sendToolCallErrorWithCommandResult(self: *AcpContext, tool_call_id: []const u8, err_text: []const u8, command_result_json: ?[]const u8) !void {
+        self.clearCommandOutputPreview(tool_call_id);
         var out: std.Io.Writer.Allocating = .init(self.alloc);
         defer out.deinit();
         try acp_types.writeToolCallUpdateWithCommandResult(&out.writer, tool_call_id, .failed, err_text, command_result_json);
@@ -2798,10 +2890,10 @@ fn formatToolExecutionError(_: *anyopaque, arena: Allocator, tool_name: []const 
     return tool_result_errors.formatToolExecutionErrorJson(arena, tool_name, err);
 }
 
-fn onCommandOutputChunk(raw_ctx: *anyopaque, lifecycle_id: ?types.ToolLifecycleId, _: command_output_content.Stream, chunk: []const u8) !void {
+fn onCommandOutputChunk(raw_ctx: *anyopaque, lifecycle_id: ?types.ToolLifecycleId, stream: command_output_content.Stream, chunk: []const u8) !void {
     const ctx: *AcpContext = @ptrCast(@alignCast(raw_ctx));
     const id = lifecycle_id orelse return;
-    try ctx.sendToolCallProgressText(id.call_id, chunk);
+    try ctx.sendCommandOutputDelta(id.call_id, stream, chunk);
 }
 
 fn onMcpProgress(raw_ctx: *anyopaque, lifecycle_id: types.ToolLifecycleId, text: []const u8) void {
@@ -3298,10 +3390,10 @@ pub fn mapToolKind(tool_name: []const u8) acp_types.ToolCallKind {
 }
 
 fn describeToolTitle(registry: tool_dispatch.Registry, arena: Allocator, call: ToolCall) ![]const u8 {
-    if (tool_dispatch.toolCallPresentation(arena, registry, call)) |presentation| {
-        return std.fmt.allocPrint(arena, "{s}", .{presentation.action_label});
-    }
-    return std.fmt.allocPrint(arena, "{s}", .{call.name});
+    return tool_presentation.formatPlainAction(arena, .{
+        .tool_registry = registry,
+        .call = call,
+    });
 }
 
 test "ACP lifecycle action preserves dynamic MCP availability boundaries" {
@@ -4594,7 +4686,7 @@ test "ACP default user commands require configured authority or review" {
         .name = "exec_command",
         .arguments_json = "{\"cmd\":\"touch configured.txt\"}",
     }, .ask, &.{}, &.{}));
-    switch ((configured.execution_authority orelse return error.TestExpectedEqual).run_command) {
+    switch ((configured.execution_authority orelse return error.TestExpectedEqual).command) {
         .direct_only => return error.TestExpectedShellAllowed,
         .shell_allowed => |authority| try std.testing.expectEqual(command_admission.ShellAuthorizationSource.configured_rule, authority.source),
     }
@@ -4669,7 +4761,7 @@ test "ACP auto mode uses automatic review clear and caution without prompting" {
     );
     try std.testing.expectEqual(
         command_admission.ShellAuthorizationSource.auto_classifier,
-        direct.execution_authority.?.run_command.shell_allowed.source,
+        direct.execution_authority.?.command.shell_allowed.source,
     );
     try std.testing.expectEqual(@as(usize, 1), fake.calls);
 
@@ -4680,7 +4772,7 @@ test "ACP auto mode uses automatic review clear and caution without prompting" {
     };
     var accepted_review = TestReviewTurn.init("Create accepted.txt.", accepted_call);
     const accepted = try requestToolPermissionOutcomeWithRequest(&ctx, arena, accepted_call, accepted_review.context(), .auto, &.{}, null, null, &.{});
-    switch ((accepted.execution_authority orelse return error.TestExpectedEqual).run_command) {
+    switch ((accepted.execution_authority orelse return error.TestExpectedEqual).command) {
         .direct_only => return error.TestExpectedShellAllowed,
         .shell_allowed => |authority| try std.testing.expectEqual(
             command_admission.ShellAuthorizationSource.auto_classifier,

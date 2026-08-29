@@ -6564,7 +6564,7 @@ fn processQueuedPromptLoop(
                 call_allocator,
                 tool_call,
             )) {
-                if (execution_authority != .run_command) return error.InvalidRunCommandExecutionAuthority;
+                if (execution_authority != .command) return error.InvalidCommandExecutionAuthority;
             } else if (is_file_mutation) {
                 if (execution_authority != .file_mutation) {
                     return error.InvalidFileMutationExecutionAuthority;
@@ -6572,7 +6572,7 @@ fn processQueuedPromptLoop(
             } else if (std.mem.eql(u8, tool_call.name, "vision")) {
                 switch (execution_authority) {
                     .ordinary, .vision_paths => {},
-                    .run_command, .file_mutation => return error.InvalidVisionExecutionAuthority,
+                    .command, .file_mutation => return error.InvalidVisionExecutionAuthority,
                 }
             } else if (execution_authority != .ordinary) {
                 return error.UnexpectedCommandExecutionAuthority;
