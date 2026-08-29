@@ -138,6 +138,9 @@ pub const Manager = struct {
     pub fn writeStdinNonblocking(self: *Manager, alloc: Allocator, request: WriteRequest) !Result {
         const process = self.acquire(request.process_id) orelse return error.UnknownProcessId;
         defer self.releaseActive(process);
+        // Establish ACP's independent cursor before input can make the child
+        // emit its final bytes and let the model-facing poll drain them.
+        try process.activateObserver();
         try process.write(request.chars);
         const status: Status = if (process.isSettled()) .exited else .running;
         // ACP is an observer of the model-owned process. It must neither drain
@@ -490,6 +493,22 @@ const Process = struct {
         }
     }
 
+    fn activateObserver(self: *Process) !void {
+        self.mutex.lockUncancelable(io_mod.getIo());
+        defer self.mutex.unlock(io_mod.getIo());
+        try self.activateObserverLocked();
+    }
+
+    fn activateObserverLocked(self: *Process) !void {
+        if (self.observer_active) return;
+        var observer_stdout = try self.stdout_buffer.clone(self.alloc);
+        errdefer observer_stdout.deinit(self.alloc);
+        const observer_stderr = try self.stderr_buffer.clone(self.alloc);
+        self.observer_stdout_buffer = observer_stdout;
+        self.observer_stderr_buffer = observer_stderr;
+        self.observer_active = true;
+    }
+
     fn snapshot(
         self: *Process,
         alloc: Allocator,
@@ -511,20 +530,10 @@ const Process = struct {
                 self.stderr_buffer = .{};
             },
             .observer => {
-                if (!self.observer_active) {
-                    var observer_stdout = self.stdout_buffer.clone(self.alloc) catch |err| {
-                        self.mutex.unlock(io_mod.getIo());
-                        return err;
-                    };
-                    const observer_stderr = self.stderr_buffer.clone(self.alloc) catch |err| {
-                        observer_stdout.deinit(self.alloc);
-                        self.mutex.unlock(io_mod.getIo());
-                        return err;
-                    };
-                    self.observer_stdout_buffer = observer_stdout;
-                    self.observer_stderr_buffer = observer_stderr;
-                    self.observer_active = true;
-                }
+                self.activateObserverLocked() catch |err| {
+                    self.mutex.unlock(io_mod.getIo());
+                    return err;
+                };
                 stdout_buffer = self.observer_stdout_buffer;
                 stderr_buffer = self.observer_stderr_buffer;
                 self.observer_stdout_buffer = .{};
@@ -932,6 +941,34 @@ test "unified exec nonblocking writes return a live process immediately" {
     try std.testing.expectEqual(Manager.Status.running, second.status);
     try std.testing.expectEqual(process_id, second.process_id.?);
     try std.testing.expect(manager.terminate(process_id));
+}
+
+test "unified exec activates the observer before a direct write can fail" {
+    if (!Manager.supported()) return error.SkipZigTest;
+    var manager = Manager.init(std.testing.allocator);
+    defer manager.deinit();
+    var first = try manager.exec(std.testing.allocator, .{
+        .command = "sleep 30",
+        .cwd = "/tmp",
+        .yield_time_ms = 250,
+    });
+    const process_id = first.process_id.?;
+    first.deinit(std.testing.allocator);
+
+    const input = try std.testing.allocator.alloc(u8, 4 * 1024 * 1024);
+    defer std.testing.allocator.free(input);
+    @memset(input, 'x');
+    try std.testing.expectError(error.WriteWouldBlock, manager.writeStdinNonblocking(
+        std.testing.allocator,
+        .{ .process_id = process_id, .chars = input },
+    ));
+
+    const process = manager.acquire(process_id) orelse return error.ProcessUnavailable;
+    defer manager.releaseActive(process);
+    process.mutex.lockUncancelable(io_mod.getIo());
+    const observer_active = process.observer_active;
+    process.mutex.unlock(io_mod.getIo());
+    try std.testing.expect(observer_active);
 }
 
 test "unified exec direct control stays responsive during a model poll" {
