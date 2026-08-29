@@ -13,6 +13,7 @@ import unittest
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 SCRIPT_PATH = REPO_ROOT / "scripts" / "sign-and-notarize-macos.sh"
+RELEASE_SCRIPT_PATH = REPO_ROOT / "scripts" / "sign-macos-release.sh"
 RELEASE_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "release.yml"
 PUBLISH_LIBFX_WORKFLOW_PATH = (
     REPO_ROOT / ".github" / "workflows" / "publish-libfx.yml"
@@ -101,6 +102,7 @@ if "--display" in args:
     identifier = os.environ.get("FX_SIGNING_TEST_IDENTIFIER", "fx")
     team_id = os.environ.get("FX_SIGNING_TEST_TEAM_ID", "EXAMPLE123")
     print(f"Identifier={{identifier}}", file=sys.stderr)
+    print("Signature=adhoc", file=sys.stderr)
     print(f"TeamIdentifier={{team_id}}", file=sys.stderr)
     print("CDHash={TEST_CDHASH}", file=sys.stderr)
 ''',
@@ -342,6 +344,65 @@ else:
             )
             self.assertEqual([], list(runner_temp.iterdir()))
 
+    def run_release_script(
+        self,
+        root: pathlib.Path,
+        secret_values: dict[str, str] | None = None,
+    ) -> tuple[subprocess.CompletedProcess[str], pathlib.Path, pathlib.Path]:
+        tool_paths = self.make_tools(root)
+        binary = root / "fx"
+        binary.write_bytes(b"unsigned\n")
+        binary.chmod(0o755)
+        event_log = root / "events.log"
+        env = os.environ.copy()
+        for secret_name in SECRET_NAMES:
+            env.pop(secret_name, None)
+        env.update({key: str(value) for key, value in tool_paths.items()})
+        env["FX_SIGNING_TEST_LOG"] = str(event_log)
+        if secret_values:
+            env.update(secret_values)
+        result = subprocess.run(
+            [str(RELEASE_SCRIPT_PATH), str(binary)],
+            cwd=REPO_ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return result, binary, event_log
+
+    def test_release_wrapper_uses_verified_ad_hoc_signing_without_secrets(
+        self,
+    ) -> None:
+        self.assertTrue(RELEASE_SCRIPT_PATH.is_file())
+        with tempfile.TemporaryDirectory(prefix="fx-macos-release-signing-test-") as tmp:
+            result, binary, event_log = self.run_release_script(pathlib.Path(tmp))
+
+            output = result.stdout + result.stderr
+            self.assertEqual(0, result.returncode, output)
+            self.assertEqual(b"unsigned\nsigned\n", binary.read_bytes())
+            self.assertIn("Ad-hoc signed", output)
+            self.assertIn("notarization skipped", output)
+            events = event_log.read_text(encoding="utf-8")
+            self.assertIn("codesign --force --sign - --identifier fx", events)
+            self.assertIn("codesign --verify --strict", events)
+            self.assertIn("codesign --display --verbose=4", events)
+            self.assertNotIn("xcrun", events)
+
+    def test_release_wrapper_rejects_partial_apple_credentials(self) -> None:
+        self.assertTrue(RELEASE_SCRIPT_PATH.is_file())
+        with tempfile.TemporaryDirectory(prefix="fx-macos-release-signing-test-") as tmp:
+            result, binary, event_log = self.run_release_script(
+                pathlib.Path(tmp),
+                {"APPLE_NOTARY_KEY_ID": "partial-key"},
+            )
+
+            output = result.stdout + result.stderr
+            self.assertNotEqual(0, result.returncode, output)
+            self.assertIn("only partially configured", output)
+            self.assertEqual(b"unsigned\n", binary.read_bytes())
+            self.assertFalse(event_log.exists())
+
 
 class MacosSigningWorkflowTests(unittest.TestCase):
     def test_every_privileged_publish_job_uses_an_environment_gate(self) -> None:
@@ -361,12 +422,12 @@ class MacosSigningWorkflowTests(unittest.TestCase):
         self.assertIn("build-macos-x86_64:", release)
         self.assertIn("runs-on: macos-15-intel", release)
         self.assertEqual(1, release.count("environment: apple-signing"))
-        self.assertIn("scripts/sign-and-notarize-macos.sh zig-out/bin/fx", release)
+        self.assertIn("scripts/sign-macos-release.sh zig-out/bin/fx", release)
         self.assertIn("sign-stable-release:", pgso)
         self.assertIn("needs: aggregate", pgso)
         self.assertEqual(1, pgso.count("environment: apple-signing"))
         self.assertIn(
-            "scripts/sign-and-notarize-macos.sh "
+            "scripts/sign-macos-release.sh "
             '"$RUNNER_TEMP/fx-pgso-aggregate/candidate/fx"',
             pgso,
         )
@@ -393,7 +454,7 @@ class MacosSigningWorkflowTests(unittest.TestCase):
             sign_release,
         )
         report_position = sign_release.index("python3 -m scripts.pgso report")
-        signing_position = sign_release.index("scripts/sign-and-notarize-macos.sh")
+        signing_position = sign_release.index("scripts/sign-macos-release.sh")
         package_position = sign_release.index("tar -czf")
         self.assertLess(report_position, signing_position)
         self.assertLess(signing_position, package_position)

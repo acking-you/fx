@@ -72,7 +72,7 @@
 - **Smaller supported surface:** Removed Vercel-only runtime, setup, account, updater, telemetry, gateway protocol, credential storage, SDK login, release-channel, and obsolete test/eval code that conflicted with the BYOK product direction. Generic Responses, provider, MCP, ACP, image, SDK, and permission boundaries remain supported.
 - **Focused regression ownership:** Kept deterministic coverage for real crashes, recovery, resource limits, security boundaries, provider routing, streaming, TUI rendering, ACP, and process lifecycle while removing brittle layout counts, duplicate scenarios, and tests owned only by removed features.
 - **Release qualification:** Full CI now runs once on the exact feature commit across Linux and macOS x86_64 and arm64, avoids repeating the same suite after the squash merge, and reserves the expensive macOS arm64 PGSO qualification for stable releases.
-- **Download integrity:** Stable releases build stripped ReleaseSafe archives for Linux x86_64 and arm64 plus signed and notarized macOS x86_64 and PGSO-qualified arm64, with a SHA-256 file beside every downloadable package.
+- **Download integrity:** Stable releases build stripped ReleaseSafe archives for Linux x86_64 and arm64 plus PGSO-qualified macOS arm64, with a SHA-256 file beside every downloadable package. macOS binaries use Developer ID signing and notarization when Apple credentials are configured; fork releases without those credentials use a verified ad-hoc signature and state that notarization was skipped.
 
 ### Security
 
