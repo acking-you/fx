@@ -7,6 +7,7 @@ const responses_compaction_provider = @import("../core/gateway/responses_compact
 const responses_compaction = @import("../core/gateway/responses_compaction.zig");
 const responses_protocol = @import("../core/gateway/responses_protocol.zig");
 const debug_trace = @import("../core/shared/debug_trace.zig");
+const io_mod = @import("../core/shared/io.zig");
 const model_tool_schema = @import("../core/tooling/model_tool_schema.zig");
 const types = @import("../core/shared/types.zig");
 const gateway_client = @import("client.zig");
@@ -219,11 +220,20 @@ fn prepareRequest(alloc: Allocator, request: stream_provider.ModelRequest) !Prep
     const route: provider_route.ProviderRoute = .openai_responses_byok;
     const wire_model = provider_route.wireModel(route, request.model);
     try validateModel(wire_model);
-    var binding = try responses_compaction_binding.buildFromEnvironmentAlloc(
+    const binding_options = if (request.endpoint) |endpoint|
+        responses_compaction_binding.BuildOptions{
+            .endpoint_overrides = .{ .responses_base_url = endpoint },
+            .organization = io_mod.getenv("OPENAI_ORG_ID"),
+            .project = io_mod.getenv("OPENAI_PROJECT_ID"),
+        }
+    else
+        responses_compaction_binding.BuildOptions.fromEnvironment();
+    var binding = try responses_compaction_binding.buildAlloc(
         alloc,
         .openai_api_key,
         request.credential.secret,
         request.credential.account_id,
+        binding_options,
     );
     errdefer types.freeResponsesCompactionProviderBinding(alloc, binding);
 

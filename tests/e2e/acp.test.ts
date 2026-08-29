@@ -548,6 +548,43 @@ function writeSeededAcpChatGptLogin(home: string, accessToken: string): void {
   chmodSync(authPath, 0o600);
 }
 
+function startAcpFakeChatGptLogin() {
+  const accessToken = acpChatGptAccessToken("acct_acp_login");
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request) {
+      const url = new URL(request.url);
+      if (url.pathname === "/oauth/authorize") {
+        const redirectUri = url.searchParams.get("redirect_uri");
+        const state = url.searchParams.get("state");
+        if (!redirectUri || !state) return new Response("invalid", { status: 400 });
+        const callback = new URL(redirectUri.replace("localhost", "127.0.0.1"));
+        callback.searchParams.set("code", "acp-login-code");
+        callback.searchParams.set("state", state);
+        return Response.redirect(callback.toString(), 302);
+      }
+      if (url.pathname === "/token") {
+        await request.text();
+        return Response.json({
+          access_token: accessToken,
+          refresh_token: "acp-login-refresh",
+          expires_in: 3600,
+        });
+      }
+      return new Response("not found", { status: 404 });
+    },
+  });
+  const baseUrl = `http://127.0.0.1:${server.port}`;
+  return {
+    env: {
+      FX_E2E_CHATGPT_ISSUER_URL: baseUrl,
+      FX_E2E_CHATGPT_TOKEN_URL: `${baseUrl}/token`,
+    },
+    stop() { server.stop(true); },
+  };
+}
+
 function codexFinalText(text: string): string {
   return `data: ${JSON.stringify({ type: "response.output_text.delta", delta: text })}\n\n` +
     'data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":4,"output_tokens":2}}}\n\n';
@@ -1191,6 +1228,136 @@ describe("acp: model-independent", () => {
   });
 
   test(
+    "ACP configures a BYOK endpoint without blocking its control plane",
+    async () => {
+      const root = createIsolatedRoot("fx-acp-provider-configure-");
+      const releaseModels = deferred<void>();
+      const gateway = startFakeGateway([finalText("ACP_BYOK_CONFIGURED")], {
+        async models() {
+          await releaseModels.promise;
+          return [{ id: FAKE_GATEWAY_MODEL, object: "model" }];
+        },
+      });
+      try {
+        client = await AcpClient.create({
+          cwd: root.workspace,
+          env: {
+            HOME: root.home,
+            OPENAI_API_KEY: undefined,
+            FX_API_KEY: undefined,
+            FX_RESPONSES_BASE_URL: undefined,
+            OPENAI_BASE_URL: undefined,
+          },
+        });
+        const initialized = await client.request("initialize", { protocolVersion: 1 }, 1) as any;
+        expect(initialized.result._meta.fx.providerControl).toEqual({
+          switch: true,
+          login: true,
+          configureByok: true,
+        });
+
+        client.send({
+          jsonrpc: "2.0",
+          id: 2,
+          method: "fx/provider/configure",
+          params: { baseUrl: gateway.baseUrl, apiKey: "acp-runtime-key" },
+        });
+        await waitForCondition(
+          "provider catalog request",
+          () => gateway.modelRequests.length === 1,
+          TIMEOUT,
+        );
+
+        const controlStarted = Date.now();
+        const status = await client.request("fx/provider/login/status", {}, 3) as any;
+        expect(status.id).toBe(3);
+        expect(status.result.state).toBe("idle");
+        expect(Date.now() - controlStarted).toBeLessThan(2_000);
+
+        releaseModels.resolve(undefined);
+        const configured = await client.readLine(TIMEOUT) as any;
+        expect(configured.id).toBe(2);
+        expect(configured.result).toMatchObject({
+          provider: "gateway",
+          model: FAKE_GATEWAY_MODEL,
+          responseUrl: `${gateway.baseUrl}/responses`,
+          credentialPersistence: "connection",
+        });
+        expect(JSON.stringify(configured)).not.toContain("acp-runtime-key");
+
+        await client.request("session/new", {}, 4);
+        await client.readLine();
+        await client.request("session/set_mode", { modeId: "code" }, 5);
+        const prompted = await runPrompt(client, "Use the ACP BYOK provider.", TIMEOUT);
+        expect(gateway.requests).toHaveLength(1);
+        expect(gateway.requests.at(-1)?.headers.get("authorization")).toBe(
+          "Bearer acp-runtime-key",
+        );
+        const settingsPath = join(root.home, ".fx", "settings.json");
+        if (existsSync(settingsPath)) {
+          expect(readFileSync(settingsPath, "utf8")).not.toContain("acp-runtime-key");
+        }
+        expect(prompted.promptResult.result.stopReason).toBe("end_turn");
+        expect(client.stderr).toBe("");
+      } finally {
+        releaseModels.resolve(undefined);
+        await client?.close();
+        gateway.stop();
+        rmSync(root.root, { recursive: true, force: true });
+      }
+    },
+    TIMEOUT,
+  );
+
+  test(
+    "ACP completes provider login through start and status methods",
+    async () => {
+      const root = createIsolatedRoot("fx-acp-provider-login-");
+      const oauth = startAcpFakeChatGptLogin();
+      try {
+        client = await AcpClient.create({
+          cwd: root.workspace,
+          env: {
+            HOME: root.home,
+            OPENAI_API_KEY: undefined,
+            FX_API_KEY: undefined,
+            ...oauth.env,
+          },
+        });
+        await client.request("initialize", { protocolVersion: 1 }, 1);
+        const started = await client.request(
+          "fx/provider/login/start",
+          { provider: "codex" },
+          2,
+        ) as any;
+        expect(started.result.state).toBe("polling");
+        expect(started.result.authorizationUrl).toStartWith("http://127.0.0.1:");
+
+        const authorization = await fetch(started.result.authorizationUrl);
+        expect(authorization.ok).toBe(true);
+        let state = "polling";
+        for (let index = 0; index < 100 && state === "polling"; index += 1) {
+          await Bun.sleep(25);
+          const status = await client.request(
+            "fx/provider/login/status",
+            {},
+            10 + index,
+          ) as any;
+          state = status.result.state;
+        }
+        expect(state).toBe("succeeded");
+        expect(existsSync(join(root.home, ".fx", "chatgpt-auth.json"))).toBe(true);
+        expect(client.stderr).toBe("");
+      } finally {
+        await client?.close();
+        oauth.stop();
+        rmSync(root.root, { recursive: true, force: true });
+      }
+    },
+    TIMEOUT,
+  );
+
+  test(
     "active ACP session uses typed MCP Resources Prompts and Completion state",
     async () => {
       const root = createIsolatedRoot("fx-acp-mcp-features-");
@@ -1796,7 +1963,7 @@ describe("acp: model-independent", () => {
       const toolCallId = "acp_unified_exec_direct_1";
       const gateway = startFakeGateway([
         fakeGatewayToolCall(toolCallId, "exec_command", {
-          cmd: "IFS= read -r reply; printf 'ACP_DIRECT_%s' \"$reply\"",
+          cmd: "IFS= read -r reply; printf 'ACP_DIRECT_%s' \"$reply\"; sleep 60",
           yield_time_ms: 250,
         }),
         finalText("ACP direct process complete"),
@@ -1823,7 +1990,13 @@ describe("acp: model-independent", () => {
         const messages: any[] = [];
         const deadline = Date.now() + TIMEOUT;
         while ((!directResponse || !promptResponse) && Date.now() < deadline) {
-          const message = await client.readLine(Math.min(5_000, Math.max(100, deadline - Date.now()))) as any;
+          const message = await client.readLine(
+            Math.min(5_000, Math.max(100, deadline - Date.now())),
+          ).catch((error) => {
+            throw new Error(
+              `direct Unified Exec response timeout: ${String(error)}; lines=${JSON.stringify(client.rawLines)}; stderr=${client.stderr}`,
+            );
+          }) as any;
           messages.push(message);
           const processId = message.params?.update?.command_result?.process_id;
           if (!directSent && typeof processId === "number") {
@@ -1836,7 +2009,6 @@ describe("acp: model-independent", () => {
                 sessionId,
                 processId,
                 chars: "hello\n",
-                yieldTimeMs: 1_000,
               },
             });
           }
@@ -1845,11 +2017,71 @@ describe("acp: model-independent", () => {
         }
 
         expect(directResponse?.error).toBeUndefined();
-        expect(directResponse?.result.status).toBe("exited");
-        expect(directResponse?.result.output).toBe("ACP_DIRECT_hello");
+        expect(directResponse?.result.status).toBe("running");
         expect(promptResponse?.result.stopReason).toBe("end_turn");
         expect(JSON.stringify(messages)).toContain("ACP direct process complete");
         expect(gateway.requests).toHaveLength(2);
+
+        let output = directResponse.result.output as string;
+        for (
+          let attempt = 0;
+          !output.includes("ACP_DIRECT_hello") && attempt < 50;
+          attempt += 1
+        ) {
+          await Bun.sleep(20);
+          const pollId = 800 + attempt;
+          client.send({
+            jsonrpc: "2.0",
+            id: pollId,
+            method: "fx/unifiedExec/writeStdin",
+            params: { sessionId, processId: directResponse.result.processId },
+          });
+          const poll = await readResponse(client, pollId, 1_000);
+          expect(poll.error).toBeUndefined();
+          output += poll.result.output;
+        }
+        expect(output).toContain("ACP_DIRECT_hello");
+
+        const controlIds = new Set([900, 901, 902]);
+        const controlResponses = new Map<number, any>();
+        const controlStartedAt = Date.now();
+        client.send({
+          jsonrpc: "2.0",
+          id: 900,
+          method: "fx/unifiedExec/writeStdin",
+          params: {
+            sessionId,
+            processId: directResponse.result.processId,
+            yieldTimeMs: 300_000,
+          },
+        });
+        client.send({
+          jsonrpc: "2.0",
+          id: 901,
+          method: "fx/turn/status",
+          params: { sessionId },
+        });
+        client.send({
+          jsonrpc: "2.0",
+          id: 902,
+          method: "fx/unifiedExec/kill",
+          params: { sessionId, processId: directResponse.result.processId },
+        });
+        const controlDeadline = Date.now() + 3_000;
+        while (
+          controlResponses.size < controlIds.size &&
+          Date.now() < controlDeadline
+        ) {
+          const message = await client.readLine(
+            Math.max(100, controlDeadline - Date.now()),
+          ) as any;
+          if (controlIds.has(message.id)) controlResponses.set(message.id, message);
+        }
+        expect(controlResponses.size).toBe(controlIds.size);
+        expect(Date.now() - controlStartedAt).toBeLessThan(3_000);
+        expect(controlResponses.get(900)?.result.status).toBe("running");
+        expect(controlResponses.get(901)?.error).toBeUndefined();
+        expect(controlResponses.get(902)?.result.terminated).toBe(true);
         expect(client.stderr).toBe("");
       } finally {
         await client?.close();
@@ -5282,7 +5514,7 @@ describe("acp: model-independent", () => {
   );
 
   test(
-    "missing API key returns JSON-RPC error on initialize",
+    "missing API key permits provider control but rejects prompting",
     async () => {
       const root = createIsolatedRoot("fx-acp-missing-auth-");
       try {
@@ -5294,10 +5526,20 @@ describe("acp: model-independent", () => {
             FX_DISABLE_KEYCHAIN: "1",
           },
         });
-        const resp = await client.request("initialize", { protocolVersion: 1 }, 1) as any;
-        expect(resp.error).toBeDefined();
-        expect(resp.error.message).toContain("fx login");
-        expect(resp.error.message).toContain("OPENAI_API_KEY");
+        const initialized = await client.request("initialize", { protocolVersion: 1 }, 1) as any;
+        expect(initialized.error).toBeUndefined();
+        expect(initialized.result._meta.fx.providerControl).toBeDefined();
+        const session = await client.request("session/new", {}, 2) as any;
+        expect(session.error).toBeUndefined();
+        await client.readLine();
+        const prompt = await client.request(
+          "session/prompt",
+          { prompt: [{ type: "text", text: "This must not reach a provider." }] },
+          3,
+        ) as any;
+        expect(prompt.error).toBeDefined();
+        expect(prompt.error.message).toContain("fx login");
+        expect(prompt.error.message).toContain("OPENAI_API_KEY");
         expect(client.stderr).toBe("");
       } finally {
         await client?.close();
@@ -7884,7 +8126,7 @@ describe.skipIf(!HAS_API_KEY)("acp: model-backed protocol", () => {
   );
 
   test(
-    "session provider changes use Codex credentials without crossing origins",
+    "fx/provider/switch activates Codex without crossing credential origins",
     async () => {
       const root = createIsolatedRoot("fx-acp-chatgpt-route-");
       const gateway = startFakeGateway([]);
@@ -7904,14 +8146,15 @@ describe.skipIf(!HAS_API_KEY)("acp: model-backed protocol", () => {
         await client.request("session/new", { mcpServers: [] }, 2);
         await client.readLine(); // consume session/update notification
 
-        const changed = await client.request("session/set_config_option", {
-          configId: "provider",
-          value: "codex",
-        }, 3) as any;
-        expect(changed.result.configOptions.find((option: any) => option.id === "provider").currentValue)
-          .toBe("codex");
-        expect(changed.result.configOptions.find((option: any) => option.id === "model").currentValue)
-          .toBe("gpt-5.6-sol");
+        const changed = await client.request(
+          "fx/provider/switch",
+          { provider: "codex" },
+          3,
+        ) as any;
+        expect(changed.result).toEqual({
+          provider: "codex",
+          model: "gpt-5.6-sol",
+        });
 
         const prompt = await runPrompt(client, "Answer directly.", TIMEOUT);
         expect(prompt.promptResult.result.stopReason).toBe("end_turn");

@@ -146,7 +146,6 @@ pub const AcquisitionAction = enum {
     chatgpt_login,
     grok_login,
     switch_credential,
-    switch_provider,
     /// Clears a remembered choice so resolution returns to plain precedence.
     /// Without it the only way back would be editing settings.json by hand.
     automatic,
@@ -206,7 +205,7 @@ pub const PickerView = struct {
             else if (comptime host_target.is_wasm)
                 1
             else
-                4,
+                3,
             .provider => if (comptime host_target.is_wasm) 2 else 3,
             .sign_in => 0,
             .switch_credential => gatewaySourceCount(self.available_sources) + 1,
@@ -233,8 +232,7 @@ pub const PickerView = struct {
             else switch (index) {
                 0 => .{ .action = .chatgpt_login },
                 1 => .{ .action = .grok_login },
-                2 => .{ .action = .switch_provider },
-                3 => .{ .action = .switch_credential },
+                2 => .{ .action = .switch_credential },
                 else => null,
             },
             .provider => switch (index) {
@@ -275,7 +273,6 @@ pub const PickerView = struct {
                 .chatgpt_login => "Sign in with Codex",
                 .grok_login => "Sign in with Grok",
                 .switch_credential => "Switch credential",
-                .switch_provider => "Switch provider",
                 .automatic => "Automatic",
             },
         };
@@ -288,7 +285,7 @@ pub const PickerView = struct {
             .action => |action| switch (action) {
                 .chatgpt_login => if (self.available_sources.contains(.chatgpt_subscription)) "connected" else "",
                 .grok_login => if (self.available_sources.contains(.grok_subscription)) "connected" else "",
-                .switch_credential, .switch_provider => "",
+                .switch_credential => "",
                 .automatic => "use normal precedence",
             },
         };
@@ -877,8 +874,7 @@ pub const Runtime = struct {
             return true;
         }
         if (stage == .provider) {
-            self.picker_stage = .root;
-            self.picker_selection = .{ .action = .switch_provider };
+            self.closePicker(alloc);
             return true;
         }
 
@@ -931,7 +927,6 @@ pub const Runtime = struct {
                 .provider => unreachable,
                 .source => self.closePicker(alloc),
                 .action => |action| switch (action) {
-                    .switch_provider => {},
                     .switch_credential => {
                         self.openSwitchCredentialPicker(alloc);
                         return null;
@@ -1545,7 +1540,7 @@ const LogoutFixture = struct {
     }
 };
 
-test "auth picker root starts on sign in and keeps sources in the switch stage" {
+test "auth picker root keeps sign in and credential actions" {
     const alloc = std.testing.allocator;
     var runtime: Runtime = .{};
     defer runtime.deinit(alloc);
@@ -1560,9 +1555,9 @@ test "auth picker root starts on sign in and keeps sources in the switch stage" 
     const picker = runtime.pickerView();
     try std.testing.expect(picker.active);
     try std.testing.expect((Choice{ .action = .chatgpt_login }).eql(picker.selected_choice.?));
-    try std.testing.expectEqual(@as(usize, 4), picker.choiceCount());
-    try std.testing.expectEqualStrings("Switch provider", picker.choiceLabel(picker.choiceAt(2).?));
-    try std.testing.expect(picker.choiceAt(4) == null);
+    try std.testing.expectEqual(@as(usize, 3), picker.choiceCount());
+    try std.testing.expectEqualStrings("Switch credential", picker.choiceLabel(picker.choiceAt(2).?));
+    try std.testing.expect(picker.choiceAt(3) == null);
 }
 
 test "credential switcher excludes provider-routed subscription sessions" {
@@ -1579,7 +1574,7 @@ test "credential switcher excludes provider-routed subscription sessions" {
     try std.testing.expect((Choice{ .action = .automatic }).eql(picker.choiceAt(1).?));
 }
 
-test "auth picker navigation wraps across the four hub actions" {
+test "auth picker navigation wraps across the three login hub actions" {
     const alloc = std.testing.allocator;
     var runtime: Runtime = .{};
     runtime.source_inventory = SourceSet.initOne(.openai_api_key);
@@ -1587,8 +1582,6 @@ test "auth picker navigation wraps across the four hub actions" {
 
     try std.testing.expect(runtime.movePicker(1));
     try std.testing.expect((Choice{ .action = .grok_login }).eql(runtime.pickerView().selected_choice.?));
-    try std.testing.expect(runtime.movePicker(1));
-    try std.testing.expectEqualStrings("Switch provider", runtime.pickerView().choiceLabel(runtime.pickerView().selected_choice.?));
     try std.testing.expect(runtime.movePicker(1));
     try std.testing.expect((Choice{ .action = .switch_credential }).eql(runtime.pickerView().selected_choice.?));
     try std.testing.expect(runtime.movePicker(1));
@@ -1618,7 +1611,7 @@ test "auth picker without credentials exposes acquisition actions" {
     try std.testing.expect(picker.active_source == null);
     try std.testing.expect((Choice{ .action = .chatgpt_login }).eql(picker.selected_choice.?));
     try std.testing.expectEqual(@as(usize, 0), picker.available_sources.count());
-    try std.testing.expectEqual(@as(usize, 4), picker.choiceCount());
+    try std.testing.expectEqual(@as(usize, 3), picker.choiceCount());
     try std.testing.expectEqualStrings("missing", picker.activeSourceLabel());
 }
 
@@ -1664,7 +1657,7 @@ test "switch credential stage includes the active source and pops to its root ac
     try std.testing.expect((Choice{ .action = .switch_credential }).eql(root_view.selected_choice.?));
 }
 
-test "provider stage pops to its hub root action" {
+test "standalone provider stage closes when cancelled" {
     const alloc = std.testing.allocator;
     var runtime: Runtime = .{};
     defer runtime.deinit(alloc);
@@ -1672,10 +1665,7 @@ test "provider stage pops to its hub root action" {
     runtime.openProviderPicker(alloc, .codex);
 
     try std.testing.expect(runtime.popPickerStage(alloc));
-    const root_view = runtime.pickerView();
-    try std.testing.expect(root_view.active);
-    try std.testing.expectEqual(PickerStage.root, root_view.stage);
-    try std.testing.expectEqualStrings("Switch provider", root_view.choiceLabel(root_view.selected_choice.?));
+    try std.testing.expect(!runtime.pickerView().active);
 }
 
 test "auth picker cancellation preserves the active credential source" {

@@ -37,6 +37,7 @@ pub const SlashKind = enum {
     rename_session,
     help,
     login,
+    provider,
     logout,
     status,
     background,

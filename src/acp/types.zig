@@ -186,6 +186,7 @@ pub fn writeToolCallUpdateWithCommandResult(
 pub const InitializeOptions = struct {
     image_capable: bool = true,
     unified_exec_capable: bool = true,
+    provider_control_capable: bool = true,
 };
 
 pub fn writeInitializeResponse(w: *std.Io.Writer) !void {
@@ -214,6 +215,9 @@ pub fn writeInitializeResponseWithOptions(
     try w.writeAll("\"backgroundTerminals\":true,\"processStatusCommand\":\"/ps\"");
     if (options.unified_exec_capable) {
         try w.writeAll(",\"unifiedExec\":{\"writeStdin\":true,\"kill\":true}");
+    }
+    if (options.provider_control_capable) {
+        try w.writeAll(",\"providerControl\":{\"switch\":true,\"login\":true,\"configureByok\":true}");
     }
     try w.writeAll("}}}");
 }
@@ -348,6 +352,7 @@ test "writeInitializeResponse contains required fields" {
     try std.testing.expect(std.mem.find(u8, out.writer.buffered(), "\"list\":{}") != null);
     try std.testing.expect(std.mem.find(u8, out.writer.buffered(), "\"resume\":{}") != null);
     try std.testing.expect(std.mem.find(u8, out.writer.buffered(), "\"close\":{}") != null);
+    try std.testing.expect(std.mem.find(u8, out.writer.buffered(), "\"providerControl\":") != null);
     try std.testing.expect(mcp_capabilities.get("http").?.bool);
     try std.testing.expect(mcp_capabilities.get("sse").?.bool);
     const fx_meta = parsed.value.object.get("_meta").?.object.get("fx").?.object;

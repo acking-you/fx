@@ -225,7 +225,7 @@ const AcpContext = struct {
                 .account_id = session.account_id,
                 .worker_model = session.model,
                 .gateway_retry_count = self.state.cfg.gateway_retry_count,
-                .gateway_chat_url = self.state.cfg.gateway_chat_url,
+                .gateway_chat_url = server.gatewayChatUrl(self.state),
                 .usage = &session.session_rt.usage,
                 .usage_allocator = self.state.alloc,
             });
@@ -250,8 +250,8 @@ const AcpContext = struct {
             .secret_store = self.state.cfg.secret_store,
             .model = session.model,
             .gateway_retry_count = self.state.cfg.gateway_retry_count,
-            .gateway_chat_url = self.state.cfg.gateway_chat_url,
-            .gateway_models_path = self.state.cfg.gateway_models_path,
+            .gateway_chat_url = server.gatewayChatUrl(self.state),
+            .gateway_models_path = server.gatewayModelsPath(self.state),
             .agent_step_limit = session.agent_step_limit,
             .fast_mode = session.fast_mode,
             .effort = session.effort,
@@ -1003,7 +1003,6 @@ const UnifiedExecWriteInput = struct {
     session_id: []u8,
     process_id: u64,
     chars: []u8,
-    yield_time_ms: u64 = 250,
     max_output_tokens: ?u64 = null,
 
     fn deinit(self: *UnifiedExecWriteInput, alloc: Allocator) void {
@@ -1038,10 +1037,12 @@ fn parseUnifiedExecWriteInput(
     }
     const chars = if (parsed.value.object.get("chars")) |value| value.string else "";
 
-    var yield_time_ms: u64 = 250;
+    // Keep validating the legacy field for protocol compatibility, but never
+    // honor it on the ACP read loop. Direct process control is intentionally
+    // nonblocking regardless of the requested poll duration.
     if (parsed.value.object.get("yieldTimeMs")) |value| {
         if (value != .integer or value.integer < 0) return error.InvalidYieldTime;
-        yield_time_ms = std.math.cast(u64, value.integer) orelse return error.InvalidYieldTime;
+        _ = std.math.cast(u64, value.integer) orelse return error.InvalidYieldTime;
     }
 
     var max_output_tokens: ?u64 = null;
@@ -1058,7 +1059,6 @@ fn parseUnifiedExecWriteInput(
         .session_id = owned_session_id,
         .process_id = process_id,
         .chars = owned_chars,
-        .yield_time_ms = yield_time_ms,
         .max_output_tokens = max_output_tokens,
     };
 }
@@ -1165,10 +1165,9 @@ pub fn handleUnifiedExecWriteStdin(
         return writeUnifiedExecError(state, alloc, msg, err);
     };
     defer input.deinit(alloc);
-    var result = state.unified_exec.writeStdin(alloc, .{
+    var result = state.unified_exec.writeStdinNonblocking(alloc, .{
         .process_id = input.process_id,
         .chars = input.chars,
-        .yield_time_ms = input.yield_time_ms,
         .max_output_tokens = input.max_output_tokens,
     }) catch |err| {
         return writeUnifiedExecError(state, alloc, msg, err);
@@ -1448,7 +1447,8 @@ fn buildAgentConfig(state: *server.ServerState, session: *server.ActiveSessionSt
         .skills_prompt_section = sections.skills_prompt_section,
         .explicit_skills_prompt_section = sections.explicit_skills_prompt_section,
         .gateway_retry_count = state.cfg.gateway_retry_count,
-        .gateway_chat_url = state.cfg.gateway_chat_url,
+        .gateway_chat_url = server.gatewayChatUrl(state),
+        .provider_endpoint_override = state.gateway_chat_url_override,
         .advertised_tool_names = sections.advertised_tool_names,
         .advertised_functions = sections.advertised_functions,
         .provider_capabilities = state.cfg.provider_set.select(session.provider).capabilities,
@@ -1896,7 +1896,7 @@ fn resolveModelCapabilities(
                 session.api_key,
                 session.account_id,
             ),
-            .endpoint = ctx.state.cfg.gateway_models_path,
+            .endpoint = server.gatewayModelsPath(ctx.state),
             .cancel_flag = &session.cancel_flag,
         },
         model,

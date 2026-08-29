@@ -111,16 +111,21 @@ fn fetchModelCatalog(
     const api_key = input.access.authorizationCredential() orelse
         return .{ .failure = model_catalog.failureForHttpStatus(.unauthorized) };
 
-    const base_url = provider_route.resolveBaseUrlAlloc(
-        alloc,
-        .openai_responses_byok,
-        provider_route.EndpointOverrides.fromEnvironment(),
-    ) catch |err| {
-        if (err == error.OutOfMemory) return error.OutOfMemory;
-        return .{ .failure = .{ .category = .transport } };
-    };
-    defer alloc.free(base_url);
-    const endpoint = provider_route.appendModelsEndpointAlloc(alloc, base_url) catch |err| {
+    const endpoint = (if (std.mem.startsWith(u8, input.endpoint, "https://") or
+        std.mem.startsWith(u8, input.endpoint, "http://"))
+        provider_route.appendModelsEndpointAlloc(alloc, input.endpoint)
+    else endpoint: {
+        const base_url = provider_route.resolveBaseUrlAlloc(
+            alloc,
+            .openai_responses_byok,
+            provider_route.EndpointOverrides.fromEnvironment(),
+        ) catch |err| {
+            if (err == error.OutOfMemory) return error.OutOfMemory;
+            return .{ .failure = .{ .category = .transport } };
+        };
+        defer alloc.free(base_url);
+        break :endpoint provider_route.appendModelsEndpointAlloc(alloc, base_url);
+    }) catch |err| {
         if (err == error.OutOfMemory) return error.OutOfMemory;
         return .{ .failure = .{ .category = .transport } };
     };

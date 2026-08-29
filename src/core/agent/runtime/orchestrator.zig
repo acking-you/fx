@@ -3058,6 +3058,7 @@ fn processQueuedPromptLoop(
                     .source = job.credential_source,
                     .account_id = job.account_id,
                 },
+                .endpoint = config.provider_endpoint_override,
                 .session_id = lifecycle.scope.session_id,
                 .model = gateway_model,
                 .retry_count = config.gateway_retry_count,

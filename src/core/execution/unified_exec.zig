@@ -131,6 +131,24 @@ pub const Manager = struct {
         return removed.snapshot(alloc, null, .exited, request.max_output_tokens);
     }
 
+    /// Writes input and returns the output currently available without a
+    /// bounded wait. ACP uses this path so process control cannot stall its
+    /// request dispatch loop.
+    pub fn writeStdinNonblocking(self: *Manager, alloc: Allocator, request: WriteRequest) !Result {
+        self.operation_mutex.lockUncancelable(io_mod.getIo());
+        defer self.operation_mutex.unlock(io_mod.getIo());
+        const process = self.lookup(request.process_id) orelse return error.UnknownProcessId;
+        try process.write(request.chars);
+        if (!process.waitUntilDone(0)) {
+            return process.snapshot(alloc, request.process_id, .running, request.max_output_tokens);
+        }
+        const removed = self.take(request.process_id) orelse return error.ProcessUnavailable;
+        removed.stopAndJoin();
+        removed.finalizeArtifact();
+        defer removed.destroy();
+        return removed.snapshot(alloc, null, .exited, request.max_output_tokens);
+    }
+
     /// Explicitly terminate one background process and its process group.
     /// This is an internal lifecycle hook; the model-facing surface remains
     /// the two Codex-compatible exec_command/write_stdin tools.
@@ -743,6 +761,29 @@ test "unified exec writes interactive input without blocking the caller" {
     defer second.deinit(std.testing.allocator);
     try std.testing.expectEqual(Manager.Status.exited, second.status);
     try std.testing.expectEqualStrings("got:hello", second.stdout);
+}
+
+test "unified exec nonblocking writes return a live process immediately" {
+    if (!Manager.supported()) return error.SkipZigTest;
+    var manager = Manager.init(std.testing.allocator);
+    defer manager.deinit();
+    var first = try manager.exec(std.testing.allocator, .{
+        .command = "IFS= read -r line; printf 'got:%s' \"$line\"; sleep 30",
+        .cwd = "/tmp",
+        .yield_time_ms = 250,
+    });
+    const process_id = first.process_id.?;
+    first.deinit(std.testing.allocator);
+
+    var second = try manager.writeStdinNonblocking(std.testing.allocator, .{
+        .process_id = process_id,
+        .chars = "hello\n",
+        .yield_time_ms = max_poll_yield_ms,
+    });
+    defer second.deinit(std.testing.allocator);
+    try std.testing.expectEqual(Manager.Status.running, second.status);
+    try std.testing.expectEqual(process_id, second.process_id.?);
+    try std.testing.expect(manager.terminate(process_id));
 }
 
 test "unified exec clamps empty polls and retains head tail bounds" {
