@@ -58,8 +58,8 @@ fn compactHistoryNotice(outcome: app_session_runtime.CompactHistoryOutcome) Comp
             .body = "Context is already compacted.",
         },
         .started => .{
-            .tone = .neutral,
-            .body = "Context compaction started.",
+            .tone = .information,
+            .body = "Context compaction started. The composer stays available; submitted input waits for the next turn.",
         },
         .busy => .{
             .tone = .neutral,
@@ -2724,7 +2724,7 @@ test "compact command reports asynchronous and settled outcomes accurately" {
         body: []const u8,
     }{
         .{ .outcome = .unchanged, .tone = .neutral, .body = "Context is already compacted." },
-        .{ .outcome = .started, .tone = .neutral, .body = "Context compaction started." },
+        .{ .outcome = .started, .tone = .information, .body = "Context compaction started. The composer stays available; submitted input waits for the next turn." },
         .{ .outcome = .busy, .tone = .neutral, .body = "Context compaction is already in progress." },
     };
 

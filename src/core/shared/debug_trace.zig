@@ -74,6 +74,35 @@ pub fn logf(scope: []const u8, comptime fmt: []const u8, args: anytype) void {
     line.end();
 }
 
+/// Writes a product diagnostic even when `FX_TRACE` is unset. Unit tests stay
+/// silent unless an explicit trace file is already configured.
+pub fn logDurable(scope: []const u8, comptime fmt: []const u8, args: anytype) void {
+    logf(scope, fmt, args);
+    if (comptime @import("builtin").is_test) return;
+    if (isScopeEnabled(scope)) return;
+
+    var out: std.Io.Writer.Allocating = .init(std.heap.c_allocator);
+    defer out.deinit();
+    out.writer.print("{d} [{s}] ", .{ io_mod.milliTimestamp(), scope }) catch return;
+    out.writer.print(fmt, args) catch return;
+    out.writer.writeByte('\n') catch return;
+    appendAbsoluteLogLine(out.written());
+}
+
+pub fn appendAbsoluteLogLine(line: []const u8) void {
+    if (comptime @import("builtin").is_test) return;
+    const home = io_mod.getenv("HOME") orelse return;
+    const path = profile_paths.traceLogPath(std.heap.c_allocator, home) catch return;
+    defer std.heap.c_allocator.free(path);
+    appendLineToPath(path, line);
+}
+
+pub fn appendLineToPath(path: []const u8, line: []const u8) void {
+    ensureParentDir(path) catch return;
+    rotateIfTooLarge(path, default_log_max_bytes);
+    appendLineToFile(io_mod.getIo(), path, line);
+}
+
 pub fn eventf(scope: []const u8, event: []const u8, ctx: TraceContext, comptime fmt: []const u8, args: anytype) void {
     var line: TraceLine = undefined;
     if (!line.beginEvent(scope, event, ctx, fmt.len != 0)) return;

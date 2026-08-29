@@ -1392,6 +1392,7 @@ const CompactionTaskRuntime = struct {
             .local_model, .local_fallback => .{ .local = .{
                 .summary = try alloc.dupe(u8, result.summary),
                 .strategy = result.strategy,
+                .detail = try alloc.dupe(u8, result.detail orelse ""),
             } },
         };
         alloc.free(event.outcome.failed);
@@ -3352,7 +3353,7 @@ pub fn Runtime(comptime App: type) type {
         ) void {
             const task = app.session_persistence.compaction_tasks
                 .takeCompletedGeneration(event.generation) orelse {
-                debug_trace.logf(
+                debug_trace.logDurable(
                     "session",
                     "event=compaction_result outcome=ignored reason=unknown_generation generation={d}",
                     .{event.generation},
@@ -3369,7 +3370,7 @@ pub fn Runtime(comptime App: type) type {
                 app.worker.releaseTurnStartHold();
 
             if (!optionalStringsEqual(activeSessionId(app), event.session_id)) {
-                debug_trace.logf(
+                debug_trace.logDurable(
                     "session",
                     "event=compaction_result outcome=discarded reason=session_changed generation={d}",
                     .{event.generation},
@@ -3425,7 +3426,7 @@ pub fn Runtime(comptime App: type) type {
                 true;
 
             if (!history_matches or !source_matches or !model_matches or !binding_matches) {
-                debug_trace.logf(
+                debug_trace.logDurable(
                     "session",
                     "event=compaction_result outcome=discarded reason=stale history_match={} source_match={} model_match={} binding_match={}",
                     .{ history_matches, source_matches, model_matches, binding_matches },
@@ -3440,16 +3441,18 @@ pub fn Runtime(comptime App: type) type {
 
             const installed = switch (event.outcome) {
                 .failed => |name| {
-                    debug_trace.logf(
+                    debug_trace.logDurable(
                         "session",
                         "event=compaction_result outcome=failed reason={s}",
                         .{name},
                     );
-                    writeCompactionNotice(
-                        app,
-                        .@"error",
-                        "Context compaction failed before it could produce a safe fallback; no context was changed.",
-                    );
+                    var failed_buf: [256]u8 = undefined;
+                    const failed_body = std.fmt.bufPrint(
+                        &failed_buf,
+                        "Context compaction failed before it could produce a safe fallback ({s}); no context was changed.",
+                        .{name},
+                    ) catch "Context compaction failed before it could produce a safe fallback; no context was changed.";
+                    writeCompactionNotice(app, .@"error", failed_body);
                     return;
                 },
                 .remote => |completed| blk: {
@@ -3471,7 +3474,7 @@ pub fn Runtime(comptime App: type) type {
                             .provider_binding = binding.view(),
                         },
                     ) catch |err| {
-                        debug_trace.logf(
+                        debug_trace.logDurable(
                             "session",
                             "event=compaction_result outcome=install_failed err={s}",
                             .{@errorName(err)},
@@ -3489,7 +3492,7 @@ pub fn Runtime(comptime App: type) type {
                     completed.summary,
                     null,
                 ) catch |err| {
-                    debug_trace.logf(
+                    debug_trace.logDurable(
                         "session",
                         "event=compaction_result outcome=install_failed err={s}",
                         .{@errorName(err)},
@@ -3513,7 +3516,7 @@ pub fn Runtime(comptime App: type) type {
 
             refreshContextUsageAfterCompaction(app);
             persistCompactionState(app) catch |err| {
-                debug_trace.logf(
+                debug_trace.logDurable(
                     "session",
                     "event=compaction_result outcome=persist_failed err={s}",
                     .{@errorName(err)},
@@ -3527,7 +3530,7 @@ pub fn Runtime(comptime App: type) type {
             };
             switch (event.outcome) {
                 .remote => {
-                    debug_trace.logf(
+                    debug_trace.logDurable(
                         "session",
                         "event=compaction_result outcome=installed strategy=remote generation={d}",
                         .{event.generation},
@@ -3539,19 +3542,18 @@ pub fn Runtime(comptime App: type) type {
                     );
                 },
                 .local => |completed| {
-                    debug_trace.logf(
+                    debug_trace.logDurable(
                         "session",
-                        "event=compaction_result outcome=installed strategy={s} generation={d}",
-                        .{ @tagName(completed.strategy), event.generation },
+                        "event=compaction_result outcome=installed strategy={s} generation={d} detail={s}",
+                        .{ @tagName(completed.strategy), event.generation, completed.detail },
                     );
-                    writeCompactionNotice(
-                        app,
-                        if (completed.strategy == .local_fallback) .warning else .neutral,
-                        if (completed.strategy == .local_fallback)
-                            "Context compacted with the bounded local fallback because the active model was unavailable."
-                        else
-                            "Context compacted locally with the active model.",
+                    var notice_buf: [512]u8 = undefined;
+                    const notice = runtime_compaction.formatInstalledNotice(
+                        &notice_buf,
+                        completed.strategy,
+                        completed.detail,
                     );
+                    writeCompactionNotice(app, notice.tone, notice.body);
                 },
                 .failed => unreachable,
             }
@@ -10984,6 +10986,7 @@ test "local compaction result installs through the shared UI drain" {
         .outcome = .{ .local = .{
             .summary = @constCast("Conversation summary: one, two, and three are complete."),
             .strategy = .local_model,
+            .detail = @constCast("local model compaction accepted mode=fitted attempt=1"),
         } },
     };
     Runtime(TestApp).applyCompactionEvent(&app, event);

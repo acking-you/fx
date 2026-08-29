@@ -577,13 +577,17 @@ fn handleCompactCommand(
             try commitAcpStateReplacement(ctx.alloc, session, writable, false);
         }
     }
-    try ctx.sendAgentText(if (!changed)
-        "Context is already compacted."
-    else switch (result.strategy) {
-        .remote => "Context compacted with the active Responses provider.",
-        .local_model => "Context compacted locally with the active model.",
-        .local_fallback => "Model compaction was unavailable; context was compacted with the deterministic fallback.",
-    });
+    if (!changed) {
+        try ctx.sendAgentText("Context is already compacted.");
+    } else {
+        var notice_buf: [512]u8 = undefined;
+        const notice = runtime_compaction.formatInstalledNotice(
+            &notice_buf,
+            result.strategy,
+            result.detail orelse "",
+        );
+        try ctx.sendAgentText(notice.body);
+    }
     return .{ .stop_reason = .end_turn };
 }
 
