@@ -1895,6 +1895,53 @@ test "review stored result bounds one retained logical line" {
     try std.testing.expect(source.len < 4096);
 }
 
+test "review command artifact preserves live command rail geometry" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io_mod.getIo(), "commands");
+    const command_dir = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "commands");
+    defer alloc.free(command_dir);
+    var capability = try session_child_store.SessionChildCapability.initLegacyRoute(
+        alloc,
+        command_dir,
+        .command_artifacts,
+        .writable,
+    );
+    defer capability.deinit();
+
+    const handle = "review-command-artifact.log";
+    var artifact = try capability.createExclusiveFile(alloc, .command_artifacts, handle);
+    defer artifact.deinit();
+    try artifact.writeAll("first\nsecond\n");
+    try artifact.sync();
+
+    var projection = Projection{ .styles = .{} };
+    defer projection.deinit(alloc);
+    try projection.segments.append(alloc, .{ .stored_result = .{
+        .kind = .command_artifact,
+        .handle = handle,
+        .preview = null,
+        .detail_depth = .review,
+        .line_prefix = "│  ",
+    } });
+
+    const measurement = try measureProjection(alloc, &projection, &capability, 80);
+    const source = try renderProjectionViewportSource(
+        alloc,
+        &projection,
+        &capability,
+        80,
+        @intCast(measurement.total_rows),
+        0,
+    );
+    defer alloc.free(source);
+
+    try std.testing.expect(std.mem.indexOf(u8, source, "│  2 output lines") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source, "│ first") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source, "│  first") == null);
+}
+
 test "review line accounting keeps blank rows and unterminated tails exact" {
     const cases = [_]struct {
         bytes: []const u8,
@@ -5939,7 +5986,7 @@ fn appendStoredResultContent(
     stored: StoredResult,
 ) !bool {
     if (stored.detail_depth == .review) {
-        return if (stored.kind == .command_replay)
+        return if (stored.kind != .tool_result)
             appendReviewCommandStoredResultContent(alloc, walker, capability, styles, stored)
         else
             appendReviewStoredResultContent(alloc, walker, capability, styles, stored);
