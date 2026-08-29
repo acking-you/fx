@@ -251,6 +251,10 @@ const AcpContext = struct {
             .model = session.model,
             .gateway_retry_count = self.state.cfg.gateway_retry_count,
             .gateway_chat_url = server.gatewayChatUrl(self.state),
+            .provider_endpoint_override = server.providerEndpointOverride(
+                self.state,
+                session.provider,
+            ),
             .gateway_models_path = server.gatewayModelsPath(self.state),
             .agent_step_limit = session.agent_step_limit,
             .fast_mode = session.fast_mode,
@@ -517,6 +521,7 @@ fn handleCompactCommand(
             session.effort,
             session.fast_mode,
         ),
+        .endpoint_override = server.providerEndpointOverride(ctx.state, session.provider),
         .cancel_flag = &session.cancel_flag,
     });
     defer result.deinit(ctx.alloc);
@@ -1448,7 +1453,7 @@ fn buildAgentConfig(state: *server.ServerState, session: *server.ActiveSessionSt
         .explicit_skills_prompt_section = sections.explicit_skills_prompt_section,
         .gateway_retry_count = state.cfg.gateway_retry_count,
         .gateway_chat_url = server.gatewayChatUrl(state),
-        .provider_endpoint_override = state.gateway_chat_url_override,
+        .provider_endpoint_override = server.providerEndpointOverride(state, session.provider),
         .advertised_tool_names = sections.advertised_tool_names,
         .advertised_functions = sections.advertised_functions,
         .provider_capabilities = state.cfg.provider_set.select(session.provider).capabilities,

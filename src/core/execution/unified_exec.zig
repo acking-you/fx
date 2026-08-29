@@ -14,11 +14,16 @@ const Allocator = std.mem.Allocator;
 /// addressable by its numeric id through write_stdin.
 pub const Manager = struct {
     const max_processes: usize = 64;
+    const ProcessIdentity = struct { id: u64, generation: u64 };
 
     mutex: std.Io.Mutex = .init,
-    operation_mutex: std.Io.Mutex = .init,
+    lifecycle_mutex: std.Io.Mutex = .init,
     processes: std.AutoHashMap(u64, *Process),
     next_id: u64 = 1,
+    generation: u64 = 1,
+    pending_processes: usize = 0,
+    active_operations: usize = 0,
+    resetting: bool = false,
     stopping: bool = false,
     alloc: Allocator,
 
@@ -95,27 +100,24 @@ pub const Manager = struct {
 
     pub fn exec(self: *Manager, alloc: Allocator, request: ExecRequest) !Result {
         if (!supported()) return error.UnsupportedHost;
-        self.operation_mutex.lockUncancelable(io_mod.getIo());
-        defer self.operation_mutex.unlock(io_mod.getIo());
         const process = try self.createProcess(request);
+        defer self.releaseActive(process);
         const id = process.id;
         const yield_ms = clampInitialYield(request.yield_time_ms);
         if (!process.waitUntilDone(yield_ms)) {
             return process.snapshot(alloc, id, .running, request.max_output_tokens);
         }
-        const removed = self.take(id) orelse return error.ProcessUnavailable;
+        if (!self.detachHeld(id, process)) return error.ProcessUnavailable;
         // The wait thread may observe exit before the pipe readers have drained
         // their final bytes. Join them before taking the terminal snapshot.
-        removed.stopAndJoin();
-        removed.finalizeArtifact();
-        defer removed.destroy();
-        return removed.snapshot(alloc, null, .exited, request.max_output_tokens);
+        process.stopAndJoin();
+        process.finalizeArtifact();
+        return process.snapshot(alloc, null, .exited, request.max_output_tokens);
     }
 
     pub fn writeStdin(self: *Manager, alloc: Allocator, request: WriteRequest) !Result {
-        self.operation_mutex.lockUncancelable(io_mod.getIo());
-        defer self.operation_mutex.unlock(io_mod.getIo());
-        const process = self.lookup(request.process_id) orelse return error.UnknownProcessId;
+        const process = self.acquire(request.process_id) orelse return error.UnknownProcessId;
+        defer self.releaseActive(process);
         try process.write(request.chars);
         const yield_ms = if (request.chars.len == 0)
             clampPollYield(request.yield_time_ms)
@@ -124,55 +126,55 @@ pub const Manager = struct {
         if (!process.waitUntilDone(yield_ms)) {
             return process.snapshot(alloc, request.process_id, .running, request.max_output_tokens);
         }
-        const removed = self.take(request.process_id) orelse return error.ProcessUnavailable;
-        removed.stopAndJoin();
-        removed.finalizeArtifact();
-        defer removed.destroy();
-        return removed.snapshot(alloc, null, .exited, request.max_output_tokens);
+        if (!self.detachHeld(request.process_id, process)) return error.ProcessUnavailable;
+        process.stopAndJoin();
+        process.finalizeArtifact();
+        return process.snapshot(alloc, null, .exited, request.max_output_tokens);
     }
 
     /// Writes input and returns the output currently available without a
     /// bounded wait. ACP uses this path so process control cannot stall its
     /// request dispatch loop.
     pub fn writeStdinNonblocking(self: *Manager, alloc: Allocator, request: WriteRequest) !Result {
-        self.operation_mutex.lockUncancelable(io_mod.getIo());
-        defer self.operation_mutex.unlock(io_mod.getIo());
-        const process = self.lookup(request.process_id) orelse return error.UnknownProcessId;
+        const process = self.acquire(request.process_id) orelse return error.UnknownProcessId;
+        defer self.releaseActive(process);
         try process.write(request.chars);
         if (!process.waitUntilDone(0)) {
             return process.snapshot(alloc, request.process_id, .running, request.max_output_tokens);
         }
-        const removed = self.take(request.process_id) orelse return error.ProcessUnavailable;
-        removed.stopAndJoin();
-        removed.finalizeArtifact();
-        defer removed.destroy();
-        return removed.snapshot(alloc, null, .exited, request.max_output_tokens);
+        if (!self.detachHeld(request.process_id, process)) return error.ProcessUnavailable;
+        process.stopAndJoin();
+        process.finalizeArtifact();
+        return process.snapshot(alloc, null, .exited, request.max_output_tokens);
     }
 
     /// Explicitly terminate one background process and its process group.
     /// This is an internal lifecycle hook; the model-facing surface remains
     /// the two Codex-compatible exec_command/write_stdin tools.
     pub fn terminate(self: *Manager, process_id: u64) bool {
-        self.operation_mutex.lockUncancelable(io_mod.getIo());
-        defer self.operation_mutex.unlock(io_mod.getIo());
-        const process = self.take(process_id) orelse return false;
+        const process = self.takeForOperation(process_id) orelse return false;
+        defer self.releaseActive(process);
         process.stopAndJoin();
-        process.destroy();
         return true;
     }
 
     fn createProcess(self: *Manager, request: ExecRequest) !*Process {
         const zio = io_mod.getIo();
-        const id = blk: {
+        const identity: ProcessIdentity = blk: {
             self.mutex.lockUncancelable(zio);
             defer self.mutex.unlock(zio);
-            if (self.stopping) return error.RuntimeStopping;
-            if (self.processes.count() >= max_processes) return error.ProcessLimitReached;
+            if (self.stopping or self.resetting) return error.RuntimeStopping;
+            if (self.processes.count() + self.pending_processes >= max_processes)
+                return error.ProcessLimitReached;
+            self.pending_processes += 1;
             const value = self.next_id;
             self.next_id +%= 1;
             if (self.next_id == 0) self.next_id = 1;
-            break :blk value;
+            break :blk .{ .id = value, .generation = self.generation };
         };
+        var pending_reserved = true;
+        defer if (pending_reserved) self.releasePending();
+        const id = identity.id;
 
         const argv = [_][]const u8{ request.shell, if (request.login) "-lc" else "-c", request.command, "fx-exec" };
         var child = try std.process.spawn(zio, .{
@@ -217,31 +219,96 @@ pub const Manager = struct {
         try process.start();
 
         self.mutex.lockUncancelable(zio);
-        defer self.mutex.unlock(zio);
-        if (self.stopping) return error.RuntimeStopping;
-        try self.processes.put(id, process);
+        if (self.stopping or self.generation != identity.generation) {
+            self.mutex.unlock(zio);
+            return error.RuntimeStopping;
+        }
+        self.processes.put(id, process) catch |err| {
+            self.mutex.unlock(zio);
+            return err;
+        };
+        std.debug.assert(self.pending_processes > 0);
+        self.pending_processes -= 1;
+        pending_reserved = false;
+        // The map and this exec call each own one reference. Later callers
+        // retain under the same mutex before borrowing the process pointer.
+        process.references = 2;
+        self.active_operations += 1;
+        self.mutex.unlock(zio);
         return process;
     }
 
-    fn lookup(self: *Manager, id: u64) ?*Process {
+    fn acquire(self: *Manager, id: u64) ?*Process {
         self.mutex.lockUncancelable(io_mod.getIo());
         defer self.mutex.unlock(io_mod.getIo());
-        return self.processes.get(id);
+        const process = self.processes.get(id) orelse return null;
+        process.references += 1;
+        self.active_operations += 1;
+        return process;
     }
 
-    fn take(self: *Manager, id: u64) ?*Process {
+    fn releasePending(self: *Manager) void {
+        self.mutex.lockUncancelable(io_mod.getIo());
+        defer self.mutex.unlock(io_mod.getIo());
+        std.debug.assert(self.pending_processes > 0);
+        self.pending_processes -= 1;
+    }
+
+    /// Detaches the map-owned reference while the caller keeps its retained
+    /// operation reference. Only the winner may join and finalize the process.
+    fn detachHeld(self: *Manager, id: u64, process: *Process) bool {
+        self.mutex.lockUncancelable(io_mod.getIo());
+        defer self.mutex.unlock(io_mod.getIo());
+        const current = self.processes.get(id) orelse return false;
+        if (current != process) return false;
+        const entry = self.processes.fetchRemove(id) orelse return false;
+        std.debug.assert(entry.value == process);
+        std.debug.assert(process.references >= 2);
+        process.references -= 1;
+        return true;
+    }
+
+    /// Removes a process and converts the map's owning reference into an active
+    /// operation reference. No new operation can retain it after this returns.
+    fn takeForOperation(self: *Manager, id: u64) ?*Process {
         self.mutex.lockUncancelable(io_mod.getIo());
         defer self.mutex.unlock(io_mod.getIo());
         const entry = self.processes.fetchRemove(id) orelse return null;
+        self.active_operations += 1;
         return entry.value;
+    }
+
+    fn releaseActive(self: *Manager, process: *Process) void {
+        const zio = io_mod.getIo();
+        self.mutex.lockUncancelable(zio);
+        std.debug.assert(self.active_operations > 0);
+        std.debug.assert(process.references > 0);
+        self.active_operations -= 1;
+        process.references -= 1;
+        const destroy = process.references == 0;
+        self.mutex.unlock(zio);
+        if (destroy) process.destroy();
+    }
+
+    fn releaseOwned(self: *Manager, process: *Process) void {
+        const zio = io_mod.getIo();
+        self.mutex.lockUncancelable(zio);
+        std.debug.assert(process.references > 0);
+        process.references -= 1;
+        const destroy = process.references == 0;
+        self.mutex.unlock(zio);
+        if (destroy) process.destroy();
     }
 
     fn stopAll(self: *Manager, mark_stopping: bool) void {
         const zio = io_mod.getIo();
-        self.operation_mutex.lockUncancelable(zio);
-        defer self.operation_mutex.unlock(zio);
+        self.lifecycle_mutex.lockUncancelable(zio);
+        defer self.lifecycle_mutex.unlock(zio);
         self.mutex.lockUncancelable(zio);
         if (mark_stopping) self.stopping = true;
+        self.resetting = true;
+        self.generation +%= 1;
+        if (self.generation == 0) self.generation = 1;
         var values: [max_processes]*Process = undefined;
         var count: usize = 0;
         var iterator = self.processes.iterator();
@@ -255,7 +322,23 @@ pub const Manager = struct {
 
         for (values[0..count]) |process| {
             process.stopAndJoin();
-            process.destroy();
+            self.releaseOwned(process);
+        }
+
+        // A session reset must outlive creators and callers that crossed the
+        // fence. Killing the map-owned processes wakes bounded polls, so this
+        // wait is normally only a few scheduler ticks.
+        while (true) {
+            self.mutex.lockUncancelable(zio);
+            const drained = self.pending_processes == 0 and self.active_operations == 0;
+            self.mutex.unlock(zio);
+            if (drained) break;
+            io_mod.sleep(std.time.ns_per_ms);
+        }
+        if (!mark_stopping) {
+            self.mutex.lockUncancelable(zio);
+            self.resetting = false;
+            self.mutex.unlock(zio);
         }
     }
 };
@@ -297,6 +380,9 @@ const Process = struct {
     command: []u8,
     cwd: []u8,
     started_at_ms: i64,
+    /// Protected by Manager.mutex. The process is destroyed only after its map
+    /// ownership and every in-flight operation have both been released.
+    references: usize = 0,
     done: bool = false,
     term: ?std.process.Child.Term = null,
     readers_done: u8 = 0,
@@ -784,6 +870,59 @@ test "unified exec nonblocking writes return a live process immediately" {
     try std.testing.expectEqual(Manager.Status.running, second.status);
     try std.testing.expectEqual(process_id, second.process_id.?);
     try std.testing.expect(manager.terminate(process_id));
+}
+
+test "unified exec direct control stays responsive during a model poll" {
+    if (!Manager.supported()) return error.SkipZigTest;
+    var manager = Manager.init(std.testing.allocator);
+    defer manager.deinit();
+    var first = try manager.exec(std.testing.allocator, .{
+        .command = "sleep 30",
+        .cwd = "/tmp",
+        .yield_time_ms = 250,
+    });
+    const process_id = first.process_id.?;
+    first.deinit(std.testing.allocator);
+
+    const Poll = struct {
+        manager: *Manager,
+        process_id: u64,
+        entered: std.atomic.Value(bool) = .init(false),
+        failure: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.entered.store(true, .release);
+            var result = self.manager.writeStdin(std.testing.allocator, .{
+                .process_id = self.process_id,
+                .yield_time_ms = max_poll_yield_ms,
+            }) catch |err| {
+                self.failure = err;
+                return;
+            };
+            result.deinit(std.testing.allocator);
+        }
+    };
+    var poll = Poll{ .manager = &manager, .process_id = process_id };
+    const thread = try std.Thread.spawn(.{}, Poll.run, .{&poll});
+    while (!poll.entered.load(.acquire)) io_mod.sleep(std.time.ns_per_ms);
+    // Give the poller enough time to enter its bounded wait. This reproduces
+    // the old global-operation-lock stall without making the assertion depend
+    // on private manager state.
+    io_mod.sleep(50 * std.time.ns_per_ms);
+
+    const started = io_mod.milliTimestamp();
+    var direct = try manager.writeStdinNonblocking(std.testing.allocator, .{
+        .process_id = process_id,
+        .yield_time_ms = max_poll_yield_ms,
+    });
+    defer direct.deinit(std.testing.allocator);
+    const elapsed = io_mod.milliTimestamp() - started;
+    try std.testing.expectEqual(Manager.Status.running, direct.status);
+    try std.testing.expect(elapsed < 1_000);
+
+    try std.testing.expect(manager.terminate(process_id));
+    thread.join();
+    if (poll.failure) |err| try std.testing.expectEqual(error.ProcessUnavailable, err);
 }
 
 test "unified exec clamps empty polls and retains head tail bounds" {

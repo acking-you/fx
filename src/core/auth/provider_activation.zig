@@ -182,6 +182,13 @@ pub const Runtime = struct {
     }
 
     pub fn deinit(self: *Self) void {
+        self.cancelAndDrain();
+    }
+
+    /// Invalidates any in-flight provider preparation and discards its result.
+    /// Logout uses this fence so a cloned credential cannot be published after
+    /// the user has durably removed that provider's session.
+    pub fn cancelAndDrain(self: *Self) void {
         self.cancel_requested.store(true, .seq_cst);
         const thread = self.detachThread();
         if (thread) |handle| handle.join();
@@ -193,26 +200,25 @@ pub const Runtime = struct {
     }
 
     pub fn start(self: *Self, request: Request) !bool {
-        self.mutex.lockUncancelable(io_mod.getIo());
-        const unavailable = self.running or self.completion != null or self.thread != null;
-        self.mutex.unlock(io_mod.getIo());
-        if (unavailable) return false;
-
         var owned = try OwnedRequest.init(self.alloc, request);
         errdefer owned.deinit(self.alloc);
         self.cancel_requested.store(false, .seq_cst);
 
         self.mutex.lockUncancelable(io_mod.getIo());
+        if (self.running or self.completion != null or self.thread != null) {
+            self.mutex.unlock(io_mod.getIo());
+            owned.deinit(self.alloc);
+            return false;
+        }
         self.running = true;
-        self.mutex.unlock(io_mod.getIo());
         const thread = std.Thread.spawn(.{}, threadMain, .{ self, owned }) catch |err| {
-            self.mutex.lockUncancelable(io_mod.getIo());
             self.running = false;
             self.mutex.unlock(io_mod.getIo());
             return err;
         };
         owned = undefined;
-        self.mutex.lockUncancelable(io_mod.getIo());
+        // Publish the handle before the worker can publish completion. The
+        // worker takes this same mutex at the end of threadMain.
         self.thread = thread;
         self.mutex.unlock(io_mod.getIo());
         return true;
@@ -280,4 +286,46 @@ fn cloneCredential(alloc: Allocator, value: credentials.Credential) !credentials
         .account_id = account_id,
         .refresh_after_ms = value.refresh_after_ms,
     };
+}
+
+test "provider activation cancellation discards a prepared credential" {
+    const FakeCatalog = struct {
+        entered: std.atomic.Value(bool) = .init(false),
+
+        fn fetch(
+            raw: ?*anyopaque,
+            _: Allocator,
+            input: model_catalog.FetchInput,
+        ) Allocator.Error!model_catalog.ProviderResult {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            self.entered.store(true, .release);
+            const cancel = input.cancel_flag orelse unreachable;
+            while (!cancel.load(.acquire)) io_mod.sleep(std.time.ns_per_ms);
+            return .{ .failure = .{ .category = .cancellation } };
+        }
+    };
+
+    var fake = FakeCatalog{};
+    var runtime = Runtime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const credential = credentials.Credential{
+        .token = @constCast("test-key"),
+        .source = .openai_api_key,
+    };
+    const request = Request{
+        .target = .gateway,
+        .oauth_transport = oauth_transport.unavailable_provider,
+        .secret_store = host.unavailable_secret_store,
+        .catalog_provider = .{ .context = &fake, .fetch_fn = FakeCatalog.fetch },
+        .endpoint = "https://example.test/v1/models",
+        .credential_override = &credential,
+    };
+    try std.testing.expect(try runtime.start(request));
+    while (!fake.entered.load(.acquire)) io_mod.sleep(std.time.ns_per_ms);
+    try std.testing.expect(!(try runtime.start(request)));
+
+    runtime.cancelAndDrain();
+
+    try std.testing.expect(!runtime.isRunning());
+    try std.testing.expect(runtime.takeCompletion() == null);
 }

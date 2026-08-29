@@ -186,9 +186,11 @@ fx builds as a native binary or WebAssembly. Applications embedding fx can provi
 The WebAssembly SDK is experimental. See the [WebAssembly SDK](sdk/README.md) and the repository's [ACP usage and fx extensions guide](docs/acp.md).
 
 Native ACP clients can also interact with a running Unified Exec process
-directly through `fx/unifiedExec/writeStdin` and `fx/unifiedExec/kill`; see the
-ACP guide for the session and process ID contract. Vision-capable models accept
-standard ACP base64 image prompt blocks and persist verified image snapshots.
+directly through `fx/unifiedExec/writeStdin` and `fx/unifiedExec/kill`; those
+control requests remain responsive while a model-side output poll is waiting.
+See the ACP guide for the session and process ID contract. Vision-capable models
+accept standard ACP base64 image prompt blocks and persist verified image
+snapshots.
 
 ## Extend fx
 

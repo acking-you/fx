@@ -367,8 +367,7 @@ pub const ServerState = struct {
     api_key: []u8 = &.{},
     credential_source: ?types.CredentialSource = null,
     account_id: ?[]u8 = null,
-    gateway_chat_url_override: ?[]u8 = null,
-    gateway_models_path_override: ?[]u8 = null,
+    gateway_binding: ?GatewayConnectionBinding = null,
     selected_model: []u8 = &.{},
     provider: model_provider.ProviderId = .gateway,
     configured_model: []u8 = &.{},
@@ -398,7 +397,7 @@ pub const ServerState = struct {
     subagent_store: ?session_store.Store = null,
     subagent_host: ?*subagent_tool_host.Runtime = null,
     capability_resolver: gateway_provider.CapabilityResolver = .{},
-    terminate_connection: bool = false,
+    terminate_connection: std.atomic.Value(bool) = .init(false),
     web_fetch_runtime: web_fetch_runtime.Runtime = web_fetch_runtime.Runtime.init(.{}),
     web_search_runtime: web_search_runtime.Runtime = web_search_runtime.Runtime.init(.{}),
     lifecycle_runtime: hooks.Runtime = hooks.Runtime.init(std.heap.c_allocator),
@@ -428,8 +427,7 @@ pub const ServerState = struct {
         if (self.workspace_root.len > 0) self.alloc.free(self.workspace_root);
         if (self.api_key.len > 0) secret.zeroAndFree(self.alloc, self.api_key);
         if (self.account_id) |account_id| self.alloc.free(account_id);
-        if (self.gateway_chat_url_override) |value| self.alloc.free(value);
-        if (self.gateway_models_path_override) |value| self.alloc.free(value);
+        if (self.gateway_binding) |*binding| binding.deinit(self.alloc);
         if (self.selected_model.len > 0) self.alloc.free(self.selected_model);
         if (self.configured_model.len > 0) self.alloc.free(self.configured_model);
         self.permission_rules.deinit(self.alloc);
@@ -451,12 +449,50 @@ pub const ServerState = struct {
     }
 };
 
+/// One connection-scoped custom Gateway route. The endpoint pair and key are
+/// owned together so switching temporarily to a subscription provider cannot
+/// leave a custom origin paired with an unrelated credential.
+const GatewayConnectionBinding = struct {
+    chat_url: []u8,
+    models_url: []u8,
+    credential: credentials.Credential,
+
+    fn deinit(self: *GatewayConnectionBinding, alloc: Allocator) void {
+        alloc.free(self.chat_url);
+        alloc.free(self.models_url);
+        self.credential.deinit(alloc);
+        self.* = undefined;
+    }
+};
+
 pub fn gatewayChatUrl(state: *const ServerState) []const u8 {
-    return state.gateway_chat_url_override orelse state.cfg.gateway_chat_url;
+    return if (state.gateway_binding) |binding|
+        binding.chat_url
+    else
+        state.cfg.gateway_chat_url;
 }
 
 pub fn gatewayModelsPath(state: *const ServerState) []const u8 {
-    return state.gateway_models_path_override orelse state.cfg.gateway_models_path;
+    return if (state.gateway_binding) |binding|
+        binding.models_url
+    else
+        state.cfg.gateway_models_path;
+}
+
+pub fn providerEndpointOverride(
+    state: *const ServerState,
+    provider: model_provider.ProviderId,
+) ?[]const u8 {
+    if (provider != .gateway) return null;
+    return if (state.gateway_binding) |binding| binding.chat_url else null;
+}
+
+fn providerCatalogEndpoint(
+    state: *const ServerState,
+    provider: model_provider.ProviderId,
+) []const u8 {
+    if (provider == .gateway) return gatewayModelsPath(state);
+    return state.cfg.gateway_models_path;
 }
 
 fn credentialMatchesProvider(
@@ -464,6 +500,26 @@ fn credentialMatchesProvider(
     provider: model_provider.ProviderId,
 ) bool {
     return model_provider.authorizesCredential(provider, source);
+}
+
+fn borrowedCredentialForProvider(
+    state: *ServerState,
+    provider: model_provider.ProviderId,
+) ?credentials.Credential {
+    if (provider == .gateway) {
+        if (state.gateway_binding) |*binding| return .{
+            .token = binding.credential.token,
+            .source = binding.credential.source,
+            .account_id = binding.credential.account_id,
+        };
+    }
+    if (state.api_key.len == 0 or
+        !credentialMatchesProvider(state.credential_source, provider)) return null;
+    return .{
+        .token = state.api_key,
+        .source = state.credential_source.?,
+        .account_id = state.account_id,
+    };
 }
 
 fn adoptServerCredential(state: *ServerState, credential: *credentials.Credential) void {
@@ -489,6 +545,15 @@ pub fn selectCredentialForProvider(
     state: *ServerState,
     provider: model_provider.ProviderId,
 ) !bool {
+    if (provider == .gateway and state.gateway_binding != null) {
+        var connection_credential = try cloneServerCredential(
+            state.alloc,
+            state.gateway_binding.?.credential,
+        );
+        defer connection_credential.deinit(state.alloc);
+        adoptServerCredential(state, &connection_credential);
+        return true;
+    }
     if (state.active_session) |active| {
         if (credentialMatchesProvider(active.credential_source, provider)) return true;
     }
@@ -813,7 +878,7 @@ pub fn runWithTransport(
     defer state.deinit();
 
     var reader = reader_value;
-    while (!state.terminate_connection) {
+    while (!state.terminate_connection.load(.acquire)) {
         reapActivePrompt(&state, false);
         reapProviderJob(&state, false);
         const line_result = reader.readLine(alloc) catch break;
@@ -829,6 +894,10 @@ pub fn runWithTransport(
             .line => |value| value,
         };
         defer alloc.free(line);
+        // A background provider commit can discover an indeterminate durable
+        // tail while this thread is blocked in readLine. Discard the wake-up
+        // frame instead of dispatching one more request on uncertain state.
+        if (state.terminate_connection.load(.acquire)) break;
 
         var msg = jsonrpc.parseMessage(alloc, line) catch |err| {
             const code = switch (err) {
@@ -847,7 +916,7 @@ pub fn runWithTransport(
 
         if (!shouldRespondToMessage(&msg)) {
             dispatchNotification(&state, alloc, &msg) catch {};
-            if (state.terminate_connection) break;
+            if (state.terminate_connection.load(.acquire)) break;
             continue;
         }
 
@@ -857,7 +926,7 @@ pub fn runWithTransport(
                 .message = @errorName(err),
             }) catch break;
         };
-        if (state.terminate_connection) break;
+        if (state.terminate_connection.load(.acquire)) break;
     }
     // Release any prompt thread parked on a pending approval before
     // state.deinit() joins it, or shutdown deadlocks.
@@ -1222,6 +1291,7 @@ fn dispatchNotification(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Mes
 }
 
 fn dispatch(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message) !void {
+    if (state.terminate_connection.load(.acquire)) return;
     reapActivePrompt(state, false);
     reapProviderJob(state, false);
     const method = AcpMethod.parse(msg.method);
@@ -1693,17 +1763,13 @@ fn handleProviderSwitch(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Mes
             .message = "provider must be gateway, codex, or grok",
         });
 
-    var current_credential: ?credentials.Credential = if (state.api_key.len > 0 and credentialMatchesProvider(state.credential_source, target)) .{
-        .token = @constCast(state.api_key),
-        .source = state.credential_source.?,
-        .account_id = if (state.account_id) |value| @constCast(value) else null,
-    } else null;
+    var current_credential = borrowedCredentialForProvider(state, target);
     const started = try startProviderJob(
         state,
         msg,
         target,
         .explicit_switch,
-        gatewayModelsPath(state),
+        providerCatalogEndpoint(state, target),
         null,
         if (current_credential) |*value| value else null,
     );
@@ -2137,6 +2203,7 @@ fn providerJobMain(job: *ProviderJob) void {
             session_test_controls.logOptions(),
         ) catch |err| {
             debug_trace.logf("provider", "ACP provider commit failed err={s}", .{@errorName(err)});
+            _ = markIndeterminateCommitTerminal(state, err);
             state.writer.writeError(state.alloc, job.msg.id, .{
                 .code = ErrorCode.internal_error,
                 .message = "Failed to persist session provider",
@@ -2158,12 +2225,16 @@ fn providerJobMain(job: *ProviderJob) void {
 
     if (job.kind == .configure_byok) {
         const chat_url = job.chat_url orelse unreachable;
-        if (state.gateway_chat_url_override) |value| state.alloc.free(value);
-        if (state.gateway_models_path_override) |value| state.alloc.free(value);
-        state.gateway_chat_url_override = chat_url;
-        state.gateway_models_path_override = job.models_url;
+        const binding_credential = job.credential_override orelse unreachable;
+        if (state.gateway_binding) |*binding| binding.deinit(state.alloc);
+        state.gateway_binding = .{
+            .chat_url = chat_url,
+            .models_url = job.models_url,
+            .credential = binding_credential,
+        };
         job.chat_url = null;
         job.models_url_transferred = true;
+        job.credential_override = null;
     }
 
     state.capability_resolver.adoptOwnedCatalog(state.alloc, &prepared.catalog);
@@ -2331,17 +2402,13 @@ fn handleSetConfigOption(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Me
                     .message = "Subscription provider switching is unavailable in this WASM runtime",
                 });
             }
-            var current_credential: ?credentials.Credential = if (state.api_key.len > 0 and credentialMatchesProvider(state.credential_source, target)) .{
-                .token = @constCast(state.api_key),
-                .source = state.credential_source.?,
-                .account_id = if (state.account_id) |account_id| @constCast(account_id) else null,
-            } else null;
+            var current_credential = borrowedCredentialForProvider(state, target);
             if (!try startProviderJob(
                 state,
                 msg,
                 target,
                 .config_option,
-                gatewayModelsPath(state),
+                providerCatalogEndpoint(state, target),
                 null,
                 if (current_credential) |*credential| credential else null,
             )) {
@@ -2530,12 +2597,11 @@ fn writeConfigCommitError(
     err: anyerror,
     invalid_message: []const u8,
 ) !void {
-    if (modelCommitFailureTerminatesConnection(err)) {
+    if (markIndeterminateCommitTerminal(state, err)) {
         try state.writer.writeError(alloc, msg.id, .{
             .code = ErrorCode.internal_error,
             .message = "Failed to persist session configuration",
         });
-        state.terminate_connection = true;
         return;
     }
     return state.writer.writeError(alloc, msg.id, .{
@@ -2662,6 +2728,12 @@ fn commitSessionPreferences(
 fn modelCommitFailureTerminatesConnection(err: anyerror) bool {
     return err == error.SessionCommitIndeterminate or
         err == error.SessionLogCompactionIndeterminate;
+}
+
+fn markIndeterminateCommitTerminal(state: *ServerState, err: anyerror) bool {
+    if (!modelCommitFailureTerminatesConnection(err)) return false;
+    state.terminate_connection.store(true, .release);
+    return true;
 }
 
 fn handleSetMode(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message) !void {
@@ -2817,6 +2889,43 @@ test "ACP provider job gate leaves control-plane methods responsive" {
     try std.testing.expect(AcpMethod.fx_provider_login_cancel.allowedDuringProviderJob());
     try std.testing.expect(!AcpMethod.session_prompt.allowedDuringProviderJob());
     try std.testing.expect(!AcpMethod.fx_provider_switch.allowedDuringProviderJob());
+}
+
+test "ACP custom gateway binding survives subscription credential activation" {
+    const alloc = std.testing.allocator;
+    var state = ServerState{
+        .alloc = alloc,
+        .cfg = undefined,
+        .writer = jsonrpc.Writer.init(),
+    };
+    defer state.deinit();
+    state.gateway_binding = .{
+        .chat_url = try alloc.dupe(u8, "https://custom.example.test/v1/responses"),
+        .models_url = try alloc.dupe(u8, "https://custom.example.test/v1/models"),
+        .credential = .{
+            .token = try alloc.dupe(u8, "custom-key"),
+            .source = .openai_api_key,
+        },
+    };
+    state.api_key = try alloc.dupe(u8, "subscription-token");
+    state.credential_source = .chatgpt_subscription;
+
+    try std.testing.expectEqualStrings(
+        "https://custom.example.test/v1/responses",
+        gatewayChatUrl(&state),
+    );
+    try std.testing.expectEqualStrings(
+        "custom-key",
+        borrowedCredentialForProvider(&state, .gateway).?.token,
+    );
+    try std.testing.expectEqualStrings(
+        "subscription-token",
+        borrowedCredentialForProvider(&state, .codex).?.token,
+    );
+
+    try std.testing.expect(try selectCredentialForProvider(&state, .gateway));
+    try std.testing.expectEqual(types.CredentialSource.openai_api_key, state.credential_source.?);
+    try std.testing.expectEqualStrings("custom-key", state.api_key);
 }
 
 test "ACP active prompt admits and drains only matching turn steers" {
@@ -3403,6 +3512,18 @@ test "ACP indeterminate model commit leaves staged runtime value unapplied" {
             error.SessionLogCompactionIndeterminate,
         ),
     );
+
+    var server_state = ServerState{
+        .alloc = alloc,
+        .cfg = undefined,
+        .writer = jsonrpc.Writer.init(),
+    };
+    defer server_state.deinit();
+    try std.testing.expect(markIndeterminateCommitTerminal(
+        &server_state,
+        error.SessionCommitIndeterminate,
+    ));
+    try std.testing.expect(server_state.terminate_connection.load(.acquire));
 }
 
 test "ACP model commits honor the active session write boundary" {

@@ -229,6 +229,7 @@ pub fn run(
             .explicit_skills_prompt_section = config.explicit_skills_prompt_section,
             .gateway_retry_count = config.tool_context.gateway_retry_count,
             .gateway_chat_url = config.tool_context.gateway_chat_url,
+            .provider_endpoint_override = config.tool_context.provider_endpoint_override,
             .advertised_tool_names = config.advertised_tool_names,
             .advertised_functions = config.advertised_functions,
             .provider_capabilities = config.provider_set.select(admission.provider).capabilities,

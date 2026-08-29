@@ -147,6 +147,7 @@ pub const Context = struct {
     current_turn_messages: []const ChatMessage = &.{},
     gateway_retry_count: usize,
     gateway_chat_url: []const u8,
+    provider_endpoint_override: ?[]const u8 = null,
     gateway_models_path: []const u8 = "/v1/models",
     agent_step_limit: usize,
     fast_mode: bool = false,
@@ -280,7 +281,11 @@ pub const Context = struct {
             .credential_source = self.credential_source,
             .model = self.model,
             .session_id = self.lifecycle_scope.session_id,
-            .endpoint = self.gateway_chat_url,
+            // Only a connection-owned override is authoritative here. With no
+            // override, provider transports resolve their normal environment
+            // route; gateway_chat_url is the built-in fallback, not proof that
+            // it supersedes FX_RESPONSES_BASE_URL or another provider route.
+            .endpoint = self.provider_endpoint_override orelse "",
             .cancel_flag = self.cancel_flag,
             .usage = &self.session.usage,
             .usage_allocator = self.session_allocator,

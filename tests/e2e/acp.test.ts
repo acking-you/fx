@@ -1228,16 +1228,25 @@ describe("acp: model-independent", () => {
   });
 
   test(
-    "ACP configures a BYOK endpoint without blocking its control plane",
+    "ACP configures and restores one BYOK binding without blocking its control plane",
     async () => {
       const root = createIsolatedRoot("fx-acp-provider-configure-");
+      const reviewedTarget = join(root.external, "custom-reviewed.txt");
+      writeFileSync(reviewedTarget, "before");
       const releaseModels = deferred<void>();
-      const gateway = startFakeGateway([finalText("ACP_BYOK_CONFIGURED")], {
+      const gateway = startFakeGateway([
+        finalText("ACP_BYOK_CONFIGURED"),
+        finalText("ACP_BYOK_RESTORED"),
+        fileToolCall("custom_binding_review", reviewedTarget, "after"),
+        finalText("ACP_BYOK_REVIEWED"),
+      ], {
         async models() {
           await releaseModels.promise;
           return [{ id: FAKE_GATEWAY_MODEL, object: "model" }];
         },
       });
+      const codex = startAcpFakeCodex();
+      writeSeededAcpChatGptLogin(root.home, codex.accessToken);
       try {
         client = await AcpClient.create({
           cwd: root.workspace,
@@ -1247,6 +1256,8 @@ describe("acp: model-independent", () => {
             FX_API_KEY: undefined,
             FX_RESPONSES_BASE_URL: undefined,
             OPENAI_BASE_URL: undefined,
+            FX_CODEX_BASE_URL: codex.responsesUrl.replace(/\/responses$/, ""),
+            FX_E2E_OPENAI_CODEX_MODELS_URL: codex.modelsUrl,
           },
         });
         const initialized = await client.request("initialize", { protocolVersion: 1 }, 1) as any;
@@ -1293,6 +1304,44 @@ describe("acp: model-independent", () => {
         expect(gateway.requests.at(-1)?.headers.get("authorization")).toBe(
           "Bearer acp-runtime-key",
         );
+
+        const codexSwitch = await client.request(
+          "fx/provider/switch",
+          { provider: "codex" },
+          6,
+        ) as any;
+        expect(codexSwitch.result.provider).toBe("codex");
+        const codexPrompt = await runPrompt(client, "Use Codex temporarily.", TIMEOUT);
+        expect(codexPrompt.promptResult.result.stopReason).toBe("end_turn");
+
+        const gatewaySwitch = await client.request(
+          "fx/provider/switch",
+          { provider: "gateway" },
+          7,
+        ) as any;
+        expect(gatewaySwitch.result.provider).toBe("gateway");
+        const restored = await runPrompt(client, "Use the restored BYOK provider.", TIMEOUT);
+        expect(restored.promptResult.result.stopReason).toBe("end_turn");
+        expect(gateway.requests).toHaveLength(2);
+        expect(gateway.modelRequests).toHaveLength(2);
+        for (const request of gateway.requests) {
+          expect(request.headers.get("authorization")).toBe("Bearer acp-runtime-key");
+        }
+        for (const request of codex.requests) {
+          expect(request.authorization).not.toBe("Bearer acp-runtime-key");
+        }
+
+        const reviewed = await runPrompt(
+          client,
+          `Use only write_file to overwrite ${reviewedTarget}.`,
+          TIMEOUT,
+        );
+        expect(reviewed.promptResult.result.stopReason).toBe("end_turn");
+        expect(gateway.classifierRequests).toHaveLength(1);
+        expect(gateway.classifierRequests[0]!.headers.get("authorization")).toBe(
+          "Bearer acp-runtime-key",
+        );
+        expect(readFileSync(reviewedTarget, "utf8")).toBe("after");
         const settingsPath = join(root.home, ".fx", "settings.json");
         if (existsSync(settingsPath)) {
           expect(readFileSync(settingsPath, "utf8")).not.toContain("acp-runtime-key");
@@ -1302,6 +1351,7 @@ describe("acp: model-independent", () => {
       } finally {
         releaseModels.resolve(undefined);
         await client?.close();
+        codex.stop();
         gateway.stop();
         rmSync(root.root, { recursive: true, force: true });
       }

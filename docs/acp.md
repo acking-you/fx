@@ -112,7 +112,10 @@ The API key is never echoed. This ACP method keeps it only in the current fx
 process and does not write it to `settings.json` or a session log. Start a new
 ACP connection or call the method again to replace it. Use environment or
 profile-owned credential configuration when persistence across process restarts
-is required.
+is required. The response URL and key remain one connection-scoped binding when
+you temporarily switch to Codex or Grok; switching back to `gateway` restores
+both. Ordinary model requests, automatic permission reviews, and manual or
+automatic remote compaction all use that same binding.
 
 ## Query the active turn
 

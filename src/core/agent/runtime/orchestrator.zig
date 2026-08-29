@@ -2976,6 +2976,7 @@ fn processQueuedPromptLoop(
                     .messages = request_messages,
                     .capabilities = request_capabilities,
                     .provider_options = provider_opts,
+                    .endpoint_override = config.provider_endpoint_override,
                     .cancel_flag = config.cancel_flag,
                 });
                 if (inline_compaction) |*previous| previous.deinit(arena);

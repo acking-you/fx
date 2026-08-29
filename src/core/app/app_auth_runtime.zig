@@ -157,6 +157,9 @@ pub fn Runtime(comptime App: type) type {
                 });
                 return;
             }
+            if (comptime @hasField(App, "provider_switch")) {
+                app.provider_switch.cancelAndDrain();
+            }
             try app.flushBeforeBlockingExternalWork();
             if (logout_provider == .grok) {
                 const outcome = grok_oauth.logout(app.alloc, app.auth.oauthTransport()) catch {

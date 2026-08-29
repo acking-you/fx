@@ -174,6 +174,7 @@ fn sendReview(
             .source = runtime.adapter.source,
             .account_id = runtime.input.account_id,
         },
+        .endpoint = if (runtime.input.endpoint.len > 0) runtime.input.endpoint else null,
         .model = model,
         .retry_count = 1,
         .messages = &.{},
@@ -259,6 +260,10 @@ test "direct review exact usage settles through the session ledger" {
             request: stream_provider.ModelRequest,
             _: []const u8,
         ) !stream_provider.Result {
+            try std.testing.expectEqualStrings(
+                "https://review.example.test/v1/responses",
+                request.endpoint orelse return error.MissingProviderEndpoint,
+            );
             try request.admission.admit();
             request.delivery.markPossiblySent();
             return .{ .completed = .{
@@ -287,7 +292,11 @@ test "direct review exact usage settles through the session ledger" {
     var usage = session_usage.Usage.initFresh();
     defer usage.deinit(alloc);
     var runtime = Runtime{
-        .input = .{ .usage = &usage, .usage_allocator = alloc },
+        .input = .{
+            .endpoint = "https://review.example.test/v1/responses",
+            .usage = &usage,
+            .usage_allocator = alloc,
+        },
         .adapter = .{
             .source = .chatgpt_subscription,
             .model = "gpt-review",

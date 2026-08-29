@@ -38,7 +38,9 @@
 
 ### Bug Fixes
 
-- **ACP process control**: Direct Unified Exec writes and output polls no longer block cancellation, steering, permission responses, status queries, or process termination while waiting for output.
+- **ACP process control**: Direct Unified Exec writes, output polls, and termination remain responsive even while a model-side output poll is waiting.
+- **ACP provider bindings**: Connection-scoped BYOK endpoints keep their matching API key across temporary provider switches and now apply consistently to model requests, automatic permission reviews, and remote compaction.
+- **Provider logout**: Signing out cannot be undone by a provider switch that was already loading in the background.
 - **Terminal resize**: Terminal resizing no longer leaves empty scrollback behind.
 - **Subscription sign-in**: Codex and Grok sign-ins now survive unrelated, stalled, reset, or stale browser connections. Grok authorization codes can also be pasted when the browser cannot return to fx.
 - **OAuth callback pages**: OAuth callbacks now show a completion or failure page after returning from the browser.

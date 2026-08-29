@@ -211,6 +211,27 @@ fn validateModel(model: []const u8) !void {
     }
 }
 
+fn buildBoundProviderIdentity(
+    alloc: Allocator,
+    request: stream_provider.ModelRequest,
+) !types.ResponsesCompactionProviderBinding {
+    const binding_options = if (request.endpoint) |endpoint|
+        responses_compaction_binding.BuildOptions{
+            .endpoint_overrides = .{ .responses_base_url = endpoint },
+            .organization = io_mod.getenv("OPENAI_ORG_ID"),
+            .project = io_mod.getenv("OPENAI_PROJECT_ID"),
+        }
+    else
+        responses_compaction_binding.BuildOptions.fromEnvironment();
+    return responses_compaction_binding.buildAlloc(
+        alloc,
+        .openai_api_key,
+        request.credential.secret,
+        request.credential.account_id,
+        binding_options,
+    );
+}
+
 fn prepareRequest(alloc: Allocator, request: stream_provider.ModelRequest) !PreparedRequest {
     if (request.credential.source != .openai_api_key) {
         return error.OpenAIResponsesApiKeyRequired;
@@ -220,21 +241,7 @@ fn prepareRequest(alloc: Allocator, request: stream_provider.ModelRequest) !Prep
     const route: provider_route.ProviderRoute = .openai_responses_byok;
     const wire_model = provider_route.wireModel(route, request.model);
     try validateModel(wire_model);
-    const binding_options = if (request.endpoint) |endpoint|
-        responses_compaction_binding.BuildOptions{
-            .endpoint_overrides = .{ .responses_base_url = endpoint },
-            .organization = io_mod.getenv("OPENAI_ORG_ID"),
-            .project = io_mod.getenv("OPENAI_PROJECT_ID"),
-        }
-    else
-        responses_compaction_binding.BuildOptions.fromEnvironment();
-    var binding = try responses_compaction_binding.buildAlloc(
-        alloc,
-        .openai_api_key,
-        request.credential.secret,
-        request.credential.account_id,
-        binding_options,
-    );
+    var binding = try buildBoundProviderIdentity(alloc, request);
     errdefer types.freeResponsesCompactionProviderBinding(alloc, binding);
 
     const payload = try buildPayload(
@@ -326,12 +333,7 @@ pub fn streamPrepared(
     if (request.credential.source != .openai_api_key) {
         return error.OpenAIResponsesApiKeyRequired;
     }
-    var binding = try responses_compaction_binding.buildFromEnvironmentAlloc(
-        alloc,
-        .openai_api_key,
-        request.credential.secret,
-        request.credential.account_id,
-    );
+    var binding = try buildBoundProviderIdentity(alloc, request);
     defer types.freeResponsesCompactionProviderBinding(alloc, binding);
     return streamPreparedWithBinding(alloc, request, payload, binding.view(), request.model);
 }
