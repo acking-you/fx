@@ -367,6 +367,7 @@ pub const ServerState = struct {
     api_key: []u8 = &.{},
     credential_source: ?types.CredentialSource = null,
     account_id: ?[]u8 = null,
+    gateway_binding_mutex: std.Io.Mutex = .init,
     gateway_binding: ?GatewayConnectionBinding = null,
     selected_model: []u8 = &.{},
     provider: model_provider.ProviderId = .gateway,
@@ -427,7 +428,10 @@ pub const ServerState = struct {
         if (self.workspace_root.len > 0) self.alloc.free(self.workspace_root);
         if (self.api_key.len > 0) secret.zeroAndFree(self.alloc, self.api_key);
         if (self.account_id) |account_id| self.alloc.free(account_id);
+        self.gateway_binding_mutex.lockUncancelable(io_mod.getIo());
         if (self.gateway_binding) |*binding| binding.deinit(self.alloc);
+        self.gateway_binding = null;
+        self.gateway_binding_mutex.unlock(io_mod.getIo());
         if (self.selected_model.len > 0) self.alloc.free(self.selected_model);
         if (self.configured_model.len > 0) self.alloc.free(self.configured_model);
         self.permission_rules.deinit(self.alloc);
@@ -464,6 +468,41 @@ const GatewayConnectionBinding = struct {
         self.* = undefined;
     }
 };
+
+/// Turn-owned copy of the connection-scoped Gateway route. Background child
+/// turns keep this snapshot until they finish, so reconfiguring the ACP
+/// connection cannot free an endpoint or credential that a child still uses.
+pub const GatewayRouteSnapshot = struct {
+    chat_url: []u8,
+    models_url: []u8,
+    credential: credentials.Credential,
+
+    pub fn deinit(self: *GatewayRouteSnapshot, alloc: Allocator) void {
+        alloc.free(self.chat_url);
+        alloc.free(self.models_url);
+        self.credential.deinit(alloc);
+        self.* = undefined;
+    }
+};
+
+pub fn snapshotGatewayRoute(
+    state: *ServerState,
+    alloc: Allocator,
+) !?GatewayRouteSnapshot {
+    state.gateway_binding_mutex.lockUncancelable(io_mod.getIo());
+    defer state.gateway_binding_mutex.unlock(io_mod.getIo());
+    const binding = state.gateway_binding orelse return null;
+    const chat_url = try alloc.dupe(u8, binding.chat_url);
+    errdefer alloc.free(chat_url);
+    const models_url = try alloc.dupe(u8, binding.models_url);
+    errdefer alloc.free(models_url);
+    const credential = try cloneServerCredential(alloc, binding.credential);
+    return .{
+        .chat_url = chat_url,
+        .models_url = models_url,
+        .credential = credential,
+    };
+}
 
 pub fn gatewayChatUrl(state: *const ServerState) []const u8 {
     return if (state.gateway_binding) |binding|
@@ -2226,12 +2265,14 @@ fn providerJobMain(job: *ProviderJob) void {
     if (job.kind == .configure_byok) {
         const chat_url = job.chat_url orelse unreachable;
         const binding_credential = job.credential_override orelse unreachable;
+        state.gateway_binding_mutex.lockUncancelable(io_mod.getIo());
         if (state.gateway_binding) |*binding| binding.deinit(state.alloc);
         state.gateway_binding = .{
             .chat_url = chat_url,
             .models_url = job.models_url,
             .credential = binding_credential,
         };
+        state.gateway_binding_mutex.unlock(io_mod.getIo());
         job.chat_url = null;
         job.models_url_transferred = true;
         job.credential_override = null;
@@ -2926,6 +2967,36 @@ test "ACP custom gateway binding survives subscription credential activation" {
     try std.testing.expect(try selectCredentialForProvider(&state, .gateway));
     try std.testing.expectEqual(types.CredentialSource.openai_api_key, state.credential_source.?);
     try std.testing.expectEqualStrings("custom-key", state.api_key);
+
+    var snapshot = (try snapshotGatewayRoute(&state, alloc)).?;
+    defer snapshot.deinit(alloc);
+    var replacement = replacement: {
+        const chat_url = try alloc.dupe(u8, "https://replacement.example.test/v1/responses");
+        errdefer alloc.free(chat_url);
+        const models_url = try alloc.dupe(u8, "https://replacement.example.test/v1/models");
+        errdefer alloc.free(models_url);
+        const credential = credentials.Credential{
+            .token = try alloc.dupe(u8, "replacement-key"),
+            .source = .openai_api_key,
+        };
+        break :replacement GatewayConnectionBinding{
+            .chat_url = chat_url,
+            .models_url = models_url,
+            .credential = credential,
+        };
+    };
+    state.gateway_binding_mutex.lockUncancelable(std.testing.io);
+    if (state.gateway_binding) |*binding| binding.deinit(alloc);
+    state.gateway_binding = replacement;
+    replacement = undefined;
+    state.gateway_binding_mutex.unlock(std.testing.io);
+
+    try std.testing.expectEqualStrings("https://custom.example.test/v1/responses", snapshot.chat_url);
+    try std.testing.expectEqualStrings("custom-key", snapshot.credential.token);
+    try std.testing.expectEqualStrings(
+        "https://replacement.example.test/v1/responses",
+        gatewayChatUrl(&state),
+    );
 }
 
 test "ACP active prompt admits and drains only matching turn steers" {

@@ -115,7 +115,10 @@ profile-owned credential configuration when persistence across process restarts
 is required. The response URL and key remain one connection-scoped binding when
 you temporarily switch to Codex or Grok; switching back to `gateway` restores
 both. Ordinary model requests, automatic permission reviews, and manual or
-automatic remote compaction all use that same binding.
+automatic remote compaction all use that same binding. Persistent subagents
+also retain the provider and connection route captured for each child turn.
+Changing the parent provider does not reroute an existing child, and replacing
+the connection binding does not alter a child turn already in progress.
 
 ## Query the active turn
 

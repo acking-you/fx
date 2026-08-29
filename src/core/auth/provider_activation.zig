@@ -175,6 +175,7 @@ pub const Runtime = struct {
     thread: ?std.Thread = null,
     running: bool = false,
     completion: ?Completion = null,
+    pending_target: ?model_provider.ProviderId = null,
     discard_completion: bool = false,
     cancel_requested: std.atomic.Value(bool) = .init(false),
 
@@ -195,6 +196,7 @@ pub const Runtime = struct {
         self.mutex.lockUncancelable(io_mod.getIo());
         if (self.completion) |*completion| completion.deinit(self.alloc);
         self.completion = null;
+        self.pending_target = null;
         self.running = false;
         self.discard_completion = false;
         self.mutex.unlock(io_mod.getIo());
@@ -204,12 +206,28 @@ pub const Runtime = struct {
     /// The event loop later reaps the handle after the worker has stopped, so
     /// a slow network operation cannot block logout or any other UI action.
     pub fn cancel(self: *Self) void {
-        self.cancel_requested.store(true, .seq_cst);
+        _ = self.cancelMatching(null);
+    }
+
+    /// Invalidates only an activation for `target`. Logging out of one
+    /// subscription provider must not discard an unrelated provider switch.
+    pub fn cancelTarget(self: *Self, target: model_provider.ProviderId) bool {
+        return self.cancelMatching(target);
+    }
+
+    fn cancelMatching(self: *Self, target: ?model_provider.ProviderId) bool {
         self.mutex.lockUncancelable(io_mod.getIo());
+        defer self.mutex.unlock(io_mod.getIo());
+        const pending_target = self.pending_target orelse return false;
+        if (target) |expected| {
+            if (pending_target != expected) return false;
+        }
+        self.cancel_requested.store(true, .seq_cst);
         self.discard_completion = true;
         if (self.completion) |*completion| completion.deinit(self.alloc);
         self.completion = null;
-        self.mutex.unlock(io_mod.getIo());
+        self.pending_target = null;
+        return true;
     }
 
     pub fn start(self: *Self, request: Request) !bool {
@@ -226,8 +244,10 @@ pub const Runtime = struct {
         self.discard_completion = false;
         self.cancel_requested.store(false, .seq_cst);
         self.running = true;
+        self.pending_target = request.target;
         const thread = std.Thread.spawn(.{}, threadMain, .{ self, owned }) catch |err| {
             self.running = false;
+            self.pending_target = null;
             self.mutex.unlock(io_mod.getIo());
             return err;
         };
@@ -252,6 +272,7 @@ pub const Runtime = struct {
             if (thread != null) {
                 self.thread = null;
                 self.discard_completion = false;
+                self.pending_target = null;
             }
             self.mutex.unlock(io_mod.getIo());
             if (thread) |handle| handle.join();
@@ -261,6 +282,7 @@ pub const Runtime = struct {
         const thread = self.thread;
         self.thread = null;
         self.discard_completion = false;
+        self.pending_target = null;
         self.mutex.unlock(io_mod.getIo());
         if (thread) |handle| handle.join();
         return completion;
@@ -409,4 +431,48 @@ test "provider activation cancellation never joins a stalled worker" {
     fake.release.store(true, .release);
     while (runtime.isRunning()) io_mod.sleep(std.time.ns_per_ms);
     try std.testing.expect(runtime.takeCompletion() == null);
+}
+
+test "provider activation cancellation ignores a different provider" {
+    const FakeCatalog = struct {
+        entered: std.atomic.Value(bool) = .init(false),
+        release: std.atomic.Value(bool) = .init(false),
+
+        fn fetch(
+            raw: ?*anyopaque,
+            _: Allocator,
+            _: model_catalog.FetchInput,
+        ) Allocator.Error!model_catalog.ProviderResult {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            self.entered.store(true, .release);
+            while (!self.release.load(.acquire)) io_mod.sleep(std.time.ns_per_ms);
+            return .{ .failure = .{ .category = .cancellation } };
+        }
+    };
+
+    var fake = FakeCatalog{};
+    var runtime = Runtime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const credential = credentials.Credential{
+        .token = @constCast("grok-key"),
+        .source = .grok_subscription,
+    };
+    try std.testing.expect(try runtime.start(.{
+        .target = .grok,
+        .oauth_transport = oauth_transport.unavailable_provider,
+        .secret_store = host.unavailable_secret_store,
+        .catalog_provider = .{ .context = &fake, .fetch_fn = FakeCatalog.fetch },
+        .endpoint = "https://example.test/models",
+        .credential_override = &credential,
+    }));
+    while (!fake.entered.load(.acquire)) io_mod.sleep(std.time.ns_per_ms);
+
+    try std.testing.expect(!runtime.cancelTarget(.codex));
+    try std.testing.expect(runtime.isRunning());
+
+    fake.release.store(true, .release);
+    while (runtime.isRunning()) io_mod.sleep(std.time.ns_per_ms);
+    var completion = runtime.takeCompletion() orelse return error.TestExpectedEqual;
+    defer completion.deinit(std.testing.allocator);
+    try std.testing.expectEqual(model_provider.ProviderId.grok, completion.target);
 }

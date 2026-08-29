@@ -1353,6 +1353,11 @@ pub fn runSubagentChild(
     const state: *server.ServerState = @ptrCast(@alignCast(raw.?));
     const subagent_host = state.subagent_host orelse return error.ProviderFailed;
     const alloc = state.alloc;
+    var gateway_route = if (admission.provider == .gateway)
+        server.snapshotGatewayRoute(state, alloc) catch return error.OutOfMemory
+    else
+        null;
+    defer if (gateway_route) |*route| route.deinit(alloc);
     state.subagent_authority_mutex.lockUncancelable(io_mod.getIo());
     const active = if (state.active_session) |*session| session else {
         state.subagent_authority_mutex.unlock(io_mod.getIo());
@@ -1396,6 +1401,17 @@ pub fn runSubagentChild(
         state.context_limits,
     ) catch return error.OutOfMemory;
     defer explicit_skills.deinit(alloc);
+    const provider_route_override: ?subagent_agent_adapter.ProviderRouteOverride = if (gateway_route) |*route|
+        .{
+            .provider = .gateway,
+            .api_key = route.credential.token,
+            .credential_source = route.credential.source,
+            .account_id = route.credential.account_id,
+            .endpoint = route.chat_url,
+            .models_path = route.models_url,
+        }
+    else
+        null;
     return subagent_agent_adapter.run(.{
         .host = subagent_host,
         .tool_context = ctx.toolContext(),
@@ -1411,6 +1427,7 @@ pub fn runSubagentChild(
         .context_enabled = state.context_enabled,
         .project_context = state.context_snapshot.modelVisibleBytes(),
         .lifecycle_view = state.lifecycle_view,
+        .provider_route_override = provider_route_override,
     }, turn, message, admission, cancel);
 }
 

@@ -32,6 +32,17 @@ const tool_host = @import("tool_host.zig");
 
 const Allocator = std.mem.Allocator;
 
+/// Borrowed, already-owned-for-the-turn provider route supplied by the host.
+/// The adapter applies it only when it matches the child's admitted provider.
+pub const ProviderRouteOverride = struct {
+    provider: model_provider.ProviderId,
+    api_key: []const u8,
+    credential_source: types.CredentialSource,
+    account_id: ?[]const u8 = null,
+    endpoint: []const u8,
+    models_path: []const u8,
+};
+
 pub const Config = struct {
     host: *tool_host.Runtime,
     tool_context: tool_runtime.Context,
@@ -47,6 +58,7 @@ pub const Config = struct {
     context_enabled: bool,
     project_context: []const u8 = "",
     lifecycle_view: hooks.RuntimeView = hooks.RuntimeView.empty(),
+    provider_route_override: ?ProviderRouteOverride = null,
 };
 
 const Context = struct {
@@ -133,9 +145,26 @@ pub fn run(
     routed_config.tool_context.agent_stream_provider = provider.agent_stream_or_unavailable();
     routed_config.tool_context.permission_reviewer_provider = provider.permission_reviewer;
     routed_config.tool_context.auto_classifier = auto_classifier.Classifier.disabled();
+    if (admission.provider != config.tool_context.provider) {
+        // Endpoint overrides and search backends are provider-specific parent
+        // snapshots. Never carry them across a child provider boundary.
+        routed_config.tool_context.provider_endpoint_override = null;
+        routed_config.tool_context.web_search_backend = null;
+        routed_config.tool_context.web_search_runtime_ready = false;
+    }
+    if (config.provider_route_override) |route| {
+        if (route.provider == admission.provider) {
+            routed_config.tool_context.api_key = route.api_key;
+            routed_config.tool_context.credential_source = route.credential_source;
+            routed_config.tool_context.account_id = route.account_id;
+            routed_config.tool_context.gateway_chat_url = route.endpoint;
+            routed_config.tool_context.provider_endpoint_override = route.endpoint;
+            routed_config.tool_context.gateway_models_path = route.models_path;
+        }
+    }
     if (!model_provider.authorizesCredential(
         admission.provider,
-        config.tool_context.credential_source,
+        routed_config.tool_context.credential_source,
     )) {
         const resolution = credentials.resolveForProvider(
             turn.alloc,
@@ -228,8 +257,8 @@ pub fn run(
             .skills_prompt_section = config.skills_prompt_section,
             .explicit_skills_prompt_section = config.explicit_skills_prompt_section,
             .gateway_retry_count = config.tool_context.gateway_retry_count,
-            .gateway_chat_url = config.tool_context.gateway_chat_url,
-            .provider_endpoint_override = config.tool_context.provider_endpoint_override,
+            .gateway_chat_url = routed_config.tool_context.gateway_chat_url,
+            .provider_endpoint_override = routed_config.tool_context.provider_endpoint_override,
             .advertised_tool_names = config.advertised_tool_names,
             .advertised_functions = config.advertised_functions,
             .provider_capabilities = config.provider_set.select(admission.provider).capabilities,

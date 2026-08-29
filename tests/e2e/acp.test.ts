@@ -1360,6 +1360,191 @@ describe("acp: model-independent", () => {
   );
 
   test(
+    "ACP persistent Gateway children retain an owned route across parent switches and reconfiguration",
+    async () => {
+      const root = createIsolatedRoot("fx-acp-gateway-child-route-");
+      const marker = join(root.workspace, "gateway-child-marker.txt");
+      writeFileSync(marker, "owned-route-marker");
+      const childFirstPrompt = "GATEWAY_CHILD_FIRST_TURN";
+      const childSecondPrompt = "GATEWAY_CHILD_SECOND_TURN";
+      const childSecondStarted = deferred<void>();
+      const releaseChildSecond = deferred<void>();
+      let childId = "";
+      let secondTurnRequests = 0;
+      const gatewayA = startDynamicFakeGateway(async (body) => {
+        if (body.includes('"call_id":"gateway_child_create"') &&
+            body.includes('"type":"function_call_output"')) {
+          const created = JSON.parse(
+            acpToolResultText(body, "gateway_child_create"),
+          ) as { child_id: string; status: string };
+          expect(created.status).toBe("created");
+          childId = created.child_id;
+          return finalText("GATEWAY_PARENT_CREATED_CHILD");
+        }
+        if (body.includes('"call_id":"gateway_child_read"') &&
+            body.includes('"type":"function_call_output"')) {
+          expect(acpToolResultText(body, "gateway_child_read")).toContain(
+            "owned-route-marker",
+          );
+          secondTurnRequests += 1;
+          return finalText("GATEWAY_CHILD_SECOND_DONE");
+        }
+        const latest = acpLatestPromptText(body);
+        if (latest.includes(childSecondPrompt)) {
+          secondTurnRequests += 1;
+          childSecondStarted.resolve(undefined);
+          await releaseChildSecond.promise;
+          return fakeGatewayToolCall("gateway_child_read", "read_file", {
+            path: marker,
+          });
+        }
+        if (latest.includes(childFirstPrompt)) {
+          return finalText("GATEWAY_CHILD_FIRST_DONE");
+        }
+        if (latest.includes("Create a persistent Gateway child.")) {
+          return fakeGatewayToolCall("gateway_child_create", "subagent", {
+            command: { create: {
+              name: "gateway-persistent-child",
+              mode: "persistent",
+              prompt: childFirstPrompt,
+            } },
+          });
+        }
+        return new Response("unexpected Gateway A request", { status: 500 });
+      });
+      const gatewayB = startFakeGateway([]);
+      const codex = startAcpFakeCodex({
+        route(body) {
+          const toolResult = codexLatestToolResult(body);
+          if (toolResult?.callId === "gateway_child_resume") {
+            return codexFinalText("CODEX_PARENT_RESUMED_GATEWAY_CHILD");
+          }
+          if (toolResult?.callId === "gateway_child_message") {
+            return codexFinalText("CODEX_PARENT_MESSAGED_GATEWAY_CHILD");
+          }
+          if (body.includes("Resume the Gateway child.")) {
+            if (!childId) throw new Error("Gateway child id was not captured");
+            return codexToolCall("gateway_child_resume", "subagent", {
+              command: { lifecycle: { id: childId, action: "resume" } },
+            });
+          }
+          if (body.includes("Send the Gateway child another message.")) {
+            if (!childId) throw new Error("Gateway child id was not captured");
+            return codexToolCall("gateway_child_message", "subagent", {
+              command: {
+                message: { send: { id: childId, content: childSecondPrompt } },
+              },
+            });
+          }
+          throw new Error("unexpected Codex parent request");
+        },
+      });
+      writeSeededAcpChatGptLogin(root.home, codex.accessToken);
+      try {
+        client = await AcpClient.create({
+          cwd: root.workspace,
+          env: {
+            HOME: root.home,
+            OPENAI_API_KEY: undefined,
+            FX_API_KEY: undefined,
+            FX_RESPONSES_BASE_URL: undefined,
+            OPENAI_BASE_URL: undefined,
+            FX_CODEX_BASE_URL: codex.responsesUrl.replace(/\/responses$/, ""),
+            FX_E2E_OPENAI_CODEX_MODELS_URL: codex.modelsUrl,
+          },
+        });
+        await client.request("initialize", { protocolVersion: 1 }, 1);
+        const configuredA = await client.request(
+          "fx/provider/configure",
+          { baseUrl: gatewayA.baseUrl, apiKey: "gateway-key-a" },
+          2,
+        ) as any;
+        expect(configuredA.result.provider).toBe("gateway");
+        await client.request("session/new", { mcpServers: [] }, 3);
+        await client.readLine();
+        await client.request("session/set_mode", { modeId: "code" }, 4);
+
+        const first = await runPrompt(
+          client,
+          "Create a persistent Gateway child.",
+          TIMEOUT,
+        );
+        expect(first.promptResult.result.stopReason).toBe("end_turn");
+        await waitForCondition(
+          "first Gateway child idle state",
+          () => childId.length > 0 && acpSubagentState(root, childId) === "idle",
+          TIMEOUT,
+        );
+
+        const switched = await client.request(
+          "fx/provider/switch",
+          { provider: "codex" },
+          5,
+        ) as any;
+        expect(switched.result.provider).toBe("codex");
+        const second = await runPrompt(
+          client,
+          "Send the Gateway child another message.",
+          TIMEOUT,
+        );
+        expect(second.promptResult.result.stopReason).toBe("end_turn");
+        const resumed = await runPrompt(client, "Resume the Gateway child.", TIMEOUT);
+        expect(resumed.promptResult.result.stopReason).toBe("end_turn");
+        const childStarted = await Promise.race([
+          childSecondStarted.promise.then(() => true),
+          Bun.sleep(5_000).then(() => false),
+        ]);
+        if (!childStarted) {
+          throw new Error(
+            `Gateway child did not start after resume: control=${JSON.stringify(JSON.parse(
+              readFileSync(
+                join(root.home, ".fx", "sessions", childId, "subagent", "control.json"),
+                "utf8",
+              ),
+            ))} gatewayA=${JSON.stringify(gatewayA.requests.map((request) => acpLatestPromptText(request.body)))} gatewayB=${JSON.stringify(gatewayB.requests.map((request) => acpLatestPromptText(request.body)))}`,
+          );
+        }
+
+        const configuredB = await client.request(
+          "fx/provider/configure",
+          { baseUrl: gatewayB.baseUrl, apiKey: "gateway-key-b" },
+          6,
+        ) as any;
+        expect(configuredB.result.provider).toBe("gateway");
+        releaseChildSecond.resolve(undefined);
+        await waitForCondition(
+          "second Gateway child idle state",
+          () => acpSubagentState(root, childId) === "idle",
+          TIMEOUT,
+        );
+
+        expect(secondTurnRequests).toBe(2);
+        expect(gatewayA.requests.length).toBeGreaterThanOrEqual(4);
+        for (const request of gatewayA.requests) {
+          expect(request.headers.get("authorization")).toBe("Bearer gateway-key-a");
+        }
+        expect(gatewayB.requests).toHaveLength(0);
+        expect(gatewayB.modelRequests).toHaveLength(1);
+        expect(gatewayB.modelRequests[0]!.headers.get("authorization")).toBe(
+          "Bearer gateway-key-b",
+        );
+        for (const request of codex.requests) {
+          expect(request.authorization).toBe(`Bearer ${codex.accessToken}`);
+        }
+        expect(client.stderr).toBe("");
+      } finally {
+        releaseChildSecond.resolve(undefined);
+        await client?.close();
+        codex.stop();
+        gatewayB.stop();
+        gatewayA.stop();
+        rmSync(root.root, { recursive: true, force: true });
+      }
+    },
+    TIMEOUT,
+  );
+
+  test(
     "ACP completes provider login through start and status methods",
     async () => {
       const root = createIsolatedRoot("fx-acp-provider-login-");
