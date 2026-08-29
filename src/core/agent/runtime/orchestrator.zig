@@ -2996,15 +2996,13 @@ fn processQueuedPromptLoop(
                 inline_compaction_suffix_start = within_turn_suffix.items.len;
                 inline_auto_compaction_pending = false;
                 finalization.requestAutoCompaction(!used_remote);
-                try pushVisibleCompactionNotice(
-                    deps,
-                    if (compacted.strategy == .local_fallback) .warning else .success,
-                    switch (compacted.strategy) {
-                        .remote => "Context compacted with the active Responses provider.",
-                        .local_model => "Context compacted locally with the active model.",
-                        .local_fallback => "Model compaction is unavailable; continuing with deterministic compacted context.",
-                    },
+                var notice_buf: [512]u8 = undefined;
+                const notice = runtime_compaction.formatInstalledNotice(
+                    &notice_buf,
+                    compacted.strategy,
+                    compacted.detail orelse "",
                 );
+                try pushVisibleCompactionNotice(deps, notice.tone, notice.body);
                 continue;
             }
             const tool_choice: types.ToolChoice = if (recovery_strategy == .reconcile_tool)

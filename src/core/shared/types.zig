@@ -192,6 +192,7 @@ pub const CompactionWorkerOutcome = union(enum) {
     local: struct {
         summary: []u8,
         strategy: CompactionStrategy,
+        detail: []u8,
     },
     failed: []u8,
 };
@@ -240,6 +241,7 @@ pub fn dupeCompactionWorkerEvent(
         .local => |completed| .{ .local = .{
             .summary = try alloc.dupe(u8, completed.summary),
             .strategy = completed.strategy,
+            .detail = try alloc.dupe(u8, completed.detail),
         } },
         .failed => |name| .{ .failed = try alloc.dupe(u8, name) },
     };
@@ -271,7 +273,10 @@ pub fn freeCompactionWorkerEvent(
             alloc.free(completed.input_json);
             alloc.free(completed.summary);
         },
-        .local => |completed| alloc.free(completed.summary),
+        .local => |completed| {
+            alloc.free(completed.summary);
+            alloc.free(completed.detail);
+        },
         .failed => |name| alloc.free(name),
     }
 }

@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 const agent_stream_provider = @import("../stream_provider.zig");
 const model_capabilities = @import("../../config/model_capabilities.zig");
@@ -7,6 +8,8 @@ const responses_compaction_binding = @import("../../gateway/responses_compaction
 const responses_compaction_provider = @import("../../gateway/responses_compaction_provider.zig");
 const debug_trace = @import("../../shared/debug_trace.zig");
 const io_mod = @import("../../shared/io.zig");
+const profile_paths = @import("../../shared/profile_paths.zig");
+const session_layout = @import("../../session/session_layout.zig");
 const session_usage = @import("../../session/session_usage.zig");
 const types = @import("../../shared/types.zig");
 const runtime_gateway_step = @import("gateway_step.zig");
@@ -21,6 +24,12 @@ const local_model_default_output_tokens: u32 = 8192;
 const local_model_max_output_tokens: u32 = 32 * 1024;
 const local_model_max_summary_attempts: usize = 3;
 const local_model_min_summary_bytes: usize = 500;
+const local_compaction_retry_base_delay_ns: u64 = 150 * std.time.ns_per_ms;
+const local_compaction_retry_max_delay_ns: u64 = std.time.ns_per_s;
+const installed_fallback_notice =
+    "Context compacted with a bounded local fallback after the active model failed. Recent conversation evidence was kept.";
+const installed_fallback_notice_fmt =
+    "Context compacted with a bounded local fallback after the active model failed ({s}). Recent conversation evidence was kept.";
 const local_compaction_prompt = @embedFile("compaction_prompt.md");
 const remote_compaction_truncated_tool_output =
     "[Tool output truncated before remote context compaction to fit the model context window.]";
@@ -78,9 +87,12 @@ pub const Result = struct {
     summary: []u8,
     strategy: types.CompactionStrategy,
     remote: ?RemoteResult = null,
+    /// Owned diagnostic trail for logs and user-visible fallback notices.
+    detail: ?[]u8 = null,
 
     pub fn deinit(self: *Result, alloc: Allocator) void {
         alloc.free(self.summary);
+        if (self.detail) |detail| alloc.free(detail);
         if (self.remote) |remote| {
             alloc.free(remote.wire_model);
             alloc.free(remote.input_json);
@@ -102,6 +114,90 @@ pub const Result = struct {
         };
     }
 };
+
+pub const InstalledNotice = struct {
+    tone: types.NoticeTone,
+    body: []const u8,
+};
+
+pub fn formatInstalledNotice(
+    buf: []u8,
+    strategy: types.CompactionStrategy,
+    detail: []const u8,
+) InstalledNotice {
+    return switch (strategy) {
+        .remote => .{
+            .tone = .neutral,
+            .body = "Context compacted with the active Responses provider.",
+        },
+        .local_model => .{
+            .tone = .neutral,
+            .body = "Context compacted locally with the active model.",
+        },
+        .local_fallback => .{
+            .tone = .warning,
+            .body = formatFallbackNotice(buf, detail),
+        },
+    };
+}
+
+fn formatFallbackNotice(buf: []u8, detail: []const u8) []const u8 {
+    const clipped = debug_trace.preview(detail, 180);
+    if (clipped.len == 0) return installed_fallback_notice;
+    return std.fmt.bufPrint(buf, installed_fallback_notice_fmt, .{clipped}) catch
+        installed_fallback_notice;
+}
+
+const DiagnosticLog = struct {
+    alloc: Allocator,
+    session_id: ?[]const u8,
+    buf: std.ArrayList(u8) = .empty,
+
+    fn init(alloc: Allocator, session_id: ?[]const u8) DiagnosticLog {
+        return .{ .alloc = alloc, .session_id = session_id };
+    }
+
+    fn deinit(self: *DiagnosticLog) void {
+        self.buf.deinit(self.alloc);
+    }
+
+    fn add(self: *DiagnosticLog, comptime fmt: []const u8, args: anytype) void {
+        const line = std.fmt.allocPrint(self.alloc, fmt, args) catch return;
+        defer self.alloc.free(line);
+        debug_trace.logf("compaction", "{s}", .{line});
+        debug_trace.logDurable("compaction", "{s}", .{line});
+        persistSessionCompactionLine(self.session_id, line);
+        if (self.buf.items.len > 0) {
+            self.buf.appendSlice(self.alloc, "; ") catch return;
+        }
+        self.buf.appendSlice(self.alloc, line) catch {};
+    }
+
+    fn take(self: *DiagnosticLog) ?[]u8 {
+        if (self.buf.items.len == 0) return null;
+        const owned = self.buf.toOwnedSlice(self.alloc) catch return null;
+        self.buf = .empty;
+        return owned;
+    }
+};
+
+fn persistSessionCompactionLine(session_id: ?[]const u8, line: []const u8) void {
+    if (comptime builtin.is_test) return;
+    const id = session_id orelse return;
+    session_layout.validateSessionId(id) catch return;
+    const home = io_mod.getenv("HOME") orelse return;
+    const alloc = std.heap.c_allocator;
+    const sessions_dir = profile_paths.sessionsDir(alloc, home) catch return;
+    defer alloc.free(sessions_dir);
+    const session_dir = session_layout.sessionDirPath(alloc, sessions_dir, id) catch return;
+    defer alloc.free(session_dir);
+    const path = std.fs.path.join(alloc, &.{ session_dir, "logs", "compaction.log" }) catch return;
+    defer alloc.free(path);
+    var stamped: std.Io.Writer.Allocating = .init(alloc);
+    defer stamped.deinit();
+    stamped.writer.print("{d} [compaction] {s}\n", .{ io_mod.milliTimestamp(), line }) catch return;
+    debug_trace.appendLineToPath(path, stamped.written());
+}
 
 pub fn supportsAutomaticCompaction(source: ?types.CredentialSource) bool {
     return source != null;
@@ -150,35 +246,55 @@ pub fn isContextOverflow(status: std.http.Status, detail: []const u8) bool {
 pub fn compact(alloc: Allocator, request: Request) !Result {
     if (request.cancel_flag.load(.seq_cst)) return error.Cancelled;
 
+    var notes = DiagnosticLog.init(alloc, request.session_id);
+    defer notes.deinit();
+    notes.add(
+        "compaction start model={s} allow_remote={} history_len={d}",
+        .{
+            request.model,
+            request.allow_remote,
+            request.messages.len -| request.history_start,
+        },
+    );
+
     const history = request.messages[@min(request.history_start, request.messages.len)..];
     const fallback_summary = try buildDeterministicSummaryAlloc(alloc, history);
     var owns_fallback = true;
     defer if (owns_fallback) alloc.free(fallback_summary);
 
     if (request.allow_remote) {
-        if (try tryRemoteCompaction(alloc, request, fallback_summary)) |remote| {
-            return remote;
+        if (try tryRemoteCompaction(alloc, request, fallback_summary, &notes)) |remote| {
+            var result = remote;
+            result.detail = notes.take();
+            return result;
         }
+    } else {
+        notes.add("remote compaction skipped reason=disallowed", .{});
     }
 
     if (request.cancel_flag.load(.seq_cst)) return error.Cancelled;
-    const local = tryLocalModelCompaction(alloc, request) catch |err| switch (err) {
+    const local = tryLocalModelCompaction(alloc, request, &notes) catch |err| switch (err) {
         error.Cancelled => return error.Cancelled,
         else => blk: {
-            debug_trace.logf(
-                "compaction",
+            notes.add(
                 "local model compaction unavailable err={s}; using deterministic fallback",
                 .{@errorName(err)},
             );
             break :blk null;
         },
     };
-    if (local) |result| return result;
+    if (local) |result_value| {
+        var result = result_value;
+        result.detail = notes.take();
+        return result;
+    }
 
+    notes.add("installing deterministic fallback", .{});
     owns_fallback = false;
     return .{
         .summary = fallback_summary,
         .strategy = .local_fallback,
+        .detail = notes.take(),
     };
 }
 
@@ -186,20 +302,37 @@ fn tryRemoteCompaction(
     alloc: Allocator,
     request: Request,
     fallback_summary: []const u8,
+    notes: *DiagnosticLog,
 ) !?Result {
-    const source = request.credential_source orelse return null;
-    const route = provider_route.fromCredentialSource(source) orelse return null;
+    const source = request.credential_source orelse {
+        notes.add("remote compaction skipped reason=missing_credential", .{});
+        return null;
+    };
+    const route = provider_route.fromCredentialSource(source) orelse {
+        notes.add(
+            "remote compaction skipped reason=unsupported_credential_source source={s}",
+            .{@tagName(source)},
+        );
+        return null;
+    };
     if (route.contract().wire_api != .openai_responses or
         route.contract().remote_compaction == .unsupported)
     {
+        notes.add(
+            "remote compaction skipped reason=unsupported_route route={s} remote_compaction={s}",
+            .{ @tagName(route), @tagName(route.contract().remote_compaction) },
+        );
         return null;
     }
-    const provider = request.remote_provider orelse return null;
+    const provider = request.remote_provider orelse {
+        notes.add("remote compaction skipped reason=missing_remote_provider", .{});
+        return null;
+    };
 
     var owned_binding: ?types.ResponsesCompactionProviderBinding = null;
     const binding_view = if (request.provider_binding) |provided| blk: {
         responses_compaction_binding.validate(source, provided) catch |err| {
-            debug_trace.logf("compaction", "provider binding unavailable err={s}", .{@errorName(err)});
+            notes.add("provider binding unavailable err={s}", .{@errorName(err)});
             return null;
         };
         if (!responses_compaction_binding.credentialMatches(
@@ -208,7 +341,7 @@ fn tryRemoteCompaction(
             request.account_id,
             provided,
         )) {
-            debug_trace.logf("compaction", "provider binding unavailable err=CredentialBindingMismatch", .{});
+            notes.add("provider binding unavailable err=CredentialBindingMismatch", .{});
             return null;
         }
         break :blk provided;
@@ -228,7 +361,7 @@ fn tryRemoteCompaction(
             request.account_id,
             options,
         ) catch |err| {
-            debug_trace.logf("compaction", "provider binding unavailable err={s}", .{@errorName(err)});
+            notes.add("provider binding unavailable err={s}", .{@errorName(err)});
             return null;
         };
         break :blk owned_binding.?.view();
@@ -272,7 +405,7 @@ fn tryRemoteCompaction(
         },
         else => {
             try observation.fail(.ambiguous_delivery);
-            debug_trace.logf("compaction", "remote request failed err={s}", .{@errorName(err)});
+            notes.add("remote request failed err={s}", .{@errorName(err)});
             return null;
         },
     };
@@ -280,12 +413,12 @@ fn tryRemoteCompaction(
     return switch (outcome) {
         .unsupported => {
             try observation.fail(.unbilled);
-            debug_trace.logf("compaction", "remote request unsupported for active route", .{});
+            notes.add("remote request unsupported for active route", .{});
             return null;
         },
         .rejected => |status| {
             try observation.fail(.unbilled);
-            debug_trace.logf("compaction", "remote request rejected status={d}", .{@intFromEnum(status)});
+            notes.add("remote request rejected status={d}", .{@intFromEnum(status)});
             return null;
         },
         .compacted => |completed| blk: {
@@ -307,6 +440,7 @@ fn tryRemoteCompaction(
             const wire_model = owned_remote.wire_model;
             const input_json = owned_remote.input_json;
             owns_remote = false;
+            notes.add("remote compaction accepted wire_model={s}", .{wire_model});
             break :blk .{
                 .summary = summary,
                 .strategy = .remote,
@@ -326,14 +460,21 @@ const LocalInputMode = enum {
     lossy,
 };
 
-fn tryLocalModelCompaction(alloc: Allocator, request: Request) !?Result {
-    if (request.credential_source == null or request.credential.len == 0) return null;
+fn tryLocalModelCompaction(alloc: Allocator, request: Request, notes: *DiagnosticLog) !?Result {
+    if (request.credential_source == null or request.credential.len == 0) {
+        notes.add("local model compaction skipped reason=missing_credential", .{});
+        return null;
+    }
     const history = request.messages[@min(request.history_start, request.messages.len)..];
-    if (history.len == 0) return null;
+    if (history.len == 0) {
+        notes.add("local model compaction skipped reason=empty_history", .{});
+        return null;
+    }
 
     const modes = [_]LocalInputMode{ .fitted, .lossy };
     modes_loop: for (modes) |mode| {
         if (request.cancel_flag.load(.seq_cst)) return error.Cancelled;
+        notes.add("local model compaction trying mode={s}", .{@tagName(mode)});
 
         var arena_state = std.heap.ArenaAllocator.init(alloc);
         defer arena_state.deinit();
@@ -378,11 +519,19 @@ fn tryLocalModelCompaction(alloc: Allocator, request: Request) !?Result {
             ) catch |err| switch (err) {
                 error.Cancelled => return error.Cancelled,
                 else => {
-                    debug_trace.logf(
-                        "compaction",
+                    notes.add(
                         "local model request failed mode={s} attempt={d} err={s}",
                         .{ @tagName(mode), attempt, @errorName(err) },
                     );
+                    if (isRetryableLocalStreamError(err) and
+                        attempt < local_model_max_summary_attempts)
+                    {
+                        retryPause(attempt);
+                        continue;
+                    }
+                    if (mode == .fitted and shouldAdvanceToLossyAfterStreamError(err)) {
+                        continue :modes_loop;
+                    }
                     return null;
                 },
             };
@@ -390,20 +539,33 @@ fn tryLocalModelCompaction(alloc: Allocator, request: Request) !?Result {
 
             switch (streamed) {
                 .failed => |failure| {
-                    debug_trace.logf(
-                        "compaction",
-                        "local model request rejected mode={s} attempt={d} kind={s}",
-                        .{ @tagName(mode), attempt, @tagName(failure.kind) },
+                    const failure_detail = if (failure.detail) |detail|
+                        debug_trace.preview(detail, 240)
+                    else
+                        "";
+                    notes.add(
+                        "local model request rejected mode={s} attempt={d} kind={s} detail={s}",
+                        .{ @tagName(mode), attempt, @tagName(failure.kind), failure_detail },
                     );
-                    if (failure.kind == .request_too_large and mode == .fitted) {
+                    if ((failure.kind == .request_too_large or failure.kind == .invalid_request) and
+                        mode == .fitted)
+                    {
+                        continue :modes_loop;
+                    }
+                    if (isRetryableLocalFailureKind(failure.kind) and
+                        attempt < local_model_max_summary_attempts)
+                    {
+                        retryPause(attempt);
+                        continue;
+                    }
+                    if (mode == .fitted and isRetryableLocalFailureKind(failure.kind)) {
                         continue :modes_loop;
                     }
                     return null;
                 },
                 .completed => |completed| {
                     const content = completed.completion.content orelse {
-                        debug_trace.logf(
-                            "compaction",
+                        notes.add(
                             "local model summary missing mode={s} attempt={d}",
                             .{ @tagName(mode), attempt },
                         );
@@ -412,10 +574,9 @@ fn tryLocalModelCompaction(alloc: Allocator, request: Request) !?Result {
                     };
                     const cleaned = cleanLocalSummaryAlloc(alloc, content) catch |err| switch (err) {
                         error.InvalidLocalCompactionSummary => {
-                            debug_trace.logf(
-                                "compaction",
-                                "local model summary rejected mode={s} attempt={d}",
-                                .{ @tagName(mode), attempt },
+                            notes.add(
+                                "local model summary rejected mode={s} attempt={d} bytes={d}",
+                                .{ @tagName(mode), attempt, content.len },
                             );
                             if (attempt < local_model_max_summary_attempts) continue;
                             continue :modes_loop;
@@ -426,6 +587,10 @@ fn tryLocalModelCompaction(alloc: Allocator, request: Request) !?Result {
                     const anchors = try buildContinuationAnchorsAlloc(alloc, history);
                     defer alloc.free(anchors);
                     const summary = try assembleLocalSummaryAlloc(alloc, cleaned, anchors);
+                    notes.add(
+                        "local model compaction accepted mode={s} attempt={d}",
+                        .{ @tagName(mode), attempt },
+                    );
                     return .{
                         .summary = summary,
                         .strategy = .local_model,
@@ -435,6 +600,48 @@ fn tryLocalModelCompaction(alloc: Allocator, request: Request) !?Result {
         }
     }
     return null;
+}
+
+fn isRetryableLocalFailureKind(kind: agent_stream_provider.FailureKind) bool {
+    return switch (kind) {
+        .invalid_request, .unauthorized, .forbidden, .request_too_large => false,
+        .rate_limited,
+        .server_error,
+        .bad_gateway,
+        .unavailable,
+        .gateway_timeout,
+        .provider_error,
+        => true,
+    };
+}
+
+fn isRetryableLocalStreamError(err: anyerror) bool {
+    return switch (err) {
+        error.Cancelled,
+        error.OutOfMemory,
+        error.AgentStreamProviderUnavailable,
+        error.ProviderAdmissionMissing,
+        error.ProviderAdmissionRepeated,
+        error.GrokSubscriptionCredentialRequired,
+        error.GrokSubscriptionAccountRequired,
+        error.InvalidGrokSubscriptionAccount,
+        error.InvalidXaiGrokModel,
+        => false,
+        else => true,
+    };
+}
+
+fn shouldAdvanceToLossyAfterStreamError(err: anyerror) bool {
+    return isRetryableLocalStreamError(err);
+}
+
+fn retryPause(attempt: usize) void {
+    if (comptime builtin.is_test) return;
+    const delay = @min(
+        attempt * local_compaction_retry_base_delay_ns,
+        local_compaction_retry_max_delay_ns,
+    );
+    io_mod.sleep(delay);
 }
 
 fn discardLocalCompactionEvent(_: *anyopaque, _: agent_stream_provider.Event) void {}
@@ -1228,6 +1435,111 @@ test "missing remote compact provider falls back to bounded local summary" {
     try std.testing.expectEqual(types.CompactionStrategy.local_fallback, result.strategy);
     try std.testing.expect(std.mem.find(u8, result.summary, "inspect the repository") != null);
     try std.testing.expect(std.mem.find(u8, result.summary, "file evidence") != null);
+    const detail = result.detail orelse return error.TestExpectedEqual;
+    try std.testing.expect(std.mem.find(u8, detail, "missing_remote_provider") != null);
+    try std.testing.expect(std.mem.find(u8, detail, "AgentStreamProviderUnavailable") != null);
+}
+
+test "fallback notice includes the recorded local failure" {
+    var buf: [512]u8 = undefined;
+    const notice = formatInstalledNotice(
+        &buf,
+        .local_fallback,
+        "local model request failed mode=fitted attempt=1 err=ConnectionResetByPeer",
+    );
+    try std.testing.expectEqual(types.NoticeTone.warning, notice.tone);
+    try std.testing.expect(std.mem.find(u8, notice.body, "bounded local fallback") != null);
+    try std.testing.expect(std.mem.find(u8, notice.body, "ConnectionResetByPeer") != null);
+}
+
+test "retryable local stream failure is retried before a successful handoff" {
+    const Fake = struct {
+        calls: usize = 0,
+
+        fn stream(
+            raw: ?*anyopaque,
+            _: Allocator,
+            request: agent_stream_provider.ModelRequest,
+        ) !agent_stream_provider.Result {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            self.calls += 1;
+            try request.admission.admit();
+            if (self.calls == 1) return error.ConnectionResetByPeer;
+            return .{ .completed = .{
+                .completion = .{
+                    .content = ("The handoff preserves the user's request, exact evidence, completed checks, current code state, unresolved risks, and next action. " ** 6),
+                },
+                .usage = .{ .exact = .gateway },
+            } };
+        }
+    };
+
+    var fake: Fake = .{};
+    var cancel_flag = std.atomic.Value(bool).init(false);
+    var result = try compact(std.testing.allocator, .{
+        .remote_provider = null,
+        .local_provider = .{ .context = &fake, .stream_fn = Fake.stream },
+        .credential_source = .grok_subscription,
+        .credential = "grok-token",
+        .account_id = null,
+        .session_id = "session",
+        .model = "grok-4.6",
+        .serialized_tools = "[]",
+        .messages = &.{.{ .role = .user, .content = "continue after a reset" }},
+        .provider_options = .{},
+        .cancel_flag = &cancel_flag,
+    });
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), fake.calls);
+    try std.testing.expectEqual(types.CompactionStrategy.local_model, result.strategy);
+    const detail = result.detail orelse return error.TestExpectedEqual;
+    try std.testing.expect(std.mem.find(u8, detail, "ConnectionResetByPeer") != null);
+    try std.testing.expect(std.mem.find(u8, detail, "accepted mode=fitted attempt=2") != null);
+}
+
+test "non-retryable local rejection falls back without extra attempts" {
+    const Fake = struct {
+        calls: usize = 0,
+
+        fn stream(
+            raw: ?*anyopaque,
+            alloc: Allocator,
+            request: agent_stream_provider.ModelRequest,
+        ) !agent_stream_provider.Result {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            self.calls += 1;
+            try request.admission.admit();
+            return .{ .failed = .{
+                .kind = .unauthorized,
+                .detail = try alloc.dupe(u8, "subscription token rejected"),
+                .ownership = .owned,
+            } };
+        }
+    };
+
+    var fake: Fake = .{};
+    var cancel_flag = std.atomic.Value(bool).init(false);
+    var result = try compact(std.testing.allocator, .{
+        .remote_provider = null,
+        .local_provider = .{ .context = &fake, .stream_fn = Fake.stream },
+        .credential_source = .grok_subscription,
+        .credential = "grok-token",
+        .account_id = "acct",
+        .session_id = "session",
+        .model = "grok-4.6",
+        .serialized_tools = "[]",
+        .messages = &.{.{ .role = .user, .content = "inspect fallback" }},
+        .provider_options = .{},
+        .cancel_flag = &cancel_flag,
+    });
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), fake.calls);
+    try std.testing.expectEqual(types.CompactionStrategy.local_fallback, result.strategy);
+    const detail = result.detail orelse return error.TestExpectedEqual;
+    try std.testing.expect(std.mem.find(u8, detail, "unauthorized") != null);
+    try std.testing.expect(std.mem.find(u8, detail, "subscription token rejected") != null);
 }
 
 test "BYOK remote rejection uses the active model through the same compaction core" {

@@ -160,14 +160,20 @@ a later successful semantic compaction replaces them.
 
 | Condition | Behavior |
 | --- | --- |
-| Remote route unsupported | Continue with active-model compaction |
+| Remote route unsupported | Record the skip reason, then continue with active-model compaction |
 | Remote request rejected or transport unavailable | Record the attempt, then continue locally |
-| Local input too large | Retry with bounded lossy input |
+| Local transport or retryable provider failure | Retry up to three times in the current stage, then try the lossy stage |
+| Local input too large or rejected as invalid | Retry with bounded lossy input |
 | Local summary empty, too short, or unsafe | Retry up to three times in the current stage |
-| Local model unavailable after both stages | Install the deterministic fallback |
+| Local model unavailable after both stages | Install the deterministic fallback and show the recorded failure reason |
 | Cancellation | Return cancellation without installing a result |
 | TUI state or provider changed before completion | Discard the stale result without mutating context |
 | Installation or persistence failed | Keep the failure visible and do not report successful compaction |
+
+Every local and remote failure is written to `~/.fx/logs/trace.log` and, when a
+session id is present, to that session's `logs/compaction.log`. The TUI, ACP, and
+inline overflow notices reuse the same recorded reason so a fallback is never
+described only as "the active model was unavailable."
 
 Every provider attempt records usage through the ordinary durable usage path.
 A successful remote request records its direct response usage. Local model
