@@ -181,6 +181,14 @@ Keep tests that protect real product behavior, including stability, crashes, rec
 
 Do not delete a test solely to make CI green. First diagnose the failure and establish that the assertion is redundant, meaningless, or belongs to an unsupported feature. When removing a feature, remove its complete vertical slice in the same change: entrypoints, dispatch, configuration, state, protocol and UI wiring, documentation, tests, fixtures, and any PGSO corpus entry. Prefer the smallest coherent deletion, then build, run focused tests, and exercise the affected real runtime path.
 
+### Applying Code Review Findings
+
+Do not change code merely because a review finding is theoretically valid. Before implementing it, trace the production entrypoint and classify it using realistic trigger conditions, expected frequency, user impact, and available runtime or incident evidence.
+
+Treat a finding as actionable for the current change when it affects a normal supported workflow, reproduces an observed failure, or has a plausible path to a crash, data loss, credential exposure, security-boundary violation, or persistent user-visible corruption. A concurrency concern that requires a contrived sequence of rapid, contradictory user actions and has no production evidence is normally not a hotfix. Explain the sequence and rationale in the review, then defer or close it instead of adding state, synchronization, compatibility logic, or tests solely to satisfy the reviewer.
+
+When priority is uncertain, first seek the smallest source or runtime proof that distinguishes a reachable product bug from a hypothetical race. Keep accepted fixes proportional to the proven risk and keep rejected findings out of the implementation and test surface.
+
 ### Adding a Command
 
 1. Add the spec to `src/core/slash_commands/command_specs.zig`
