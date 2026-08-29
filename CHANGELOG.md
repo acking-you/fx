@@ -40,7 +40,7 @@
 
 - **ACP process control**: Direct Unified Exec writes, output polls, and termination remain responsive even while a model-side output poll is waiting, without consuming output intended for the model.
 - **ACP provider bindings**: Connection-scoped BYOK endpoints keep their matching API key across temporary provider switches and now apply consistently to model requests, automatic permission reviews, remote compaction, and persistent subagent turns. Reconfiguring the connection cannot redirect or invalidate a child turn already in progress.
-- **Provider logout**: Signing out immediately invalidates a matching provider switch already loading in the background without waiting for its network request to finish, while an unrelated provider activation continues normally.
+- **Provider logout**: Signing out immediately invalidates a matching provider switch already loading in the background, leaves unrelated provider activation alone, and keeps durable credential removal off the TUI event loop while an in-flight refresh releases its session lock.
 - **Terminal resize**: Terminal resizing no longer leaves empty scrollback behind.
 - **Subscription sign-in**: Codex and Grok sign-ins now survive unrelated, stalled, reset, or stale browser connections. Grok authorization codes can also be pasted when the browser cannot return to fx.
 - **OAuth callback pages**: OAuth callbacks now show a completion or failure page after returning from the browser.

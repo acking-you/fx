@@ -9,8 +9,6 @@ const credentials = @import("../auth/credentials.zig");
 const auth_runtime = @import("../auth/auth_runtime.zig");
 const provider_activation = @import("../auth/provider_activation.zig");
 const login_flow = @import("../auth/login_flow.zig");
-const chatgpt_oauth = @import("../auth/chatgpt_oauth.zig");
-const grok_oauth = @import("../auth/grok_oauth.zig");
 const provider_catalog = @import("../auth/provider_catalog.zig");
 const auth_transition = @import("../auth/auth_transition.zig");
 const model_provider = @import("../config/model_provider.zig");
@@ -157,60 +155,97 @@ pub fn Runtime(comptime App: type) type {
                 });
                 return;
             }
+            const cancelled_activation = if (comptime @hasField(App, "provider_switch"))
+                app.provider_switch.cancelTarget(logout_provider)
+            else
+                false;
+            if (comptime !@hasField(App, "provider_logout")) {
+                try writeAuthNotice(app, .{
+                    .topic = "auth",
+                    .tone = .warning,
+                    .body = "Subscription logout is unavailable in this host.",
+                });
+                return;
+            }
+            if (!try app.provider_logout.start(
+                logout_provider,
+                app.auth.oauthTransport(),
+                cancelled_activation,
+            )) {
+                try writeAuthNotice(app, .{
+                    .topic = "auth",
+                    .tone = .warning,
+                    .body = "A subscription logout is already in progress.",
+                });
+                return;
+            }
+            try writeAuthNotice(app, .{
+                .topic = "auth",
+                .tone = .neutral,
+                .body = if (logout_provider == .grok)
+                    "Signing out of Grok..."
+                else
+                    "Signing out of Codex...",
+            });
+            app.shell.render_requests.request(.footer);
+        }
+
+        pub fn collectProviderLogoutFacts(app: *App) !void {
+            if (comptime !@hasField(App, "provider_logout")) return;
+            const completion = app.provider_logout.takeCompletion() orelse return;
             if (comptime @hasField(App, "provider_switch")) {
-                _ = app.provider_switch.cancelTarget(logout_provider);
+                // A switch requested after /logout started must not reinstall
+                // the credential that the completed logout just removed.
+                _ = app.provider_switch.cancelTarget(completion.target);
             }
-            try app.flushBeforeBlockingExternalWork();
-            if (logout_provider == .grok) {
-                const outcome = grok_oauth.logout(app.alloc, app.auth.oauthTransport()) catch {
+            switch (completion.outcome) {
+                .failed => |err| {
+                    debug_trace.logf("auth", "provider logout failed provider={t} err={s}", .{
+                        completion.target,
+                        @errorName(err),
+                    });
                     try writeAuthNotice(app, .{
                         .topic = "auth",
                         .tone = .@"error",
-                        .body = "Could not durably sign out of Grok. The current source is unchanged.",
+                        .body = if (completion.target == .grok)
+                            "Could not durably sign out of Grok. The current source is unchanged."
+                        else
+                            "Could not durably sign out of Codex. The current source is unchanged.",
                     });
-                    return;
-                };
-                const changed = if (comptime @hasDecl(@TypeOf(app.auth), "reconcileAfterGrokLogout"))
-                    try app.auth.reconcileAfterGrokLogout(app.alloc)
-                else
-                    false;
-                applyCredentialChange(app, changed);
-                try writeAuthNotice(app, switch (outcome.deletion) {
-                    .deleted => .{ .topic = "auth", .tone = .neutral, .body = "Signed out of Grok." },
-                    .missing => .{ .topic = "auth", .tone = .neutral, .body = "No Grok login session found." },
-                    .deleted_not_durable => .{ .topic = "auth", .tone = .warning, .body = "Signed out of Grok, but could not confirm the profile directory update." },
-                });
-                if (outcome.revocation_failed) {
-                    try writeAuthNotice(app, .{
-                        .topic = "auth",
-                        .tone = .warning,
-                        .body = "The local Grok session was removed, but remote revocation could not be confirmed.",
+                },
+                .grok => |outcome| {
+                    const changed = if (comptime @hasDecl(@TypeOf(app.auth), "reconcileAfterGrokLogout"))
+                        try app.auth.reconcileAfterGrokLogout(app.alloc)
+                    else
+                        false;
+                    applyCredentialChange(app, changed);
+                    try writeAuthNotice(app, switch (outcome.deletion) {
+                        .deleted => .{ .topic = "auth", .tone = .neutral, .body = "Signed out of Grok." },
+                        .missing => .{ .topic = "auth", .tone = .neutral, .body = "No Grok login session found." },
+                        .deleted_not_durable => .{ .topic = "auth", .tone = .warning, .body = "Signed out of Grok, but could not confirm the profile directory update." },
                     });
-                }
-                return;
+                    if (outcome.revocation_failed) {
+                        try writeAuthNotice(app, .{
+                            .topic = "auth",
+                            .tone = .warning,
+                            .body = "The local Grok session was removed, but remote revocation could not be confirmed.",
+                        });
+                    }
+                },
+                .codex => |outcome| {
+                    const changed = if (comptime @hasDecl(@TypeOf(app.auth), "reconcileAfterChatGptLogout"))
+                        try app.auth.reconcileAfterChatGptLogout(app.alloc)
+                    else
+                        false;
+                    applyCredentialChange(app, changed);
+                    try writeAuthNotice(app, switch (outcome) {
+                        .deleted => .{ .topic = "auth", .tone = .neutral, .body = "Signed out of Codex." },
+                        .missing => .{ .topic = "auth", .tone = .neutral, .body = "No Codex login session found." },
+                        .deleted_not_durable => .{ .topic = "auth", .tone = .warning, .body = "Signed out of Codex, but could not confirm the profile directory update." },
+                    });
+                },
             }
-            if (logout_provider == .codex) {
-                const outcome = chatgpt_oauth.logout() catch {
-                    try writeAuthNotice(app, .{
-                        .topic = "auth",
-                        .tone = .@"error",
-                        .body = "Could not durably sign out of Codex. The current source is unchanged.",
-                    });
-                    return;
-                };
-                const changed = if (comptime @hasDecl(@TypeOf(app.auth), "reconcileAfterChatGptLogout"))
-                    try app.auth.reconcileAfterChatGptLogout(app.alloc)
-                else
-                    false;
-                applyCredentialChange(app, changed);
-                try writeAuthNotice(app, switch (outcome) {
-                    .deleted => .{ .topic = "auth", .tone = .neutral, .body = "Signed out of Codex." },
-                    .missing => .{ .topic = "auth", .tone = .neutral, .body = "No Codex login session found." },
-                    .deleted_not_durable => .{ .topic = "auth", .tone = .warning, .body = "Signed out of Codex, but could not confirm the profile directory update." },
-                });
-                return;
-            }
-            unreachable;
+            app.shell.render_requests.request(.footer);
         }
 
         pub fn applyPickerChoice(app: *App, choice: auth_runtime.Choice) !void {

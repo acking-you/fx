@@ -8,6 +8,7 @@ pub const version = "0.0.6";
 const app_lifecycle = @import("core/app/app_lifecycle.zig");
 const provider_runtime = @import("core/app/provider_runtime.zig");
 const provider_activation = @import("core/auth/provider_activation.zig");
+const provider_logout = @import("core/auth/provider_logout.zig");
 const auth_runtime = @import("core/auth/auth_runtime.zig");
 const oauth_transport = @import("core/auth/oauth_transport.zig");
 const js_host_auth = @import("core/auth/js_host_auth.zig");
@@ -483,7 +484,7 @@ const App = struct {
     fn terminalTitleBusy(self: *Self) bool {
         return self.stream.active or self.pacer.hasPending() or
             self.worker.isProcessing() or
-            self.provider_switch.isRunning() or
+            self.provider_switch.isRunning() or self.provider_logout.isRunning() or
             SessionAppRuntime.responsesCompactionActive(self);
     }
 
@@ -522,6 +523,7 @@ const App = struct {
     ),
     provider_selection: provider_runtime.Runtime = provider_runtime.Runtime.init(std.heap.c_allocator),
     provider_switch: provider_activation.Runtime = provider_activation.Runtime.init(std.heap.c_allocator),
+    provider_logout: provider_logout.Runtime = provider_logout.Runtime.init(std.heap.c_allocator),
     model_cache: model_cache_runtime.Runtime = model_cache_runtime.Runtime.init(std.heap.c_allocator, builtin_gateway.models_path),
     workspace_root: []u8 = &.{},
     workspace_identity: statusline_identity.Runtime = .{},
@@ -811,6 +813,7 @@ const App = struct {
         self.terminal_client.deinit();
         self.unified_exec.deinit();
         self.provider_switch.deinit();
+        self.provider_logout.deinit();
         self.model_cache.deinit();
         InputSubmitRuntime.clearPendingSubmission(self, "shutdown");
         const resume_handoff = if (capture_resume_handoff and
@@ -2631,6 +2634,7 @@ const App = struct {
         if (comptime host_profile.native_auth or host_profile.js_host_auth) {
             try AuthAppRuntime.collectSignInFacts(self);
             try AuthAppRuntime.collectProviderSwitchFacts(self);
+            try AuthAppRuntime.collectProviderLogoutFacts(self);
         }
         if (comptime host_profile.native_auth) {
             try app_terminal_runtime.Runtime(App).collectFacts(self);
