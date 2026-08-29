@@ -175,6 +175,8 @@ pub const Runtime = struct {
     thread: ?std.Thread = null,
     running: bool = false,
     completion: ?Completion = null,
+    pending_target: ?model_provider.ProviderId = null,
+    discard_completion: bool = false,
     cancel_requested: std.atomic.Value(bool) = .init(false),
 
     pub fn init(alloc: Allocator) Self {
@@ -182,37 +184,76 @@ pub const Runtime = struct {
     }
 
     pub fn deinit(self: *Self) void {
-        self.cancel_requested.store(true, .seq_cst);
+        self.cancelAndDrain();
+    }
+
+    /// Blocking teardown for process shutdown. Event-loop callers use cancel()
+    /// and let takeCompletion() reap the worker after it has stopped.
+    pub fn cancelAndDrain(self: *Self) void {
+        self.cancel();
         const thread = self.detachThread();
         if (thread) |handle| handle.join();
         self.mutex.lockUncancelable(io_mod.getIo());
         if (self.completion) |*completion| completion.deinit(self.alloc);
         self.completion = null;
+        self.pending_target = null;
         self.running = false;
+        self.discard_completion = false;
         self.mutex.unlock(io_mod.getIo());
     }
 
-    pub fn start(self: *Self, request: Request) !bool {
-        self.mutex.lockUncancelable(io_mod.getIo());
-        const unavailable = self.running or self.completion != null or self.thread != null;
-        self.mutex.unlock(io_mod.getIo());
-        if (unavailable) return false;
+    /// Invalidates a pending provider activation without joining its worker.
+    /// The event loop later reaps the handle after the worker has stopped, so
+    /// a slow network operation cannot block logout or any other UI action.
+    pub fn cancel(self: *Self) void {
+        _ = self.cancelMatching(null);
+    }
 
+    /// Invalidates only an activation for `target`. Logging out of one
+    /// subscription provider must not discard an unrelated provider switch.
+    pub fn cancelTarget(self: *Self, target: model_provider.ProviderId) bool {
+        return self.cancelMatching(target);
+    }
+
+    fn cancelMatching(self: *Self, target: ?model_provider.ProviderId) bool {
+        self.mutex.lockUncancelable(io_mod.getIo());
+        defer self.mutex.unlock(io_mod.getIo());
+        const pending_target = self.pending_target orelse return false;
+        if (target) |expected| {
+            if (pending_target != expected) return false;
+        }
+        self.cancel_requested.store(true, .seq_cst);
+        self.discard_completion = true;
+        if (self.completion) |*completion| completion.deinit(self.alloc);
+        self.completion = null;
+        self.pending_target = null;
+        return true;
+    }
+
+    pub fn start(self: *Self, request: Request) !bool {
+        self.reapFinished();
         var owned = try OwnedRequest.init(self.alloc, request);
         errdefer owned.deinit(self.alloc);
-        self.cancel_requested.store(false, .seq_cst);
 
         self.mutex.lockUncancelable(io_mod.getIo());
+        if (self.running or self.completion != null or self.thread != null) {
+            self.mutex.unlock(io_mod.getIo());
+            owned.deinit(self.alloc);
+            return false;
+        }
+        self.discard_completion = false;
+        self.cancel_requested.store(false, .seq_cst);
         self.running = true;
-        self.mutex.unlock(io_mod.getIo());
+        self.pending_target = request.target;
         const thread = std.Thread.spawn(.{}, threadMain, .{ self, owned }) catch |err| {
-            self.mutex.lockUncancelable(io_mod.getIo());
             self.running = false;
+            self.pending_target = null;
             self.mutex.unlock(io_mod.getIo());
             return err;
         };
         owned = undefined;
-        self.mutex.lockUncancelable(io_mod.getIo());
+        // Publish the handle before the worker can publish completion. The
+        // worker takes this same mutex at the end of threadMain.
         self.thread = thread;
         self.mutex.unlock(io_mod.getIo());
         return true;
@@ -227,12 +268,21 @@ pub const Runtime = struct {
     pub fn takeCompletion(self: *Self) ?Completion {
         self.mutex.lockUncancelable(io_mod.getIo());
         const completion = self.completion orelse {
+            const thread = if (!self.running) self.thread else null;
+            if (thread != null) {
+                self.thread = null;
+                self.discard_completion = false;
+                self.pending_target = null;
+            }
             self.mutex.unlock(io_mod.getIo());
+            if (thread) |handle| handle.join();
             return null;
         };
         self.completion = null;
         const thread = self.thread;
         self.thread = null;
+        self.discard_completion = false;
+        self.pending_target = null;
         self.mutex.unlock(io_mod.getIo());
         if (thread) |handle| handle.join();
         return completion;
@@ -246,16 +296,29 @@ pub const Runtime = struct {
             credential
         else
             null;
-        const outcome = prepare(self.alloc, request, &self.cancel_requested);
-        self.mutex.lockUncancelable(io_mod.getIo());
-        self.completion = .{
+        var completion = Completion{
             .target = request.target,
             .intent = request.intent,
             .allow_login = request.allow_login,
-            .outcome = outcome,
+            .outcome = prepare(self.alloc, request, &self.cancel_requested),
         };
+        self.mutex.lockUncancelable(io_mod.getIo());
+        const discard = self.discard_completion;
+        if (!discard) self.completion = completion;
         self.running = false;
         self.mutex.unlock(io_mod.getIo());
+        if (discard) completion.deinit(self.alloc);
+    }
+
+    fn reapFinished(self: *Self) void {
+        self.mutex.lockUncancelable(io_mod.getIo());
+        const thread = if (!self.running) self.thread else null;
+        if (thread != null) {
+            self.thread = null;
+            self.discard_completion = false;
+        }
+        self.mutex.unlock(io_mod.getIo());
+        if (thread) |handle| handle.join();
     }
 
     fn detachThread(self: *Self) ?std.Thread {
@@ -280,4 +343,136 @@ fn cloneCredential(alloc: Allocator, value: credentials.Credential) !credentials
         .account_id = account_id,
         .refresh_after_ms = value.refresh_after_ms,
     };
+}
+
+test "provider activation cancellation discards a prepared credential" {
+    const FakeCatalog = struct {
+        entered: std.atomic.Value(bool) = .init(false),
+
+        fn fetch(
+            raw: ?*anyopaque,
+            _: Allocator,
+            input: model_catalog.FetchInput,
+        ) Allocator.Error!model_catalog.ProviderResult {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            self.entered.store(true, .release);
+            const cancel = input.cancel_flag orelse unreachable;
+            while (!cancel.load(.acquire)) io_mod.sleep(std.time.ns_per_ms);
+            return .{ .failure = .{ .category = .cancellation } };
+        }
+    };
+
+    var fake = FakeCatalog{};
+    var runtime = Runtime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const credential = credentials.Credential{
+        .token = @constCast("test-key"),
+        .source = .openai_api_key,
+    };
+    const request = Request{
+        .target = .gateway,
+        .oauth_transport = oauth_transport.unavailable_provider,
+        .secret_store = host.unavailable_secret_store,
+        .catalog_provider = .{ .context = &fake, .fetch_fn = FakeCatalog.fetch },
+        .endpoint = "https://example.test/v1/models",
+        .credential_override = &credential,
+    };
+    try std.testing.expect(try runtime.start(request));
+    while (!fake.entered.load(.acquire)) io_mod.sleep(std.time.ns_per_ms);
+    try std.testing.expect(!(try runtime.start(request)));
+
+    runtime.cancel();
+    while (runtime.isRunning()) io_mod.sleep(std.time.ns_per_ms);
+
+    try std.testing.expect(!runtime.isRunning());
+    try std.testing.expect(runtime.takeCompletion() == null);
+}
+
+test "provider activation cancellation never joins a stalled worker" {
+    const FakeCatalog = struct {
+        entered: std.atomic.Value(bool) = .init(false),
+        release: std.atomic.Value(bool) = .init(false),
+
+        fn fetch(
+            raw: ?*anyopaque,
+            _: Allocator,
+            _: model_catalog.FetchInput,
+        ) Allocator.Error!model_catalog.ProviderResult {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            self.entered.store(true, .release);
+            while (!self.release.load(.acquire)) io_mod.sleep(std.time.ns_per_ms);
+            return .{ .failure = .{ .category = .cancellation } };
+        }
+    };
+
+    var fake = FakeCatalog{};
+    var runtime = Runtime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const credential = credentials.Credential{
+        .token = @constCast("test-key"),
+        .source = .openai_api_key,
+    };
+    try std.testing.expect(try runtime.start(.{
+        .target = .gateway,
+        .oauth_transport = oauth_transport.unavailable_provider,
+        .secret_store = host.unavailable_secret_store,
+        .catalog_provider = .{ .context = &fake, .fetch_fn = FakeCatalog.fetch },
+        .endpoint = "https://example.test/v1/models",
+        .credential_override = &credential,
+    }));
+    while (!fake.entered.load(.acquire)) io_mod.sleep(std.time.ns_per_ms);
+
+    runtime.cancel();
+    // A synchronous join would never reach these assertions because this fake
+    // provider intentionally ignores the cooperative cancellation flag.
+    try std.testing.expect(runtime.isRunning());
+    try std.testing.expect(runtime.takeCompletion() == null);
+
+    fake.release.store(true, .release);
+    while (runtime.isRunning()) io_mod.sleep(std.time.ns_per_ms);
+    try std.testing.expect(runtime.takeCompletion() == null);
+}
+
+test "provider activation cancellation ignores a different provider" {
+    const FakeCatalog = struct {
+        entered: std.atomic.Value(bool) = .init(false),
+        release: std.atomic.Value(bool) = .init(false),
+
+        fn fetch(
+            raw: ?*anyopaque,
+            _: Allocator,
+            _: model_catalog.FetchInput,
+        ) Allocator.Error!model_catalog.ProviderResult {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            self.entered.store(true, .release);
+            while (!self.release.load(.acquire)) io_mod.sleep(std.time.ns_per_ms);
+            return .{ .failure = .{ .category = .cancellation } };
+        }
+    };
+
+    var fake = FakeCatalog{};
+    var runtime = Runtime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const credential = credentials.Credential{
+        .token = @constCast("grok-key"),
+        .source = .grok_subscription,
+    };
+    try std.testing.expect(try runtime.start(.{
+        .target = .grok,
+        .oauth_transport = oauth_transport.unavailable_provider,
+        .secret_store = host.unavailable_secret_store,
+        .catalog_provider = .{ .context = &fake, .fetch_fn = FakeCatalog.fetch },
+        .endpoint = "https://example.test/models",
+        .credential_override = &credential,
+    }));
+    while (!fake.entered.load(.acquire)) io_mod.sleep(std.time.ns_per_ms);
+
+    try std.testing.expect(!runtime.cancelTarget(.codex));
+    try std.testing.expect(runtime.isRunning());
+
+    fake.release.store(true, .release);
+    while (runtime.isRunning()) io_mod.sleep(std.time.ns_per_ms);
+    var completion = runtime.takeCompletion() orelse return error.TestExpectedEqual;
+    defer completion.deinit(std.testing.allocator);
+    try std.testing.expectEqual(model_provider.ProviderId.grok, completion.target);
 }

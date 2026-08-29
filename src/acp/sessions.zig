@@ -845,7 +845,7 @@ fn handleLoadFailure(
             .code = ErrorCode.internal_error,
             .message = "Failed to commit session workspace rebind",
         });
-        state.terminate_connection = true;
+        state.terminate_connection.store(true, .release);
         return;
     }
     if (err == error.SessionWorkspaceRebindFailed) {

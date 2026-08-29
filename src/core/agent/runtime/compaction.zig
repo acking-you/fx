@@ -5,6 +5,7 @@ const provider_route = @import("../../gateway/provider_route.zig");
 const responses_compaction_binding = @import("../../gateway/responses_compaction_binding.zig");
 const responses_compaction_provider = @import("../../gateway/responses_compaction_provider.zig");
 const debug_trace = @import("../../shared/debug_trace.zig");
+const io_mod = @import("../../shared/io.zig");
 const types = @import("../../shared/types.zig");
 
 const Allocator = std.mem.Allocator;
@@ -32,6 +33,9 @@ pub const Request = struct {
     /// use this to keep the request and its stale-result check bound to the
     /// same provider endpoint and credential identity.
     provider_binding: ?types.ResponsesCompactionProviderBindingView = null,
+    /// Exact live endpoint used by hosts with a connection-scoped BYOK route.
+    /// This is consumed only when no prebuilt provider binding was supplied.
+    endpoint_override: ?[]const u8 = null,
     cancel_flag: *std.atomic.Value(bool),
 };
 
@@ -118,11 +122,20 @@ pub fn compact(alloc: Allocator, request: Request) !Result {
         }
         break :blk provided;
     } else blk: {
-        owned_binding = responses_compaction_binding.buildFromEnvironmentAlloc(
+        const options = if (request.endpoint_override) |endpoint|
+            responses_compaction_binding.BuildOptions{
+                .endpoint_overrides = .{ .responses_base_url = endpoint },
+                .organization = io_mod.getenv("OPENAI_ORG_ID"),
+                .project = io_mod.getenv("OPENAI_PROJECT_ID"),
+            }
+        else
+            responses_compaction_binding.BuildOptions.fromEnvironment();
+        owned_binding = responses_compaction_binding.buildAlloc(
             alloc,
             source,
             request.credential,
             request.account_id,
+            options,
         ) catch |err| {
             debug_trace.logf("compaction", "provider binding unavailable err={s}", .{@errorName(err)});
             return localResult(local_summary);
@@ -584,6 +597,49 @@ test "remote compaction honors a caller-captured provider binding" {
         .cancel_flag = &cancel_flag,
     });
     defer result.deinit(alloc);
+    try std.testing.expect(result.used_remote);
+}
+
+test "remote compaction binds a connection-scoped endpoint to its key" {
+    const Fake = struct {
+        fn fetch(
+            _: ?*anyopaque,
+            alloc: Allocator,
+            request: responses_compaction_provider.Request,
+        ) !responses_compaction_provider.Outcome {
+            try std.testing.expectEqualStrings(
+                "https://connection.example/v1/responses",
+                request.provider_binding.normalized_origin,
+            );
+            try std.testing.expect(responses_compaction_binding.credentialMatches(
+                .openai_api_key,
+                request.credential,
+                request.account_id,
+                request.provider_binding,
+            ));
+            return .{ .compacted = .{
+                .credential_source = .openai_api_key,
+                .wire_model = try alloc.dupe(u8, "gpt-5.4"),
+                .input_json = try alloc.dupe(u8, "[{\"type\":\"compaction\"}]"),
+            } };
+        }
+    };
+
+    var cancel_flag = std.atomic.Value(bool).init(false);
+    var result = try compact(std.testing.allocator, .{
+        .provider = .{ .fetch_fn = Fake.fetch },
+        .credential_source = .openai_api_key,
+        .credential = "sk-connection",
+        .account_id = null,
+        .session_id = "session",
+        .model = "gpt-5.4",
+        .serialized_tools = "[]",
+        .messages = &.{.{ .role = .user, .content = "retain this intent" }},
+        .provider_options = .{},
+        .endpoint_override = "https://connection.example/v1/responses",
+        .cancel_flag = &cancel_flag,
+    });
+    defer result.deinit(std.testing.allocator);
     try std.testing.expect(result.used_remote);
 }
 

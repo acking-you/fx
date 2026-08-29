@@ -68,7 +68,11 @@ afterEach(async () => {
   stderrPath = null;
 });
 
-function writeSeededChatGptLogin(testHome: string, accessToken = chatgptAccessToken()): void {
+function writeSeededChatGptLogin(
+  testHome: string,
+  accessToken = chatgptAccessToken(),
+  expiresAtMs = Date.now() + 60 * 60 * 1000,
+): void {
   const fxDir = join(testHome, ".fx");
   mkdirSync(fxDir, { recursive: true, mode: 0o700 });
   chmodSync(fxDir, 0o700);
@@ -77,7 +81,7 @@ function writeSeededChatGptLogin(testHome: string, accessToken = chatgptAccessTo
     version: 1,
     access_token: accessToken,
     refresh_token: "chatgpt-refresh",
-    expires_at_ms: Date.now() + 60 * 60 * 1000,
+    expires_at_ms: expiresAtMs,
     account_id: "acct_e2e",
   }) + "\n", { mode: 0o600 });
   chmodSync(authPath, 0o600);
@@ -1037,6 +1041,41 @@ tmuxTest(
     expect(Date.now() - statusStarted).toBeLessThan(1_500);
     await session.waitForText("Switched to Codex subscription", TIMEOUT);
 
+    expect(session.isAlive()).toBe(true);
+    expect(readFileSync(stderrPath, "utf8")).toBe("");
+  },
+  60_000,
+);
+
+tmuxTest(
+  "logout waits for a provider refresh without blocking the TUI thread",
+  async () => {
+    home = mkdtempSync(join(tmpdir(), "fx-tui-provider-logout-responsive-"));
+    stderrPath = join(home, "stderr.log");
+    writeFileSync(stderrPath, "");
+    gateway = startFakeGateway([]);
+    chatgptOauth = startFakeChatGptOAuth({ tokenDelayMs: 3_000 });
+    writeSeededChatGptLogin(home, chatgptOauth.accessToken, Date.now() - 1_000);
+    session = await startFx(home, stderrPath, gateway, undefined, chatgptOauth.env);
+    await session.waitForComposer(TIMEOUT);
+
+    await session.sendText("/provider codex");
+    await session.waitForText("Switching to Codex subscription...", TIMEOUT);
+    while (!chatgptOauth.requests.some((request) => request.path === "/chatgpt/token")) {
+      await Bun.sleep(10);
+    }
+    const logoutStarted = Date.now();
+    await session.sendText("/logout codex");
+    await session.waitForText("Signing out of Codex...", TIMEOUT);
+    await session.sendText("/status");
+    await session.waitForText("auth=OPENAI_API_KEY", TIMEOUT);
+    expect(Date.now() - logoutStarted).toBeLessThan(1_500);
+    await session.waitForText("Signed out of Codex.", TIMEOUT);
+    expect(existsSync(join(home, ".fx", "chatgpt-auth.json"))).toBe(false);
+
+    expect(await session.captureFullScrollback()).not.toContain(
+      "Switched to Codex subscription with",
+    );
     expect(session.isAlive()).toBe(true);
     expect(readFileSync(stderrPath, "utf8")).toBe("");
   },

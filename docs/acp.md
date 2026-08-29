@@ -112,7 +112,13 @@ The API key is never echoed. This ACP method keeps it only in the current fx
 process and does not write it to `settings.json` or a session log. Start a new
 ACP connection or call the method again to replace it. Use environment or
 profile-owned credential configuration when persistence across process restarts
-is required.
+is required. The response URL and key remain one connection-scoped binding when
+you temporarily switch to Codex or Grok; switching back to `gateway` restores
+both. Ordinary model requests, automatic permission reviews, and manual or
+automatic remote compaction all use that same binding. Persistent subagents
+also retain the provider and connection route captured for each child turn.
+Changing the parent provider does not reroute an existing child, and replacing
+the connection binding does not alter a child turn already in progress.
 
 ## Query the active turn
 
@@ -259,7 +265,9 @@ this shape:
 Omit `chars` to take a nonblocking output snapshot. Polling and writing never
 hold the ACP dispatch loop open while waiting for process output, so the same
 connection can continue to cancel or steer the turn, answer permission
-requests, query status, or terminate the process. The legacy `yieldTimeMs`
+requests, query status, or terminate the process. ACP keeps an independent
+output cursor, so these snapshots never consume output awaited by the model.
+The legacy `yieldTimeMs`
 parameter is accepted and validated for compatibility but does not delay this
 ACP method. Terminate the process with:
 

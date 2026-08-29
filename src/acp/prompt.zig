@@ -88,6 +88,11 @@ pub const TerminalOutcome = union(enum) {
 };
 
 const AcpContext = struct {
+    const GatewayRouteView = union(enum) {
+        live,
+        snapshot: ?*const server.GatewayRouteSnapshot,
+    };
+
     alloc: Allocator,
     state: *server.ServerState,
     session_id: []const u8,
@@ -215,9 +220,37 @@ const AcpContext = struct {
     }
 
     fn toolContext(self: *AcpContext) tool_runtime.Context {
+        return self.toolContextWithGatewayRoute(.live);
+    }
+
+    fn toolContextWithGatewayRoute(
+        self: *AcpContext,
+        gateway_route: GatewayRouteView,
+    ) tool_runtime.Context {
         const session = if (self.state.active_session) |*active| active else unreachable;
         const provider_bundle = self.state.cfg.provider_set.select(session.provider);
         const provider_capabilities = provider_bundle.capabilities;
+        const gateway_chat_url = switch (gateway_route) {
+            .live => server.gatewayChatUrl(self.state),
+            .snapshot => |route| if (route) |owned|
+                owned.chat_url
+            else
+                self.state.cfg.gateway_chat_url,
+        };
+        const gateway_models_path = switch (gateway_route) {
+            .live => server.gatewayModelsPath(self.state),
+            .snapshot => |route| if (route) |owned|
+                owned.models_url
+            else
+                self.state.cfg.gateway_models_path,
+        };
+        const provider_endpoint_override = switch (gateway_route) {
+            .live => server.providerEndpointOverride(self.state, session.provider),
+            .snapshot => |route| if (route) |owned|
+                if (session.provider == .gateway) owned.chat_url else null
+            else
+                null,
+        };
         if (provider_capabilities.fx_search and provider_bundle.fx_search != null) {
             self.state.web_search_runtime.configureForProvider(provider_bundle.fx_search.?, .{
                 .api_key = session.api_key,
@@ -225,7 +258,7 @@ const AcpContext = struct {
                 .account_id = session.account_id,
                 .worker_model = session.model,
                 .gateway_retry_count = self.state.cfg.gateway_retry_count,
-                .gateway_chat_url = server.gatewayChatUrl(self.state),
+                .gateway_chat_url = gateway_chat_url,
                 .usage = &session.session_rt.usage,
                 .usage_allocator = self.state.alloc,
             });
@@ -250,8 +283,9 @@ const AcpContext = struct {
             .secret_store = self.state.cfg.secret_store,
             .model = session.model,
             .gateway_retry_count = self.state.cfg.gateway_retry_count,
-            .gateway_chat_url = server.gatewayChatUrl(self.state),
-            .gateway_models_path = server.gatewayModelsPath(self.state),
+            .gateway_chat_url = gateway_chat_url,
+            .provider_endpoint_override = provider_endpoint_override,
+            .gateway_models_path = gateway_models_path,
             .agent_step_limit = session.agent_step_limit,
             .fast_mode = session.fast_mode,
             .effort = session.effort,
@@ -517,6 +551,7 @@ fn handleCompactCommand(
             session.effort,
             session.fast_mode,
         ),
+        .endpoint_override = server.providerEndpointOverride(ctx.state, session.provider),
         .cancel_flag = &session.cancel_flag,
     });
     defer result.deinit(ctx.alloc);
@@ -1348,6 +1383,11 @@ pub fn runSubagentChild(
     const state: *server.ServerState = @ptrCast(@alignCast(raw.?));
     const subagent_host = state.subagent_host orelse return error.ProviderFailed;
     const alloc = state.alloc;
+    var gateway_route = if (admission.provider == .gateway)
+        server.snapshotGatewayRoute(state, alloc) catch return error.OutOfMemory
+    else
+        null;
+    defer if (gateway_route) |*route| route.deinit(alloc);
     state.subagent_authority_mutex.lockUncancelable(io_mod.getIo());
     const active = if (state.active_session) |*session| session else {
         state.subagent_authority_mutex.unlock(io_mod.getIo());
@@ -1391,9 +1431,23 @@ pub fn runSubagentChild(
         state.context_limits,
     ) catch return error.OutOfMemory;
     defer explicit_skills.deinit(alloc);
+    const provider_route_override: ?subagent_agent_adapter.ProviderRouteOverride = if (gateway_route) |*route|
+        .{
+            .provider = .gateway,
+            .api_key = route.credential.token,
+            .credential_source = route.credential.source,
+            .account_id = route.credential.account_id,
+            .endpoint = route.chat_url,
+            .models_path = route.models_url,
+        }
+    else
+        null;
+    const child_tool_context = ctx.toolContextWithGatewayRoute(
+        .{ .snapshot = if (gateway_route) |*route| route else null },
+    );
     return subagent_agent_adapter.run(.{
         .host = subagent_host,
-        .tool_context = ctx.toolContext(),
+        .tool_context = child_tool_context,
         .provider_set = state.cfg.provider_set,
         .system_prompt = state.cfg.prompt_policy.system_prompt,
         .model_prompt_overlay = state.cfg.prompt_policy.modelPromptOverlay(admission.model),
@@ -1406,6 +1460,7 @@ pub fn runSubagentChild(
         .context_enabled = state.context_enabled,
         .project_context = state.context_snapshot.modelVisibleBytes(),
         .lifecycle_view = state.lifecycle_view,
+        .provider_route_override = provider_route_override,
     }, turn, message, admission, cancel);
 }
 
@@ -1448,7 +1503,7 @@ fn buildAgentConfig(state: *server.ServerState, session: *server.ActiveSessionSt
         .explicit_skills_prompt_section = sections.explicit_skills_prompt_section,
         .gateway_retry_count = state.cfg.gateway_retry_count,
         .gateway_chat_url = server.gatewayChatUrl(state),
-        .provider_endpoint_override = state.gateway_chat_url_override,
+        .provider_endpoint_override = server.providerEndpointOverride(state, session.provider),
         .advertised_tool_names = sections.advertised_tool_names,
         .advertised_functions = sections.advertised_functions,
         .provider_capabilities = state.cfg.provider_set.select(session.provider).capabilities,

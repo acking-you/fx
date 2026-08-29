@@ -1029,7 +1029,10 @@ const AskContext = struct {
             .credential_source = self.credential_source,
             .account_id = self.account_id,
             .model = self.model,
-            .endpoint = self.cfg.gateway_chat_url,
+            // Direct providers own their environment route. The built-in
+            // gateway_chat_url is only a fallback and must not mask an
+            // FX_RESPONSES_BASE_URL used by the admitted model request.
+            .endpoint = "",
             .cancel_flag = self.cancelFlag(),
             .usage = &self.session.usage,
             .usage_allocator = self.alloc,

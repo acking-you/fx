@@ -73,7 +73,7 @@ fx login grok
 fx
 ```
 
-`fx login codex` and `fx login grok` select that provider and a model from its authenticated catalog. Inside fx, use `/provider` to choose between BYOK Responses, Codex, and Grok, or switch directly with `/provider gateway`, `/provider codex`, or `/provider grok`. Provider credential refresh and catalog loading run in the background, so the composer, status commands, and terminal activity remain responsive while a switch is validated. `/login` is reserved for provider sign-in and credential selection. `/model` lists the active provider's fetched models. Subscription model IDs are the raw IDs returned by each authenticated catalog. Use `/logout codex` or `/logout grok` to remove that subscription session; selecting the provider again starts sign-in when needed.
+`fx login codex` and `fx login grok` select that provider and a model from its authenticated catalog. Inside fx, use `/provider` to choose between BYOK Responses, Codex, and Grok, or switch directly with `/provider gateway`, `/provider codex`, or `/provider grok`. Provider credential refresh, catalog loading, and durable subscription logout run in the background, so the composer, status commands, and terminal activity remain responsive while those operations settle. `/login` is reserved for provider sign-in and credential selection. `/model` lists the active provider's fetched models. Subscription model IDs are the raw IDs returned by each authenticated catalog. Use `/logout codex` or `/logout grok` to remove that subscription session; selecting the provider again starts sign-in when needed.
 
 The OpenAI Codex route uses ChatGPT subscription access directly. The session is stored privately at `~/.fx/chatgpt-auth.json` and refreshed when needed. Its `web_search` tool uses the authenticated Codex search service directly. On supported Codex models, `/fast` requests OpenAI's priority service tier and consumes ChatGPT credits at the higher Fast mode rate.
 
@@ -96,7 +96,7 @@ fx
 
 `OPENAI_BASE_URL` is also supported when `FX_RESPONSES_BASE_URL` is unset. This path expects the Responses API, not the Chat Completions protocol.
 
-Inside the interactive app, run `/model` to browse the active provider's catalog. After choosing a model, the same picker offers only the reasoning efforts and Fast mode supported by that catalog entry. The **Model** row in `/settings` uses the same flow. `/effort` shows or sets the current reasoning effort, while `/fast` toggles Fast mode for the current model. ACP clients receive the same `model`, `provider`, `effort`, and `fast_mode` configuration options. Native ACP also exposes provider login plus connection-scoped BYOK URL and API-key configuration without requiring those secrets in the process environment; see [ACP usage](docs/acp.md#provider-control). The JavaScript SDK exposes `setModel`, `setEffort`, and `setFastMode`. On the Responses wire, Fast mode uses the `priority` service tier. Selecting a model that does not support the current effort or Fast mode clears that stale setting instead of sending an invalid request.
+Inside the interactive app, run `/model` to browse the active provider's catalog. After choosing a model, the same picker offers only the reasoning efforts and Fast mode supported by that catalog entry. The **Model** row in `/settings` uses the same flow. `/effort` shows or sets the current reasoning effort, while `/fast` toggles Fast mode for the current model. ACP clients receive the same `model`, `provider`, `effort`, and `fast_mode` configuration options. Native ACP also exposes provider login plus connection-scoped BYOK URL and API-key configuration without requiring those secrets in the process environment; persistent child turns keep their own provider route even when the parent switches or the connection binding is replaced. See [ACP usage](docs/acp.md#provider-control). The JavaScript SDK exposes `setModel`, `setEffort`, and `setFastMode`. On the Responses wire, Fast mode uses the `priority` service tier. Selecting a model that does not support the current effort or Fast mode clears that stale setting instead of sending an invalid request.
 
 For a direct switch, pass the model, effort, and optional speed in one command:
 
@@ -186,9 +186,12 @@ fx builds as a native binary or WebAssembly. Applications embedding fx can provi
 The WebAssembly SDK is experimental. See the [WebAssembly SDK](sdk/README.md) and the repository's [ACP usage and fx extensions guide](docs/acp.md).
 
 Native ACP clients can also interact with a running Unified Exec process
-directly through `fx/unifiedExec/writeStdin` and `fx/unifiedExec/kill`; see the
-ACP guide for the session and process ID contract. Vision-capable models accept
-standard ACP base64 image prompt blocks and persist verified image snapshots.
+directly through `fx/unifiedExec/writeStdin` and `fx/unifiedExec/kill`; those
+control requests remain responsive while a model-side output poll is waiting,
+and ACP output observation does not consume the model-facing output stream.
+See the ACP guide for the session and process ID contract. Vision-capable models
+accept standard ACP base64 image prompt blocks and persist verified image
+snapshots.
 
 ## Extend fx
 
