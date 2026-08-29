@@ -4547,8 +4547,14 @@ test "disabled automatic reviewer returns a recoverable denial without a human p
     try std.testing.expect(rt.worker.pending_permission_request_shared == null);
 }
 
-test "web_fetch permits valid public hosts by default" {
-    var rt = TestRuntime{ .workspace_root = "/tmp/workspace", .permission_mode = .auto, .interactive = false };
+test "web_fetch bypasses automatic review for valid public hosts by default" {
+    var reviewer = TestAutoReview{};
+    var rt = TestRuntime{
+        .workspace_root = "/tmp/workspace",
+        .permission_mode = .auto,
+        .interactive = false,
+        .auto_classifier = reviewer.classifier(),
+    };
     defer rt.deinit(std.testing.allocator);
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
@@ -4559,6 +4565,7 @@ test "web_fetch permits valid public hosts by default" {
         .name = "web_fetch",
         .arguments_json = "{\"url\":\"https://example.com/frameworks/sample\"}",
     }, .auto, &.{})).decision);
+    try std.testing.expectEqual(@as(usize, 0), reviewer.calls);
 }
 
 test "web_fetch exact session grant authorizes only matching canonical domain" {

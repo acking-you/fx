@@ -3390,10 +3390,18 @@ pub fn mapToolKind(tool_name: []const u8) acp_types.ToolCallKind {
 }
 
 fn describeToolTitle(registry: tool_dispatch.Registry, arena: Allocator, call: ToolCall) ![]const u8 {
-    return tool_presentation.formatPlainAction(arena, .{
-        .tool_registry = registry,
-        .call = call,
-    });
+    if (registry.lookup(call.name)) |spec| {
+        if (spec.executor_kind == .exec_command or spec.executor_kind == .write_stdin) {
+            return tool_presentation.formatPlainAction(arena, .{
+                .tool_registry = registry,
+                .call = call,
+            });
+        }
+    }
+    if (tool_dispatch.toolCallPresentation(arena, registry, call)) |presentation| {
+        return std.fmt.allocPrint(arena, "{s}", .{presentation.action_label});
+    }
+    return std.fmt.allocPrint(arena, "{s}", .{call.name});
 }
 
 test "ACP lifecycle action preserves dynamic MCP availability boundaries" {
