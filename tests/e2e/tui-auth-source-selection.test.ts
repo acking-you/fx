@@ -1044,6 +1044,36 @@ tmuxTest(
 );
 
 tmuxTest(
+  "logout invalidates provider loading without joining the TUI thread",
+  async () => {
+    home = mkdtempSync(join(tmpdir(), "fx-tui-provider-logout-responsive-"));
+    stderrPath = join(home, "stderr.log");
+    writeFileSync(stderrPath, "");
+    gateway = startFakeGateway([]);
+    chatgptOauth = startFakeChatGptOAuth({ modelDelayMs: 2_000 });
+    writeSeededChatGptLogin(home, chatgptOauth.accessToken);
+    session = await startFx(home, stderrPath, gateway, undefined, chatgptOauth.env);
+    await session.waitForComposer(TIMEOUT);
+
+    await session.sendText("/provider codex");
+    await session.waitForText("Switching to Codex subscription...", TIMEOUT);
+    const logoutStarted = Date.now();
+    await session.sendText("/logout codex");
+    await session.waitForText("Signed out of Codex.", TIMEOUT);
+    expect(Date.now() - logoutStarted).toBeLessThan(1_500);
+    expect(existsSync(join(home, ".fx", "chatgpt-auth.json"))).toBe(false);
+
+    await Bun.sleep(2_200);
+    expect(await session.captureFullScrollback()).not.toContain(
+      "Switched to Codex subscription with",
+    );
+    expect(session.isAlive()).toBe(true);
+    expect(readFileSync(stderrPath, "utf8")).toBe("");
+  },
+  60_000,
+);
+
+tmuxTest(
   "provider switch reauthenticates current Codex and replaces an unavailable model",
   async () => {
     home = mkdtempSync(join(tmpdir(), "fx-tui-chatgpt-success-"));

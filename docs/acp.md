@@ -262,7 +262,9 @@ this shape:
 Omit `chars` to take a nonblocking output snapshot. Polling and writing never
 hold the ACP dispatch loop open while waiting for process output, so the same
 connection can continue to cancel or steer the turn, answer permission
-requests, query status, or terminate the process. The legacy `yieldTimeMs`
+requests, query status, or terminate the process. ACP keeps an independent
+output cursor, so these snapshots never consume output awaited by the model.
+The legacy `yieldTimeMs`
 parameter is accepted and validated for compatibility but does not delay this
 ACP method. Terminate the process with:
 

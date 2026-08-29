@@ -105,14 +105,14 @@ pub const Manager = struct {
         const id = process.id;
         const yield_ms = clampInitialYield(request.yield_time_ms);
         if (!process.waitUntilDone(yield_ms)) {
-            return process.snapshot(alloc, id, .running, request.max_output_tokens);
+            return process.snapshot(alloc, id, .running, request.max_output_tokens, .model);
         }
         if (!self.detachHeld(id, process)) return error.ProcessUnavailable;
         // The wait thread may observe exit before the pipe readers have drained
         // their final bytes. Join them before taking the terminal snapshot.
         process.stopAndJoin();
         process.finalizeArtifact();
-        return process.snapshot(alloc, null, .exited, request.max_output_tokens);
+        return process.snapshot(alloc, null, .exited, request.max_output_tokens, .model);
     }
 
     pub fn writeStdin(self: *Manager, alloc: Allocator, request: WriteRequest) !Result {
@@ -124,12 +124,12 @@ pub const Manager = struct {
         else
             clampInitialYield(request.yield_time_ms);
         if (!process.waitUntilDone(yield_ms)) {
-            return process.snapshot(alloc, request.process_id, .running, request.max_output_tokens);
+            return process.snapshot(alloc, request.process_id, .running, request.max_output_tokens, .model);
         }
         if (!self.detachHeld(request.process_id, process)) return error.ProcessUnavailable;
         process.stopAndJoin();
         process.finalizeArtifact();
-        return process.snapshot(alloc, null, .exited, request.max_output_tokens);
+        return process.snapshot(alloc, null, .exited, request.max_output_tokens, .model);
     }
 
     /// Writes input and returns the output currently available without a
@@ -139,13 +139,17 @@ pub const Manager = struct {
         const process = self.acquire(request.process_id) orelse return error.UnknownProcessId;
         defer self.releaseActive(process);
         try process.write(request.chars);
-        if (!process.waitUntilDone(0)) {
-            return process.snapshot(alloc, request.process_id, .running, request.max_output_tokens);
-        }
-        if (!self.detachHeld(request.process_id, process)) return error.ProcessUnavailable;
-        process.stopAndJoin();
-        process.finalizeArtifact();
-        return process.snapshot(alloc, null, .exited, request.max_output_tokens);
+        const status: Status = if (process.isSettled()) .exited else .running;
+        // ACP is an observer of the model-owned process. It must neither drain
+        // the model's output cursor nor claim terminal cleanup when the child
+        // exits; the model-facing write_stdin path remains the sole consumer.
+        return process.snapshot(
+            alloc,
+            if (status == .running) request.process_id else null,
+            status,
+            request.max_output_tokens,
+            .observer,
+        );
     }
 
     /// Explicitly terminate one background process and its process group.
@@ -358,6 +362,8 @@ fn clampPollYield(value: u64) u64 {
 }
 
 const Process = struct {
+    const SnapshotConsumer = enum { model, observer };
+
     alloc: Allocator,
     id: u64,
     pid: std.posix.pid_t,
@@ -368,6 +374,9 @@ const Process = struct {
     mutex: std.Io.Mutex = .init,
     stdout_buffer: HeadTailBuffer = .{},
     stderr_buffer: HeadTailBuffer = .{},
+    observer_stdout_buffer: HeadTailBuffer = .{},
+    observer_stderr_buffer: HeadTailBuffer = .{},
+    observer_active: bool = false,
     artifact_threshold: usize,
     artifact_eager: bool,
     artifact_capability: ?*session_child_store.SessionChildCapability,
@@ -453,6 +462,12 @@ const Process = struct {
         }
     }
 
+    fn isSettled(self: *Process) bool {
+        self.mutex.lockUncancelable(io_mod.getIo());
+        defer self.mutex.unlock(io_mod.getIo());
+        return self.done and self.readers_done == 2;
+    }
+
     fn write(self: *Process, chars: []const u8) !void {
         if (chars.len == 0) return;
         self.mutex.lockUncancelable(io_mod.getIo());
@@ -475,16 +490,47 @@ const Process = struct {
         }
     }
 
-    fn snapshot(self: *Process, alloc: Allocator, process_id: ?u64, status: Manager.Status, max_output_tokens: ?u64) !Manager.Result {
+    fn snapshot(
+        self: *Process,
+        alloc: Allocator,
+        process_id: ?u64,
+        status: Manager.Status,
+        max_output_tokens: ?u64,
+        consumer: SnapshotConsumer,
+    ) !Manager.Result {
         var stdout_buffer: HeadTailBuffer = .{};
         var stderr_buffer: HeadTailBuffer = .{};
         var term: ?std.process.Child.Term = null;
         var artifact_paths: ?command_runner.CommandArtifact.Paths = null;
         self.mutex.lockUncancelable(io_mod.getIo());
-        stdout_buffer = self.stdout_buffer;
-        stderr_buffer = self.stderr_buffer;
-        self.stdout_buffer = .{};
-        self.stderr_buffer = .{};
+        switch (consumer) {
+            .model => {
+                stdout_buffer = self.stdout_buffer;
+                stderr_buffer = self.stderr_buffer;
+                self.stdout_buffer = .{};
+                self.stderr_buffer = .{};
+            },
+            .observer => {
+                if (!self.observer_active) {
+                    var observer_stdout = self.stdout_buffer.clone(self.alloc) catch |err| {
+                        self.mutex.unlock(io_mod.getIo());
+                        return err;
+                    };
+                    const observer_stderr = self.stderr_buffer.clone(self.alloc) catch |err| {
+                        observer_stdout.deinit(self.alloc);
+                        self.mutex.unlock(io_mod.getIo());
+                        return err;
+                    };
+                    self.observer_stdout_buffer = observer_stdout;
+                    self.observer_stderr_buffer = observer_stderr;
+                    self.observer_active = true;
+                }
+                stdout_buffer = self.observer_stdout_buffer;
+                stderr_buffer = self.observer_stderr_buffer;
+                self.observer_stdout_buffer = .{};
+                self.observer_stderr_buffer = .{};
+            },
+        }
         term = self.term;
         if (self.artifact) |*artifact| artifact_paths = artifact.paths();
         self.mutex.unlock(io_mod.getIo());
@@ -590,6 +636,8 @@ const Process = struct {
         self.alloc.free(self.cwd);
         self.stdout_buffer.deinit(self.alloc);
         self.stderr_buffer.deinit(self.alloc);
+        self.observer_stdout_buffer.deinit(self.alloc);
+        self.observer_stderr_buffer.deinit(self.alloc);
         self.alloc.destroy(self);
     }
 
@@ -609,10 +657,15 @@ const Process = struct {
             const count = file.readStreaming(io_mod.getIo(), &.{buffer[0..]}) catch break;
             if (count == 0) break;
             self.mutex.lockUncancelable(io_mod.getIo());
-            if (stderr)
-                self.stderr_buffer.append(self.alloc, buffer[0..count]) catch {}
-            else
+            if (stderr) {
+                self.stderr_buffer.append(self.alloc, buffer[0..count]) catch {};
+                if (self.observer_active)
+                    self.observer_stderr_buffer.append(self.alloc, buffer[0..count]) catch {};
+            } else {
                 self.stdout_buffer.append(self.alloc, buffer[0..count]) catch {};
+                if (self.observer_active)
+                    self.observer_stdout_buffer.append(self.alloc, buffer[0..count]) catch {};
+            }
             self.appendArtifactLocked(stderr, buffer[0..count]);
             self.mutex.unlock(io_mod.getIo());
         }
@@ -724,6 +777,15 @@ const HeadTailBuffer = struct {
         @memcpy(bytes[head.len .. head.len + marker.len], marker);
         @memcpy(bytes[head.len + marker.len ..], tail);
         return .{ .bytes = bytes, .total = self.total, .truncated = omitted };
+    }
+
+    fn clone(self: *const HeadTailBuffer, alloc: Allocator) !HeadTailBuffer {
+        var result: HeadTailBuffer = .{};
+        errdefer result.deinit(alloc);
+        try result.head.appendSlice(alloc, self.head.items);
+        try result.tail.appendSlice(alloc, self.tail.items);
+        result.total = self.total;
+        return result;
     }
 
     fn deinit(self: *HeadTailBuffer, alloc: Allocator) void {
@@ -877,7 +939,7 @@ test "unified exec direct control stays responsive during a model poll" {
     var manager = Manager.init(std.testing.allocator);
     defer manager.deinit();
     var first = try manager.exec(std.testing.allocator, .{
-        .command = "sleep 30",
+        .command = "IFS= read -r first; printf 'model:%s' \"$first\"; IFS= read -r second",
         .cwd = "/tmp",
         .yield_time_ms = 250,
     });
@@ -889,6 +951,9 @@ test "unified exec direct control stays responsive during a model poll" {
         process_id: u64,
         entered: std.atomic.Value(bool) = .init(false),
         failure: ?anyerror = null,
+        status: ?Manager.Status = null,
+        stdout: [64]u8 = undefined,
+        stdout_len: usize = 0,
 
         fn run(self: *@This()) void {
             self.entered.store(true, .release);
@@ -899,6 +964,9 @@ test "unified exec direct control stays responsive during a model poll" {
                 self.failure = err;
                 return;
             };
+            self.status = result.status;
+            self.stdout_len = @min(self.stdout.len, result.stdout.len);
+            @memcpy(self.stdout[0..self.stdout_len], result.stdout[0..self.stdout_len]);
             result.deinit(std.testing.allocator);
         }
     };
@@ -913,16 +981,35 @@ test "unified exec direct control stays responsive during a model poll" {
     const started = io_mod.milliTimestamp();
     var direct = try manager.writeStdinNonblocking(std.testing.allocator, .{
         .process_id = process_id,
+        .chars = "hello\n",
         .yield_time_ms = max_poll_yield_ms,
     });
-    defer direct.deinit(std.testing.allocator);
     const elapsed = io_mod.milliTimestamp() - started;
     try std.testing.expectEqual(Manager.Status.running, direct.status);
     try std.testing.expect(elapsed < 1_000);
+    var observed = std.mem.find(u8, direct.stdout, "model:hello") != null;
+    direct.deinit(std.testing.allocator);
 
-    try std.testing.expect(manager.terminate(process_id));
+    const observation_deadline = io_mod.milliTimestamp() + 2_000;
+    while (!observed and io_mod.milliTimestamp() < observation_deadline) {
+        io_mod.sleep(5 * std.time.ns_per_ms);
+        var observation = try manager.writeStdinNonblocking(std.testing.allocator, .{
+            .process_id = process_id,
+        });
+        observed = std.mem.find(u8, observation.stdout, "model:hello") != null;
+        observation.deinit(std.testing.allocator);
+    }
+    try std.testing.expect(observed);
+
+    var finish = try manager.writeStdinNonblocking(std.testing.allocator, .{
+        .process_id = process_id,
+        .chars = "done\n",
+    });
+    finish.deinit(std.testing.allocator);
     thread.join();
-    if (poll.failure) |err| try std.testing.expectEqual(error.ProcessUnavailable, err);
+    try std.testing.expect(poll.failure == null);
+    try std.testing.expectEqual(Manager.Status.exited, poll.status.?);
+    try std.testing.expect(std.mem.find(u8, poll.stdout[0..poll.stdout_len], "model:hello") != null);
 }
 
 test "unified exec clamps empty polls and retains head tail bounds" {

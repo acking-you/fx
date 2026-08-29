@@ -2143,6 +2143,139 @@ describe("acp: model-independent", () => {
   );
 
   test(
+    "ACP Unified Exec observation preserves model-side poll output",
+    async () => {
+      const root = createShortIsolatedRoot("fx-acp-unified-exec-observer-");
+      const execCallId = "acp_unified_exec_observer_exec";
+      const pollCallId = "acp_unified_exec_observer_poll";
+      let gatewayPhase = 0;
+      let modelProcessId: number | null = null;
+      const gateway = startDynamicFakeGateway((body) => {
+        if (gatewayPhase === 0) {
+          gatewayPhase = 1;
+          return fakeGatewayToolCall(execCallId, "exec_command", {
+            cmd: "IFS= read -r first; printf 'MODEL_SEES_%s' \"$first\"; IFS= read -r second",
+            yield_time_ms: 250,
+          });
+        }
+        if (gatewayPhase === 1) {
+          const execResult = acpToolResultText(body, execCallId);
+          const processMatch = execResult.match(/"session_id":(\d+)/);
+          if (!processMatch) {
+            return new Response("missing Unified Exec session id", { status: 500 });
+          }
+          modelProcessId = Number(processMatch[1]);
+          gatewayPhase = 2;
+          return fakeGatewayToolCall(pollCallId, "write_stdin", {
+            session_id: modelProcessId,
+            yield_time_ms: 300_000,
+          });
+        }
+        if (gatewayPhase === 2) {
+          gatewayPhase = 3;
+          return finalText("Independent observers complete");
+        }
+        return new Response("unexpected observer request", { status: 500 });
+      });
+      try {
+        client = await AcpClient.create({
+          cwd: root.workspace,
+          env: fakeGatewayEnv(root, gateway),
+        });
+        client.setPermissionOption("allow_once");
+        const sessionId = await startCodeSession(client);
+        const promptId = 920;
+        client.send({
+          jsonrpc: "2.0",
+          id: promptId,
+          method: "session/prompt",
+          params: { prompt: [{ type: "text", text: "Run the two-step command." }] },
+        });
+
+        let processId: number | null = null;
+        const processDeadline = Date.now() + TIMEOUT;
+        while (processId === null && Date.now() < processDeadline) {
+          const message = await client.readLine(
+            Math.min(3_000, Math.max(100, processDeadline - Date.now())),
+          ) as any;
+          const candidate = message.params?.update?.command_result?.process_id;
+          if (typeof candidate === "number") processId = candidate;
+        }
+        expect(processId).not.toBeNull();
+        await waitForCondition(
+          "model-side Unified Exec poll",
+          () => gateway.requests.length >= 2,
+          5_000,
+        );
+        expect(processId).toBe(modelProcessId);
+
+        const writeId = 921;
+        client.send({
+          jsonrpc: "2.0",
+          id: writeId,
+          method: "fx/unifiedExec/writeStdin",
+          params: { sessionId, processId, chars: "hello\n" },
+        });
+        const writeResponse = await readResponse(client, writeId, 3_000);
+        expect(writeResponse.error).toBeUndefined();
+        let observed = writeResponse.result.output as string;
+        for (
+          let attempt = 0;
+          !observed.includes("MODEL_SEES_hello") && attempt < 50;
+          attempt += 1
+        ) {
+          await Bun.sleep(20);
+          const pollId = 930 + attempt;
+          client.send({
+            jsonrpc: "2.0",
+            id: pollId,
+            method: "fx/unifiedExec/writeStdin",
+            params: { sessionId, processId },
+          });
+          const response = await readResponse(client, pollId, 1_000);
+          expect(response.error).toBeUndefined();
+          observed += response.result.output;
+        }
+        expect(observed).toContain("MODEL_SEES_hello");
+
+        const finishId = 990;
+        client.send({
+          jsonrpc: "2.0",
+          id: finishId,
+          method: "fx/unifiedExec/writeStdin",
+          params: { sessionId, processId, chars: "done\n" },
+        });
+        let finishResponse: any = null;
+        let promptResponse: any = null;
+        const finishDeadline = Date.now() + TIMEOUT;
+        while ((!finishResponse || !promptResponse) && Date.now() < finishDeadline) {
+          const message = await client.readLine(
+            Math.min(3_000, Math.max(100, finishDeadline - Date.now())),
+          ) as any;
+          if (message.id === finishId) finishResponse = message;
+          if (message.id === promptId) promptResponse = message;
+        }
+
+        expect(finishResponse?.error).toBeUndefined();
+        expect(promptResponse?.result.stopReason).toBe("end_turn");
+        expect(gateway.requests).toHaveLength(3);
+        const modelPollResult = acpToolResultText(
+          gateway.requests[2]!.body,
+          pollCallId,
+        );
+        expect(modelPollResult).toContain("MODEL_SEES_hello");
+        expect(modelPollResult).toContain('"exit_code":0');
+        expect(client.stderr).toBe("");
+      } finally {
+        await client?.close();
+        gateway.stop();
+        rmSync(root.root, { recursive: true, force: true });
+      }
+    },
+    TIMEOUT,
+  );
+
+  test(
     "ACP added-root reads skip external deferral and added project instructions",
     async () => {
       const root = createIsolatedRoot("fx-acp-added-root-");

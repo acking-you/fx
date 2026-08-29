@@ -158,7 +158,7 @@ pub fn Runtime(comptime App: type) type {
                 return;
             }
             if (comptime @hasField(App, "provider_switch")) {
-                app.provider_switch.cancelAndDrain();
+                app.provider_switch.cancel();
             }
             try app.flushBeforeBlockingExternalWork();
             if (logout_provider == .grok) {

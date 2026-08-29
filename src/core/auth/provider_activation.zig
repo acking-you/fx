@@ -175,6 +175,7 @@ pub const Runtime = struct {
     thread: ?std.Thread = null,
     running: bool = false,
     completion: ?Completion = null,
+    discard_completion: bool = false,
     cancel_requested: std.atomic.Value(bool) = .init(false),
 
     pub fn init(alloc: Allocator) Self {
@@ -185,24 +186,36 @@ pub const Runtime = struct {
         self.cancelAndDrain();
     }
 
-    /// Invalidates any in-flight provider preparation and discards its result.
-    /// Logout uses this fence so a cloned credential cannot be published after
-    /// the user has durably removed that provider's session.
+    /// Blocking teardown for process shutdown. Event-loop callers use cancel()
+    /// and let takeCompletion() reap the worker after it has stopped.
     pub fn cancelAndDrain(self: *Self) void {
-        self.cancel_requested.store(true, .seq_cst);
+        self.cancel();
         const thread = self.detachThread();
         if (thread) |handle| handle.join();
         self.mutex.lockUncancelable(io_mod.getIo());
         if (self.completion) |*completion| completion.deinit(self.alloc);
         self.completion = null;
         self.running = false;
+        self.discard_completion = false;
+        self.mutex.unlock(io_mod.getIo());
+    }
+
+    /// Invalidates a pending provider activation without joining its worker.
+    /// The event loop later reaps the handle after the worker has stopped, so
+    /// a slow network operation cannot block logout or any other UI action.
+    pub fn cancel(self: *Self) void {
+        self.cancel_requested.store(true, .seq_cst);
+        self.mutex.lockUncancelable(io_mod.getIo());
+        self.discard_completion = true;
+        if (self.completion) |*completion| completion.deinit(self.alloc);
+        self.completion = null;
         self.mutex.unlock(io_mod.getIo());
     }
 
     pub fn start(self: *Self, request: Request) !bool {
+        self.reapFinished();
         var owned = try OwnedRequest.init(self.alloc, request);
         errdefer owned.deinit(self.alloc);
-        self.cancel_requested.store(false, .seq_cst);
 
         self.mutex.lockUncancelable(io_mod.getIo());
         if (self.running or self.completion != null or self.thread != null) {
@@ -210,6 +223,8 @@ pub const Runtime = struct {
             owned.deinit(self.alloc);
             return false;
         }
+        self.discard_completion = false;
+        self.cancel_requested.store(false, .seq_cst);
         self.running = true;
         const thread = std.Thread.spawn(.{}, threadMain, .{ self, owned }) catch |err| {
             self.running = false;
@@ -233,12 +248,19 @@ pub const Runtime = struct {
     pub fn takeCompletion(self: *Self) ?Completion {
         self.mutex.lockUncancelable(io_mod.getIo());
         const completion = self.completion orelse {
+            const thread = if (!self.running) self.thread else null;
+            if (thread != null) {
+                self.thread = null;
+                self.discard_completion = false;
+            }
             self.mutex.unlock(io_mod.getIo());
+            if (thread) |handle| handle.join();
             return null;
         };
         self.completion = null;
         const thread = self.thread;
         self.thread = null;
+        self.discard_completion = false;
         self.mutex.unlock(io_mod.getIo());
         if (thread) |handle| handle.join();
         return completion;
@@ -252,16 +274,29 @@ pub const Runtime = struct {
             credential
         else
             null;
-        const outcome = prepare(self.alloc, request, &self.cancel_requested);
-        self.mutex.lockUncancelable(io_mod.getIo());
-        self.completion = .{
+        var completion = Completion{
             .target = request.target,
             .intent = request.intent,
             .allow_login = request.allow_login,
-            .outcome = outcome,
+            .outcome = prepare(self.alloc, request, &self.cancel_requested),
         };
+        self.mutex.lockUncancelable(io_mod.getIo());
+        const discard = self.discard_completion;
+        if (!discard) self.completion = completion;
         self.running = false;
         self.mutex.unlock(io_mod.getIo());
+        if (discard) completion.deinit(self.alloc);
+    }
+
+    fn reapFinished(self: *Self) void {
+        self.mutex.lockUncancelable(io_mod.getIo());
+        const thread = if (!self.running) self.thread else null;
+        if (thread != null) {
+            self.thread = null;
+            self.discard_completion = false;
+        }
+        self.mutex.unlock(io_mod.getIo());
+        if (thread) |handle| handle.join();
     }
 
     fn detachThread(self: *Self) ?std.Thread {
@@ -324,8 +359,54 @@ test "provider activation cancellation discards a prepared credential" {
     while (!fake.entered.load(.acquire)) io_mod.sleep(std.time.ns_per_ms);
     try std.testing.expect(!(try runtime.start(request)));
 
-    runtime.cancelAndDrain();
+    runtime.cancel();
+    while (runtime.isRunning()) io_mod.sleep(std.time.ns_per_ms);
 
     try std.testing.expect(!runtime.isRunning());
+    try std.testing.expect(runtime.takeCompletion() == null);
+}
+
+test "provider activation cancellation never joins a stalled worker" {
+    const FakeCatalog = struct {
+        entered: std.atomic.Value(bool) = .init(false),
+        release: std.atomic.Value(bool) = .init(false),
+
+        fn fetch(
+            raw: ?*anyopaque,
+            _: Allocator,
+            _: model_catalog.FetchInput,
+        ) Allocator.Error!model_catalog.ProviderResult {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            self.entered.store(true, .release);
+            while (!self.release.load(.acquire)) io_mod.sleep(std.time.ns_per_ms);
+            return .{ .failure = .{ .category = .cancellation } };
+        }
+    };
+
+    var fake = FakeCatalog{};
+    var runtime = Runtime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const credential = credentials.Credential{
+        .token = @constCast("test-key"),
+        .source = .openai_api_key,
+    };
+    try std.testing.expect(try runtime.start(.{
+        .target = .gateway,
+        .oauth_transport = oauth_transport.unavailable_provider,
+        .secret_store = host.unavailable_secret_store,
+        .catalog_provider = .{ .context = &fake, .fetch_fn = FakeCatalog.fetch },
+        .endpoint = "https://example.test/v1/models",
+        .credential_override = &credential,
+    }));
+    while (!fake.entered.load(.acquire)) io_mod.sleep(std.time.ns_per_ms);
+
+    runtime.cancel();
+    // A synchronous join would never reach these assertions because this fake
+    // provider intentionally ignores the cooperative cancellation flag.
+    try std.testing.expect(runtime.isRunning());
+    try std.testing.expect(runtime.takeCompletion() == null);
+
+    fake.release.store(true, .release);
+    while (runtime.isRunning()) io_mod.sleep(std.time.ns_per_ms);
     try std.testing.expect(runtime.takeCompletion() == null);
 }

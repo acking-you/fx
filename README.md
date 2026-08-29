@@ -187,7 +187,8 @@ The WebAssembly SDK is experimental. See the [WebAssembly SDK](sdk/README.md) an
 
 Native ACP clients can also interact with a running Unified Exec process
 directly through `fx/unifiedExec/writeStdin` and `fx/unifiedExec/kill`; those
-control requests remain responsive while a model-side output poll is waiting.
+control requests remain responsive while a model-side output poll is waiting,
+and ACP output observation does not consume the model-facing output stream.
 See the ACP guide for the session and process ID contract. Vision-capable models
 accept standard ACP base64 image prompt blocks and persist verified image
 snapshots.
