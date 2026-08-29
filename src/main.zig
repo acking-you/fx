@@ -7,6 +7,7 @@ pub const version = "0.0.6";
 
 const app_lifecycle = @import("core/app/app_lifecycle.zig");
 const provider_runtime = @import("core/app/provider_runtime.zig");
+const provider_activation = @import("core/auth/provider_activation.zig");
 const auth_runtime = @import("core/auth/auth_runtime.zig");
 const oauth_transport = @import("core/auth/oauth_transport.zig");
 const js_host_auth = @import("core/auth/js_host_auth.zig");
@@ -445,6 +446,10 @@ const App = struct {
         });
     }
 
+    pub fn providerCatalogEndpoint(_: *const Self) []const u8 {
+        return builtin_gateway.models_path;
+    }
+
     pub fn cooperativeTransportPulse(self: *Self) !void {
         if (comptime !host_target.is_wasm) return;
         if (try event_loop.pump_ready_input(
@@ -478,6 +483,7 @@ const App = struct {
     fn terminalTitleBusy(self: *Self) bool {
         return self.stream.active or self.pacer.hasPending() or
             self.worker.isProcessing() or
+            self.provider_switch.isRunning() or
             SessionAppRuntime.responsesCompactionActive(self);
     }
 
@@ -515,6 +521,7 @@ const App = struct {
         if (host_target.is_wasm) host.unavailable_secret_store else host.unavailable_secret_store,
     ),
     provider_selection: provider_runtime.Runtime = provider_runtime.Runtime.init(std.heap.c_allocator),
+    provider_switch: provider_activation.Runtime = provider_activation.Runtime.init(std.heap.c_allocator),
     model_cache: model_cache_runtime.Runtime = model_cache_runtime.Runtime.init(std.heap.c_allocator, builtin_gateway.models_path),
     workspace_root: []u8 = &.{},
     workspace_identity: statusline_identity.Runtime = .{},
@@ -803,6 +810,7 @@ const App = struct {
         };
         self.terminal_client.deinit();
         self.unified_exec.deinit();
+        self.provider_switch.deinit();
         self.model_cache.deinit();
         InputSubmitRuntime.clearPendingSubmission(self, "shutdown");
         const resume_handoff = if (capture_resume_handoff and
@@ -913,6 +921,10 @@ const App = struct {
 
     pub fn runLoginCommand(self: *App) !void {
         try AuthAppRuntime.runLoginCommand(self);
+    }
+
+    pub fn runProviderCommand(self: *App, target: []const u8) !void {
+        try AuthAppRuntime.runProviderCommand(self, target);
     }
 
     pub fn runLogoutCommand(self: *App, target: []const u8) !void {
@@ -2618,6 +2630,7 @@ const App = struct {
         try app_commands.Handlers(App).collectMcpReloadFacts(self);
         if (comptime host_profile.native_auth or host_profile.js_host_auth) {
             try AuthAppRuntime.collectSignInFacts(self);
+            try AuthAppRuntime.collectProviderSwitchFacts(self);
         }
         if (comptime host_profile.native_auth) {
             try app_terminal_runtime.Runtime(App).collectFacts(self);

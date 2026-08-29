@@ -167,6 +167,7 @@ function chatgptAccessToken(accountId = "acct_e2e"): string {
 function startFakeChatGptOAuth(
   options: {
     tokenDelayMs?: number;
+    modelDelayMs?: number;
     responseDelayMs?: number;
     contextOverflowResponses?: number;
     unauthorizedResponses?: number;
@@ -227,6 +228,7 @@ function startFakeChatGptOAuth(
         });
       }
       if (url.pathname === "/chatgpt/models") {
+        if (options.modelDelayMs) await Bun.sleep(options.modelDelayMs);
         return Response.json({ models });
       }
       if (url.pathname === "/chatgpt/responses") {
@@ -922,11 +924,7 @@ async function waitForModelRequestCount(
 }
 
 async function openProviderPicker(pickerSession: TmuxSession): Promise<void> {
-  await pickerSession.sendText("/login");
-  await pickerSession.waitForText("Accounts", TIMEOUT);
-  await pickerSession.sendKeys("Down");
-  await pickerSession.sendKeys("Down");
-  await pickerSession.sendKeys("Enter");
+  await pickerSession.sendText("/provider");
   await pickerSession.waitForText("Model provider", TIMEOUT);
 }
 
@@ -946,7 +944,6 @@ tmuxTest(
         pane.includes("Accounts") &&
         pane.includes("Sign in with Codex") &&
         pane.includes("Sign in with Grok") &&
-        pane.includes("Switch provider") &&
         pane.includes("Switch credential"),
       TIMEOUT,
     );
@@ -955,15 +952,19 @@ tmuxTest(
     await session.sendKeys("Down");
     await session.sendKeys("Down");
     await session.sendKeys("Enter");
-    await session.waitForText("Model provider", TIMEOUT);
-    await session.sendKeys("Escape");
-    await session.waitForText("Accounts", TIMEOUT);
-    await session.sendKeys("Down");
-    await session.sendKeys("Enter");
     const credentials = await session.waitForText("Credential source", TIMEOUT);
     expect(credentials).toContain("OPENAI_API_KEY");
     expect(credentials).not.toContain("fx login");
     await session.sendKeys("Escape");
+    await session.waitForText("Accounts", TIMEOUT);
+    await session.sendKeys("Escape");
+    await session.waitForPane(
+      (pane) => !pane.includes("Accounts") && !pane.includes("Credential source"),
+      TIMEOUT,
+    );
+
+    await session.sendText("/provider");
+    await session.waitForText("Model provider", TIMEOUT);
     await session.sendKeys("Escape");
     await session.waitForComposer(TIMEOUT);
 
@@ -1011,6 +1012,32 @@ tmuxTest(
     expect(session.isAlive()).toBe(true);
     expect(existsSync(join(home, ".fx", "chatgpt-auth.json"))).toBe(false);
     expect(await session.captureFullScrollback()).not.toContain("Signed in with Codex.");
+    expect(readFileSync(stderrPath, "utf8")).toBe("");
+  },
+  60_000,
+);
+
+tmuxTest(
+  "provider catalog loading keeps the TUI event loop responsive",
+  async () => {
+    home = mkdtempSync(join(tmpdir(), "fx-tui-provider-responsive-"));
+    stderrPath = join(home, "stderr.log");
+    writeFileSync(stderrPath, "");
+    gateway = startFakeGateway([]);
+    chatgptOauth = startFakeChatGptOAuth({ modelDelayMs: 2_000 });
+    writeSeededChatGptLogin(home, chatgptOauth.accessToken);
+    session = await startFx(home, stderrPath, gateway, undefined, chatgptOauth.env);
+    await session.waitForComposer(TIMEOUT);
+
+    await session.sendText("/provider codex");
+    await session.waitForText("Switching to Codex subscription...", TIMEOUT);
+    const statusStarted = Date.now();
+    await session.sendText("/status");
+    await session.waitForText("auth=OPENAI_API_KEY", TIMEOUT);
+    expect(Date.now() - statusStarted).toBeLessThan(1_500);
+    await session.waitForText("Switched to Codex subscription", TIMEOUT);
+
+    expect(session.isAlive()).toBe(true);
     expect(readFileSync(stderrPath, "utf8")).toBe("");
   },
   60_000,

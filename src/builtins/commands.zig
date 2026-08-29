@@ -386,6 +386,7 @@ pub const slash_specs = [_]SlashSpec{
     .{ .kind = .continue_recovery, .command = "/continue", .help_entry = "/continue", .completion_description = "continue a paused model response", .presentation_category = .session, .requires_prompt_credential = true },
     .{ .kind = .rename_session, .command = "/rename", .help_entry = "/rename <title>", .completion_description = "rename the current session", .presentation_category = .session, .has_args = true, .accepts_payload = true },
     .{ .kind = .login, .command = "/login", .help_entry = "/login", .completion_description = "choose a provider sign-in", .presentation_category = .account },
+    .{ .kind = .provider, .command = "/provider", .help_entry = "/provider [gateway|codex|grok]", .completion_description = "show or switch the active provider", .presentation_category = .account, .has_args = true, .accepts_payload = true },
     .{ .kind = .logout, .command = "/logout", .help_entry = "/logout <codex|grok>", .completion_description = "sign out of a provider session", .presentation_category = .account, .has_args = true, .accepts_payload = true },
     .{ .kind = .stats, .command = "/stats", .help_entry = "/stats", .completion_description = "show token and turn statistics", .presentation_category = .account },
     .{ .kind = .usage, .command = "/usage", .aliases = &.{"/cost"}, .help_entry = "/usage (/cost)", .completion_description = "show local fx tokens, models, and spend", .presentation_category = .account },

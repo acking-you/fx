@@ -26,7 +26,8 @@ The initialize response advertises fx-specific capabilities under `_meta.fx`:
       "turnStatus": true,
       "backgroundTerminals": true,
       "processStatusCommand": "/ps",
-      "unifiedExec": {"writeStdin": true, "kill": true}
+      "unifiedExec": {"writeStdin": true, "kill": true},
+      "providerControl": {"switch": true, "login": true, "configureByok": true}
     }
   }
 }
@@ -35,6 +36,83 @@ The initialize response advertises fx-specific capabilities under `_meta.fx`:
 These fields and the methods below are fx extensions, not standard ACP methods. Clients should check the advertised metadata before using them.
 
 The design follows the same separation used by Codex app-server: starting a new turn and steering an active turn are different operations, and background terminal state has a separate control-plane query.
+
+## Provider control
+
+Native ACP can initialize before a model credential is available. This lets an
+ACP client complete login or configure a BYOK endpoint over the protocol before
+creating its first session. A prompt still requires a working credential.
+
+Switch the process or active session to a saved provider credential with:
+
+```json
+{"jsonrpc":"2.0","id":20,"method":"fx/provider/switch","params":{"provider":"codex"}}
+```
+
+`provider` is `gateway`, `codex`, or `grok`. `sessionId` is optional; when it is
+present it must identify the active session. The response is written after the
+credential and model catalog have been validated:
+
+```json
+{"jsonrpc":"2.0","id":20,"result":{"provider":"codex","model":"gpt-5.6-sol"}}
+```
+
+The standard `session/set_config_option` provider option uses the same
+background activation path. While catalog loading is in progress, the ACP read
+loop remains available for cancellation, turn status, background-terminal
+queries, provider-login status, and Unified Exec writes or termination. Other
+state-changing requests receive `Provider operation already in progress`.
+
+### Provider login
+
+Start browser login for Codex or Grok:
+
+```json
+{"jsonrpc":"2.0","id":21,"method":"fx/provider/login/start","params":{"provider":"codex"}}
+```
+
+The result contains `state`, `authorizationUrl`, and `acceptsManualCode`. Open
+the authorization URL in the user's browser, then query completion without
+blocking the ACP connection:
+
+```json
+{"jsonrpc":"2.0","id":22,"method":"fx/provider/login/status","params":{}}
+```
+
+Possible states are `idle`, `polling`, `succeeded`, `failed`, and `cancelled`.
+Grok login can accept a manually copied authorization code when
+`acceptsManualCode` is true:
+
+```json
+{"jsonrpc":"2.0","id":23,"method":"fx/provider/login/submitCode","params":{"code":"COPIED_CODE"}}
+```
+
+Cancel a pending login with `fx/provider/login/cancel`. A successful login is
+saved in the same private profile file used by the native CLI. Use
+`fx/provider/switch` afterward to activate its catalog for the process or active
+session.
+
+### Connection-scoped BYOK configuration
+
+Configure and validate a Responses-compatible API root and API key directly:
+
+```json
+{"jsonrpc":"2.0","id":24,"method":"fx/provider/configure","params":{"baseUrl":"https://gateway.example.com/v1","apiKey":"YOUR_KEY"}}
+```
+
+fx derives `/responses` and `/models`, fetches the model catalog with the
+provided key, and activates the gateway provider only after validation. Remote
+URLs must use HTTPS. Loopback HTTP is allowed only with an explicit port.
+
+```json
+{"jsonrpc":"2.0","id":24,"result":{"provider":"gateway","model":"gpt-5","responseUrl":"https://gateway.example.com/v1/responses","credentialPersistence":"connection"}}
+```
+
+The API key is never echoed. This ACP method keeps it only in the current fx
+process and does not write it to `settings.json` or a session log. Start a new
+ACP connection or call the method again to replace it. Use environment or
+profile-owned credential configuration when persistence across process restarts
+is required.
 
 ## Query the active turn
 
@@ -168,16 +246,22 @@ completed `exec_command` tool call:
 ```
 
 ```json
-{"jsonrpc":"2.0","id":15,"method":"fx/unifiedExec/writeStdin","params":{"sessionId":"SESSION_ID","processId":7,"chars":"next input\n","yieldTimeMs":250}}
+{"jsonrpc":"2.0","id":15,"method":"fx/unifiedExec/writeStdin","params":{"sessionId":"SESSION_ID","processId":7,"chars":"next input\n"}}
 ```
 
-The response is immediate after the bounded poll and has this shape:
+The response returns immediately with the output currently available and has
+this shape:
 
 ```json
 {"sessionId":"SESSION_ID","processId":7,"status":"running","output":"...","wallTimeSeconds":0.250,"exitCode":null,"signal":null,"stdoutBytes":12,"stderrBytes":0,"truncated":false}
 ```
 
-Omit `chars` to poll without writing. Terminate the process with:
+Omit `chars` to take a nonblocking output snapshot. Polling and writing never
+hold the ACP dispatch loop open while waiting for process output, so the same
+connection can continue to cancel or steer the turn, answer permission
+requests, query status, or terminate the process. The legacy `yieldTimeMs`
+parameter is accepted and validated for compatibility but does not delay this
+ACP method. Terminate the process with:
 
 ```json
 {"jsonrpc":"2.0","id":16,"method":"fx/unifiedExec/kill","params":{"sessionId":"SESSION_ID","processId":7}}

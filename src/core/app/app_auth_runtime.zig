@@ -7,6 +7,7 @@ const host_target = @import("../hosts/target.zig");
 const io_mod = @import("../shared/io.zig");
 const credentials = @import("../auth/credentials.zig");
 const auth_runtime = @import("../auth/auth_runtime.zig");
+const provider_activation = @import("../auth/provider_activation.zig");
 const login_flow = @import("../auth/login_flow.zig");
 const chatgpt_oauth = @import("../auth/chatgpt_oauth.zig");
 const grok_oauth = @import("../auth/grok_oauth.zig");
@@ -113,6 +114,24 @@ pub fn Runtime(comptime App: type) type {
             app.shell.render_requests.request(.footer);
         }
 
+        pub fn runProviderCommand(app: *App, target_text: []const u8) !void {
+            const target = std.mem.trim(u8, target_text, " \t\r\n");
+            if (target.len == 0) {
+                app.auth.openProviderPicker(app.alloc, provider_runtime.provider(app));
+                app.shell.render_requests.request(.footer);
+                return;
+            }
+            const provider = provider_catalog.parse(target) orelse {
+                try app.writeDomainNotice(.{
+                    .topic = "provider",
+                    .tone = .warning,
+                    .body = "Usage: /provider [gateway|codex|grok]",
+                }, true);
+                return;
+            };
+            try switchProvider(app, provider, true, .manual);
+        }
+
         pub fn runLogoutCommand(app: *App, target: []const u8) !void {
             if (comptime !oauthAuthEnabled(App)) {
                 try app.writeDomainNotice(.{
@@ -207,7 +226,6 @@ pub fn Runtime(comptime App: type) type {
                     .chatgpt_login => try beginChatGptSignIn(app),
                     .grok_login => try beginGrokSignIn(app),
                     .switch_credential => app.auth.openSwitchCredentialPicker(app.alloc),
-                    .switch_provider => app.auth.openProviderPicker(app.alloc, provider_runtime.provider(app)),
                     .automatic => try applyAutomaticCredential(app),
                 },
             }
@@ -500,7 +518,9 @@ pub fn Runtime(comptime App: type) type {
             intent: ProviderSwitchIntent,
         ) !void {
             if (comptime !provider_runtime.supported(App) or
-                !@hasDecl(App, "fetchProviderCatalog") or
+                !@hasField(App, "provider_switch") or
+                !@hasDecl(App, "providerSet") or
+                !@hasDecl(App, "providerCatalogEndpoint") or
                 !@hasDecl(@TypeOf(app.model_cache), "adoptOwnedCatalog"))
             {
                 try app.writeDomainNotice(.{
@@ -557,112 +577,121 @@ pub fn Runtime(comptime App: type) type {
                     return;
                 },
             }
-            try app.flushBeforeBlockingExternalWork();
-
-            const resolution = credentials.resolveForProvider(
-                app.alloc,
-                app.auth.oauthTransport(),
-                app.auth.secretStore(),
-                .refresh_if_needed,
-                target,
-                null,
-            ) catch |err| {
-                debug_trace.logf("provider", "credential preparation failed provider={t} err={s}", .{ target, @errorName(err) });
-                try app.writeDomainNotice(.{
-                    .topic = "provider",
-                    .tone = .@"error",
-                    .body = providerFailureMessage(
-                        intent,
-                        "Could not prepare the target provider credential. The current provider is unchanged.",
-                        "Subscription sign-in completed, but its credential could not be prepared. The current provider is unchanged.",
-                    ),
-                }, true);
-                return;
-            };
-            var credential = resolution.credential orelse {
-                if (target == .codex and allow_login) {
-                    try beginCodexSignInForProviderSwitch(app);
-                    return;
-                }
-                if (target == .grok and allow_login) {
-                    try beginGrokSignInForProviderSwitch(app);
-                    return;
-                }
+            const catalog_provider = app.providerSet().select(target).model_catalog orelse {
                 try app.writeDomainNotice(.{
                     .topic = "provider",
                     .tone = .warning,
-                    .body = if (intent == .post_oauth)
-                        "Subscription sign-in completed, but its saved credential is unavailable. The current provider is unchanged."
-                    else if (target == .codex)
-                        "Run fx login codex, then try switching again."
-                    else if (target == .grok)
-                        "Run fx login grok, then try switching again."
-                    else
-                        credentials.missing_interactive_credential_message,
+                    .body = "The selected provider is unavailable in this host.",
                 }, true);
                 return;
             };
-            defer credential.deinit(app.alloc);
-            if (!model_provider.authorizesCredential(target, credential.source)) {
+            if (!try app.provider_switch.start(.{
+                .target = target,
+                .intent = intent,
+                .allow_login = allow_login,
+                .oauth_transport = app.auth.oauthTransport(),
+                .secret_store = app.auth.secretStore(),
+                .catalog_provider = catalog_provider,
+                .endpoint = app.providerCatalogEndpoint(),
+            })) {
                 try app.writeDomainNotice(.{
                     .topic = "provider",
-                    .tone = .@"error",
-                    .body = providerFailureMessage(
-                        intent,
-                        "The target credential cannot authorize that provider. The current provider is unchanged.",
-                        "Subscription sign-in completed, but its credential cannot authorize the provider. The current provider is unchanged.",
-                    ),
+                    .tone = .warning,
+                    .body = "A provider switch is already in progress.",
                 }, true);
                 return;
             }
-
-            const access = credentials.catalogAccessForCredentialAndAccount(
-                credential.source,
-                credential.token,
-                credential.accountId(),
+            const body = try std.fmt.allocPrint(
+                app.alloc,
+                "Switching to {s}...",
+                .{provider_catalog.label(target)},
             );
-            const fetched = app.fetchProviderCatalog(target, access) catch |err| {
-                debug_trace.logf("provider", "catalog preparation failed provider={t} err={s}", .{ target, @errorName(err) });
-                try app.writeDomainNotice(.{
-                    .topic = "provider",
-                    .tone = .@"error",
-                    .body = providerFailureMessage(
-                        intent,
-                        "Could not load the target provider catalog. The current provider is unchanged.",
-                        "Subscription sign-in completed, but its model catalog could not be loaded. The current provider is unchanged.",
-                    ),
-                }, true);
-                return;
-            };
-            var catalog = switch (fetched) {
-                .catalog => |catalog| catalog,
-                .failure => |failure| {
-                    debug_trace.logf("provider", "catalog rejected provider={t} category={t}", .{ target, failure.category });
-                    try app.writeDomainNotice(.{
-                        .topic = "provider",
-                        .tone = .@"error",
-                        .body = providerFailureMessage(
-                            intent,
-                            "The target provider catalog could not be validated. The current provider is unchanged.",
-                            "Subscription sign-in completed, but its model catalog could not be validated. The current provider is unchanged.",
-                        ),
-                    }, true);
+            defer app.alloc.free(body);
+            try app.writeDomainNotice(.{ .topic = "provider", .tone = .neutral, .body = body }, true);
+            app.shell.render_requests.request(.footer);
+        }
+
+        pub fn collectProviderSwitchFacts(app: *App) !void {
+            if (comptime !@hasField(App, "provider_switch")) return;
+            var completion = app.provider_switch.takeCompletion() orelse return;
+            defer completion.deinit(app.alloc);
+            const intent = completion.intent;
+            const target = completion.target;
+            const current = provider_runtime.provider(app);
+            var prepared = switch (completion.outcome) {
+                .prepared => |*value| value,
+                .failed => |failure| {
+                    switch (failure) {
+                        .cancelled => {},
+                        .missing_credential => {
+                            if (completion.allow_login and target == .codex) {
+                                try beginCodexSignInForProviderSwitch(app);
+                                return;
+                            }
+                            if (completion.allow_login and target == .grok) {
+                                try beginGrokSignInForProviderSwitch(app);
+                                return;
+                            }
+                            try app.writeDomainNotice(.{
+                                .topic = "provider",
+                                .tone = .warning,
+                                .body = if (intent == .post_oauth)
+                                    "Subscription sign-in completed, but its saved credential is unavailable. The current provider is unchanged."
+                                else if (target == .codex)
+                                    "Run /login and sign in with Codex, then try /provider codex again."
+                                else if (target == .grok)
+                                    "Run /login and sign in with Grok, then try /provider grok again."
+                                else
+                                    credentials.missing_interactive_credential_message,
+                            }, true);
+                        },
+                        .unauthorized_credential => try app.writeDomainNotice(.{
+                            .topic = "provider",
+                            .tone = .@"error",
+                            .body = providerFailureMessage(
+                                intent,
+                                "The target credential cannot authorize that provider. The current provider is unchanged.",
+                                "Subscription sign-in completed, but its credential cannot authorize the provider. The current provider is unchanged.",
+                            ),
+                        }, true),
+                        .credential => |err| {
+                            debug_trace.logf("provider", "provider preparation failed provider={t} err={s}", .{ target, @errorName(err) });
+                            try app.writeDomainNotice(.{
+                                .topic = "provider",
+                                .tone = .@"error",
+                                .body = providerFailureMessage(
+                                    intent,
+                                    "Could not prepare the target provider. The current provider is unchanged.",
+                                    "Subscription sign-in completed, but the provider could not be prepared. The current provider is unchanged.",
+                                ),
+                            }, true);
+                        },
+                        .catalog => |failure_value| {
+                            debug_trace.logf("provider", "catalog rejected provider={t} category={t}", .{ target, failure_value.category });
+                            try app.writeDomainNotice(.{
+                                .topic = "provider",
+                                .tone = .@"error",
+                                .body = providerFailureMessage(
+                                    intent,
+                                    "The target provider catalog could not be validated. The current provider is unchanged.",
+                                    "Subscription sign-in completed, but its model catalog could not be validated. The current provider is unchanged.",
+                                ),
+                            }, true);
+                        },
+                        .empty_catalog => try app.writeDomainNotice(.{
+                            .topic = "provider",
+                            .tone = .@"error",
+                            .body = providerFailureMessage(
+                                intent,
+                                "The target provider returned no supported models. The current provider is unchanged.",
+                                "Subscription sign-in completed, but its model catalog returned no supported models. The current provider is unchanged.",
+                            ),
+                        }, true),
+                    }
+                    app.shell.render_requests.request(.footer);
                     return;
                 },
             };
-            defer model_catalog.freeModelCatalog(app.alloc, &catalog);
-            if (catalog.items.len == 0) {
-                try app.writeDomainNotice(.{
-                    .topic = "provider",
-                    .tone = .@"error",
-                    .body = providerFailureMessage(
-                        intent,
-                        "The target provider returned no supported models. The current provider is unchanged.",
-                        "Subscription sign-in completed, but its model catalog returned no supported models. The current provider is unchanged.",
-                    ),
-                }, true);
-                return;
-            }
 
             var settings = config_runtime.loadMergedSettings(app.alloc, app.workspace_root) catch |err| {
                 debug_trace.logf("provider", "settings load failed err={s}", .{@errorName(err)});
@@ -687,7 +716,7 @@ pub fn Runtime(comptime App: type) type {
                 saved_model
             else
                 io_mod.getenv("FX_MODEL") orelse saved_model;
-            const selected_model = selectCatalogModel(catalog.items, current_model, preferred_model) orelse unreachable;
+            const selected_model = selectCatalogModel(prepared.catalog.items, current_model, preferred_model) orelse unreachable;
             var owned_model = try app.alloc.dupe(u8, selected_model);
             errdefer app.alloc.free(owned_model);
 
@@ -704,9 +733,14 @@ pub fn Runtime(comptime App: type) type {
                 return;
             }
 
-            app.model_cache.adoptOwnedCatalog(access, &catalog);
+            const access = credentials.catalogAccessForCredentialAndAccount(
+                prepared.credential.source,
+                prepared.credential.token,
+                prepared.credential.accountId(),
+            );
+            app.model_cache.adoptOwnedCatalog(access, &prepared.catalog);
             app.provider_selection.adoptOwned(target, &owned_model);
-            _ = app.auth.adoptCredential(app.alloc, &credential);
+            _ = app.auth.adoptCredential(app.alloc, &prepared.credential);
 
             const body = try std.fmt.allocPrint(
                 app.alloc,

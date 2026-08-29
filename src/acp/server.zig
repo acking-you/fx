@@ -16,11 +16,16 @@ const builtin_tools = @import("../builtins/tools.zig");
 const credentials = @import("../core/auth/credentials.zig");
 const secret = @import("../core/auth/secret.zig");
 const auth_runtime = @import("../core/auth/auth_runtime.zig");
+const provider_activation = @import("../core/auth/provider_activation.zig");
+const login_flow = @import("../core/auth/login_flow.zig");
+const chatgpt_oauth = @import("../core/auth/chatgpt_oauth.zig");
+const grok_oauth = @import("../core/auth/grok_oauth.zig");
 const model_capabilities = @import("../core/config/model_capabilities.zig");
 const model_provider = @import("../core/config/model_provider.zig");
 const debug_trace = @import("../core/shared/debug_trace.zig");
 const gateway_provider = @import("../core/gateway/gateway_provider.zig");
 const model_catalog = @import("../core/gateway/model_catalog.zig");
+const provider_route = @import("../core/gateway/provider_route.zig");
 const hooks = @import("../core/hooks/hooks.zig");
 const mcp_runtime = @import("../core/mcp/mcp_runtime.zig");
 const mode_registry = @import("../core/modes/mode_registry.zig");
@@ -68,6 +73,12 @@ const AcpMethod = enum {
     fx_background_terminals_list,
     fx_unified_exec_write_stdin,
     fx_unified_exec_kill,
+    fx_provider_switch,
+    fx_provider_configure,
+    fx_provider_login_start,
+    fx_provider_login_status,
+    fx_provider_login_submit_code,
+    fx_provider_login_cancel,
     unknown,
 
     fn parse(method: []const u8) AcpMethod {
@@ -87,6 +98,12 @@ const AcpMethod = enum {
         if (std.mem.eql(u8, method, "fx/backgroundTerminals/list")) return .fx_background_terminals_list;
         if (std.mem.eql(u8, method, "fx/unifiedExec/writeStdin")) return .fx_unified_exec_write_stdin;
         if (std.mem.eql(u8, method, "fx/unifiedExec/kill")) return .fx_unified_exec_kill;
+        if (std.mem.eql(u8, method, "fx/provider/switch")) return .fx_provider_switch;
+        if (std.mem.eql(u8, method, "fx/provider/configure")) return .fx_provider_configure;
+        if (std.mem.eql(u8, method, "fx/provider/login/start")) return .fx_provider_login_start;
+        if (std.mem.eql(u8, method, "fx/provider/login/status")) return .fx_provider_login_status;
+        if (std.mem.eql(u8, method, "fx/provider/login/submitCode")) return .fx_provider_login_submit_code;
+        if (std.mem.eql(u8, method, "fx/provider/login/cancel")) return .fx_provider_login_cancel;
         return .unknown;
     }
 
@@ -104,13 +121,34 @@ const AcpMethod = enum {
             .fx_background_terminals_list,
             .fx_unified_exec_write_stdin,
             .fx_unified_exec_kill,
+            .fx_provider_login_status,
+            .fx_provider_login_submit_code,
+            .fx_provider_login_cancel,
             => false,
             .session_list,
             .session_remove,
             .session_prompt,
             .session_set_config_option,
+            .fx_provider_switch,
+            .fx_provider_configure,
+            .fx_provider_login_start,
             .unknown,
             => true,
+        };
+    }
+
+    fn allowedDuringProviderJob(self: AcpMethod) bool {
+        return switch (self) {
+            .session_cancel,
+            .fx_turn_status,
+            .fx_background_terminals_list,
+            .fx_unified_exec_write_stdin,
+            .fx_unified_exec_kill,
+            .fx_provider_login_status,
+            .fx_provider_login_submit_code,
+            .fx_provider_login_cancel,
+            => true,
+            else => false,
         };
     }
 };
@@ -329,6 +367,8 @@ pub const ServerState = struct {
     api_key: []u8 = &.{},
     credential_source: ?types.CredentialSource = null,
     account_id: ?[]u8 = null,
+    gateway_chat_url_override: ?[]u8 = null,
+    gateway_models_path_override: ?[]u8 = null,
     selected_model: []u8 = &.{},
     provider: model_provider.ProviderId = .gateway,
     configured_model: []u8 = &.{},
@@ -351,6 +391,10 @@ pub const ServerState = struct {
     background: background_runtime.BackgroundRuntime = .{},
     terminal_client: terminal_client_runtime.Runtime = .{},
     unified_exec: unified_exec_runtime.Manager = unified_exec_runtime.Manager.init(std.heap.c_allocator),
+    provider_job_thread: ?std.Thread = null,
+    provider_job_running: std.atomic.Value(bool) = .init(false),
+    provider_job_cancel: std.atomic.Value(bool) = .init(false),
+    provider_login: login_flow.SignInRuntime = .{},
     subagent_store: ?session_store.Store = null,
     subagent_host: ?*subagent_tool_host.Runtime = null,
     capability_resolver: gateway_provider.CapabilityResolver = .{},
@@ -368,6 +412,9 @@ pub const ServerState = struct {
 
     pub fn deinit(self: *ServerState) void {
         reapActivePrompt(self, true);
+        self.provider_job_cancel.store(true, .seq_cst);
+        reapProviderJob(self, true);
+        self.provider_login.deinit(self.alloc);
         self.terminal_client.deinit();
         closeActiveSession(self) catch |err| {
             debug_trace.logf(
@@ -381,6 +428,8 @@ pub const ServerState = struct {
         if (self.workspace_root.len > 0) self.alloc.free(self.workspace_root);
         if (self.api_key.len > 0) secret.zeroAndFree(self.alloc, self.api_key);
         if (self.account_id) |account_id| self.alloc.free(account_id);
+        if (self.gateway_chat_url_override) |value| self.alloc.free(value);
+        if (self.gateway_models_path_override) |value| self.alloc.free(value);
         if (self.selected_model.len > 0) self.alloc.free(self.selected_model);
         if (self.configured_model.len > 0) self.alloc.free(self.configured_model);
         self.permission_rules.deinit(self.alloc);
@@ -401,6 +450,14 @@ pub const ServerState = struct {
         self.pending_legacy_urls.deinit(self.alloc);
     }
 };
+
+pub fn gatewayChatUrl(state: *const ServerState) []const u8 {
+    return state.gateway_chat_url_override orelse state.cfg.gateway_chat_url;
+}
+
+pub fn gatewayModelsPath(state: *const ServerState) []const u8 {
+    return state.gateway_models_path_override orelse state.cfg.gateway_models_path;
+}
 
 fn credentialMatchesProvider(
     source: ?types.CredentialSource,
@@ -758,6 +815,7 @@ pub fn runWithTransport(
     var reader = reader_value;
     while (!state.terminate_connection) {
         reapActivePrompt(&state, false);
+        reapProviderJob(&state, false);
         const line_result = reader.readLine(alloc) catch break;
         if (line_result == null) break;
         const line = switch (line_result.?) {
@@ -1165,6 +1223,7 @@ fn dispatchNotification(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Mes
 
 fn dispatch(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message) !void {
     reapActivePrompt(state, false);
+    reapProviderJob(state, false);
     const method = AcpMethod.parse(msg.method);
 
     if (method == .initialize) {
@@ -1181,6 +1240,13 @@ fn dispatch(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message) !void 
     if (method == .session_cancel) {
         handleCancel(state);
         return state.writer.writeResponse(alloc, msg.id, "null");
+    }
+
+    if (state.provider_job_running.load(.seq_cst) and !method.allowedDuringProviderJob()) {
+        return state.writer.writeError(alloc, msg.id, .{
+            .code = ErrorCode.invalid_request,
+            .message = "Provider operation already in progress",
+        });
     }
 
     if (method == .session_prompt and
@@ -1228,6 +1294,12 @@ fn dispatch(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message) !void 
         .fx_background_terminals_list => prompt_handler.handleBackgroundTerminalsList(state, alloc, msg),
         .fx_unified_exec_write_stdin => prompt_handler.handleUnifiedExecWriteStdin(state, alloc, msg),
         .fx_unified_exec_kill => prompt_handler.handleUnifiedExecKill(state, alloc, msg),
+        .fx_provider_switch => handleProviderSwitch(state, alloc, msg),
+        .fx_provider_configure => handleProviderConfigure(state, alloc, msg),
+        .fx_provider_login_start => handleProviderLoginStart(state, alloc, msg),
+        .fx_provider_login_status => handleProviderLoginStatus(state, alloc, msg),
+        .fx_provider_login_submit_code => handleProviderLoginSubmitCode(state, alloc, msg),
+        .fx_provider_login_cancel => handleProviderLoginCancel(state, alloc, msg),
         .initialize,
         .session_cancel,
         .session_remove,
@@ -1456,7 +1528,7 @@ fn handleInitialize(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message
         credentialMatchesProvider(credential.source, state.provider)
     else
         false;
-    const credential: *credentials.Credential = if (state.provider == .gateway and state.cfg.credential_override != null) override: {
+    const credential: ?*credentials.Credential = if (state.provider == .gateway and state.cfg.credential_override != null) override: {
         routed_credential = .{
             .token = try alloc.dupe(u8, state.cfg.credential_override.?.token),
             .source = state.cfg.credential_override.?.source,
@@ -1475,31 +1547,11 @@ fn handleInitialize(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message
             preferred,
         );
         routed_credential = resolution.credential;
-        if (routed_credential == null) {
-            return state.writer.writeError(alloc, msg.id, .{
-                .code = ErrorCode.invalid_request,
-                .message = if (state.provider == .codex)
-                    credentials.missing_chatgpt_credential_message
-                else if (state.provider == .grok)
-                    credentials.missing_grok_credential_message
-                else
-                    credentials.missing_credential_message,
-            });
-        }
-        break :routed &routed_credential.?;
+        break :routed if (routed_credential != null) &routed_credential.? else null;
     };
-    if (credential.token.len == 0) {
-        return state.writer.writeError(alloc, msg.id, .{
-            .code = ErrorCode.invalid_request,
-            .message = if (state.provider == .codex)
-                credentials.missing_chatgpt_credential_message
-            else if (state.provider == .grok)
-                credentials.missing_grok_credential_message
-            else
-                credentials.missing_credential_message,
-        });
+    if (credential) |resolved| {
+        if (resolved.token.len > 0) adoptServerCredential(state, resolved);
     }
-    adoptServerCredential(state, credential);
 
     state.permission_mode = startup.permission_mode;
     state.permission_rules = startup.takePermissionRules();
@@ -1519,27 +1571,29 @@ fn handleInitialize(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message
         state.skills.replaceLoaded(alloc, loaded_skills.dir, loaded_skills.skills, loaded_skills.diagnostics);
     }
 
-    var catalog_cancel_flag = std.atomic.Value(bool).init(false);
-    const startup_catalog = catalogProviderFor(state, state.provider) orelse
-        return state.writer.writeError(alloc, msg.id, .{
-            .code = ErrorCode.invalid_request,
-            .message = "Selected provider is unavailable in this host",
-        });
-    _ = try state.capability_resolver.resolve(
-        state.alloc,
-        startup_catalog,
-        .{
-            .access = credentials.catalogAccessForCredentialAndAccount(
-                state.credential_source,
-                state.api_key,
-                state.account_id,
-            ),
-            .endpoint = state.cfg.gateway_models_path,
-            .cancel_flag = &catalog_cancel_flag,
-        },
-        state.selected_model,
-        state.cfg.provider_set.select(state.provider).fallbackModelCapabilities(state.selected_model),
-    );
+    if (state.api_key.len > 0) {
+        var catalog_cancel_flag = std.atomic.Value(bool).init(false);
+        const startup_catalog = catalogProviderFor(state, state.provider) orelse
+            return state.writer.writeError(alloc, msg.id, .{
+                .code = ErrorCode.invalid_request,
+                .message = "Selected provider is unavailable in this host",
+            });
+        _ = try state.capability_resolver.resolve(
+            state.alloc,
+            startup_catalog,
+            .{
+                .access = credentials.catalogAccessForCredentialAndAccount(
+                    state.credential_source,
+                    state.api_key,
+                    state.account_id,
+                ),
+                .endpoint = gatewayModelsPath(state),
+                .cancel_flag = &catalog_cancel_flag,
+            },
+            state.selected_model,
+            state.cfg.provider_set.select(state.provider).fallbackModelCapabilities(state.selected_model),
+        );
+    }
 
     state.client_fs_read = request.client_fs_read;
     state.client_fs_write = request.client_fs_write;
@@ -1554,12 +1608,14 @@ fn handleInitialize(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message
         .{
             .image_capable = !host_target.is_wasm,
             .unified_exec_capable = unified_exec_runtime.Manager.supported(),
+            .provider_control_capable = !host_target.is_wasm,
         },
     );
     try state.writer.writeResponse(alloc, msg.id, out.writer.buffered());
 }
 
 fn handleCancel(state: *ServerState) void {
+    state.provider_job_cancel.store(true, .seq_cst);
     if (state.active_session) |*session| {
         debug_trace.eventf("interrupt", "cancel_requested", .{}, "source=acp active_tool_known=false", .{});
         session.cancel_flag.store(true, .seq_cst);
@@ -1620,6 +1676,556 @@ fn handleCloseSession(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Messa
         });
     };
     try state.writer.writeResponse(alloc, msg.id, "{}");
+}
+
+fn handleProviderSwitch(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message) !void {
+    const params = parseProviderParams(state, alloc, msg, true) catch |err| {
+        if (err == error.ResponseWritten) return;
+        return state.writer.writeError(alloc, msg.id, .{
+            .code = ErrorCode.invalid_params,
+            .message = "Missing or invalid provider switch params",
+        });
+    };
+    defer params.parsed.deinit();
+    const target = model_provider.parse(params.provider orelse unreachable) orelse
+        return state.writer.writeError(alloc, msg.id, .{
+            .code = ErrorCode.invalid_params,
+            .message = "provider must be gateway, codex, or grok",
+        });
+
+    var current_credential: ?credentials.Credential = if (state.api_key.len > 0 and credentialMatchesProvider(state.credential_source, target)) .{
+        .token = @constCast(state.api_key),
+        .source = state.credential_source.?,
+        .account_id = if (state.account_id) |value| @constCast(value) else null,
+    } else null;
+    const started = try startProviderJob(
+        state,
+        msg,
+        target,
+        .explicit_switch,
+        gatewayModelsPath(state),
+        null,
+        if (current_credential) |*value| value else null,
+    );
+    if (!started) {
+        return state.writer.writeError(alloc, msg.id, .{
+            .code = ErrorCode.invalid_request,
+            .message = "Provider operation already in progress",
+        });
+    }
+}
+
+fn handleProviderConfigure(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message) !void {
+    const params = msg.params_raw orelse return state.writer.writeError(alloc, msg.id, .{
+        .code = ErrorCode.invalid_params,
+        .message = "Missing params",
+    });
+    const parsed = std.json.parseFromSlice(std.json.Value, alloc, params, .{}) catch
+        return state.writer.writeError(alloc, msg.id, .{
+            .code = ErrorCode.invalid_params,
+            .message = "Invalid params",
+        });
+    defer parsed.deinit();
+    if (parsed.value != .object) return state.writer.writeError(alloc, msg.id, .{
+        .code = ErrorCode.invalid_params,
+        .message = "Params must be object",
+    });
+    validateOptionalProviderSession(state, alloc, msg, parsed.value) catch |err| {
+        if (err == error.ResponseWritten) return;
+        return err;
+    };
+    const base_url = requiredProviderString(parsed.value, "baseUrl") orelse
+        return state.writer.writeError(alloc, msg.id, .{
+            .code = ErrorCode.invalid_params,
+            .message = "Missing baseUrl",
+        });
+    const api_key = requiredProviderString(parsed.value, "apiKey") orelse
+        return state.writer.writeError(alloc, msg.id, .{
+            .code = ErrorCode.invalid_params,
+            .message = "Missing apiKey",
+        });
+    if (api_key.len == 0) return state.writer.writeError(alloc, msg.id, .{
+        .code = ErrorCode.invalid_params,
+        .message = "apiKey must not be empty",
+    });
+
+    const chat_url = provider_route.appendResponsesEndpointAlloc(alloc, base_url) catch |err|
+        return state.writer.writeError(alloc, msg.id, .{
+            .code = ErrorCode.invalid_params,
+            .message = switch (err) {
+                error.InsecureBaseUrl => "baseUrl must use HTTPS or loopback HTTP with an explicit port",
+                else => "Invalid baseUrl",
+            },
+        });
+    defer alloc.free(chat_url);
+    const models_url = provider_route.appendModelsEndpointAlloc(alloc, base_url) catch
+        return state.writer.writeError(alloc, msg.id, .{
+            .code = ErrorCode.invalid_params,
+            .message = "Invalid baseUrl",
+        });
+    defer alloc.free(models_url);
+    var credential = credentials.Credential{
+        .token = @constCast(api_key),
+        .source = .openai_api_key,
+    };
+    if (!try startProviderJob(
+        state,
+        msg,
+        .gateway,
+        .configure_byok,
+        models_url,
+        chat_url,
+        &credential,
+    )) {
+        return state.writer.writeError(alloc, msg.id, .{
+            .code = ErrorCode.invalid_request,
+            .message = "Provider operation already in progress",
+        });
+    }
+}
+
+const ParsedProviderParams = struct {
+    parsed: std.json.Parsed(std.json.Value),
+    provider: ?[]const u8,
+};
+
+fn parseProviderParams(
+    state: *ServerState,
+    alloc: Allocator,
+    msg: *jsonrpc.Message,
+    provider_required: bool,
+) !ParsedProviderParams {
+    const params = msg.params_raw orelse return error.MissingParams;
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, params, .{});
+    errdefer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidParams;
+    try validateOptionalProviderSession(state, alloc, msg, parsed.value);
+    const provider = requiredProviderString(parsed.value, "provider");
+    if (provider_required and provider == null) return error.MissingProvider;
+    return .{ .parsed = parsed, .provider = provider };
+}
+
+fn validateOptionalProviderSession(
+    state: *ServerState,
+    alloc: Allocator,
+    msg: *jsonrpc.Message,
+    root: std.json.Value,
+) !void {
+    const value = root.object.get("sessionId") orelse return;
+    if (value != .string or value.string.len == 0) {
+        try state.writer.writeError(alloc, msg.id, .{
+            .code = ErrorCode.invalid_params,
+            .message = "sessionId must be a non-empty string",
+        });
+        return error.ResponseWritten;
+    }
+    const active = state.active_session orelse {
+        try state.writer.writeError(alloc, msg.id, .{
+            .code = ErrorCode.invalid_request,
+            .message = "Session is not active",
+        });
+        return error.ResponseWritten;
+    };
+    if (!std.mem.eql(u8, active.session_id, value.string)) {
+        try state.writer.writeError(alloc, msg.id, .{
+            .code = ErrorCode.invalid_request,
+            .message = "Session is not active",
+        });
+        return error.ResponseWritten;
+    }
+}
+
+fn requiredProviderString(root: std.json.Value, name: []const u8) ?[]const u8 {
+    const value = root.object.get(name) orelse return null;
+    if (value != .string) return null;
+    return value.string;
+}
+
+fn handleProviderLoginStart(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message) !void {
+    const params = parseProviderParams(state, alloc, msg, true) catch |err| {
+        if (err == error.ResponseWritten) return;
+        return state.writer.writeError(alloc, msg.id, .{
+            .code = ErrorCode.invalid_params,
+            .message = "Missing or invalid provider login params",
+        });
+    };
+    defer params.parsed.deinit();
+    const provider = model_provider.parse(params.provider.?) orelse
+        return state.writer.writeError(alloc, msg.id, .{
+            .code = ErrorCode.invalid_params,
+            .message = "provider must be codex or grok",
+        });
+    const started = switch (provider) {
+        .codex => try chatgpt_oauth.startSignIn(
+            &state.provider_login,
+            alloc,
+            state.cfg.gateway_provider.oauth_transport,
+        ),
+        .grok => try grok_oauth.startSignIn(
+            &state.provider_login,
+            alloc,
+            state.cfg.gateway_provider.oauth_transport,
+        ),
+        .gateway => return state.writer.writeError(alloc, msg.id, .{
+            .code = ErrorCode.invalid_params,
+            .message = "provider must be codex or grok",
+        }),
+    };
+    if (!started) return state.writer.writeError(alloc, msg.id, .{
+        .code = ErrorCode.invalid_request,
+        .message = "Provider login already in progress",
+    });
+    try writeProviderLoginSnapshot(state, alloc, msg.id, state.provider_login.snapshot(), null);
+}
+
+fn handleProviderLoginStatus(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message) !void {
+    switch (state.provider_login.pollTransition(alloc)) {
+        .none => try writeProviderLoginSnapshot(state, alloc, msg.id, state.provider_login.snapshot(), null),
+        .cancelled => try writeProviderLoginSnapshot(state, alloc, msg.id, .{ .state = .cancelled }, null),
+        .failed => |err| try writeProviderLoginSnapshot(state, alloc, msg.id, .{ .state = .failed }, @errorName(err)),
+        .succeeded => |completion| {
+            var owned = completion;
+            defer owned.deinit(alloc);
+            try writeProviderLoginSnapshot(state, alloc, msg.id, .{ .state = .succeeded }, null);
+        },
+    }
+}
+
+fn handleProviderLoginSubmitCode(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message) !void {
+    const params = msg.params_raw orelse return state.writer.writeError(alloc, msg.id, .{
+        .code = ErrorCode.invalid_params,
+        .message = "Missing params",
+    });
+    const parsed = std.json.parseFromSlice(std.json.Value, alloc, params, .{}) catch
+        return state.writer.writeError(alloc, msg.id, .{
+            .code = ErrorCode.invalid_params,
+            .message = "Invalid params",
+        });
+    defer parsed.deinit();
+    if (parsed.value != .object) return state.writer.writeError(alloc, msg.id, .{
+        .code = ErrorCode.invalid_params,
+        .message = "Params must be object",
+    });
+    const code = requiredProviderString(parsed.value, "code") orelse
+        return state.writer.writeError(alloc, msg.id, .{
+            .code = ErrorCode.invalid_params,
+            .message = "Missing code",
+        });
+    if (!try state.provider_login.submitManualCode(alloc, code)) {
+        return state.writer.writeError(alloc, msg.id, .{
+            .code = ErrorCode.invalid_request,
+            .message = "This provider login is not accepting a manual code",
+        });
+    }
+    try state.writer.writeResponse(alloc, msg.id, "{\"accepted\":true}");
+}
+
+fn handleProviderLoginCancel(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message) !void {
+    const cancelled = state.provider_login.cancel(alloc);
+    try state.writer.writeResponse(
+        alloc,
+        msg.id,
+        if (cancelled) "{\"cancelled\":true}" else "{\"cancelled\":false}",
+    );
+}
+
+fn writeProviderLoginSnapshot(
+    state: *ServerState,
+    alloc: Allocator,
+    id: ?jsonrpc.RequestId,
+    snapshot: login_flow.SignInSnapshot,
+    failure: ?[]const u8,
+) !void {
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+    try out.writer.writeAll("{\"state\":");
+    try writeJsonStr(@tagName(snapshot.state), &out.writer);
+    if (snapshot.authorization_url.len > 0) {
+        try out.writer.writeAll(",\"authorizationUrl\":");
+        try writeJsonStr(snapshot.authorization_url, &out.writer);
+    }
+    try out.writer.print(",\"acceptsManualCode\":{s}", .{
+        if (snapshot.accepts_manual_code) "true" else "false",
+    });
+    if (failure) |value| {
+        try out.writer.writeAll(",\"error\":");
+        try writeJsonStr(value, &out.writer);
+    }
+    try out.writer.writeByte('}');
+    try state.writer.writeResponse(alloc, id, out.writer.buffered());
+}
+
+const ProviderJobKind = enum {
+    config_option,
+    explicit_switch,
+    configure_byok,
+};
+
+const ProviderJob = struct {
+    state: *ServerState,
+    msg: jsonrpc.Message,
+    target: model_provider.ProviderId,
+    kind: ProviderJobKind,
+    models_url: []u8,
+    models_url_transferred: bool = false,
+    chat_url: ?[]u8 = null,
+    credential_override: ?credentials.Credential = null,
+
+    fn init(
+        state: *ServerState,
+        msg: *const jsonrpc.Message,
+        target: model_provider.ProviderId,
+        kind: ProviderJobKind,
+        models_url: []const u8,
+        chat_url: ?[]const u8,
+        credential_override: ?*const credentials.Credential,
+    ) !ProviderJob {
+        const owned_models_url = try state.alloc.dupe(u8, models_url);
+        errdefer state.alloc.free(owned_models_url);
+        const owned_chat_url = if (chat_url) |value| try state.alloc.dupe(u8, value) else null;
+        errdefer if (owned_chat_url) |value| state.alloc.free(value);
+        var owned_credential = if (credential_override) |value|
+            try cloneServerCredential(state.alloc, value.*)
+        else
+            null;
+        errdefer if (owned_credential) |*value| value.deinit(state.alloc);
+        return .{
+            .state = state,
+            .msg = try cloneMessage(state.alloc, msg),
+            .target = target,
+            .kind = kind,
+            .models_url = owned_models_url,
+            .chat_url = owned_chat_url,
+            .credential_override = owned_credential,
+        };
+    }
+
+    fn deinit(self: *ProviderJob) void {
+        jsonrpc.freeMessage(self.state.alloc, &self.msg);
+        if (!self.models_url_transferred) self.state.alloc.free(self.models_url);
+        if (self.chat_url) |value| self.state.alloc.free(value);
+        if (self.credential_override) |*value| value.deinit(self.state.alloc);
+        self.* = undefined;
+    }
+};
+
+fn cloneServerCredential(alloc: Allocator, value: credentials.Credential) !credentials.Credential {
+    const token = try alloc.dupe(u8, value.token);
+    errdefer secret.zeroAndFree(alloc, token);
+    const account_id = if (value.account_id) |account_id|
+        try alloc.dupe(u8, account_id)
+    else
+        null;
+    return .{
+        .token = token,
+        .source = value.source,
+        .account_id = account_id,
+        .refresh_after_ms = value.refresh_after_ms,
+    };
+}
+
+fn startProviderJob(
+    state: *ServerState,
+    msg: *const jsonrpc.Message,
+    target: model_provider.ProviderId,
+    kind: ProviderJobKind,
+    models_url: []const u8,
+    chat_url: ?[]const u8,
+    credential_override: ?*const credentials.Credential,
+) !bool {
+    reapProviderJob(state, false);
+    if (state.provider_job_running.load(.seq_cst) or state.provider_job_thread != null) return false;
+
+    const job = try state.alloc.create(ProviderJob);
+    errdefer state.alloc.destroy(job);
+    job.* = try ProviderJob.init(
+        state,
+        msg,
+        target,
+        kind,
+        models_url,
+        chat_url,
+        credential_override,
+    );
+    errdefer job.deinit();
+
+    state.provider_job_cancel.store(false, .seq_cst);
+    state.provider_job_running.store(true, .seq_cst);
+    state.provider_job_thread = std.Thread.spawn(.{}, providerJobMain, .{job}) catch |err| {
+        state.provider_job_running.store(false, .seq_cst);
+        return err;
+    };
+    return true;
+}
+
+fn reapProviderJob(state: *ServerState, wait: bool) void {
+    const thread = state.provider_job_thread orelse return;
+    if (!wait and state.provider_job_running.load(.seq_cst)) return;
+    thread.join();
+    state.provider_job_thread = null;
+}
+
+fn providerJobMain(job: *ProviderJob) void {
+    const state = job.state;
+    defer {
+        job.deinit();
+        state.alloc.destroy(job);
+        state.provider_job_running.store(false, .seq_cst);
+    }
+
+    const catalog_provider = catalogProviderFor(state, job.target) orelse {
+        state.writer.writeError(state.alloc, job.msg.id, .{
+            .code = ErrorCode.invalid_request,
+            .message = "Selected provider is unavailable in this host",
+        }) catch {};
+        return;
+    };
+    var outcome = provider_activation.prepare(state.alloc, .{
+        .target = job.target,
+        .oauth_transport = state.cfg.gateway_provider.oauth_transport,
+        .secret_store = state.cfg.secret_store,
+        .catalog_provider = catalog_provider,
+        .endpoint = job.models_url,
+        .credential_override = if (job.credential_override) |*value| value else null,
+    }, &state.provider_job_cancel);
+    defer outcome.deinit(state.alloc);
+    var prepared = switch (outcome) {
+        .prepared => |*value| value,
+        .failed => |failure| {
+            writeProviderJobFailure(job, failure);
+            return;
+        },
+    };
+
+    var settings = (if (state.cfg.home_override) |home|
+        config_runtime.loadMergedSettingsFromHome(state.alloc, home, state.workspace_root)
+    else
+        config_runtime.loadMergedSettings(state.alloc, state.workspace_root)) catch |err| {
+        debug_trace.logf("provider", "ACP provider settings load failed err={s}", .{@errorName(err)});
+        state.writer.writeError(state.alloc, job.msg.id, .{
+            .code = ErrorCode.internal_error,
+            .message = "Failed to load provider settings",
+        }) catch {};
+        return;
+    };
+    defer settings.deinit(state.alloc);
+
+    const current_model = if (state.active_session) |*active|
+        if (active.provider == job.target) active.model else null
+    else if (state.provider == job.target)
+        state.selected_model
+    else
+        null;
+    const selected_model = selectProviderModel(
+        prepared.catalog.items,
+        current_model,
+        settings.models.get(job.target),
+    ) orelse {
+        state.writer.writeError(state.alloc, job.msg.id, .{
+            .code = ErrorCode.invalid_request,
+            .message = "Provider returned no supported models",
+        }) catch {};
+        return;
+    };
+
+    if (state.active_session) |*active| {
+        commitActiveSessionProvider(
+            state.alloc,
+            active,
+            job.target,
+            selected_model,
+            session_test_controls.logOptions(),
+        ) catch |err| {
+            debug_trace.logf("provider", "ACP provider commit failed err={s}", .{@errorName(err)});
+            state.writer.writeError(state.alloc, job.msg.id, .{
+                .code = ErrorCode.internal_error,
+                .message = "Failed to persist session provider",
+            }) catch {};
+            return;
+        };
+    }
+
+    const selected_copy = state.alloc.dupe(u8, selected_model) catch {
+        state.writer.writeError(state.alloc, job.msg.id, .{
+            .code = ErrorCode.internal_error,
+            .message = "Failed to activate provider",
+        }) catch {};
+        return;
+    };
+    if (state.selected_model.len > 0) state.alloc.free(state.selected_model);
+    state.selected_model = selected_copy;
+    state.provider = job.target;
+
+    if (job.kind == .configure_byok) {
+        const chat_url = job.chat_url orelse unreachable;
+        if (state.gateway_chat_url_override) |value| state.alloc.free(value);
+        if (state.gateway_models_path_override) |value| state.alloc.free(value);
+        state.gateway_chat_url_override = chat_url;
+        state.gateway_models_path_override = job.models_url;
+        job.chat_url = null;
+        job.models_url_transferred = true;
+    }
+
+    state.capability_resolver.adoptOwnedCatalog(state.alloc, &prepared.catalog);
+    adoptServerCredential(state, &prepared.credential);
+
+    switch (job.kind) {
+        .config_option => writeConfigOptionsResponse(state, state.alloc, job.msg.id) catch {},
+        .explicit_switch, .configure_byok => writeProviderOperationResponse(job, selected_model) catch {},
+    }
+}
+
+fn selectProviderModel(
+    entries: []const model_catalog.ModelCatalogEntry,
+    current: ?[]const u8,
+    saved: ?[]const u8,
+) ?[]const u8 {
+    for ([_]?[]const u8{ current, saved }) |candidate_value| {
+        const candidate = candidate_value orelse continue;
+        for (entries) |entry| {
+            if (std.mem.eql(u8, entry.id, candidate)) return entry.id;
+        }
+    }
+    return if (entries.len > 0) entries[0].id else null;
+}
+
+fn writeProviderJobFailure(job: *ProviderJob, failure: provider_activation.Failure) void {
+    const message = switch (failure) {
+        .cancelled => "Provider operation cancelled",
+        .missing_credential => if (job.target == .codex)
+            credentials.missing_chatgpt_credential_message
+        else if (job.target == .grok)
+            credentials.missing_grok_credential_message
+        else
+            credentials.missing_credential_message,
+        .unauthorized_credential => "Credential cannot authorize the selected provider",
+        .catalog => "Failed to load provider model catalog",
+        .empty_catalog => "Provider returned no supported models",
+        .credential => |err| message: {
+            debug_trace.logf("provider", "ACP provider preparation failed provider={t} err={s}", .{ job.target, @errorName(err) });
+            break :message "Failed to prepare provider credential or model catalog";
+        },
+    };
+    job.state.writer.writeError(job.state.alloc, job.msg.id, .{
+        .code = ErrorCode.invalid_request,
+        .message = message,
+    }) catch {};
+}
+
+fn writeProviderOperationResponse(job: *ProviderJob, model: []const u8) !void {
+    var out: std.Io.Writer.Allocating = .init(job.state.alloc);
+    defer out.deinit();
+    try out.writer.writeAll("{\"provider\":");
+    try writeJsonStr(@tagName(job.target), &out.writer);
+    try out.writer.writeAll(",\"model\":");
+    try writeJsonStr(model, &out.writer);
+    if (job.kind == .configure_byok) {
+        try out.writer.writeAll(",\"responseUrl\":");
+        try writeJsonStr(gatewayChatUrl(job.state), &out.writer);
+        try out.writer.writeAll(",\"credentialPersistence\":\"connection\"");
+    }
+    try out.writer.writeByte('}');
+    try job.state.writer.writeResponse(job.state.alloc, job.msg.id, out.writer.buffered());
 }
 
 fn handleSetConfigOption(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message) !void {
@@ -1725,100 +2331,26 @@ fn handleSetConfigOption(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Me
                     .message = "Subscription provider switching is unavailable in this WASM runtime",
                 });
             }
-            var staged_credential = if (target == .gateway and state.cfg.credential_override != null)
-                credentials.Credential{
-                    .token = try alloc.dupe(u8, state.cfg.credential_override.?.token),
-                    .source = state.cfg.credential_override.?.source,
-                }
-            else credential: {
-                const resolution = try credentials.resolveForProvider(
-                    alloc,
-                    state.cfg.gateway_provider.oauth_transport,
-                    state.cfg.secret_store,
-                    .refresh_if_needed,
-                    target,
-                    null,
-                );
-                break :credential resolution.credential orelse
-                    return state.writer.writeError(alloc, msg.id, .{
-                        .code = ErrorCode.invalid_request,
-                        .message = if (target == .codex)
-                            credentials.missing_chatgpt_credential_message
-                        else if (target == .grok)
-                            credentials.missing_grok_credential_message
-                        else
-                            credentials.missing_credential_message,
-                    });
-            };
-            defer staged_credential.deinit(alloc);
-            if (!model_provider.authorizesCredential(target, staged_credential.source)) {
-                return state.writer.writeError(alloc, msg.id, .{
-                    .code = ErrorCode.invalid_request,
-                    .message = "Credential cannot authorize the selected provider",
-                });
-            }
-            const catalog_provider = catalogProviderFor(state, target) orelse
-                return state.writer.writeError(alloc, msg.id, .{
-                    .code = ErrorCode.invalid_request,
-                    .message = "Selected provider is unavailable in this host",
-                });
-            const access = credentials.catalogAccessForCredentialAndAccount(
-                staged_credential.source,
-                staged_credential.token,
-                staged_credential.accountId(),
-            );
-            const fetched = try catalog_provider.fetch(alloc, .{
-                .access = access,
-                .endpoint = state.cfg.gateway_models_path,
-                .cancel_flag = &session.cancel_flag,
-                .view = .picker,
-            });
-            var catalog = switch (fetched) {
-                .catalog => |catalog| catalog,
-                .failure => return state.writer.writeError(alloc, msg.id, .{
-                    .code = ErrorCode.invalid_request,
-                    .message = "Failed to load provider model catalog",
-                }),
-            };
-            defer model_catalog.freeModelCatalog(alloc, &catalog);
-            if (catalog.items.len == 0) {
-                return state.writer.writeError(alloc, msg.id, .{
-                    .code = ErrorCode.invalid_request,
-                    .message = "Provider returned no supported models",
-                });
-            }
-            var settings = if (state.cfg.home_override) |home|
-                try config_runtime.loadMergedSettingsFromHome(alloc, home, state.workspace_root)
-            else
-                try config_runtime.loadMergedSettings(alloc, state.workspace_root);
-            defer settings.deinit(alloc);
-            const saved_model = settings.models.get(target);
-            var selected_model = catalog.items[0].id;
-            if (saved_model) |saved| {
-                for (catalog.items) |entry| {
-                    if (std.mem.eql(u8, entry.id, saved)) {
-                        selected_model = entry.id;
-                        break;
-                    }
-                }
-            }
-            commitActiveSessionProvider(
-                alloc,
-                session,
+            var current_credential: ?credentials.Credential = if (state.api_key.len > 0 and credentialMatchesProvider(state.credential_source, target)) .{
+                .token = @constCast(state.api_key),
+                .source = state.credential_source.?,
+                .account_id = if (state.account_id) |account_id| @constCast(account_id) else null,
+            } else null;
+            if (!try startProviderJob(
+                state,
+                msg,
                 target,
-                selected_model,
-                session_test_controls.logOptions(),
-            ) catch |err| {
-                if (modelCommitFailureTerminatesConnection(err)) {
-                    state.terminate_connection = true;
-                }
+                .config_option,
+                gatewayModelsPath(state),
+                null,
+                if (current_credential) |*credential| credential else null,
+            )) {
                 return state.writer.writeError(alloc, msg.id, .{
-                    .code = ErrorCode.internal_error,
-                    .message = "Failed to persist session provider",
+                    .code = ErrorCode.invalid_request,
+                    .message = "Provider operation already in progress",
                 });
-            };
-            state.capability_resolver.adoptOwnedCatalog(alloc, &catalog);
-            adoptServerCredential(state, &staged_credential);
+            }
+            return;
         }
     } else if (std.mem.eql(u8, config_id, "effort")) {
         const effort = parseEffortConfig(value) orelse
@@ -1884,6 +2416,18 @@ fn handleSetConfigOption(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Me
         });
     }
 
+    try writeConfigOptionsResponse(state, alloc, msg.id);
+}
+
+fn writeConfigOptionsResponse(
+    state: *ServerState,
+    alloc: Allocator,
+    id: ?jsonrpc.RequestId,
+) !void {
+    const session = if (state.active_session) |*active| active else return state.writer.writeError(alloc, id, .{
+        .code = ErrorCode.invalid_request,
+        .message = "No active session",
+    });
     const current_model = session.model;
     const current_mode = session.mode;
     const current_capabilities = state.capability_resolver.available(
@@ -1913,7 +2457,7 @@ fn handleSetConfigOption(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Me
     try out.writer.writeAll(",");
     try sessions.writeModeConfigOption(&out.writer, state.cfg.mode_registry, current_mode);
     try out.writer.writeAll("]}");
-    try state.writer.writeResponse(alloc, msg.id, out.writer.buffered());
+    try state.writer.writeResponse(alloc, id, out.writer.buffered());
 }
 
 const SessionPreferenceUpdate = struct {
@@ -2227,6 +2771,14 @@ test "ACP method parser classifies request dispatch methods" {
     try std.testing.expectEqual(AcpMethod.fx_turn_steer, AcpMethod.parse("fx/turn/steer"));
     try std.testing.expectEqual(AcpMethod.fx_turn_status, AcpMethod.parse("fx/turn/status"));
     try std.testing.expectEqual(AcpMethod.fx_background_terminals_list, AcpMethod.parse("fx/backgroundTerminals/list"));
+    try std.testing.expectEqual(AcpMethod.fx_unified_exec_write_stdin, AcpMethod.parse("fx/unifiedExec/writeStdin"));
+    try std.testing.expectEqual(AcpMethod.fx_unified_exec_kill, AcpMethod.parse("fx/unifiedExec/kill"));
+    try std.testing.expectEqual(AcpMethod.fx_provider_switch, AcpMethod.parse("fx/provider/switch"));
+    try std.testing.expectEqual(AcpMethod.fx_provider_configure, AcpMethod.parse("fx/provider/configure"));
+    try std.testing.expectEqual(AcpMethod.fx_provider_login_start, AcpMethod.parse("fx/provider/login/start"));
+    try std.testing.expectEqual(AcpMethod.fx_provider_login_status, AcpMethod.parse("fx/provider/login/status"));
+    try std.testing.expectEqual(AcpMethod.fx_provider_login_submit_code, AcpMethod.parse("fx/provider/login/submitCode"));
+    try std.testing.expectEqual(AcpMethod.fx_provider_login_cancel, AcpMethod.parse("fx/provider/login/cancel"));
     try std.testing.expectEqual(AcpMethod.unknown, AcpMethod.parse("workspace/unknown"));
 }
 
@@ -2244,7 +2796,27 @@ test "ACP prompt gate policy keeps lifecycle interruption responsive" {
     try std.testing.expect(!AcpMethod.fx_turn_steer.waitsForActivePrompt());
     try std.testing.expect(!AcpMethod.fx_turn_status.waitsForActivePrompt());
     try std.testing.expect(!AcpMethod.fx_background_terminals_list.waitsForActivePrompt());
+    try std.testing.expect(!AcpMethod.fx_unified_exec_write_stdin.waitsForActivePrompt());
+    try std.testing.expect(!AcpMethod.fx_unified_exec_kill.waitsForActivePrompt());
+    try std.testing.expect(AcpMethod.fx_provider_switch.waitsForActivePrompt());
+    try std.testing.expect(AcpMethod.fx_provider_configure.waitsForActivePrompt());
+    try std.testing.expect(AcpMethod.fx_provider_login_start.waitsForActivePrompt());
+    try std.testing.expect(!AcpMethod.fx_provider_login_status.waitsForActivePrompt());
+    try std.testing.expect(!AcpMethod.fx_provider_login_submit_code.waitsForActivePrompt());
+    try std.testing.expect(!AcpMethod.fx_provider_login_cancel.waitsForActivePrompt());
     try std.testing.expect(AcpMethod.unknown.waitsForActivePrompt());
+}
+
+test "ACP provider job gate leaves control-plane methods responsive" {
+    try std.testing.expect(AcpMethod.session_cancel.allowedDuringProviderJob());
+    try std.testing.expect(AcpMethod.fx_turn_status.allowedDuringProviderJob());
+    try std.testing.expect(AcpMethod.fx_unified_exec_write_stdin.allowedDuringProviderJob());
+    try std.testing.expect(AcpMethod.fx_unified_exec_kill.allowedDuringProviderJob());
+    try std.testing.expect(AcpMethod.fx_provider_login_status.allowedDuringProviderJob());
+    try std.testing.expect(AcpMethod.fx_provider_login_submit_code.allowedDuringProviderJob());
+    try std.testing.expect(AcpMethod.fx_provider_login_cancel.allowedDuringProviderJob());
+    try std.testing.expect(!AcpMethod.session_prompt.allowedDuringProviderJob());
+    try std.testing.expect(!AcpMethod.fx_provider_switch.allowedDuringProviderJob());
 }
 
 test "ACP active prompt admits and drains only matching turn steers" {

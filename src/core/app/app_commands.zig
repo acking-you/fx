@@ -381,6 +381,7 @@ pub fn Handlers(comptime App: type) type {
                 .continue_recovery = commandContinueRecovery,
                 .show_help = commandShowHelp,
                 .login = commandLogin,
+                .provider = commandProvider,
                 .logout = commandLogout,
                 .show_status = commandShowStatus,
                 .show_background = commandShowBackground,
@@ -669,6 +670,19 @@ pub fn Handlers(comptime App: type) type {
                     .topic = "auth",
                     .tone = .@"error",
                     .body = "login is not available in this runtime",
+                }, true);
+            }
+        }
+
+        fn commandProvider(ctx: *anyopaque, target: []const u8) !void {
+            const app: *App = @ptrCast(@alignCast(ctx));
+            if (comptime @hasDecl(App, "runProviderCommand")) {
+                try app.runProviderCommand(target);
+            } else {
+                try app.writeDomainNotice(.{
+                    .topic = "provider",
+                    .tone = .@"error",
+                    .body = "provider switching is not available in this runtime",
                 }, true);
             }
         }

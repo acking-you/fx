@@ -15,6 +15,8 @@
 
 - **Unified Exec commands:** Model turns now use separate `exec_command` and `write_stdin` tools with numeric sessions for long-running and interactive commands. Output remains bounded while processes survive turn boundaries until they finish or the session closes.
 
+- **ACP provider control:** Native ACP clients can start and monitor Codex or Grok login, switch providers, and configure a connection-scoped Responses base URL and API key without restarting fx.
+
 - **Remote MCP servers**: `/mcp add --transport http <name> <url>` now saves or replaces a remote Streamable HTTP server and reloads MCP immediately. The existing local stdio form is unchanged.
 - **Retained command output**: Captured command output can now be read later with `read_tool_result`, including after a saved session resumes. With `--no-save`, output remains available until fx exits.
 
@@ -25,6 +27,7 @@
 - **Auto mode review prompts**: Auto mode now uses fewer tokens when reviewing unresolved actions.
 - **Native binary size**: The macOS arm64 binary is 0.3% smaller (6.12 MiB vs 6.13 MiB).
 - **Provider model preferences**: Gateway, Codex, and Grok now keep separate saved model selections, so switching providers no longer replaces another provider's preferred model.
+- **Responsive provider switching**: Provider credential refresh and catalog loading no longer block TUI input or ACP control messages. `/provider` is now the direct interactive provider command, while `/login` remains focused on authentication.
 - **Subscription session longevity**: Codex and Grok sessions remain usable beyond 64 consecutive requests.
 - **Usage tracking**: Rejected completions no longer appear in usage tracking, and duplicate completion callbacks are recorded once.
 - **MCP discovery**: MCP searches still find the selected tool when a request includes surrounding context, and another server's authentication failure no longer replaces an empty search result.
@@ -35,6 +38,7 @@
 
 ### Bug Fixes
 
+- **ACP process control**: Direct Unified Exec writes and output polls no longer block cancellation, steering, permission responses, status queries, or process termination while waiting for output.
 - **Terminal resize**: Terminal resizing no longer leaves empty scrollback behind.
 - **Subscription sign-in**: Codex and Grok sign-ins now survive unrelated, stalled, reset, or stale browser connections. Grok authorization codes can also be pasted when the browser cannot return to fx.
 - **OAuth callback pages**: OAuth callbacks now show a completion or failure page after returning from the browser.

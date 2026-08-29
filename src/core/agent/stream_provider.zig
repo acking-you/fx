@@ -177,6 +177,9 @@ pub const RequestData = struct {
 /// endpoint selection, headers, HTTP, and stream reduction.
 pub const ModelRequest = struct {
     credential: CredentialLease,
+    /// Optional resolved endpoint for providers whose route is configurable.
+    /// Subscription providers ignore this rather than inheriting a BYOK URL.
+    endpoint: ?[]const u8 = null,
     session_id: ?[]const u8 = null,
     model: []const u8,
     retry_count: usize,

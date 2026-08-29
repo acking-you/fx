@@ -32,6 +32,9 @@ pub const Config = struct {
     /// from cancellation. Headless hosts leave this null.
     recovery_pause_flag: ?*std.atomic.Value(bool) = null,
     gateway_chat_url: []const u8,
+    /// Connection-scoped route selected by the host. Null keeps the provider's
+    /// normal environment or subscription endpoint resolution.
+    provider_endpoint_override: ?[]const u8 = null,
     advertised_tool_names: []const []const u8 = &.{},
     advertised_functions: []const model_tool_schema.FunctionSchema = &.{},
     provider_capabilities: provider_set.Bundle.Capabilities = .{
