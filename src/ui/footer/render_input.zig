@@ -528,13 +528,6 @@ fn thinkingActivityProjection(
     if (ctx.stream.active and ctx.stream.assistant_text_started) {
         return .none;
     }
-    // A completed assistant tail is already visible in the transcript. It
-    // must win over the pacer's generic "has pending presentation" signal,
-    // otherwise the final drain can briefly resurrect a Working/token row
-    // after the turn has visibly completed.
-    if (ctx.completed_assistant_presentation_tail) {
-        return .none;
-    }
     // The pacer owns the visible response while a turn is active. Keep the
     // activity row hidden across both chunk gaps and token emission; showing
     // a second spinner here causes needless redraws and diverges from the
@@ -1027,8 +1020,11 @@ test "frame-owned activity shows live streaming token progress" {
     tail_ctx.completed_assistant_presentation_tail = true;
     var tail_buf: [256]u8 = undefined;
     switch (frameOwnedActivityProjection(&tail_buf, &shell, tail_ctx, null)) {
-        .none => {},
-        .turn_thinking, .tool_slot => return error.TestUnexpectedResult,
+        .turn_thinking => |thinking| {
+            try std.testing.expectEqualStrings("  (↑50k ↓1.2k)", thinking.label);
+            try std.testing.expectEqual(ActivityProjection.Tone.neutral, thinking.tone);
+        },
+        .none, .tool_slot => return error.TestUnexpectedResult,
     }
 }
 

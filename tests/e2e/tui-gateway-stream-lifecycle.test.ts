@@ -1860,8 +1860,12 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
 
       await session.resizeWindow(72, 24);
       releaseFinalResponse?.();
-      await session.waitForText(finalText, TIMEOUT);
-      const scrollback = await session.captureFullScrollback();
+      const scrollback = await waitForScrollback(
+        session,
+        (value) =>
+          value.includes(finalText) && TURN_SUMMARY_WITH_TOKENS.test(value),
+        "route recovery final summary",
+      );
 
       expect(queuedGateway.requests.length).toBe(2);
       expect(scrollback).not.toContain("System");
@@ -2733,13 +2737,13 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
           queuedGateway.requests.length === 1 &&
           hold.started &&
           candidate.includes(queuedSummaryText(1)) &&
-          !candidate.includes(queuedPrompt),
-        "queued prompt count shown before active turn releases",
+          candidate.includes(queuedPrompt),
+        "queued prompt preview shown before active turn releases",
       );
 
-      expect(heldScrollback).not.toContain(queuedPrompt);
+      expect(heldScrollback).toContain(queuedPrompt);
       expect(heldScrollback).not.toContain("next:");
-      expect(countOccurrences(heldScrollback, queuedPrompt)).toBe(0);
+      expect(countOccurrences(heldScrollback, queuedPrompt)).toBe(1);
       expect(heldScrollback).not.toContain(activeBefore.trim());
       expect(heldScrollback).not.toContain(activeAfter.trim());
       expect(queuedGateway.requests).toHaveLength(1);
@@ -2978,7 +2982,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       await session.waitForPane(
         (pane) =>
           pane.includes(queuedSummaryText(2)) &&
-          !pane.includes(firstQueued) &&
+          pane.includes(firstQueued) &&
           !pane.includes(secondQueued),
         TIMEOUT,
       );
@@ -3629,7 +3633,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       await session.waitForPane(
         (pane) =>
           pane.includes(queuedSummaryText(1)) &&
-          !pane.includes(queuedPrompt),
+          pane.includes(queuedPrompt),
         TIMEOUT,
       );
       await session.sendKeys("Up");
@@ -3729,7 +3733,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       await session.waitForPane(
         (pane) =>
           pane.includes(queuedSummaryText(2)) &&
-          !pane.includes(firstQueued) &&
+          pane.includes(firstQueued) &&
           !pane.includes(secondQueued),
         TIMEOUT,
       );
@@ -3907,7 +3911,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       await session.waitForPane(
         (pane) =>
           pane.includes(queuedSummaryText(1)) &&
-          !pane.includes(queuedPrompt),
+          pane.includes(queuedPrompt),
         TIMEOUT,
       );
       rmSync(image);
@@ -4029,7 +4033,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       await session.waitForPane(
         (pane) =>
           pane.includes(queuedSummaryText(2)) &&
-          !pane.includes(firstQueued) &&
+          pane.includes(firstQueued) &&
           !pane.includes(secondQueued),
         TIMEOUT,
       );
@@ -4191,7 +4195,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         await session.waitForPane(
           (pane) =>
             pane.includes(queuedSummaryText(2)) &&
-            !pane.includes(firstQueued) &&
+            pane.includes(firstQueued) &&
             !pane.includes(secondQueued),
           TIMEOUT,
         );
@@ -4346,7 +4350,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       await session.waitForPane(
         (pane) =>
           pane.includes(queuedSummaryText(2)) &&
-          !pane.includes(firstQueued) &&
+          pane.includes(firstQueued) &&
           !pane.includes(secondQueued),
         TIMEOUT,
       );
