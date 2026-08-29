@@ -79,6 +79,26 @@ pub fn composeQueuedSummaryRow(
     return row;
 }
 
+/// Single-line preview of the oldest queued follow-up. Codex-cli keeps the
+/// pending message body visible while a turn is running; retaining one clipped
+/// row gives fx the same affordance without expanding every queued draft on
+/// every frame.
+pub fn composeQueuedPreviewRow(
+    alloc: Allocator,
+    preview: []const u8,
+    width: u16,
+) !std.ArrayList(u8) {
+    var row: std.ArrayList(u8) = .empty;
+    try row.appendSlice(alloc, ui_render.dim_style);
+    try row_text.appendClipped(alloc, &row, "  ↳ ", width);
+    const prefix_width: u16 = @intCast(display_width.visibleWidthIgnoringAnsi("  ↳ "));
+    if (width > prefix_width) {
+        try row_text.appendClipped(alloc, &row, preview, width -| prefix_width);
+    }
+    try row.appendSlice(alloc, ui_render.reset_style);
+    return row;
+}
+
 pub fn composeQueueReviewHintRow(
     alloc: Allocator,
     width: u16,
@@ -114,6 +134,12 @@ test "collapsed queue banner drops the affordance while the review is paused" {
 
     try std.testing.expect(std.mem.find(u8, row.items, "2 queued messages") != null);
     try std.testing.expect(std.mem.find(u8, row.items, "↑ to edit") == null);
+}
+
+test "queued preview keeps the oldest follow-up visible" {
+    var row = try composeQueuedPreviewRow(std.testing.allocator, "BLOCKED_DURING_COMPACTION", 80);
+    defer row.deinit(std.testing.allocator);
+    try std.testing.expect(std.mem.find(u8, row.items, "↳ BLOCKED_DURING_COMPACTION") != null);
 }
 
 test "queue review hint explains empty draft deletion" {

@@ -694,18 +694,22 @@ fn setTerminalTitleLabel(raw: ?*anyopaque, label: []const u8) void {
     const out = titleOutput(raw);
     var label_buffer: [terminal_title_max_label_bytes]u8 = undefined;
     const sanitized = sanitizedTerminalTitleLabel(label, &label_buffer);
-    var sequence_buffer: [terminal_title_osc_prefix.len + terminal_title_max_content_bytes + 1]u8 = undefined;
+    // Terminate OSC with ST (ESC backslash) instead of BEL.  The title is
+    // updated independently by the activity spinner, and using BEL here
+    // would make every animation frame indistinguishable from a notification
+    // bell to terminal recorders and accessibility integrations.
+    var sequence_buffer: [terminal_title_osc_prefix.len + terminal_title_max_content_bytes + 2]u8 = undefined;
     var sequence: std.Io.Writer = .fixed(&sequence_buffer);
     sequence.writeAll(terminal_title_osc_prefix) catch return;
     sequence.writeAll(terminal_title_display_prefix) catch return;
     sequence.writeAll(sanitized) catch return;
-    sequence.writeByte('\x07') catch return;
+    sequence.writeAll("\x1b\\") catch return;
     out.writeStreamingAll(io_mod.getIo(), sequence.buffered()) catch return;
 }
 
 fn clearTerminalTitleProvider(raw: ?*anyopaque) void {
     const out = titleOutput(raw);
-    out.writeStreamingAll(io_mod.getIo(), "\x1b]2;\x07") catch return;
+    out.writeStreamingAll(io_mod.getIo(), "\x1b]2;\x1b\\") catch return;
 }
 
 test "terminal title writes the label to the caller's output file" {
@@ -723,7 +727,7 @@ test "terminal title writes the label to the caller's output file" {
     defer written_file.close(io_mod.getIo());
     const written = try io_mod.readFileToEnd(alloc, &written_file, 128);
     defer alloc.free(written);
-    try std.testing.expectEqualStrings("\x1b]2;fx · release notes\x07", written);
+    try std.testing.expectEqualStrings("\x1b]2;fx · release notes\x1b\\", written);
 }
 
 test "terminal title sanitizes and bounds untrusted labels" {
@@ -739,11 +743,11 @@ test "terminal title sanitizes and bounds untrusted labels" {
     defer written_file.close(io_mod.getIo());
     const written = try io_mod.readFileToEnd(alloc, &written_file, 512);
     defer alloc.free(written);
-    try std.testing.expect(written.len <= terminal_title_osc_prefix.len + terminal_title_max_content_bytes + 1);
+    try std.testing.expect(written.len <= terminal_title_osc_prefix.len + terminal_title_max_content_bytes + 2);
     try std.testing.expect(std.mem.startsWith(u8, written, "\x1b]2;fx · safe]2;owned"));
-    try std.testing.expect(std.mem.endsWith(u8, written, "...\x07"));
-    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, written, "\x07"));
-    try std.testing.expect(std.mem.find(u8, written[terminal_title_osc_prefix.len..], "\x1b") == null);
+    try std.testing.expect(std.mem.endsWith(u8, written, "...\x1b\\"));
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, written, "\x07"));
+    try std.testing.expect(std.mem.find(u8, written[terminal_title_osc_prefix.len .. written.len - 2], "\x1b") == null);
     try std.testing.expect(std.mem.find(u8, written, "\xc2\x9b") == null);
 }
 
@@ -760,7 +764,7 @@ test "terminal title clear restores a predictable empty state" {
     defer written_file.close(io_mod.getIo());
     const written = try io_mod.readFileToEnd(alloc, &written_file, 32);
     defer alloc.free(written);
-    try std.testing.expectEqualStrings("\x1b]2;\x07", written);
+    try std.testing.expectEqualStrings("\x1b]2;\x1b\\", written);
 }
 
 pub fn formatResumeHandoff(

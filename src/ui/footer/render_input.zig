@@ -273,6 +273,9 @@ pub const RenderContext = struct {
     composer_visible: bool = true,
     permission_mode: types.PermissionMode = .ask,
     queued_count: usize,
+    /// First queued follow-up, matching codex-cli's pending-input preview.
+    /// Empty means the queue is represented by its aggregate summary only.
+    queued_prompt_preview: []const u8 = "",
     queued_paused: bool = false,
     queued_cancel_all_available: bool = false,
     queued_prompt_cards: []const QueuedPromptCard = &.{},
@@ -361,6 +364,7 @@ pub fn queuedCardSpacerRows(ctx: RenderContext) u16 {
 
 pub const QueuedBannerFacts = struct {
     queued_count: usize = 0,
+    queued_prompt_preview: []const u8 = "",
     paused: bool = false,
     card_count: usize = 0,
     card_rows: u16 = 0,
@@ -368,6 +372,7 @@ pub const QueuedBannerFacts = struct {
 
 pub fn queuedBannerRowsForFacts(facts: QueuedBannerFacts) u16 {
     if (facts.queued_count == 0) return 0;
+    const preview_rows: u16 = @intFromBool(facts.queued_prompt_preview.len > 0);
     const paused_hint_rows: u16 = @intFromBool(facts.paused);
     if (facts.card_rows > 0) {
         const between_cards: u16 = @intCast(@min(
@@ -377,12 +382,13 @@ pub fn queuedBannerRowsForFacts(facts: QueuedBannerFacts) u16 {
         const spacer_rows: u16 = 1 +| paused_hint_rows;
         return facts.card_rows +| between_cards +| paused_hint_rows +| spacer_rows;
     }
-    return 1 +| paused_hint_rows +| collapsed_queue_banner_gap_rows;
+    return 1 +| preview_rows +| paused_hint_rows +| collapsed_queue_banner_gap_rows;
 }
 
 pub fn queuedBannerRows(ctx: RenderContext) u16 {
     return queuedBannerRowsForFacts(.{
         .queued_count = ctx.queued_count,
+        .queued_prompt_preview = ctx.queued_prompt_preview,
         .paused = ctx.queued_paused,
         .card_count = ctx.queued_prompt_cards.len,
         .card_rows = ctx.queued_prompt_card_rows,
@@ -396,6 +402,10 @@ test "queued banner row policy consumes aggregate card facts" {
     try std.testing.expectEqual(@as(u16, 3), queuedBannerRowsForFacts(.{
         .queued_count = 2,
         .paused = true,
+    }));
+    try std.testing.expectEqual(@as(u16, 3), queuedBannerRowsForFacts(.{
+        .queued_count = 1,
+        .queued_prompt_preview = "follow-up",
     }));
     try std.testing.expectEqual(@as(u16, 7), queuedBannerRowsForFacts(.{
         .queued_count = 2,
@@ -516,6 +526,13 @@ fn thinkingActivityProjection(
         } };
     }
     if (ctx.stream.active and ctx.stream.assistant_text_started) {
+        return .none;
+    }
+    // The pacer owns the visible response while a turn is active. Keep the
+    // activity row hidden across both chunk gaps and token emission; showing
+    // a second spinner here causes needless redraws and diverges from the
+    // codex-cli queue/stream presentation.
+    if (ctx.writing_response and ctx.stream.active) {
         return .none;
     }
     if (ctx.writing_response and !ctx.stream.active) {

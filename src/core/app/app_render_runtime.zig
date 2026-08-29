@@ -530,12 +530,58 @@ pub fn Runtime(comptime App: type) type {
         var file_completions_buf: [input_completion_runtime.file_picker_completion_cap]file_index.SearchResult = undefined;
         var file_match_spans_buf: [input_completion_runtime.file_picker_completion_cap * file_index.max_path_len]file_index.MatchSpan = undefined;
         var file_path_storage_buf: [input_completion_runtime.file_picker_path_storage_cap]u8 = undefined;
+
+        fn refreshQueuedPromptPreview(app: *App, queue_count: usize) void {
+            if (comptime !@hasField(App, "queued_prompt_preview") or
+                !@hasField(App, "queued_prompt_preview_count") or
+                !@hasField(App, "worker") or
+                !@hasDecl(@TypeOf(app.worker), "snapshotQueuedPromptDrafts")) return;
+            if (queue_count == app.queued_prompt_preview_count) return;
+
+            if (queue_count == 0) {
+                app.queued_prompt_preview.clearRetainingCapacity();
+                app.queued_prompt_preview_count = 0;
+                return;
+            }
+
+            const drafts = app.worker.snapshotQueuedPromptDrafts(app.alloc) catch |err| {
+                debug_trace.logf("render", "queued_preview_snapshot_failed err={s}", .{@errorName(err)});
+                return;
+            };
+            defer worker_runtime.freeQueuedPromptDrafts(app.alloc, drafts);
+            if (drafts.len == 0) return;
+
+            var safe_preview = text_utils.encodeTerminalSafe(
+                app.alloc,
+                drafts[0].reviewInput(),
+                1024,
+            ) catch |err| {
+                debug_trace.logf("render", "queued_preview_encode_failed err={s}", .{@errorName(err)});
+                return;
+            };
+            defer safe_preview.deinit(app.alloc);
+            app.queued_prompt_preview.clearRetainingCapacity();
+            app.queued_prompt_preview.appendSlice(app.alloc, safe_preview.bytes) catch |err| {
+                debug_trace.logf("render", "queued_preview_copy_failed err={s}", .{@errorName(err)});
+                return;
+            };
+            app.queued_prompt_preview_count = queue_count;
+        }
+
+        fn queuedPromptPreview(app: *const App) []const u8 {
+            if (comptime @hasField(App, "queued_prompt_preview")) {
+                return app.queued_prompt_preview.items;
+            }
+            return "";
+        }
+
         noinline fn footerContext(
             app: *App,
             shimmer_pos: i16,
             queued_cards: *const QueuedCardProjection,
         ) render_input.RenderContext {
             const queue_preview = app.worker.queuePreview();
+            refreshQueuedPromptPreview(app, queue_preview.count);
 
             const model_query = app.input_runtime.picker.activeModelPickerQuery(&app.input_runtime.edit_state);
             const pending_model = if (app.input_runtime.picker.hasPendingModelPickerSelection()) app.input_runtime.picker.model_picker_pending_model.items else null;
@@ -647,6 +693,10 @@ pub fn Runtime(comptime App: type) type {
                 else
                     .ask,
                 .queued_count = if (queued_cards.cards.len > 0) queued_cards.cards.len else queue_preview.count,
+                .queued_prompt_preview = if (queued_cards.cards.len == 0)
+                    queuedPromptPreview(app)
+                else
+                    "",
                 .queued_paused = if (comptime @hasField(@TypeOf(queue_preview), "paused"))
                     queue_preview.paused
                 else

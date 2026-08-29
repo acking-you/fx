@@ -580,6 +580,11 @@ const App = struct {
     /// empty means no title has been derived or restored yet.
     session_title: std.ArrayList(u8) = .empty,
     terminal_title_state: terminal_title_runtime.State = .{},
+    /// First queued follow-up shown in the live pending-input preview. The
+    /// render path refreshes this only when the queue count changes, so the
+    /// preview does not turn every frame into a mutex-held allocation.
+    queued_prompt_preview: std.ArrayList(u8) = .empty,
+    queued_prompt_preview_count: usize = 0,
     total_input_tokens: u64 = 0,
     total_output_tokens: u64 = 0,
     total_web_search_requests: u64 = 0,
@@ -822,6 +827,7 @@ const App = struct {
         self.pacer.deinit(self.alloc);
         self.provider_selection.deinit();
         self.session_title.deinit(self.alloc);
+        self.queued_prompt_preview.deinit(self.alloc);
         self.thought_body.deinit(self.alloc);
         SessionAppRuntime.deinitPersistence(self);
         if (self.requested_resume) |*target| {
