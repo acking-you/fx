@@ -1276,7 +1276,6 @@ test "minimal layout is safe for shutdown fallback" {
 fn closeTestStdout(shell: *TranscriptRuntime) void {
     const file = shell.stdout_file orelse return;
     file.close(io_mod.getIo());
-    shell.stdout_file = null;
 }
 
 test "lifecycle terminal writer updates bytes metrics and shadow" {
