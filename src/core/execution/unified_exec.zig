@@ -799,7 +799,12 @@ const Process = struct {
                 if (comptime builtin.os.tag == .windows) {
                     _ = std.os.windows.ntdll.NtTerminateProcess(self.pid, @enumFromInt(1));
                 } else {
-                    const process_group: std.posix.pid_t = -self.pid;
+                    // Child.Id is an unsigned process handle type on some
+                    // Unix targets. Convert to pid_t before negating it for
+                    // process-group signaling so ReleaseSafe does not trap on
+                    // unsigned integer overflow.
+                    const child_pid: std.posix.pid_t = @intCast(self.pid);
+                    const process_group = -child_pid;
                     std.posix.kill(process_group, std.posix.SIG.TERM) catch {};
                     var waited_ms: u64 = 0;
                     while (waited_ms < 20) : (waited_ms += 2) {
