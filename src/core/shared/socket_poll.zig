@@ -29,16 +29,9 @@ pub fn poll(fds: []PollFd, timeout_ms: i32) PollError!usize {
         if (rc >= 0) return @intCast(rc);
         return error.NetworkDown;
     } else {
-        const fds_count = std.math.cast(std.posix.nfds_t, fds.len) orelse
-            return error.SystemResources;
-        const rc = std.posix.system.poll(fds.ptr, fds_count, timeout_ms);
-        return switch (std.posix.errno(rc)) {
-            .SUCCESS => @intCast(rc),
-            .INTR => error.Interrupted,
-            .NOMEM => error.SystemResources,
-            .NETDOWN => error.NetworkDown,
-            else => error.Unexpected,
-        };
+        // Keep the established Unix behavior, including retrying EINTR. This
+        // abstraction exists to add WSAPoll, not to replace POSIX policy.
+        return std.posix.poll(fds, timeout_ms);
     }
 }
 
@@ -55,8 +48,22 @@ pub fn setTimeouts(socket: std.Io.net.Socket.Handle, timeout_ms: u32) !void {
             .sec = @intCast(timeout_ms / 1000),
             .usec = @intCast((timeout_ms % 1000) * 1000),
         };
-        try std.posix.setsockopt(socket, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout));
-        try std.posix.setsockopt(socket, std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, std.mem.asBytes(&timeout));
+        const receive_rc = std.c.setsockopt(
+            socket,
+            std.c.SOL.SOCKET,
+            std.c.SO.RCVTIMEO,
+            &timeout,
+            @sizeOf(std.posix.timeval),
+        );
+        if (receive_rc != 0) return error.SocketOptionFailed;
+        const send_rc = std.c.setsockopt(
+            socket,
+            std.c.SOL.SOCKET,
+            std.c.SO.SNDTIMEO,
+            &timeout,
+            @sizeOf(std.posix.timeval),
+        );
+        if (send_rc != 0) return error.SocketOptionFailed;
     }
 }
 
