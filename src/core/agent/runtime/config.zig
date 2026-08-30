@@ -38,7 +38,6 @@ pub const Config = struct {
     advertised_tool_names: []const []const u8 = &.{},
     advertised_functions: []const model_tool_schema.FunctionSchema = &.{},
     provider_capabilities: provider_set.Bundle.Capabilities = .{
-        .fx_search = true,
         .vision_fallback = true,
     },
     custom_tool_guidance: []const u8 = "",

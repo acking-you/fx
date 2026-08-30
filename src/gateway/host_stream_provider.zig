@@ -144,6 +144,8 @@ fn stream(raw: ?*anyopaque, alloc: Allocator, request: stream_provider.ModelRequ
             .context = &events,
             .on_content_chunk = EventBridge.content,
             .on_tool_start = EventBridge.toolStart,
+            .on_provider_tool_start = EventBridge.providerToolStart,
+            .on_provider_tool_done = EventBridge.providerToolDone,
             .on_reasoning_chunk = EventBridge.reasoning,
             .on_tool_input_chunk = EventBridge.toolInput,
             .on_unknown_event = EventBridge.unknown,
@@ -182,6 +184,19 @@ const EventBridge = struct {
 
     fn toolStart(raw: *anyopaque, id: []const u8, name: []const u8, label: ?[]const u8) void {
         sink(raw).emit(.{ .tool_started = .{ .id = id, .name = name, .label = label } });
+    }
+
+    fn providerToolDone(raw: *anyopaque, id: []const u8, name: []const u8, label: ?[]const u8, succeeded: bool) void {
+        sink(raw).emit(.{ .provider_tool_completed = .{
+            .id = id,
+            .name = name,
+            .label = label,
+            .succeeded = succeeded,
+        } });
+    }
+
+    fn providerToolStart(raw: *anyopaque, id: []const u8, name: []const u8, label: ?[]const u8) void {
+        sink(raw).emit(.{ .provider_tool_started = .{ .id = id, .name = name, .label = label } });
     }
 };
 

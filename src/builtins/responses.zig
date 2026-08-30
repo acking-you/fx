@@ -12,6 +12,7 @@ const oauth_http_transport = @import("oauth_http_transport.zig");
 const http_client = @import("../gateway/client.zig");
 const openai_models = @import("../gateway/openai_models.zig");
 const openai_responses = @import("../gateway/openai_responses.zig");
+const configured_responses_search = @import("../gateway/configured_responses_search.zig");
 const openai_responses_permission_reviewer = @import("../gateway/openai_responses_permission_reviewer.zig");
 
 const Allocator = std.mem.Allocator;
@@ -32,15 +33,28 @@ pub const model_catalog_provider = model_catalog.Provider{
     .fetch_fn = fetchModelCatalog,
 };
 
+fn fallbackModelCapabilities(model: []const u8) model_capabilities.Capabilities {
+    var capabilities = model_capabilities.capabilitiesForModel(model);
+    // The direct Responses route owns the standard hosted web_search tool.
+    // Provider catalogs can still replace this optimistic fallback once the
+    // selected endpoint publishes explicit model metadata.
+    capabilities.supports_web_search = true;
+    return capabilities;
+}
+
 pub const provider_bundle = provider_set.Bundle{
     .presentation = provider_catalog.find(.gateway),
     .auth_strategy = .api_key,
-    .fallback_model_capabilities_fn = model_capabilities.capabilitiesForModel,
+    .fallback_model_capabilities_fn = fallbackModelCapabilities,
     .agent_stream = agent_stream_provider,
     .cli_model_catalog = cli_model_catalog_provider,
     .model_catalog = model_catalog_provider,
     .responses_compaction = openai_responses.compaction_provider,
     .permission_reviewer = permission_reviewer.provider,
+    .web_search = .{
+        .projection = .hosted,
+        .executor = configured_responses_search.provider,
+    },
 };
 
 pub const oauth_transport_provider = oauth_http_transport.provider;
@@ -157,7 +171,7 @@ fn fetchModelCatalog(
 
 test "Responses bundle exposes only the BYOK API-key route" {
     try std.testing.expectEqual(provider_set.Bundle.AuthStrategy.api_key, provider_bundle.auth_strategy.?);
-    try std.testing.expect(provider_bundle.fx_search == null);
+    try std.testing.expect(provider_bundle.web_search.projection == .hosted);
     try std.testing.expect(agent_stream_provider.stream_fn == openai_responses.agent_stream_provider.stream_fn);
 }
 

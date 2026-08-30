@@ -8,6 +8,7 @@ const types = @import("../core/shared/types.zig");
 const gateway_client = @import("client.zig");
 const responses_protocol = @import("responses_protocol.zig");
 const model_tool_schema = @import("../core/tooling/model_tool_schema.zig");
+const web_search_projection = @import("../core/gateway/web_search_projection.zig");
 
 const Allocator = std.mem.Allocator;
 const endpoint = "https://cli-chat-proxy.grok.com/v1/responses";
@@ -68,7 +69,20 @@ pub fn buildRequest(
     try writeResponsesInput(writer, alloc, request.messages, request.verified_images);
     try writer.writeByte(']');
 
-    _ = try responses_protocol.writeTools(writer, alloc, request.tools);
+    const serialized_tools = try responses_protocol.toolsJsonAlloc(alloc, request.tools);
+    defer alloc.free(serialized_tools.json);
+    const projected_tools = try web_search_projection.projectToolsAlloc(
+        alloc,
+        serialized_tools.json,
+        .{
+            .kind = if (request.provider_options.native_web_search) .hosted else .function,
+        },
+    );
+    defer alloc.free(projected_tools);
+    if (!std.mem.eql(u8, projected_tools, "[]")) {
+        try writer.writeAll(",\"tools\":");
+        try writer.writeAll(projected_tools);
+    }
     try writer.writeAll(",\"tool_choice\":");
     try std.json.Stringify.value(request.tool_choice.label(), .{}, writer);
     try writer.writeAll(",\"parallel_tool_calls\":true,\"include\":[\"reasoning.encrypted_content\"]");
@@ -308,6 +322,8 @@ pub fn streamPrepared(
         &events,
         EventBridge.content,
         EventBridge.toolStart,
+        EventBridge.providerToolStart,
+        EventBridge.providerToolDone,
         EventBridge.reasoning,
         EventBridge.toolInput,
         request.cancel_flag,
@@ -359,6 +375,19 @@ const EventBridge = struct {
 
     fn toolStart(raw: *anyopaque, id: []const u8, name: []const u8, label: ?[]const u8) void {
         sink(raw).emit(.{ .tool_started = .{ .id = id, .name = name, .label = label } });
+    }
+
+    fn providerToolDone(raw: *anyopaque, id: []const u8, name: []const u8, label: ?[]const u8, succeeded: bool) void {
+        sink(raw).emit(.{ .provider_tool_completed = .{
+            .id = id,
+            .name = name,
+            .label = label,
+            .succeeded = succeeded,
+        } });
+    }
+
+    fn providerToolStart(raw: *anyopaque, id: []const u8, name: []const u8, label: ?[]const u8) void {
+        sink(raw).emit(.{ .provider_tool_started = .{ .id = id, .name = name, .label = label } });
     }
 };
 
@@ -464,6 +493,8 @@ fn consumeSse(
     callback_ctx: *anyopaque,
     on_content_chunk: stream_provider.StreamCallback,
     on_tool_start: ?stream_provider.ToolStartCallback,
+    on_provider_tool_start: ?stream_provider.ProviderToolStartCallback,
+    on_provider_tool_done: ?stream_provider.ProviderToolDoneCallback,
     on_reasoning_chunk: ?stream_provider.StreamCallback,
     on_tool_input_chunk: ?stream_provider.StreamCallback,
     cancel_flag: *std.atomic.Value(bool),
@@ -477,6 +508,8 @@ fn consumeSse(
         .context = callback_ctx,
         .on_content = on_content_chunk,
         .on_tool_start = on_tool_start,
+        .on_provider_tool_start = on_provider_tool_start,
+        .on_provider_tool_done = on_provider_tool_done,
         .on_reasoning = on_reasoning_chunk,
         .on_tool_input = on_tool_input_chunk,
     };
@@ -550,6 +583,29 @@ test "xAI Grok request uses Responses input and converts AI SDK tool schemas" {
     try std.testing.expect(std.mem.find(u8, body, "\"reasoning\":{\"effort\":\"high\"") != null);
     try std.testing.expect(std.mem.find(u8, body, "\"service_tier\"") == null);
     try std.testing.expect(std.mem.find(u8, body, "\"max_output_tokens\":4096") != null);
+}
+
+test "xAI Grok projects unified web_search to the hosted Responses tool" {
+    const schemas = [_]model_tool_schema.FunctionSchema{
+        .{ .name = "web_search", .description = "Search", .input_schema = .{} },
+        .{ .name = "read_file", .description = "Read", .input_schema = .{} },
+    };
+    const names = [_][]const u8{ "web_search", "read_file" };
+    const body = try buildRequest(std.testing.allocator, .{
+        .model = "grok-4.20",
+        .messages = &.{.{ .role = .user, .content = "Find current Zig news." }},
+        .tools = .{
+            .advertised_names = &names,
+            .advertised_functions = &schemas,
+        },
+        .tool_choice = .auto,
+        .provider_options = .{ .native_web_search = true },
+    });
+    defer std.testing.allocator.free(body);
+
+    try std.testing.expect(std.mem.find(u8, body, "\"type\":\"web_search\"") != null);
+    try std.testing.expect(std.mem.find(u8, body, "\"name\":\"web_search\"") == null);
+    try std.testing.expect(std.mem.find(u8, body, "\"name\":\"read_file\"") != null);
 }
 
 test "xAI Grok standard requests omit the priority service tier" {
@@ -700,6 +756,8 @@ test "xAI Grok SSE maps text reasoning tools and usage" {
         &capture,
         Capture.contentChunk,
         Capture.toolStart,
+        null,
+        null,
         Capture.reasoningChunk,
         null,
         &cancelled,
@@ -708,6 +766,10 @@ test "xAI Grok SSE maps text reasoning tools and usage" {
     defer {
         if (completion.content) |value| std.testing.allocator.free(@constCast(value));
         types.freeToolCallSlice(std.testing.allocator, @constCast(completion.tool_calls));
+        types.freeResponsesProviderOutputItems(
+            std.testing.allocator,
+            completion.responses_provider_output_items,
+        );
         if (completion.provider_state_json) |value| std.testing.allocator.free(@constCast(value));
     }
     try std.testing.expectEqualStrings("hello", capture.content.items);
@@ -720,6 +782,61 @@ test "xAI Grok SSE maps text reasoning tools and usage" {
     try std.testing.expect(completion.provider_state_json != null);
     try std.testing.expect(std.mem.find(u8, completion.provider_state_json.?, "\"encrypted_content\":\"opaque\"") != null);
     try std.testing.expectEqual(types.ProviderFinishReason.tool_calls, completion.finish_reason.?);
+}
+
+test "xAI Grok preserves and publishes hosted web search lifecycle" {
+    const sse_text =
+        "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"web_search_call\",\"id\":\"ws_1\",\"status\":\"in_progress\"}}\n\n" ++
+        "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"web_search_call\",\"id\":\"ws_1\",\"status\":\"completed\",\"action\":{\"type\":\"search\",\"query\":\"Zig 0.16\"}}}\n\n" ++
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"status\":\"completed\"}}\n\n";
+    var reader: std.Io.Reader = .fixed(sse_text);
+    var cancelled = std.atomic.Value(bool).init(false);
+    const Capture = struct {
+        started: bool = false,
+        completed: bool = false,
+        label: [64]u8 = undefined,
+        label_len: usize = 0,
+
+        fn chunk(_: *anyopaque, _: []const u8) void {}
+        fn start(raw: *anyopaque, id: []const u8, name: []const u8, _: ?[]const u8) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.started = std.mem.eql(u8, id, "ws_1") and std.mem.eql(u8, name, "web_search");
+        }
+        fn done(raw: *anyopaque, id: []const u8, name: []const u8, label: ?[]const u8, succeeded: bool) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.completed = succeeded and std.mem.eql(u8, id, "ws_1") and std.mem.eql(u8, name, "web_search");
+            const value = label orelse return;
+            self.label_len = @min(value.len, self.label.len);
+            @memcpy(self.label[0..self.label_len], value[0..self.label_len]);
+        }
+    };
+    var capture: Capture = .{};
+    var completion = try consumeSse(
+        std.testing.allocator,
+        &reader,
+        &capture,
+        Capture.chunk,
+        null,
+        Capture.start,
+        Capture.done,
+        null,
+        null,
+        &cancelled,
+        null,
+    );
+    defer deinitTestCompletion(&completion);
+
+    try std.testing.expect(capture.started);
+    try std.testing.expect(capture.completed);
+    try std.testing.expectEqualStrings("Zig 0.16", capture.label[0..capture.label_len]);
+    try std.testing.expect(completion.provider_state_json != null);
+    try std.testing.expect(std.mem.find(u8, completion.provider_state_json.?, "web_search_call") != null);
+    try std.testing.expectEqual(@as(usize, 1), completion.responses_provider_output_items.len);
+    try std.testing.expect(std.mem.find(
+        u8,
+        completion.responses_provider_output_items[0].json,
+        "web_search_call",
+    ) != null);
 }
 
 const TestResponseMode = enum {
@@ -986,6 +1103,10 @@ fn deinitTestCompletion(completion: *types.ModelCompletion) void {
     if (completion.content) |value| std.testing.allocator.free(@constCast(value));
     if (completion.generation_id) |value| std.testing.allocator.free(@constCast(value));
     types.freeToolCallSlice(std.testing.allocator, @constCast(completion.tool_calls));
+    types.freeResponsesProviderOutputItems(
+        std.testing.allocator,
+        completion.responses_provider_output_items,
+    );
     if (completion.provider_state_json) |value| std.testing.allocator.free(@constCast(value));
     completion.* = .{};
 }
@@ -999,6 +1120,8 @@ fn consumeTestSse(bytes: []const u8) !types.ModelCompletion {
         &reader,
         &callback_context,
         ignoreTestChunk,
+        null,
+        null,
         null,
         null,
         null,

@@ -250,6 +250,7 @@ pub const CommandOutputChunk = struct {
 
 pub const QueuePreview = struct {
     count: usize = 0,
+    steering_count: usize = 0,
     paused: bool = false,
 };
 
@@ -842,6 +843,14 @@ pub const WorkerRuntime = struct {
         {
             return error.RecoveryBusy;
         }
+        if (queued.steer_turn_id == null and
+            queued.recovery_checkpoint == null and
+            self.worker_processing and
+            self.active_turn_id != 0 and
+            self.queue_admission == null)
+        {
+            queued.steer_turn_id = self.active_turn_id;
+        }
         queued.agent_settings = self.agent_turn_settings;
         try self.queued_prompts.append(alloc, queued);
         self.queued_prompt_count += 1;
@@ -1332,8 +1341,15 @@ pub const WorkerRuntime = struct {
 
         const count = self.queued_prompts.items.len;
         if (count == 0) return .{};
+        var steering_count: usize = 0;
+        if (self.active_turn_id != 0) {
+            for (self.queued_prompts.items) |queued| {
+                if (queued.steer_turn_id == self.active_turn_id) steering_count += 1;
+            }
+        }
         return .{
             .count = count,
+            .steering_count = steering_count,
             .paused = self.queue_admission != null,
         };
     }
@@ -2695,7 +2711,7 @@ fn checkHistoryPropagationAllocation(
     return true;
 }
 
-test "input admitted during processing remains a next-turn follow-up" {
+test "input admitted during processing steers the active turn" {
     const alloc = std.testing.allocator;
     var runtime: WorkerRuntime = .{};
     defer runtime.deinit(alloc);
@@ -2710,15 +2726,21 @@ test "input admitted during processing remains a next-turn follow-up" {
 
     try runtime.enqueuePrompt(alloc, try makePrompt(alloc, "steer now", "model"));
     try std.testing.expectEqual(@as(usize, 1), runtime.queuedPromptCount());
-    try std.testing.expectEqual(@as(?u64, null), runtime.queued_prompts.items[0].steer_turn_id);
+    try std.testing.expectEqual(@as(?u64, active.turn_id), runtime.queued_prompts.items[0].steer_turn_id);
 
-    runtime.finishProcessing();
-    const follow_up = (try runtime.tryTakeNextPrompt(alloc)) orelse
+    const steer = (try runtime.takePendingSteer(alloc, active.turn_id)) orelse
         return error.TestExpectedEqual;
-    defer freeQueuedPrompt(alloc, follow_up);
-    try std.testing.expectEqualStrings("steer now", follow_up.prompt);
-    try std.testing.expectEqual(@as(?u64, null), follow_up.steer_turn_id);
-    runtime.discardEvents(alloc);
+    defer freeQueuedPrompt(alloc, steer);
+    try std.testing.expectEqualStrings("steer now", steer.prompt);
+    try std.testing.expectEqual(@as(?u64, null), steer.steer_turn_id);
+    try std.testing.expectEqual(@as(usize, 0), runtime.queuedPromptCount());
+    var events = runtime.takeEvents();
+    defer events.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 1), events.items.len);
+    try std.testing.expect(events.items[0] == .append_prompt);
+    try std.testing.expectEqualStrings("steer now", events.items[0].append_prompt.text);
+    for (events.items) |event| freeWorkerEvent(alloc, event);
+    runtime.finishProcessing();
 }
 
 test "unconsumed steer falls back to the next queued turn" {
@@ -2733,6 +2755,7 @@ test "unconsumed steer falls back to the next queued turn" {
     runtime.discardEvents(alloc);
 
     try runtime.enqueuePrompt(alloc, try makePrompt(alloc, "late follow-up", "model"));
+    try std.testing.expectEqual(@as(?u64, active.turn_id), runtime.queued_prompts.items[0].steer_turn_id);
     runtime.finishProcessing();
     const follow_up = (try runtime.tryTakeNextPrompt(alloc)) orelse
         return error.TestExpectedEqual;

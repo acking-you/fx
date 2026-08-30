@@ -3,6 +3,7 @@ const stream_provider = @import("../core/agent/stream_provider.zig");
 const model_provider = @import("../core/config/model_provider.zig");
 const model_tool_schema = @import("../core/tooling/model_tool_schema.zig");
 const types = @import("../core/shared/types.zig");
+const responses_output_items = @import("../core/shared/responses_output_items.zig");
 const image_attachments = @import("../core/images/image_attachments.zig");
 
 pub const ReplayLimits = struct {
@@ -46,33 +47,7 @@ pub fn writeInput(
             },
             .assistant => {
                 try validateReplayMessage(message, limits);
-                if (message.provider_state_json) |state_json| {
-                    var state = std.json.parseFromSlice(std.json.Value, alloc, state_json, .{}) catch
-                        return error.InvalidProviderState;
-                    defer state.deinit();
-                    if (state.value != .array) return error.InvalidProviderState;
-                    for (state.value.array.items) |item| {
-                        if (item != .object) return error.InvalidProviderState;
-                        try writeComma(writer, &first);
-                        try std.json.Stringify.value(item, .{}, writer);
-                    }
-                }
-                if (message.content) |content| if (content.len > 0) {
-                    try writeComma(writer, &first);
-                    try writer.writeAll("{\"type\":\"message\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":");
-                    try std.json.Stringify.value(content, .{}, writer);
-                    try writer.writeAll(",\"annotations\":[]}]}");
-                };
-                for (message.tool_calls) |call| {
-                    try writeComma(writer, &first);
-                    try writer.writeAll("{\"type\":\"function_call\",\"call_id\":");
-                    try std.json.Stringify.value(call.id, .{}, writer);
-                    try writer.writeAll(",\"name\":");
-                    try std.json.Stringify.value(call.name, .{}, writer);
-                    try writer.writeAll(",\"arguments\":");
-                    try std.json.Stringify.value(call.arguments_json, .{}, writer);
-                    try writer.writeByte('}');
-                }
+                try writeAssistantInput(writer, alloc, message, &first);
             },
             .tool => {
                 try writeComma(writer, &first);
@@ -86,11 +61,169 @@ pub fn writeInput(
     }
 }
 
+const ReplayCandidateKind = enum { raw, message, tool };
+
+const ReplayCandidate = struct {
+    kind: ReplayCandidateKind,
+    output_index: u32,
+};
+
+fn chooseReplayCandidate(
+    current: ?ReplayCandidate,
+    candidate: ReplayCandidate,
+) !ReplayCandidate {
+    const selected = current orelse return candidate;
+    if (selected.output_index == candidate.output_index) {
+        return error.InvalidProviderState;
+    }
+    return if (candidate.output_index < selected.output_index) candidate else selected;
+}
+
+fn writeAssistantInput(
+    writer: *std.Io.Writer,
+    alloc: std.mem.Allocator,
+    message: types.ChatMessage,
+    first: *bool,
+) !void {
+    if (message.responses_output_sequence_complete) {
+        try responses_output_items.validateComplete(
+            alloc,
+            message.responses_provider_output_items,
+        );
+        for (message.responses_provider_output_items) |item| {
+            try writeComma(writer, first);
+            try responses_output_items.writeValidated(alloc, writer, item);
+        }
+        return;
+    }
+    if (message.responses_provider_output_items.len > 0) {
+        return writeIncompleteAssistantInput(writer, alloc, message, first);
+    }
+    if (message.provider_state_json) |state_json| {
+        var state = std.json.parseFromSlice(std.json.Value, alloc, state_json, .{}) catch
+            return error.InvalidProviderState;
+        defer state.deinit();
+        if (state.value != .array) return error.InvalidProviderState;
+        for (state.value.array.items) |item| {
+            if (item != .object) return error.InvalidProviderState;
+            try writeComma(writer, first);
+            try std.json.Stringify.value(item, .{}, writer);
+        }
+    }
+    if (message.content) |content| if (content.len > 0) {
+        try writeAssistantMessage(writer, content, first);
+    };
+    for (message.tool_calls) |call| {
+        try writeFunctionCall(writer, call, first);
+    }
+}
+
+fn writeIncompleteAssistantInput(
+    writer: *std.Io.Writer,
+    alloc: std.mem.Allocator,
+    message: types.ChatMessage,
+    first: *bool,
+) !void {
+    try responses_output_items.validate(alloc, message.responses_provider_output_items);
+    var raw_index: usize = 0;
+    var tool_index: usize = 0;
+    var message_written = false;
+    var expected_output_index: u32 = 0;
+    const has_message = if (message.content) |content| content.len > 0 else false;
+
+    while (true) {
+        var selected: ?ReplayCandidate = null;
+        if (raw_index < message.responses_provider_output_items.len) {
+            selected = try chooseReplayCandidate(selected, .{
+                .kind = .raw,
+                .output_index = message.responses_provider_output_items[raw_index].output_index,
+            });
+        }
+        if (has_message and !message_written) {
+            selected = try chooseReplayCandidate(selected, .{
+                .kind = .message,
+                .output_index = message.responses_message_output_index orelse
+                    return error.InvalidProviderState,
+            });
+        }
+        if (tool_index < message.tool_calls.len) {
+            selected = try chooseReplayCandidate(selected, .{
+                .kind = .tool,
+                .output_index = message.tool_calls[tool_index].responses_output_index orelse
+                    return error.InvalidProviderState,
+            });
+        }
+
+        const candidate = selected orelse break;
+        if (candidate.output_index != expected_output_index) {
+            return error.InvalidProviderState;
+        }
+        switch (candidate.kind) {
+            .raw => {
+                try writeComma(writer, first);
+                try responses_output_items.writeValidated(
+                    alloc,
+                    writer,
+                    message.responses_provider_output_items[raw_index],
+                );
+                raw_index += 1;
+            },
+            .message => {
+                try writeAssistantMessage(writer, message.content.?, first);
+                message_written = true;
+            },
+            .tool => {
+                try writeFunctionCall(writer, message.tool_calls[tool_index], first);
+                tool_index += 1;
+            },
+        }
+        expected_output_index = std.math.add(u32, expected_output_index, 1) catch
+            return error.InvalidProviderState;
+    }
+}
+
+fn writeAssistantMessage(
+    writer: *std.Io.Writer,
+    content: []const u8,
+    first: *bool,
+) !void {
+    try writeComma(writer, first);
+    try writer.writeAll("{\"type\":\"message\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":");
+    try std.json.Stringify.value(content, .{}, writer);
+    try writer.writeAll(",\"annotations\":[]}]}");
+}
+
+fn writeFunctionCall(
+    writer: *std.Io.Writer,
+    call: types.ToolCall,
+    first: *bool,
+) !void {
+    try writeComma(writer, first);
+    try writer.writeAll("{\"type\":\"function_call\",\"call_id\":");
+    try std.json.Stringify.value(call.id, .{}, writer);
+    try writer.writeAll(",\"name\":");
+    try std.json.Stringify.value(call.name, .{}, writer);
+    try writer.writeAll(",\"arguments\":");
+    try std.json.Stringify.value(call.arguments_json, .{}, writer);
+    try writer.writeByte('}');
+}
+
 fn validateReplayMessage(message: types.ChatMessage, limits: ReplayLimits) !void {
     if (message.provider_state_json) |state_json| {
         if (state_json.len > limits.provider_state_bytes) return error.ProviderStateTooLarge;
     }
     if (message.tool_calls.len > limits.tool_calls) return error.ToolCallLimitExceeded;
+    var provider_output_bytes: usize = 0;
+    for (message.responses_provider_output_items) |item| {
+        provider_output_bytes = std.math.add(
+            usize,
+            provider_output_bytes,
+            item.json.len,
+        ) catch return error.ProviderStateTooLarge;
+    }
+    if (provider_output_bytes > limits.provider_state_bytes) {
+        return error.ProviderStateTooLarge;
+    }
     for (message.tool_calls) |call| {
         if (call.id.len == 0 or call.id.len > limits.tool_identity_bytes or
             call.name.len == 0 or call.name.len > limits.tool_identity_bytes)
@@ -131,10 +264,30 @@ pub fn writeTools(
     alloc: std.mem.Allocator,
     tools: stream_provider.ToolSelection,
 ) !usize {
+    const serialized = try toolsJsonAlloc(alloc, tools);
+    defer alloc.free(serialized.json);
+    if (serialized.count > 0) {
+        try writer.writeAll(",\"tools\":");
+        try writer.writeAll(serialized.json);
+    }
+    return serialized.count;
+}
+
+pub const SerializedTools = struct {
+    json: []u8,
+    count: usize,
+};
+
+/// Renders every selected provider-neutral function tool into one JSON array
+/// so provider boundaries can apply their native projection exactly once.
+pub fn toolsJsonAlloc(
+    alloc: std.mem.Allocator,
+    tools: stream_provider.ToolSelection,
+) !SerializedTools {
     var count: usize = 0;
     var out: std.Io.Writer.Allocating = .init(alloc);
-    defer out.deinit();
-    try out.writer.writeAll(",\"tools\":[");
+    errdefer out.deinit();
+    try out.writer.writeByte('[');
 
     for (tools.advertised_names) |name| {
         const tool = tools.advertisedFunction(name) orelse continue;
@@ -173,8 +326,7 @@ pub fn writeTools(
         count += 1;
     }
     try out.writer.writeByte(']');
-    if (count > 0) try writer.writeAll(out.written());
-    return count;
+    return .{ .json = try out.toOwnedSlice(), .count = count };
 }
 
 pub const StreamLimits = struct {
@@ -191,6 +343,8 @@ pub const StreamCallbacks = struct {
     context: *anyopaque,
     on_content: stream_provider.StreamCallback,
     on_tool_start: ?stream_provider.ToolStartCallback = null,
+    on_provider_tool_start: ?stream_provider.ProviderToolStartCallback = null,
+    on_provider_tool_done: ?stream_provider.ProviderToolDoneCallback = null,
     on_reasoning: ?stream_provider.StreamCallback = null,
     on_tool_input: ?stream_provider.StreamCallback = null,
 };
@@ -213,6 +367,8 @@ pub const Reducer = struct {
     content: std.ArrayList(u8) = .empty,
     provider_state: std.Io.Writer.Allocating,
     provider_state_count: usize = 0,
+    provider_output_items: std.ArrayList(responses_output_items.Item) = .empty,
+    message_output_index: ?u32 = null,
     tools: std.ArrayList(ToolAccumulator) = .empty,
     finish_reason: ?types.ProviderFinishReason = null,
     usage: types.Usage = .{},
@@ -229,6 +385,10 @@ pub const Reducer = struct {
     pub fn deinit(self: *Reducer, alloc: std.mem.Allocator) void {
         self.content.deinit(alloc);
         self.provider_state.deinit();
+        for (self.provider_output_items.items) |item| {
+            alloc.free(@constCast(item.json));
+        }
+        self.provider_output_items.deinit(alloc);
         for (self.tools.items) |*tool| tool.deinit(alloc);
         self.tools.deinit(alloc);
         if (self.generation_id) |id| alloc.free(id);
@@ -262,11 +422,11 @@ pub const Reducer = struct {
         const event_type = stringField(parsed.value.object, "type") orelse return false;
 
         if (std.mem.eql(u8, event_type, "response.output_item.added")) {
-            const output_index = integerField(parsed.value.object, "output_index") orelse return false;
             const item = parsed.value.object.get("item") orelse return false;
             if (item != .object) return false;
             const item_type = stringField(item.object, "type") orelse return false;
             if (std.mem.eql(u8, item_type, "function_call")) {
+                const output_index = integerField(parsed.value.object, "output_index") orelse return false;
                 const call_id = stringField(item.object, "call_id") orelse return false;
                 const name = stringField(item.object, "name") orelse return false;
                 if (findTool(self.tools.items, output_index) == null) {
@@ -274,6 +434,11 @@ pub const Reducer = struct {
                     if (callbacks.on_tool_start) |callback| {
                         callback(callbacks.context, call_id, name, null);
                     }
+                }
+            } else if (std.mem.eql(u8, item_type, "web_search_call")) {
+                const id = stringField(item.object, "id") orelse return false;
+                if (callbacks.on_provider_tool_start) |callback| {
+                    callback(callbacks.context, id, "web_search", null);
                 }
             }
         } else if (std.mem.eql(u8, event_type, "response.output_text.delta") or
@@ -310,11 +475,11 @@ pub const Reducer = struct {
                 try appendToolArguments(alloc, &self.tools.items[index].arguments, arguments, limits.tool_arguments_bytes);
             }
         } else if (std.mem.eql(u8, event_type, "response.output_item.done")) {
-            const output_index = integerField(parsed.value.object, "output_index") orelse return false;
             const item = parsed.value.object.get("item") orelse return false;
             if (item != .object) return false;
             const item_type = stringField(item.object, "type") orelse return false;
             if (std.mem.eql(u8, item_type, "function_call")) {
+                const output_index = integerField(parsed.value.object, "output_index") orelse return false;
                 if (findTool(self.tools.items, output_index)) |index| {
                     if (stringField(item.object, "arguments")) |arguments| {
                         if (self.tools.items[index].arguments.items.len == 0) {
@@ -322,31 +487,43 @@ pub const Reducer = struct {
                         }
                     }
                 }
-            } else if (std.mem.eql(u8, item_type, "reasoning") and
-                stringField(item.object, "encrypted_content") != null)
+            } else if ((std.mem.eql(u8, item_type, "reasoning") and
+                stringField(item.object, "encrypted_content") != null) or
+                std.mem.eql(u8, item_type, "web_search_call"))
             {
-                var encoded: std.Io.Writer.Allocating = .init(alloc);
-                defer encoded.deinit();
-                try std.json.Stringify.value(item, .{}, &encoded.writer);
-                const separators: usize = if (self.provider_state_count == 0) 2 else 1;
-                const encoded_size = try checkedAccumulatedSize(
-                    encoded.written().len,
-                    separators,
+                const output_index = try responseOutputIndex(
+                    parsed.value.object,
+                    self.provider_state_count,
+                );
+                try self.appendProviderStateItem(
+                    alloc,
+                    item,
+                    output_index,
                     limits.provider_state_bytes,
                 );
-                _ = try checkedAccumulatedSize(
-                    self.provider_state.written().len,
-                    encoded_size,
-                    limits.provider_state_bytes,
-                );
-                if (self.provider_state_count == 0) {
-                    try self.provider_state.writer.writeByte('[');
-                } else {
-                    try self.provider_state.writer.writeByte(',');
+                if (std.mem.eql(u8, item_type, "web_search_call")) {
+                    const id = stringField(item.object, "id") orelse return false;
+                    const status = stringField(item.object, "status");
+                    const succeeded = if (status) |value|
+                        !std.mem.eql(u8, value, "failed") and
+                            !std.mem.eql(u8, value, "cancelled")
+                    else
+                        true;
+                    if (callbacks.on_provider_tool_done) |callback| {
+                        callback(
+                            callbacks.context,
+                            id,
+                            "web_search",
+                            webSearchActionDetail(item.object),
+                            succeeded,
+                        );
+                    }
                 }
-                try self.provider_state.writer.writeAll(encoded.written());
-                self.provider_state_count += 1;
             } else if (std.mem.eql(u8, item_type, "message") and !self.saw_content_delta) {
+                self.message_output_index = try responseOutputIndex(
+                    parsed.value.object,
+                    self.provider_state_count,
+                );
                 if (item.object.get("content")) |parts| if (parts == .array) {
                     for (parts.array.items) |part| {
                         if (part != .object) continue;
@@ -356,6 +533,11 @@ pub const Reducer = struct {
                         try appendCaptured(alloc, &self.content, text, content_capture_limit);
                     }
                 };
+            } else if (std.mem.eql(u8, item_type, "message")) {
+                self.message_output_index = try responseOutputIndex(
+                    parsed.value.object,
+                    self.provider_state_count,
+                );
             }
         } else if (std.mem.eql(u8, event_type, "response.completed") or
             std.mem.eql(u8, event_type, "response.done") or
@@ -383,6 +565,42 @@ pub const Reducer = struct {
         return false;
     }
 
+    fn appendProviderStateItem(
+        self: *Reducer,
+        alloc: std.mem.Allocator,
+        item: std.json.Value,
+        output_index: u32,
+        maximum: usize,
+    ) !void {
+        var encoded: std.Io.Writer.Allocating = .init(alloc);
+        defer encoded.deinit();
+        try std.json.Stringify.value(item, .{}, &encoded.writer);
+        const separators: usize = if (self.provider_state_count == 0) 2 else 1;
+        const encoded_size = try checkedAccumulatedSize(
+            encoded.written().len,
+            separators,
+            maximum,
+        );
+        _ = try checkedAccumulatedSize(
+            self.provider_state.written().len,
+            encoded_size,
+            maximum,
+        );
+        if (self.provider_state_count == 0) {
+            try self.provider_state.writer.writeByte('[');
+        } else {
+            try self.provider_state.writer.writeByte(',');
+        }
+        try self.provider_state.writer.writeAll(encoded.written());
+        const owned_json = try alloc.dupe(u8, encoded.written());
+        errdefer alloc.free(owned_json);
+        try responses_output_items.upsertOwned(alloc, &self.provider_output_items, .{
+            .output_index = output_index,
+            .json = owned_json,
+        });
+        self.provider_state_count += 1;
+    }
+
     pub fn finish(
         self: *Reducer,
         alloc: std.mem.Allocator,
@@ -406,6 +624,9 @@ pub const Reducer = struct {
             break :state try self.provider_state.toOwnedSlice();
         } else null;
         errdefer if (owned_provider_state) |value| alloc.free(value);
+        const owned_provider_output_items = try self.provider_output_items.toOwnedSlice(alloc);
+        self.provider_output_items = .empty;
+        errdefer responses_output_items.free(alloc, owned_provider_output_items);
         const owned_tools: []types.ToolCall = if (self.tools.items.len > 0)
             try alloc.alloc(types.ToolCall, self.tools.items.len)
         else
@@ -427,6 +648,11 @@ pub const Reducer = struct {
                 .id = tool.id,
                 .name = tool.name,
                 .arguments_json = arguments,
+                .responses_output_index = if (tool.output_index >= 0 and
+                    tool.output_index <= std.math.maxInt(u32))
+                    @intCast(tool.output_index)
+                else
+                    null,
             };
             tool.id = &.{};
             tool.name = &.{};
@@ -439,11 +665,30 @@ pub const Reducer = struct {
             .tool_calls = owned_tools,
             .generation_id = generation_id,
             .provider_state_json = owned_provider_state,
+            .responses_message_output_index = self.message_output_index,
+            .responses_provider_output_items = owned_provider_output_items,
             .finish_reason = self.finish_reason orelse if (owned_tools.len > 0) .tool_calls else .stop,
             .usage = self.usage,
         };
     }
 };
+
+fn responseOutputIndex(object: std.json.ObjectMap, fallback: usize) !u32 {
+    const raw = integerField(object, "output_index") orelse {
+        if (fallback > std.math.maxInt(u32)) return error.ResourceLimitExceeded;
+        return @intCast(fallback);
+    };
+    if (raw < 0 or raw > std.math.maxInt(u32)) return error.InvalidEvent;
+    return @intCast(raw);
+}
+
+fn webSearchActionDetail(item: std.json.ObjectMap) ?[]const u8 {
+    const action = item.get("action") orelse return null;
+    if (action != .object) return null;
+    return stringField(action.object, "query") orelse
+        stringField(action.object, "url") orelse
+        stringField(action.object, "pattern");
+}
 
 fn appendTool(
     alloc: std.mem.Allocator,
@@ -720,6 +965,79 @@ test "Responses tools serialize typed static and dynamic functions once" {
     ));
     try std.testing.expect(std.mem.find(u8, out.written(), "\"name\":\"read_file\"") != null);
     try std.testing.expect(std.mem.find(u8, out.written(), "\"name\":\"mcp_search\"") != null);
+}
+
+test "Responses input replays durable provider output before legacy state" {
+    const output_items = [_]types.ResponsesProviderOutputItem{.{
+        .output_index = 0,
+        .json = "{\"type\":\"web_search_call\",\"id\":\"ws_raw\",\"status\":\"completed\"}",
+    }};
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try writeInput(
+        &out.writer,
+        std.testing.allocator,
+        &.{.{
+            .role = .assistant,
+            .content = "answer",
+            .provider_state_json = "[{\"type\":\"web_search_call\",\"id\":\"ws_legacy\"}]",
+            .responses_message_output_index = 1,
+            .responses_provider_output_items = &output_items,
+        }},
+        null,
+        .{
+            .tool_calls = 8,
+            .tool_identity_bytes = 256,
+            .tool_arguments_bytes = 4096,
+            .provider_state_bytes = 4096,
+        },
+    );
+
+    try std.testing.expect(std.mem.find(u8, out.written(), "ws_raw") != null);
+    try std.testing.expect(std.mem.find(u8, out.written(), "ws_legacy") == null);
+    try std.testing.expect(std.mem.find(u8, out.written(), "answer") != null);
+}
+
+test "Responses input merges hosted and semantic output in provider order" {
+    const output_items = [_]types.ResponsesProviderOutputItem{.{
+        .output_index = 1,
+        .json = "{\"type\":\"web_search_call\",\"id\":\"ws_ordered\",\"status\":\"completed\"}",
+    }};
+    const tool_calls = [_]types.ToolCall{.{
+        .id = "call_ordered",
+        .name = "read_file",
+        .arguments_json = "{}",
+        .responses_output_index = 0,
+    }};
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try writeInput(
+        &out.writer,
+        std.testing.allocator,
+        &.{.{
+            .role = .assistant,
+            .content = "ordered answer",
+            .tool_calls = &tool_calls,
+            .responses_message_output_index = 2,
+            .responses_provider_output_items = &output_items,
+        }},
+        null,
+        .{
+            .tool_calls = 8,
+            .tool_identity_bytes = 256,
+            .tool_arguments_bytes = 4096,
+            .provider_state_bytes = 4096,
+        },
+    );
+
+    const function_index = std.mem.find(u8, out.written(), "call_ordered") orelse
+        return error.TestExpectedEqual;
+    const search_index = std.mem.find(u8, out.written(), "ws_ordered") orelse
+        return error.TestExpectedEqual;
+    const message_index = std.mem.find(u8, out.written(), "ordered answer") orelse
+        return error.TestExpectedEqual;
+    try std.testing.expect(function_index < search_index);
+    try std.testing.expect(search_index < message_index);
 }
 
 test "Responses usage projection retains optional cached and reasoning detail" {

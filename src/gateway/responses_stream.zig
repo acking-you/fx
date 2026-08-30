@@ -25,6 +25,8 @@ pub const Callbacks = struct {
     context: *anyopaque,
     on_content_chunk: stream_provider.StreamCallback,
     on_tool_start: ?stream_provider.ToolStartCallback = null,
+    on_provider_tool_start: ?stream_provider.ProviderToolStartCallback = null,
+    on_provider_tool_done: ?stream_provider.ProviderToolDoneCallback = null,
     on_reasoning_chunk: ?stream_provider.StreamCallback = null,
     on_tool_input_chunk: ?stream_provider.StreamCallback = null,
     on_unknown_event: ?UnknownEventCallback = null,
@@ -444,6 +446,7 @@ fn applyEvent(
         .function_call_arguments_done => |event| try replaceToolInput(alloc, state, event, .function_json),
         .custom_tool_call_input_done => |event| try replaceToolInput(alloc, state, event, .custom_freeform),
         .output_item_added => |event| {
+            observeHostedWebSearchStart(callbacks, event);
             if (!semanticallyHandlesOutputItem(event.item.kind)) {
                 observeUnknown(callbacks, event.item.raw_type, raw_json);
             } else {
@@ -469,6 +472,7 @@ fn applyEvent(
                     item,
                 );
                 item_owned = false;
+                observeHostedWebSearchDone(callbacks, event);
                 observeUnknown(callbacks, event.item.raw_type, raw_json);
             } else {
                 try applyOutputItem(alloc, state, event, true, callbacks);
@@ -510,6 +514,39 @@ fn applyEvent(
             clearProviderOutputItems(alloc, state);
             state.terminal = true;
         },
+    }
+}
+
+fn observeHostedWebSearchStart(
+    callbacks: Callbacks,
+    event: responses_protocol.OutputItemEvent,
+) void {
+    if (event.item.kind != .web_search_call) return;
+    const id = event.item.id orelse return;
+    if (callbacks.on_provider_tool_start) |callback| {
+        callback(callbacks.context, id, "web_search", null);
+    }
+}
+
+fn observeHostedWebSearchDone(
+    callbacks: Callbacks,
+    event: responses_protocol.OutputItemEvent,
+) void {
+    if (event.item.kind != .web_search_call) return;
+    const id = event.item.id orelse return;
+    const succeeded = if (event.item.status) |status|
+        !std.mem.eql(u8, status, "failed") and
+            !std.mem.eql(u8, status, "cancelled")
+    else
+        true;
+    if (callbacks.on_provider_tool_done) |callback| {
+        callback(
+            callbacks.context,
+            id,
+            "web_search",
+            if (event.item.web_search_action) |action| action.detail else null,
+            succeeded,
+        );
     }
 }
 
@@ -1912,6 +1949,46 @@ test "Responses stream exposes known output items without semantic projections" 
         completion.responses_provider_output_items[0].json,
         "web_search_call",
     ) != null);
+}
+
+test "Responses stream publishes hosted web search start and completion" {
+    const Capture = struct {
+        started: bool = false,
+        completed: bool = false,
+        label: [64]u8 = undefined,
+        label_len: usize = 0,
+
+        fn chunk(_: *anyopaque, _: []const u8) void {}
+        fn start(raw: *anyopaque, id: []const u8, name: []const u8, _: ?[]const u8) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.started = std.mem.eql(u8, id, "ws_1") and std.mem.eql(u8, name, "web_search");
+        }
+        fn done(raw: *anyopaque, id: []const u8, name: []const u8, label: ?[]const u8, succeeded: bool) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.completed = succeeded and std.mem.eql(u8, id, "ws_1") and std.mem.eql(u8, name, "web_search");
+            const value = label orelse return;
+            self.label_len = @min(value.len, self.label.len);
+            @memcpy(self.label[0..self.label_len], value[0..self.label_len]);
+        }
+    };
+    var capture: Capture = .{};
+    var cancel = std.atomic.Value(bool).init(false);
+    var reader = std.Io.Reader.fixed(
+        "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"web_search_call\",\"id\":\"ws_1\",\"status\":\"in_progress\"}}\n\n" ++
+            "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"web_search_call\",\"id\":\"ws_1\",\"status\":\"completed\",\"action\":{\"type\":\"search\",\"query\":\"Zig 0.16\"}}}\n\n" ++
+            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n",
+    );
+    var completion = try consume(std.testing.allocator, &reader, .{
+        .context = &capture,
+        .on_content_chunk = Capture.chunk,
+        .on_provider_tool_start = Capture.start,
+        .on_provider_tool_done = Capture.done,
+    }, &cancel);
+    defer freeCompletion(std.testing.allocator, &completion);
+
+    try std.testing.expect(capture.started);
+    try std.testing.expect(capture.completed);
+    try std.testing.expectEqualStrings("Zig 0.16", capture.label[0..capture.label_len]);
 }
 
 test "Responses terminal output authoritatively replaces the full fallback sequence" {

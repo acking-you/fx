@@ -538,7 +538,7 @@ const App = struct {
     agent_step_limit: usize = default_max_agent_steps,
     web_fetch_runtime: web_fetch_runtime.Runtime = web_fetch_runtime.Runtime.init(.{}),
     web_search_runtime: web_search_runtime.Runtime = web_search_runtime.Runtime.init(.{
-        .provider = if (host_profile.web_search) builtin_providers.native.gateway.fx_search else null,
+        .provider = if (host_profile.web_search) builtin_providers.native.gateway.web_search.executor else null,
     }),
     web_search_models_path: []const u8 = builtin_gateway.models_path,
     lifecycle_runtime: hooks.Runtime = hooks.Runtime.init(std.heap.c_allocator),
@@ -1616,11 +1616,15 @@ const App = struct {
         alloc: Allocator,
         permission_mode: types.PermissionMode,
         permission_rules: types.PermissionRuleSet,
+        provider: model_provider.ProviderId,
+        model: []const u8,
     ) !tool_projection.EffectiveToolProjection {
-        return self.snapshotModelToolProjectionForRules(
+        return self.snapshotModelToolProjectionForRulesAndRoute(
             alloc,
             permission_mode,
             permission_rules,
+            provider,
+            model,
         );
     }
 
@@ -1630,13 +1634,32 @@ const App = struct {
         permission_mode: types.PermissionMode,
         permission_rules: types.PermissionRuleSet,
     ) !tool_projection.EffectiveToolProjection {
+        const selection = self.provider_selection.selection();
+        return self.snapshotModelToolProjectionForRulesAndRoute(
+            alloc,
+            permission_mode,
+            permission_rules,
+            selection.provider,
+            selection.model,
+        );
+    }
+
+    fn snapshotModelToolProjectionForRulesAndRoute(
+        self: *App,
+        alloc: Allocator,
+        permission_mode: types.PermissionMode,
+        permission_rules: types.PermissionRuleSet,
+        provider: model_provider.ProviderId,
+        model: []const u8,
+    ) !tool_projection.EffectiveToolProjection {
+        const bundle = self.providerSet().select(provider);
         return app_mcp_runtime.buildModelToolProjection(&self.mcp, alloc, self.toolAdvertisementSet(), .{
             .permission_mode = permission_mode,
             .permission_rules = permission_rules,
             .subagent_available = self.session_persistence.subagent_host != null,
-            .web_search_available = self.providerSet()
-                .select(self.provider_selection.selection().provider)
-                .fxSearchRuntimeReady(),
+            .web_search_available = bundle.webSearchAvailable(
+                self.resolvedModelCapabilitiesForProvider(provider, model),
+            ),
         });
     }
 
@@ -1848,7 +1871,21 @@ const App = struct {
     }
 
     pub fn resolvedModelCapabilities(self: *App, model: []const u8) model_capabilities.Capabilities {
-        const bundle = self.providerSet().select(self.provider_selection.selection().provider);
+        return self.resolvedModelCapabilitiesForProvider(
+            self.provider_selection.selection().provider,
+            model,
+        );
+    }
+
+    pub fn resolvedModelCapabilitiesForProvider(
+        self: *App,
+        provider: model_provider.ProviderId,
+        model: []const u8,
+    ) model_capabilities.Capabilities {
+        const bundle = self.providerSet().select(provider);
+        if (provider != self.provider_selection.selection().provider) {
+            return bundle.fallbackModelCapabilities(model);
+        }
         return model_capabilities.mergeCapabilities(
             bundle.fallbackModelCapabilities(model),
             self.model_cache.metadataForModel(model),

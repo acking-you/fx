@@ -5,7 +5,7 @@ const responses_protocol = @import("responses_protocol.zig");
 const responses_compaction_binding = @import("../core/gateway/responses_compaction_binding.zig");
 const responses_compaction_provider = @import("../core/gateway/responses_compaction_provider.zig");
 const responses_request_protocol = @import("../core/gateway/responses_protocol.zig");
-const responses_search = @import("../core/gateway/responses_search.zig");
+const web_search_projection = @import("../core/gateway/web_search_projection.zig");
 const io_mod = @import("../core/shared/io.zig");
 const types = @import("../core/shared/types.zig");
 const gateway_client = @import("client.zig");
@@ -45,10 +45,13 @@ fn buildRequestBound(
 
     var tools = try responses_request_protocol.prepareTools(alloc, request.tools);
     defer tools.deinit(alloc);
-    const projected_tools = try responses_search.projectNamespaceToolAlloc(
+    const projected_tools = try web_search_projection.projectToolsAlloc(
         alloc,
         tools.base_json,
-        .{ .include_web_search = containsAdvertisedTool(request.tools, "web_search") },
+        .{
+            .kind = .codex_namespace,
+            .include_web_search = containsAdvertisedTool(request.tools, "web_search"),
+        },
     );
     defer alloc.free(projected_tools);
 
@@ -205,6 +208,8 @@ fn streamPreparedWithBinding(
             .admission = request.admission,
             .on_reasoning_chunk = EventBridge.reasoning,
             .on_tool_input_chunk = EventBridge.toolInput,
+            .on_provider_tool_done = EventBridge.providerToolDone,
+            .on_provider_tool_start = EventBridge.providerToolStart,
             .provider_attempt_owner = switch (request.provider_attempt_owner) {
                 .transport => .transport,
                 .agent => .agent,
@@ -274,6 +279,19 @@ const EventBridge = struct {
 
     fn toolStart(raw: *anyopaque, id: []const u8, name: []const u8, label: ?[]const u8) void {
         sink(raw).emit(.{ .tool_started = .{ .id = id, .name = name, .label = label } });
+    }
+
+    fn providerToolDone(raw: *anyopaque, id: []const u8, name: []const u8, label: ?[]const u8, succeeded: bool) void {
+        sink(raw).emit(.{ .provider_tool_completed = .{
+            .id = id,
+            .name = name,
+            .label = label,
+            .succeeded = succeeded,
+        } });
+    }
+
+    fn providerToolStart(raw: *anyopaque, id: []const u8, name: []const u8, label: ?[]const u8) void {
+        sink(raw).emit(.{ .provider_tool_started = .{ .id = id, .name = name, .label = label } });
     }
 };
 

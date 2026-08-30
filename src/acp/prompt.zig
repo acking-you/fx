@@ -513,6 +513,12 @@ const AcpContext = struct {
         const session = if (self.state.active_session) |*active| active else unreachable;
         const provider_bundle = self.state.cfg.provider_set.select(session.provider);
         const provider_capabilities = provider_bundle.capabilities;
+        const search_capabilities = availableProviderModelCapabilities(
+            self.state,
+            session.provider,
+            session.model,
+        );
+        const search_provider = provider_bundle.web_search.executionProvider(search_capabilities);
         const gateway_chat_url = switch (gateway_route) {
             .live => server.gatewayChatUrl(self.state),
             .snapshot => |route| if (route) |owned|
@@ -534,8 +540,8 @@ const AcpContext = struct {
             else
                 null,
         };
-        if (provider_capabilities.fx_search and provider_bundle.fx_search != null) {
-            self.state.web_search_runtime.configureForProvider(provider_bundle.fx_search.?, .{
+        if (search_provider) |provider| {
+            self.state.web_search_runtime.configureForProvider(provider, .{
                 .api_key = session.api_key,
                 .credential_source = session.credential_source,
                 .account_id = session.account_id,
@@ -609,8 +615,8 @@ const AcpContext = struct {
             .web_fetch_runtime = &self.state.web_fetch_runtime,
             .web_fetch_artifact_store = session.session_rt.webFetchArtifactStore(),
             .web_fetch_artifact_error = session.session_rt.webFetchArtifactError(),
-            .web_search_runtime_ready = provider_bundle.fxSearchRuntimeReady(),
-            .web_search_backend = if (provider_capabilities.fx_search and provider_bundle.fx_search != null)
+            .web_search_runtime_ready = search_provider != null,
+            .web_search_backend = if (search_provider != null)
                 self.state.web_search_runtime.dispatchBackend()
             else
                 null,
@@ -808,7 +814,11 @@ fn handleCompactCommand(
             .permission_rules = session.permission_rules,
             .mcp_runtime = session.mcp,
             .subagent_available = ctx.state.subagent_host != null,
-            .web_search_available = ctx.state.cfg.provider_set.select(session.provider).fxSearchRuntimeReady(),
+            .web_search_available = providerWebSearchAvailable(
+                ctx.state,
+                session.provider,
+                session.model,
+            ),
         },
     );
     defer tool_projection.deinit(ctx.alloc);
@@ -990,7 +1000,11 @@ pub fn handlePrompt(
         .permission_rules = session.permission_rules,
         .mcp_runtime = session.mcp,
         .subagent_available = state.subagent_host != null,
-        .web_search_available = state.cfg.provider_set.select(session.provider).fxSearchRuntimeReady(),
+        .web_search_available = providerWebSearchAvailable(
+            state,
+            session.provider,
+            session.model,
+        ),
     });
     defer tool_projection.deinit(alloc);
 
@@ -1702,7 +1716,11 @@ pub fn runSubagentChild(
             .permission_rules = admission.rules,
             .mcp_runtime = mcp,
             .subagent_available = true,
-            .web_search_available = state.cfg.provider_set.select(admission.provider).fxSearchRuntimeReady(),
+            .web_search_available = providerWebSearchAvailable(
+                state,
+                admission.provider,
+                admission.model,
+            ),
         },
     ) catch return error.OutOfMemory;
     defer child_projection.deinit(alloc);
@@ -1737,6 +1755,11 @@ pub fn runSubagentChild(
         .host = subagent_host,
         .tool_context = child_tool_context,
         .provider_set = state.cfg.provider_set,
+        .resolved_model_capabilities = availableProviderModelCapabilities(
+            state,
+            admission.provider,
+            admission.model,
+        ),
         .system_prompt = state.cfg.prompt_policy.system_prompt,
         .model_prompt_overlay = state.cfg.prompt_policy.modelPromptOverlay(admission.model),
         .skills_prompt_section = bounded_skills.text,
@@ -2219,6 +2242,29 @@ fn persistUsageCheckpoint(
     try store.finishUsageRecoveryCheckpoint(
         writable.active_id,
         recovery_checkpoint,
+    );
+}
+
+fn availableProviderModelCapabilities(
+    state: *server.ServerState,
+    provider: model_provider.ProviderId,
+    model: []const u8,
+) model_capabilities.Capabilities {
+    const bundle = state.cfg.provider_set.select(provider);
+    return state.capability_resolver.available(
+        model,
+        bundle.fallbackModelCapabilities(model),
+    );
+}
+
+fn providerWebSearchAvailable(
+    state: *server.ServerState,
+    provider: model_provider.ProviderId,
+    model: []const u8,
+) bool {
+    const bundle = state.cfg.provider_set.select(provider);
+    return bundle.webSearchAvailable(
+        availableProviderModelCapabilities(state, provider, model),
     );
 }
 

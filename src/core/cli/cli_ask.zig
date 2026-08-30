@@ -264,7 +264,11 @@ fn runAskChild(
             .permission_rules = admission.rules,
             .mcp_runtime = ctx.mcp,
             .subagent_available = true,
-            .web_search_available = ctx.cfg.provider_set.select(admission.provider).fxSearchRuntimeReady(),
+            .web_search_available = askProviderWebSearchAvailable(
+                ctx,
+                admission.provider,
+                admission.model,
+            ),
         },
     ) catch return error.OutOfMemory;
     defer child_projection.deinit(ctx.alloc);
@@ -272,6 +276,11 @@ fn runAskChild(
         .host = ctx.subagent_host orelse return error.ProviderFailed,
         .tool_context = ctx.toolContext(),
         .provider_set = ctx.cfg.provider_set,
+        .resolved_model_capabilities = askProviderModelCapabilities(
+            ctx,
+            admission.provider,
+            admission.model,
+        ),
         .system_prompt = ctx.cfg.prompt_policy.system_prompt,
         .model_prompt_overlay = ctx.cfg.prompt_policy.modelPromptOverlay(admission.model),
         .skills_prompt_section = ctx.subagent_skills_prompt,
@@ -901,8 +910,14 @@ const AskContext = struct {
     fn toolContext(self: *AskContext) tool_runtime.Context {
         const provider_bundle = self.cfg.provider_set.select(self.provider);
         const provider_capabilities = provider_bundle.capabilities;
-        if (provider_capabilities.fx_search and provider_bundle.fx_search != null) {
-            self.web_search_runtime.configureForProvider(provider_bundle.fx_search.?, .{
+        const search_capabilities = askProviderModelCapabilities(
+            self,
+            self.provider,
+            self.model,
+        );
+        const search_provider = provider_bundle.web_search.executionProvider(search_capabilities);
+        if (search_provider) |provider| {
+            self.web_search_runtime.configureForProvider(provider, .{
                 .api_key = self.api_key,
                 .credential_source = self.credential_source,
                 .account_id = self.account_id,
@@ -976,8 +991,8 @@ const AskContext = struct {
             .web_fetch_artifact_error = self.session.webFetchArtifactError(),
             .web_fetch_progress_ctx = @ptrCast(self),
             .on_web_fetch_progress = onWebFetchProgress,
-            .web_search_runtime_ready = provider_bundle.fxSearchRuntimeReady(),
-            .web_search_backend = if (provider_capabilities.fx_search and provider_bundle.fx_search != null)
+            .web_search_runtime_ready = search_provider != null,
+            .web_search_backend = if (search_provider != null)
                 self.web_search_runtime.dispatchBackend()
             else
                 null,
@@ -1612,7 +1627,11 @@ fn runPromptInternal(alloc: Allocator, prompt: []const u8, permission_override: 
         .permission_rules = ctx.permission_rules,
         .mcp_runtime = ctx.mcp,
         .subagent_available = ctx.subagent_host != null,
-        .web_search_available = ctx.cfg.provider_set.select(ctx.provider).fxSearchRuntimeReady(),
+        .web_search_available = askProviderWebSearchAvailable(
+            &ctx,
+            ctx.provider,
+            ctx.model,
+        ),
     }, session_child_capability != null);
     defer tool_projection.deinit(alloc);
 
@@ -1967,6 +1986,30 @@ fn reportUsage(raw_ctx: *anyopaque, usage: types.Usage) void {
     const writable = if (ctx.writable) |*value| value else return;
     if (usage.input_tokens) |input| writable.state.total_input_tokens = input;
     if (usage.output_tokens) |output| writable.state.total_output_tokens = output;
+}
+
+fn askProviderModelCapabilities(
+    ctx: *AskContext,
+    provider: model_provider.ProviderId,
+    model: []const u8,
+) model_capabilities.Capabilities {
+    const bundle = ctx.cfg.provider_set.select(provider);
+    if (provider != ctx.provider) return bundle.fallbackModelCapabilities(model);
+    return ctx.capability_resolver.available(
+        model,
+        bundle.fallbackModelCapabilities(model),
+    );
+}
+
+fn askProviderWebSearchAvailable(
+    ctx: *AskContext,
+    provider: model_provider.ProviderId,
+    model: []const u8,
+) bool {
+    const bundle = ctx.cfg.provider_set.select(provider);
+    return bundle.webSearchAvailable(
+        askProviderModelCapabilities(ctx, provider, model),
+    );
 }
 
 fn resolveModelCapabilities(raw_ctx: *anyopaque, _: Allocator, model: []const u8) model_capabilities.ResolveError!model_capabilities.Capabilities {
@@ -3933,7 +3976,7 @@ fn testProcessQueuedPromptChecksTimeout(deps: *const agent_runtime.AgentRuntimeD
     try testPushAssistantText(deps, "assistant text");
 }
 
-fn testProcessQueuedPromptChecksExecOnlyTerminal(deps: *const agent_runtime.AgentRuntimeDeps, semantic_presentation: ?agent_runtime.SemanticPresentationSink, _: agent_runtime.LifecycleContext, cfg: agent_runtime.Config, _: worker_runtime.QueuedPrompt) !void {
+fn testProcessQueuedPromptChecksExecAndWebSearch(deps: *const agent_runtime.AgentRuntimeDeps, semantic_presentation: ?agent_runtime.SemanticPresentationSink, _: agent_runtime.LifecycleContext, cfg: agent_runtime.Config, _: worker_runtime.QueuedPrompt) !void {
     try std.testing.expect(semantic_presentation == null);
     try std.testing.expect(cfg.session_child_capability == null);
     try std.testing.expect(cfg.ephemeral_command_replay != null);
@@ -3943,7 +3986,7 @@ fn testProcessQueuedPromptChecksExecOnlyTerminal(deps: *const agent_runtime.Agen
     try std.testing.expect(tool_projection_mod.containsName(cfg.advertised_tool_names, "read_file"));
     try std.testing.expect(tool_projection_mod.containsName(cfg.advertised_tool_names, "exec_command"));
     try std.testing.expect(!tool_projection_mod.containsName(cfg.advertised_tool_names, "run_command"));
-    try std.testing.expect(!tool_projection_mod.containsName(cfg.advertised_tool_names, "web_search"));
+    try std.testing.expect(tool_projection_mod.containsName(cfg.advertised_tool_names, "web_search"));
     const advertised_terminal = for (cfg.advertised_functions) |function| {
         if (std.mem.eql(u8, function.name, "exec_command")) break function;
     } else return error.TestExpectedEqual;
@@ -6592,7 +6635,7 @@ test "runWithDeps projects unified exec when saved setup has no capability" {
         alloc,
         &.{"hello"},
         testConfig(),
-        testPromptRunDepsWithProcess(&stdout_capture, &stderr_capture, testProcessQueuedPromptChecksExecOnlyTerminal),
+        testPromptRunDepsWithProcess(&stdout_capture, &stderr_capture, testProcessQueuedPromptChecksExecAndWebSearch),
     );
 
     try std.testing.expectEqual(@as(u8, 0), exit_code);
@@ -6664,7 +6707,7 @@ test "runWithDeps honors no-save by skipping ask session stores" {
     defer stderr_capture.deinit(alloc);
 
     test_initialize_session_store_calls = 0;
-    var deps = testPromptRunDepsWithProcess(&stdout_capture, &stderr_capture, testProcessQueuedPromptChecksExecOnlyTerminal);
+    var deps = testPromptRunDepsWithProcess(&stdout_capture, &stderr_capture, testProcessQueuedPromptChecksExecAndWebSearch);
     deps.initialize_session_stores = testCountSessionStores;
 
     const exit_code = try runWithDeps(

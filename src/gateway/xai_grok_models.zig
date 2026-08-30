@@ -272,6 +272,10 @@ fn parseCatalog(
         const context_window = try requiredPositiveU32(object, "context_window");
         const max_output_tokens = try optionalPositiveU32(object, "max_completion_tokens");
         const has_vision = try stringArrayContains(modality_object, "input_modalities", "image");
+        const has_web_search = try optionalBoolAliases(
+            object,
+            &.{ "supportsBackendSearch", "supports_backend_search" },
+        ) orelse false;
 
         try catalog.append(alloc, .{
             .id = id,
@@ -281,6 +285,7 @@ fn parseCatalog(
             .reasoning_efforts = reasoning_efforts,
             .has_vision = has_vision,
             .has_file_input = has_vision,
+            .has_web_search = has_web_search,
             .has_implicit_caching = true,
             .context_window = context_window,
             .max_tokens = max_output_tokens,
@@ -350,6 +355,23 @@ fn requiredBool(object: std.json.ObjectMap, key: []const u8) !bool {
     return value.bool;
 }
 
+fn optionalBoolAliases(
+    object: std.json.ObjectMap,
+    keys: []const []const u8,
+) !?bool {
+    var resolved: ?bool = null;
+    for (keys) |key| {
+        const value = object.get(key) orelse continue;
+        if (value != .bool) return error.InvalidGrokModelCatalog;
+        if (resolved) |prior| {
+            if (prior != value.bool) return error.InvalidGrokModelCatalog;
+        } else {
+            resolved = value.bool;
+        }
+    }
+    return resolved;
+}
+
 fn requiredPositiveU32(object: std.json.ObjectMap, key: []const u8) !u32 {
     const value = object.get(key) orelse return error.InvalidGrokModelCatalog;
     if (value != .integer or value.integer <= 0) return error.InvalidGrokModelCatalog;
@@ -382,8 +404,8 @@ test "Grok catalog parser joins provider-owned subscription capabilities and mod
     const alloc = std.testing.allocator;
     const subscription_json =
         \\{"data":[
-        \\  {"id":"current-a","model":"current-a","api_backend":"responses","context_window":500123,"max_completion_tokens":32768,"supports_reasoning_effort":true,"reasoning_efforts":[{"value":"xhigh"},{"value":"medium"}]},
-        \\  {"id":"current-b","model":"current-b","api_backend":"responses","context_window":480321,"supports_reasoning_effort":true,"reasoning_efforts":[{"value":"provider-next"},{"value":"low"}]},
+        \\  {"id":"current-a","model":"current-a","api_backend":"responses","context_window":500123,"max_completion_tokens":32768,"supports_reasoning_effort":true,"reasoning_efforts":[{"value":"xhigh"},{"value":"medium"}],"supportsBackendSearch":false},
+        \\  {"id":"current-b","model":"current-b","api_backend":"responses","context_window":480321,"supports_reasoning_effort":true,"reasoning_efforts":[{"value":"provider-next"},{"value":"low"}],"supports_backend_search":true},
         \\  {"id":"chat-only","model":"chat-only","api_backend":"chat_completions","context_window":200000,"supports_reasoning_effort":false,"reasoning_efforts":[]}
         \\]}
     ;
@@ -407,6 +429,7 @@ test "Grok catalog parser joins provider-owned subscription capabilities and mod
     try std.testing.expectEqualStrings("medium", first.reasoning_efforts.items[1].label());
     try std.testing.expect(first.has_vision);
     try std.testing.expect(first.has_file_input);
+    try std.testing.expect(!first.has_web_search);
 
     const second = catalog.items[1];
     try std.testing.expectEqualStrings("current-b", second.id);
@@ -416,6 +439,7 @@ test "Grok catalog parser joins provider-owned subscription capabilities and mod
     try std.testing.expectEqualStrings("provider-next", second.reasoning_efforts.items[0].label());
     try std.testing.expectEqualStrings("low", second.reasoning_efforts.items[1].label());
     try std.testing.expect(!second.has_vision);
+    try std.testing.expect(second.has_web_search);
 }
 
 test "Grok catalog rejects missing provider-owned capability metadata" {

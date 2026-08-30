@@ -1376,6 +1376,12 @@ pub const OutputItem = struct {
     encrypted_content: ?[]const u8 = null,
     reasoning_summary: ?std.json.Value = null,
     content: ?std.json.Value = null,
+    web_search_action: ?WebSearchAction = null,
+};
+
+pub const WebSearchAction = struct {
+    kind: []const u8,
+    detail: ?[]const u8 = null,
 };
 
 pub const OutputItemEvent = struct {
@@ -1676,6 +1682,7 @@ pub fn urlCitationFromAnnotation(value: JsonValue) ?UrlCitation {
 fn projectOutputItemEvent(root: JsonValue) !OutputItemEvent {
     const item = objectField(root, "item") orelse return error.InvalidResponsesEvent;
     const raw_type = stringField(item, "type") orelse return error.InvalidResponsesEvent;
+    const action = objectField(item, "action");
     return .{
         .output_index = unsignedField(root, "output_index"),
         .item = .{
@@ -1692,6 +1699,15 @@ fn projectOutputItemEvent(root: JsonValue) !OutputItemEvent {
             .encrypted_content = stringField(item, "encrypted_content"),
             .reasoning_summary = valueField(item, "summary"),
             .content = valueField(item, "content"),
+            .web_search_action = if (std.mem.eql(u8, raw_type, "web_search_call"))
+                if (action) |value| .{
+                    .kind = stringField(value, "type") orelse "other",
+                    .detail = stringField(value, "query") orelse
+                        stringField(value, "url") orelse
+                        stringField(value, "pattern"),
+                } else null
+            else
+                null,
         },
     };
 }

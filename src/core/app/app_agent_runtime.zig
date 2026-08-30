@@ -197,7 +197,7 @@ pub fn Runtime(comptime App: type) type {
             const provider_capabilities = if (comptime @hasDecl(App, "providerSet"))
                 app.providerSet().select(selected_provider).capabilities
             else if (selected_provider == .gateway)
-                provider_set.Bundle.Capabilities{ .fx_search = true, .vision_fallback = true }
+                provider_set.Bundle.Capabilities{ .vision_fallback = true }
             else
                 provider_set.Bundle.Capabilities{};
             var ctx: tool_runtime.Context = .{
@@ -297,10 +297,14 @@ pub fn Runtime(comptime App: type) type {
                 else
                     provider_set.Bundle{
                         .capabilities = provider_capabilities,
-                        .fx_search = app.web_search_runtime.provider,
+                        .web_search = .{ .executor = app.web_search_runtime.provider },
                     };
-                const search_provider = search_bundle.fx_search;
-                if (provider_capabilities.fx_search and search_provider != null) {
+                const search_capabilities = if (comptime @hasDecl(App, "resolvedModelCapabilities"))
+                    app.resolvedModelCapabilities(provider_runtime.model(app))
+                else
+                    search_bundle.fallbackModelCapabilities(provider_runtime.model(app));
+                const search_provider = search_bundle.web_search.executionProvider(search_capabilities);
+                if (search_provider != null) {
                     app.web_search_runtime.configureForProvider(search_provider.?, .{
                         .api_key = app.auth.apiKey() orelse "",
                         .credential_source = app.auth.credentialSource(),
@@ -313,7 +317,7 @@ pub fn Runtime(comptime App: type) type {
                     });
                     ctx.web_search_backend = app.web_search_runtime.dispatchBackend();
                 }
-                ctx.web_search_runtime_ready = search_bundle.fxSearchRuntimeReady();
+                ctx.web_search_runtime_ready = search_provider != null;
                 ctx.web_search_progress_ctx = @ptrCast(app);
                 ctx.on_web_search_progress = app_callbacks.Bindings(App).onWebSearchProgress;
             }
@@ -1011,6 +1015,8 @@ pub fn Runtime(comptime App: type) type {
                 alloc,
                 admission.permission_mode,
                 admission.rules,
+                admission.provider,
+                admission.model,
             ) catch
                 return error.OutOfMemory;
             defer child_projection.deinit(alloc);
@@ -1054,6 +1060,15 @@ pub fn Runtime(comptime App: type) type {
                     return error.ProviderFailed,
                 .tool_context = tool_context,
                 .provider_set = providers,
+                .resolved_model_capabilities = if (comptime @hasDecl(App, "resolvedModelCapabilitiesForProvider"))
+                    app.resolvedModelCapabilitiesForProvider(
+                        admission.provider,
+                        admission.model,
+                    )
+                else if (comptime @hasDecl(App, "resolvedModelCapabilities"))
+                    app.resolvedModelCapabilities(admission.model)
+                else
+                    providers.select(admission.provider).fallbackModelCapabilities(admission.model),
                 .system_prompt = prompt_policy.system_prompt,
                 .model_prompt_overlay = prompt_policy.modelPromptOverlay(admission.model),
                 .skills_prompt_section = bounded_skills.text,
@@ -1109,7 +1124,7 @@ pub fn Runtime(comptime App: type) type {
                 .provider_capabilities = if (comptime @hasDecl(App, "providerSet"))
                     app.providerSet().select(job.provider).capabilities
                 else if (job.provider == .gateway)
-                    .{ .fx_search = true, .vision_fallback = true }
+                    .{ .vision_fallback = true }
                 else
                     .{},
                 .custom_tool_guidance = tool_projection.custom_guidance,
@@ -1496,6 +1511,8 @@ const FakeApp = struct {
         alloc: Allocator,
         permission_mode: PermissionMode,
         permission_rules: types.PermissionRuleSet,
+        _: model_provider.ProviderId,
+        _: []const u8,
     ) !tool_projection_mod.EffectiveToolProjection {
         self.snapshot_tools_count += 1;
         self.snapshot_permission_mode = permission_mode;

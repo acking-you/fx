@@ -135,6 +135,67 @@ pub const ProvisionalToolStatuses = struct {
         }) catch {};
     }
 
+    /// Completes a provider-hosted tool that has no local `ToolExecutionResult`.
+    /// The provider's stable item id reconciles the provisional row and keeps
+    /// TUI and ACP lifecycle output identical to locally executed tools.
+    pub fn finishProviderCall(
+        self: *ProvisionalToolStatuses,
+        hooks: *const AgentRuntimeDeps,
+        alloc: Allocator,
+        arena: Allocator,
+        turn_id: u64,
+        tool_id: []const u8,
+        tool_name: []const u8,
+        label_value: ?[]const u8,
+        succeeded: bool,
+    ) !void {
+        if (self.hasTerminal(tool_id)) return;
+        if (!self.has(tool_id)) {
+            const start_preflight = ProvisionalToolStatuses.preflight(hooks.tool_registry, tool_name) orelse return;
+            switch (start_preflight) {
+                .ineligible => return,
+                .eligible => |metadata| try self.publish(
+                    hooks,
+                    alloc,
+                    turn_id,
+                    tool_id,
+                    tool_name,
+                    metadata.activity_kind,
+                    metadata.action_label,
+                    label_value,
+                ),
+            }
+        }
+        const recorded_terminal = try self.recordTerminal(alloc, tool_id);
+        if (!recorded_terminal) return;
+        errdefer self.forgetTerminal(alloc, tool_id);
+
+        const spec = hooks.tool_registry.lookup(tool_name);
+        const action = if (succeeded)
+            if (spec) |tool| tool.completed_action_label else "Completed"
+        else
+            "Failed";
+        const raw_detail = label_value orelse
+            if (spec) |tool| tool.label_arg_default else tool_name;
+        const encoded = try text_utils.encodeTerminalSafe(
+            arena,
+            raw_detail,
+            diff.max_encoded_label_bytes,
+        );
+        const summary = if (encoded.bytes.len > 0)
+            try std.fmt.allocPrint(arena, "{s} {s}", .{ action, encoded.bytes })
+        else
+            action;
+        try hooks.push_tool_lifecycle(hooks.ctx, .{ .terminal = .{
+            .id = .{ .turn_id = turn_id, .call_id = tool_id },
+            .outcome = .{
+                .kind = if (succeeded) .completed else .failed,
+                .summary = summary,
+            },
+        } });
+        self.forget(alloc, tool_id);
+    }
+
     pub fn finishMalformedToolArguments(
         self: *const ProvisionalToolStatuses,
         hooks: *const AgentRuntimeDeps,
@@ -1570,6 +1631,52 @@ test "provisional lifecycle formats labeled and unlabeled eligible tools" {
         .progress => |event| try std.testing.expectEqualStrings("● Listing\x1b[0m", event.text),
         else => return error.TestExpectedEqual,
     }
+}
+
+test "provider-hosted web search uses one idempotent local lifecycle" {
+    const alloc = std.testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(alloc);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var capture = ProvisionalStatusTestCapture{
+        .alloc = alloc,
+        .tool_registry = .{ .tools = &.{test_builtin_tools.web_search} },
+    };
+    defer capture.deinit();
+    const hooks = capture.hooks();
+    var statuses = ProvisionalToolStatuses{};
+    defer statuses.deinit(alloc);
+
+    try statuses.finishProviderCall(
+        &hooks,
+        alloc,
+        arena,
+        7,
+        "ws_1",
+        "web_search",
+        "Zig 0.16",
+        true,
+    );
+    try std.testing.expectEqual(@as(usize, 3), capture.events.items.len);
+    switch (capture.events.items[2]) {
+        .terminal => |event| {
+            try std.testing.expectEqual(types.ToolOutcomeKind.completed, event.outcome.kind);
+            try std.testing.expectEqualStrings("Searched Zig 0.16", event.outcome.summary);
+        },
+        else => return error.TestExpectedEqual,
+    }
+
+    try statuses.finishProviderCall(
+        &hooks,
+        alloc,
+        arena,
+        7,
+        "ws_1",
+        "web_search",
+        "Zig 0.16",
+        true,
+    );
+    try std.testing.expectEqual(@as(usize, 3), capture.events.items.len);
 }
 
 test "tracked provisional cancellation retains labels without exposing registered names" {

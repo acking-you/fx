@@ -307,9 +307,7 @@ pub fn Bindings(comptime App: type) type {
                 .execute_tool_call = agentExecuteToolCall,
                 .publish_committed_file_handoff = agentPublishCommittedFileHandoff,
                 .propagate_history_turn = agentPropagateHistoryTurn,
-                // Interactive submissions retain the established queue/review
-                // semantics. Same-turn steering is an explicit ACP operation.
-                .take_pending_steer = null,
+                .take_pending_steer = agentTakePendingSteer,
                 .recovery_checkpoint = if (comptime @hasField(App, "session_persistence"))
                     if (app.session_persistence.writable != null)
                         .{
@@ -804,6 +802,17 @@ pub fn Bindings(comptime App: type) type {
             try app_worker_runtime.Runtime(App).propagateHistoryTurn(app, turn, app.session.max_history_turns);
         }
 
+        fn agentTakePendingSteer(
+            ctx: *anyopaque,
+            alloc: Allocator,
+            turn_id: u64,
+            finish_if_empty: bool,
+        ) !?worker_runtime.QueuedPrompt {
+            _ = finish_if_empty;
+            const app: *App = @ptrCast(@alignCast(ctx));
+            return app.worker.takePendingSteer(alloc, turn_id);
+        }
+
         fn agentSetRecoveryCheckpoint(
             ctx: *anyopaque,
             checkpoint: session_codec.RecoveryCheckpoint,
@@ -1235,6 +1244,17 @@ const FakeWorker = struct {
 
     pub fn activeTurnId(self: *FakeWorker) u64 {
         return self.active_turn_id;
+    }
+
+    pub fn takePendingSteer(
+        self: *FakeWorker,
+        alloc: std.mem.Allocator,
+        turn_id: u64,
+    ) !?worker_runtime.QueuedPrompt {
+        _ = self;
+        _ = alloc;
+        _ = turn_id;
+        return null;
     }
 };
 
@@ -1758,6 +1778,8 @@ test "agent deps forward app callbacks through core types" {
     const deps = Bindings(FakeApp).agentRuntimeDeps(&app);
     try std.testing.expect(deps.prepare_parent_turn_context != null);
     try std.testing.expect(deps.acknowledge_parent_turn_context != null);
+    try std.testing.expect(deps.take_pending_steer != null);
+    try std.testing.expect(try deps.take_pending_steer.?(deps.ctx, std.testing.allocator, 1, false) == null);
     try deps.push_text(deps.ctx, .{ .assistant_rendered = "hello" });
     try deps.finalize_turn(deps.ctx, 9, .completed, .length_limited);
     try deps.propagate_history_turn(deps.ctx, .{ .compacted_summary = .{
