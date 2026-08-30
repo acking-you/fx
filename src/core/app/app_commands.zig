@@ -1832,7 +1832,7 @@ fn traceFilePermissions() std.Io.File.Permissions {
     const builtin = @import("builtin");
     return switch (builtin.os.tag) {
         .windows => .default_file,
-        else => std.Io.File.Permissions.fromMode(0o600),
+        else => io_mod.permissionsFromMode(0o600),
     };
 }
 
@@ -2061,7 +2061,7 @@ fn writeCurrentStateSummary(writer: *std.Io.Writer, app: anytype, alloc: std.mem
 }
 
 fn writeProcessSummary(writer: *std.Io.Writer, alloc: std.mem.Allocator) !void {
-    const pid = std.c.getpid();
+    const pid = io_mod.processId();
     try writer.print("process: pid={d}", .{pid});
     if (countOpenFileDescriptors()) |fd_count| try writer.print(" open_fds={d}", .{fd_count});
     try writer.writeByte('\n');
@@ -2101,7 +2101,9 @@ fn countOpenFileDescriptors() ?usize {
     return count;
 }
 
-fn processMemorySnapshot(alloc: std.mem.Allocator, pid: std.c.pid_t) ![]u8 {
+fn processMemorySnapshot(alloc: std.mem.Allocator, pid: io_mod.ProcessId) ![]u8 {
+    const builtin = @import("builtin");
+    if (comptime builtin.os.tag == .windows) return error.ProcessSnapshotFailed;
     const pid_text = try std.fmt.allocPrint(alloc, "{d}", .{pid});
     defer alloc.free(pid_text);
     const result = try std.process.run(alloc, io_mod.getIo(), .{

@@ -2503,7 +2503,7 @@ test "historical command detail keeps artifact handles after command block attac
     try tmp.dir.createDir(
         io_mod.getIo(),
         "session",
-        std.Io.File.Permissions.fromMode(0o700),
+        io_mod.permissionsFromMode(0o700),
     );
     var session_dir = try tmp.dir.openDir(io_mod.getIo(), "session", .{
         .iterate = true,
@@ -4066,8 +4066,11 @@ fn sameFullDiffResolver(
 }
 
 pub const TranscriptRuntime = struct {
-    stdout_file: std.Io.File = std.Io.File.stdout(),
+    // Windows resolves standard handles at runtime, so stdout cannot be used
+    // as a comptime field initializer there. A null sink means process stdout.
+    stdout_file: ?std.Io.File = null,
     sync_updates_enabled: bool = true,
+
     history_reset_uses_ris: bool = false,
     layout: Layout = undefined,
     cursor_row: u16 = 1,
@@ -4227,6 +4230,10 @@ pub const TranscriptRuntime = struct {
     /// of the shared shadow grid.
     detached_commit_alloc: ?Allocator = null,
     ui_observer: render_engine.ui_observer.UiObserver = .{},
+
+    pub fn stdoutFile(self: *const TranscriptRuntime) std.Io.File {
+        return self.stdout_file orelse std.Io.File.stdout();
+    }
 
     pub fn enableShadowVt(self: *TranscriptRuntime, alloc: Allocator) !void {
         return transcript_io.enableShadowVt(self, alloc);

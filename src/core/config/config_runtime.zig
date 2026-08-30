@@ -1729,7 +1729,7 @@ test "merged settings rejects writable user policy files" {
     var root_dir = try tmp.dir.openDir(io_mod.getIo(), "home/.fx", .{});
     defer root_dir.close(io_mod.getIo());
     var file = try root_dir.openFile(io_mod.getIo(), "settings.json", .{ .mode = .read_write });
-    file.setPermissions(io_mod.getIo(), std.Io.File.Permissions.fromMode(0o666)) catch {
+    file.setPermissions(io_mod.getIo(), io_mod.permissionsFromMode(0o666)) catch {
         file.close(io_mod.getIo());
         return error.SkipZigTest;
     };
@@ -3291,7 +3291,7 @@ test "detailed settings report unsafe user permissions distinctly" {
     var root_dir = try tmp.dir.openDir(io_mod.getIo(), "home/.fx", .{});
     defer root_dir.close(io_mod.getIo());
     var file = try root_dir.openFile(io_mod.getIo(), "settings.json", .{ .mode = .read_write });
-    file.setPermissions(io_mod.getIo(), std.Io.File.Permissions.fromMode(0o666)) catch {
+    file.setPermissions(io_mod.getIo(), io_mod.permissionsFromMode(0o666)) catch {
         file.close(io_mod.getIo());
         return error.SkipZigTest;
     };

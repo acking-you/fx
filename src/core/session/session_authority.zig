@@ -510,7 +510,7 @@ pub fn openSessionFile(
     name: []const u8,
     mode: session_log.OpenMode,
 ) !std.Io.File {
-    const file = session_dir.dir.openFile(io_mod.getIo(), name, .{
+    var file = session_dir.dir.openFile(io_mod.getIo(), name, .{
         .mode = if (mode == .writable) .read_write else .read_only,
         .allow_directory = false,
         .follow_symlinks = false,
@@ -519,6 +519,7 @@ pub fn openSessionFile(
         error.SymLinkLoop, error.IsDir, error.NotDir => return error.SessionPathUnsafe,
         else => return err,
     };
+    io_mod.alignOpenedFileFlags(&file, false);
     errdefer file.close(io_mod.getIo());
     try verifyOpenedSessionFile(try file.stat(io_mod.getIo()), mode);
     return file;
@@ -643,7 +644,7 @@ pub fn eventFileStat(
         .device = device,
         .inode = @intCast(stat.inode),
         .kind = .regular,
-        .mode = stat.permissions.toMode(),
+        .mode = @intCast(io_mod.permissionsMode(stat.permissions)),
         .link_count = @intCast(stat.nlink),
         .size = stat.size,
         .mtime_ns = stat.mtime.nanoseconds,

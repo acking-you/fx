@@ -283,6 +283,8 @@ jobs:
             target: x86_64-macos
           - name: macos-aarch64
             target: aarch64-macos
+          - name: windows-x86_64
+            target: x86_64-windows
     steps:
       - uses: actions/checkout@v4
 
@@ -297,10 +299,62 @@ jobs:
 
       - name: Report binary size
         run: |
-          bytes=$(stat -c%s zig-out/bin/fx)
+          binary=zig-out/bin/fx
+          if [ ! -f "$binary" ]; then binary=zig-out/bin/fx.exe; fi
+          bytes=$(stat -c%s "$binary")
           mib=$(awk -v b="$bytes" 'BEGIN { printf "%.2f", b / 1048576 }')
           echo "${{ matrix.name }}: $bytes bytes ($mib MiB)"
           echo "${{ matrix.name }}: $bytes bytes ($mib MiB)" >> "$GITHUB_STEP_SUMMARY"
+
+  windows-native:
+    name: Windows native
+    runs-on: windows-2025
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: "0.16.0"
+          cache-key: ci-windows-native
+
+      - name: Check formatting
+        run: zig fmt --check src/
+
+      - name: Build
+        run: zig build -Doptimize=ReleaseSafe
+
+      - name: Run Windows runtime tests
+        shell: pwsh
+        run: |
+          zig build test -Doptimize=ReleaseSafe -- `
+            --test-filter "resolver builds Windows command invocations" `
+            --test-filter "unified exec returns short commands synchronously" `
+            --test-filter "unified exec keeps long process addressable and polls output" `
+            --test-filter "unified exec writes interactive input without blocking the caller" `
+            --test-filter "unified exec activates the observer before a direct write can fail" `
+            --test-filter "native hosts still load project instruction files"
+
+      - name: Smoke test CLI and ACP
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $help = & .\zig-out\bin\fx.exe help
+          if ($LASTEXITCODE -ne 0 -or -not $help) { throw "fx help failed" }
+          $status = & .\zig-out\bin\fx.exe status --json
+          if ($LASTEXITCODE -ne 0 -or -not $status) { throw "fx status failed" }
+          $requests = @(
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}'
+            '{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"mcpServers":[]}}'
+          )
+          $responses = @($requests | .\zig-out\bin\fx.exe acp)
+          if ($LASTEXITCODE -ne 0 -or $responses.Count -lt 2) { throw "ACP smoke test failed" }
+          $initialize = $responses[0] | ConvertFrom-Json
+          $newSession = $responses[1] | ConvertFrom-Json
+          if (-not $initialize.result.agentInfo.name -or -not $newSession.result.sessionId) {
+            throw "ACP returned an invalid response"
+          }
 
   lint-scripts:
     name: Shellcheck

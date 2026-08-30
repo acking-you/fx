@@ -564,6 +564,7 @@ fn loadRule(arena: Allocator, path: []const u8, limit: context_limits.Resolved) 
         };
     };
     defer file.close(io_mod.getIo());
+    io_mod.refreshOpenedFileFlags(&file);
 
     const opened_stat = file.stat(io_mod.getIo()) catch return .{ .omitted = .unreadable };
     if (opened_stat.kind != .file) return .{ .omitted = if (stat.kind == .sym_link) .symlink else .non_regular };

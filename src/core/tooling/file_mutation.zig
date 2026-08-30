@@ -1001,9 +1001,9 @@ fn validatePreimage(
             const expected_identity = prepared.policy_targets.items[0].expected_identity orelse
                 break :blk .stale;
             if (!identityEql(actual_identity, expected_identity)) break :blk .stale;
-            if (stat.permissions.toMode() & 0o222 == 0) break :blk .io_failure;
+            if (!io_mod.permissionsWritable(stat.permissions)) break :blk .io_failure;
             if (expected_permissions) |permissions| {
-                if (stat.permissions.toMode() != permissions.toMode()) break :blk .stale;
+                if (io_mod.permissionsMode(stat.permissions) != io_mod.permissionsMode(permissions)) break :blk .stale;
             }
 
             var hasher = std.crypto.hash.sha2.Sha256.init(.{});
@@ -3258,7 +3258,7 @@ test "apply preserves the existing destination mode" {
         defer file.close(std.testing.io);
         try file.setPermissions(
             std.testing.io,
-            std.Io.File.Permissions.fromMode(0o640),
+            io_mod.permissionsFromMode(0o640),
         );
     }
     var call_arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);

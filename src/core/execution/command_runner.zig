@@ -1485,7 +1485,7 @@ fn fallbackCommandArtifactDir(alloc: Allocator) ![]u8 {
 }
 
 fn currentProcessId() u64 {
-    return @intCast(std.c.getpid());
+    return @intCast(io_mod.processId());
 }
 
 fn elapsedMs(started_ms: i64, finished_ms: i64) u64 {
@@ -1659,7 +1659,7 @@ test "zsh user profile reports natural SIGTERM after alias-safe startup" {
         try wrapper.writeStreamingAll(io_mod.getIo(), source);
         try wrapper.setPermissions(
             io_mod.getIo(),
-            std.Io.File.Permissions.fromMode(0o700),
+            io_mod.permissionsFromMode(0o700),
         );
     }
 
@@ -2972,7 +2972,7 @@ test "managed command artifact confirms an indeterminate rename target" {
     try tmp.dir.createDir(
         io_mod.getIo(),
         "session",
-        std.Io.File.Permissions.fromMode(0o700),
+        io_mod.permissionsFromMode(0o700),
     );
     const workspace = try io_mod.dirRealpathAlloc(
         alloc,
@@ -3052,7 +3052,7 @@ test "managed command artifact rejects an unconfirmed rename target" {
     try tmp.dir.createDir(
         io_mod.getIo(),
         "session",
-        std.Io.File.Permissions.fromMode(0o700),
+        io_mod.permissionsFromMode(0o700),
     );
     const workspace = try io_mod.dirRealpathAlloc(
         alloc,
@@ -3343,7 +3343,7 @@ test "cancellation preserves the termination grace in an invoked script" {
         );
         try script.setPermissions(
             io_mod.getIo(),
-            std.Io.File.Permissions.fromMode(0o700),
+            io_mod.permissionsFromMode(0o700),
         );
     }
 
@@ -3419,7 +3419,7 @@ test "cancelled managed command confirms an indeterminate artifact target" {
     try tmp.dir.createDir(
         io_mod.getIo(),
         "session",
-        std.Io.File.Permissions.fromMode(0o700),
+        io_mod.permissionsFromMode(0o700),
     );
     const workspace = try io_mod.dirRealpathAlloc(
         alloc,

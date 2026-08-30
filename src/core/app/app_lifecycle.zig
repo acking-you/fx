@@ -1051,7 +1051,8 @@ fn emitShutdownCleanupAndResume(shell: *TranscriptRuntime, metrics: *Metrics) vo
 }
 
 pub fn writeLifecycleTerminalBytes(shell: *TranscriptRuntime, metrics: *Metrics, bytes: []const u8) !void {
-    try shell.stdout_file.writeStreamingAll(io_mod.getIo(), bytes);
+    var stdout_file = shell.stdoutFile();
+    try stdout_file.writeStreamingAll(io_mod.getIo(), bytes);
     if (shell.shadow_vt) |grid| {
         grid.feed(bytes) catch |err| debug_trace.logf(
             "render",

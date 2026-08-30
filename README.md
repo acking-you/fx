@@ -55,7 +55,7 @@ Fork changes stay deliberately small and shaped like upstream's own code: diverg
 
 ## Install
 
-Build this fork from source using the steps in [Build from source](#build-from-source).
+Download the archive for your platform from [GitHub Releases](https://github.com/acking-you/fx/releases), or build this fork from source using the steps in [Build from source](#build-from-source). Windows x86_64 releases are published as `fx-windows-x86_64.zip` and include `fx.exe`.
 
 ## Run fx
 
@@ -84,6 +84,13 @@ For direct BYOK access to the Responses API, set an OpenAI API key:
 ```bash
 export OPENAI_API_KEY="your-key"
 fx
+```
+
+On Windows PowerShell, use:
+
+```powershell
+$env:OPENAI_API_KEY = "your-key"
+.\fx.exe
 ```
 
 To use another endpoint that implements the Responses API, set its base URL before running fx:
@@ -221,6 +228,8 @@ cd fx
 zig build -Doptimize=ReleaseSafe
 ./zig-out/bin/fx
 ```
+
+On Windows PowerShell, run the built executable as `.\zig-out\bin\fx.exe`.
 
 Run the test suite with `zig build test`. See [CONTRIBUTING.md](CONTRIBUTING.md) for development and contribution guidelines.
 

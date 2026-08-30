@@ -1,5 +1,7 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const types = @import("../../core/shared/types.zig");
+const windows_console = if (builtin.os.tag == .windows) @import("windows_console.zig") else struct {};
 
 pub const interactive_mode_enable_sequence = "\x1b[>4;2m\x1b[>1u\x1b[?2004h\x1b[?7l";
 const tmux_interactive_mode_enable_sequence = "\x1b[>4;2m\x1b[?2004h\x1b[?7l";
@@ -33,15 +35,27 @@ pub fn interactiveModeEnableSequence(tmux: ?[]const u8) []const u8 {
         tmux_interactive_mode_enable_sequence;
 }
 
-pub fn queryLayout(fd: std.posix.fd_t, footer_rows: u16) !types.Layout {
-    var ws: std.posix.winsize = .{ .row = 0, .col = 0, .xpixel = 0, .ypixel = 0 };
+pub const LayoutHandle = if (builtin.os.tag == .windows) void else std.posix.fd_t;
 
-    const req: c_int = @intCast(std.c.T.IOCGWINSZ);
-    const rc = std.c.ioctl(fd, req, &ws);
-    if (rc == -1 or ws.row == 0 or ws.col == 0) {
-        return error.UnableToReadTerminalSize;
+pub fn stdoutLayoutHandle() LayoutHandle {
+    if (comptime builtin.os.tag == .windows) return {};
+    return std.posix.STDOUT_FILENO;
+}
+
+pub fn queryLayout(handle: LayoutHandle, footer_rows: u16) !types.Layout {
+    if (comptime builtin.os.tag == .windows) {
+        const size = try windows_console.querySize();
+        return layoutFromSize(size.rows, size.cols, footer_rows);
+    } else {
+        var ws: std.posix.winsize = .{ .row = 0, .col = 0, .xpixel = 0, .ypixel = 0 };
+
+        const req: c_int = @intCast(std.c.T.IOCGWINSZ);
+        const rc = std.c.ioctl(handle, req, &ws);
+        if (rc == -1 or ws.row == 0 or ws.col == 0) {
+            return error.UnableToReadTerminalSize;
+        }
+        return layoutFromSize(ws.row, ws.col, footer_rows);
     }
-    return layoutFromSize(ws.row, ws.col, footer_rows);
 }
 
 pub fn layoutFromSize(rows: u16, cols: u16, footer_rows: u16) !types.Layout {

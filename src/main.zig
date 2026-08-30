@@ -482,7 +482,11 @@ const App = struct {
     }
 
     pub fn terminalTitle(self: *const Self) host.TerminalTitle {
-        return ui_render.terminalTitleFor(&self.shell.stdout_file);
+        const stdout_file = if (self.shell.stdout_file) |*file|
+            file
+        else
+            return host.unavailable_terminal_title;
+        return ui_render.terminalTitleFor(stdout_file);
     }
 
     fn terminalTitleBusy(self: *Self) bool {
@@ -618,6 +622,7 @@ const App = struct {
     pub fn init(alloc: Allocator, launch: *cli_surface.InteractiveLaunch) !Self {
         var app = Self{
             .alloc = alloc,
+            .shell = .{ .stdout_file = std.Io.File.stdout() },
             .subagents = ui_subagents.Controller.init(),
             .lifecycle_runtime = hooks.Runtime.init(alloc),
             .background = BackgroundRuntime.init(if (comptime host_target.is_wasm)
@@ -3143,10 +3148,17 @@ fn rawArgs(c_argc: c_int, c_argv: [*][*:0]c_char) []const [*:0]const u8 {
 }
 
 fn argsFromRaw(raw_args: []const [*:0]const u8) std.process.Args {
+    if (comptime builtin.os.tag == .windows) {
+        const command_line = std.os.windows.peb().ProcessParameters.CommandLine;
+        return .{
+            .vector = command_line.Buffer.?[0 .. command_line.Length / @sizeOf(u16)],
+        };
+    }
     return .{ .vector = raw_args };
 }
 
 fn environBlockFromRaw(raw_env: RawEnviron) std.process.Environ.Block {
+    if (comptime builtin.os.tag == .windows) return .global;
     var count: usize = 0;
     while (raw_env[count] != null) : (count += 1) {}
     return .{ .slice = raw_env[0..count :null] };

@@ -1354,7 +1354,7 @@ test "saving MCP config replaces the file durably" {
     {
         var seed = try fx_dir.openFile(io_mod.getIo(), "mcp.json", .{ .mode = .read_write });
         defer seed.close(io_mod.getIo());
-        try seed.setPermissions(io_mod.getIo(), std.Io.File.Permissions.fromMode(0o644));
+        try seed.setPermissions(io_mod.getIo(), io_mod.permissionsFromMode(0o644));
     }
 
     // Hold the pre-save file open. A rename-over leaves this descriptor on the

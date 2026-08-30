@@ -37,6 +37,11 @@ pub fn isSupported() bool {
     return isSupportedForOs(builtin.os.tag);
 }
 
+fn currentUserId() std.c.uid_t {
+    if (comptime builtin.os.tag == .windows) return 0;
+    return std.c.getuid();
+}
+
 fn isSupportedForOs(os_tag: std.Target.Os.Tag) bool {
     return host_capabilities.terminalSupportForOs(os_tag).isSupported();
 }
@@ -203,7 +208,7 @@ pub const Paths = struct {
             alloc,
             builtin.os.tag,
             home,
-            std.c.getuid(),
+            currentUserId(),
         );
         var selection_owned = true;
         errdefer if (selection_owned) selection.deinit(alloc);
@@ -229,7 +234,7 @@ pub const Paths = struct {
         if (selection.uses_fallback) {
             transport_dir = try openRuntimeTransportDir(
                 selection.transport_root,
-                std.c.getuid(),
+                currentUserId(),
             );
         }
         selection_owned = false;
@@ -290,7 +295,7 @@ fn openVerifiedPrivateRuntimeDir(
             parent.createDir(
                 zio,
                 name,
-                std.Io.File.Permissions.fromMode(0o700),
+                io_mod.permissionsFromMode(0o700),
             ) catch |create_err| switch (create_err) {
                 error.PathAlreadyExists => {},
                 else => return create_err,
@@ -362,7 +367,7 @@ fn validatePrivateRuntimeDir(
 ) !void {
     if (stat.kind != .directory) return error.RuntimeDirectoryUnsafe;
     if (owner_uid != uid) return error.RuntimeDirectoryOwnerMismatch;
-    if (stat.permissions.toMode() & 0o777 != 0o700) {
+    if (!io_mod.permissionsPrivateDir(stat.permissions)) {
         return error.PrivateStatePermissionsUnsupported;
     }
 }
@@ -1247,7 +1252,7 @@ fn peerMatchesCurrentUser(handle: std.Io.net.Socket.Handle) bool {
             ) c_int;
         };
         if (Peer.getpeereid(handle, &peer_uid, &peer_gid) != 0) return false;
-        return peer_uid == std.c.getuid();
+        return peer_uid == currentUserId();
     }
     if (comptime builtin.os.tag == .linux) {
         const UCred = extern struct {
@@ -1265,7 +1270,7 @@ fn peerMatchesCurrentUser(handle: std.Io.net.Socket.Handle) bool {
             &credentials_len,
         ) != 0) return false;
         return credentials_len == @sizeOf(UCred) and
-            credentials.uid == std.c.getuid();
+            credentials.uid == currentUserId();
     }
     return false;
 }
@@ -1429,7 +1434,7 @@ fn verifyEndpointPermissions(host_dir: *io_mod.VerifiedDir) !void {
         .{ .follow_symlinks = false },
     );
     if (stat.kind != .unix_domain_socket or
-        stat.permissions.toMode() & 0o777 != 0o600)
+        !io_mod.permissionsPrivateFile(stat.permissions))
     {
         return error.PrivateEndpointPermissionsUnsupported;
     }
@@ -1688,7 +1693,7 @@ test "runtime transport directories reject symlinks non-private modes and foreig
     var private = try openVerifiedPrivateRuntimeDir(
         tmp.dir,
         "private",
-        std.c.getuid(),
+        currentUserId(),
     );
     defer private.close();
     const private_stat = try private.dir.stat(std.testing.io);
@@ -1700,20 +1705,20 @@ test "runtime transport directories reject symlinks non-private modes and foreig
         error.RuntimeDirectoryOwnerMismatch,
         validatePrivateRuntimeDir(
             private_stat,
-            std.c.getuid() + 1,
-            std.c.getuid(),
+            currentUserId() + 1,
+            currentUserId(),
         ),
     );
 
     try tmp.dir.createDir(
         std.testing.io,
         "public",
-        std.Io.File.Permissions.fromMode(0o755),
+        io_mod.permissionsFromMode(0o755),
     );
     try tmp.dir.setFilePermissions(
         std.testing.io,
         "public",
-        std.Io.File.Permissions.fromMode(0o755),
+        io_mod.permissionsFromMode(0o755),
         .{ .follow_symlinks = false },
     );
     const public_stat = try tmp.dir.statFile(
@@ -1727,7 +1732,7 @@ test "runtime transport directories reject symlinks non-private modes and foreig
     );
     try std.testing.expectError(
         error.PrivateStatePermissionsUnsupported,
-        openVerifiedPrivateRuntimeDir(tmp.dir, "public", std.c.getuid()),
+        openVerifiedPrivateRuntimeDir(tmp.dir, "public", currentUserId()),
     );
 
     try tmp.dir.symLink(
@@ -1738,7 +1743,7 @@ test "runtime transport directories reject symlinks non-private modes and foreig
     );
     try std.testing.expectError(
         error.RuntimeDirectoryUnsafe,
-        openVerifiedPrivateRuntimeDir(tmp.dir, "linked", std.c.getuid()),
+        openVerifiedPrivateRuntimeDir(tmp.dir, "linked", currentUserId()),
     );
 }
 

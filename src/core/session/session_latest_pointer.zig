@@ -410,6 +410,7 @@ pub fn readLatestSnapshotToken(
         },
         else => return err,
     };
+    io_mod.alignOpenedFileFlags(&file, false);
     defer file.close(io_mod.getIo());
     const stat = try file.stat(io_mod.getIo());
     if (stat.kind != .file or stat.nlink != 1) {
@@ -716,6 +717,7 @@ fn readLatestPointerJsonFromSessions(
         error.NotDir, error.SymLinkLoop, error.IsDir => return error.InvalidSessionIndex,
         else => return err,
     };
+    io_mod.alignOpenedFileFlags(&file, false);
     defer file.close(io_mod.getIo());
     const stat = try file.stat(io_mod.getIo());
     if (stat.kind != .file or stat.nlink != 1) return error.InvalidSessionIndex;
