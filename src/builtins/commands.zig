@@ -513,6 +513,7 @@ test "built-in slash commands register exact active order" {
         "/alias",
         "/paste",
         "/fast",
+        "/bash-first",
         "/statusline",
         "/sound",
         "/workspace",

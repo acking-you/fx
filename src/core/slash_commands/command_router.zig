@@ -538,6 +538,7 @@ fn testHandlers(ctx: *TestContext) CommandHandlers {
         .handle_alias = unexpectedPayload,
         .paste_clipboard = unexpectedNoPayload,
         .toggle_fast = unexpectedNoPayload,
+        .bash_first = unexpectedPayload,
         .handle_statusline = unexpectedPayload,
         .rename_session = unexpectedPayload,
         .handle_notifications = unexpectedPayload,
