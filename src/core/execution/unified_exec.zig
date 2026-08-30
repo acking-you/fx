@@ -120,15 +120,14 @@ pub const Manager = struct {
         defer process.finishOutputProjection(request.output_sink);
         const id = process.id;
         const yield_ms = clampInitialYield(request.yield_time_ms);
-        if (!process.waitUntilDone(yield_ms, request.output_sink, request.cancel_flag)) {
-            if (request.cancel_flag) |flag| {
-                if (flag.load(.seq_cst)) {
-                    if (!self.detachHeld(id, process)) return error.ProcessUnavailable;
-                    process.cancelAndJoin();
-                    process.finalizeArtifact();
-                    return error.Cancelled;
-                }
-            }
+        var finished = process.waitUntilDone(yield_ms, request.output_sink, request.cancel_flag);
+        if (!finished and cancelRequested(request.cancel_flag)) {
+            // Let the UI observe the active cancellation before the worker
+            // releases turn-scoped mutation guards. The process itself stays
+            // session-owned and addressable, just like an ordinary yield.
+            finished = process.waitUntilDone(initial_min_yield_ms, request.output_sink, null);
+        }
+        if (!finished) {
             return process.snapshot(alloc, id, .running, request.max_output_tokens, .model);
         }
         if (!self.detachHeld(id, process)) return error.ProcessUnavailable;
@@ -391,6 +390,10 @@ fn clampInitialYield(value: u64) u64 {
 
 fn clampPollYield(value: u64) u64 {
     return @max(empty_min_yield_ms, @min(max_poll_yield_ms, value));
+}
+
+fn cancelRequested(flag: ?*const std.atomic.Value(bool)) bool {
+    return if (flag) |value| value.load(.seq_cst) else false;
 }
 
 const OutputProjectionChunk = struct {
@@ -766,17 +769,6 @@ const Process = struct {
     }
 
     fn stopAndJoin(self: *Process) void {
-        self.stopAndJoinWithGrace(20);
-    }
-
-    /// A command cancelled before its initial yield is still the active
-    /// foreground action. Give its process group the same bounded cooperative
-    /// shutdown window as the legacy command runner before forcing cleanup.
-    fn cancelAndJoin(self: *Process) void {
-        self.stopAndJoinWithGrace(800);
-    }
-
-    fn stopAndJoinWithGrace(self: *Process, grace_ms: u64) void {
         if (comptime builtin.os.tag == .windows or builtin.os.tag == .wasi) return;
         if (!self.stop_requested.swap(true, .seq_cst)) {
             self.mutex.lockUncancelable(io_mod.getIo());
@@ -787,7 +779,7 @@ const Process = struct {
             if (!done or !readers_done) {
                 std.posix.kill(process_group, std.posix.SIG.TERM) catch {};
                 var waited_ms: u64 = 0;
-                while (waited_ms < grace_ms) : (waited_ms += 2) {
+                while (waited_ms < 20) : (waited_ms += 2) {
                     io_mod.sleep(2 * std.time.ns_per_ms);
                     self.mutex.lockUncancelable(io_mod.getIo());
                     done = self.done;
@@ -1247,7 +1239,7 @@ test "blocked output sink does not hold process control or reader threads" {
     try std.testing.expect(exec_context.finished.load(.acquire));
 }
 
-test "unified exec cancellation terminates an initial foreground wait" {
+test "unified exec cancellation hands off before preserving the live process" {
     if (!Manager.supported()) return error.SkipZigTest;
     var manager = Manager.init(std.heap.c_allocator);
     defer manager.deinit();
@@ -1256,22 +1248,19 @@ test "unified exec cancellation terminates an initial foreground wait" {
     const cancel_thread = try std.Thread.spawn(.{}, DelayedCancel.run, .{&delayed});
 
     const started_ms = io_mod.milliTimestamp();
-    try std.testing.expectError(
-        error.Cancelled,
-        manager.exec(std.testing.allocator, .{
-            .command = "sleep 30",
-            .cwd = "/tmp",
-            .yield_time_ms = max_yield_ms,
-            .cancel_flag = &cancel_flag,
-        }),
-    );
+    var result = try manager.exec(std.testing.allocator, .{
+        .command = "sleep 30",
+        .cwd = "/tmp",
+        .yield_time_ms = max_yield_ms,
+        .cancel_flag = &cancel_flag,
+    });
     cancel_thread.join();
+    defer result.deinit(std.testing.allocator);
 
+    try std.testing.expectEqual(Manager.Status.running, result.status);
+    try std.testing.expect(io_mod.milliTimestamp() - started_ms >= initial_min_yield_ms);
     try std.testing.expect(io_mod.milliTimestamp() - started_ms < 2_000);
-    try std.testing.expectError(error.UnknownProcessId, manager.writeStdin(
-        std.testing.allocator,
-        .{ .process_id = 1 },
-    ));
+    try std.testing.expect(manager.terminate(result.process_id.?));
 }
 
 test "unified exec cancellation releases an empty poll without consuming the process" {
