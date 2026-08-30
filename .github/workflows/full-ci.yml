@@ -44,6 +44,7 @@ jobs:
         run: |
           zig build test -Doptimize=ReleaseSafe -- `
             --test-filter "resolver builds Windows command invocations" `
+            --test-filter "browser callback survives a reset queued before accept" `
             --test-filter "unified exec returns short commands synchronously" `
             --test-filter "unified exec keeps long process addressable and polls output" `
             --test-filter "unified exec writes interactive input without blocking the caller" `
