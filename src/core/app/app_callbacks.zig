@@ -1245,6 +1245,17 @@ const FakeWorker = struct {
     pub fn activeTurnId(self: *FakeWorker) u64 {
         return self.active_turn_id;
     }
+
+    pub fn takePendingSteer(
+        self: *FakeWorker,
+        alloc: std.mem.Allocator,
+        turn_id: u64,
+    ) !?worker_runtime.QueuedPrompt {
+        _ = self;
+        _ = alloc;
+        _ = turn_id;
+        return null;
+    }
 };
 
 const FakeSession = struct {
@@ -1767,6 +1778,8 @@ test "agent deps forward app callbacks through core types" {
     const deps = Bindings(FakeApp).agentRuntimeDeps(&app);
     try std.testing.expect(deps.prepare_parent_turn_context != null);
     try std.testing.expect(deps.acknowledge_parent_turn_context != null);
+    try std.testing.expect(deps.take_pending_steer != null);
+    try std.testing.expect(try deps.take_pending_steer.?(deps.ctx, std.testing.allocator, 1, false) == null);
     try deps.push_text(deps.ctx, .{ .assistant_rendered = "hello" });
     try deps.finalize_turn(deps.ctx, 9, .completed, .length_limited);
     try deps.propagate_history_turn(deps.ctx, .{ .compacted_summary = .{
