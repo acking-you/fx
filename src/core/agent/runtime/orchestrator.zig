@@ -6733,7 +6733,9 @@ fn processQueuedPromptLoop(
                 break :blk ToolExecutionResult{ .status = .failure, .model_output = try deps.format_tool_execution_error(deps.ctx, arena, tool_call.name, err) };
             };
 
-            if (execution.cancelled and config.cancel_flag.load(.seq_cst)) {
+            if ((execution.cancelled or execution_is_command) and
+                config.cancel_flag.load(.seq_cst))
+            {
                 runtime_telemetry.traceCancelObserved(step_ctx, true);
                 var replay_handed_off = execution.command_replay_capture == null;
                 defer if (!replay_handed_off) {

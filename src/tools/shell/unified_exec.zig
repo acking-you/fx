@@ -178,7 +178,11 @@ pub fn callExec(ctx: tool_dispatch.DispatchContext, erased: tool_dispatch.ToolIn
         .command_artifact_dir = ctx.command_artifact_dir,
         .command_artifact_threshold = ctx.max_command_output_bytes,
         .output_sink = outputSink(ctx),
-    }) catch |err| return .{ .failure = try std.fmt.allocPrint(ctx.allocator, "exec_command failed: {s}", .{@errorName(err)}) };
+        .cancel_flag = ctx.cancel_flag,
+    }) catch |err| {
+        if (err == error.Cancelled) return error.Cancelled;
+        return .{ .failure = try std.fmt.allocPrint(ctx.allocator, "exec_command failed: {s}", .{@errorName(err)}) };
+    };
     defer result.deinit(ctx.allocator);
     reportResultMemory(ctx, result) catch return error.OutOfMemory;
     if (ctx.command_result_json_sink) |sink| {
@@ -201,7 +205,11 @@ pub fn callWrite(ctx: tool_dispatch.DispatchContext, erased: tool_dispatch.ToolI
         .yield_time_ms = input.yield_time_ms,
         .max_output_tokens = input.max_output_tokens,
         .output_sink = outputSink(ctx),
-    }) catch |err| return .{ .failure = try std.fmt.allocPrint(ctx.allocator, "write_stdin failed: {s}", .{@errorName(err)}) };
+        .cancel_flag = ctx.cancel_flag,
+    }) catch |err| {
+        if (err == error.Cancelled) return error.Cancelled;
+        return .{ .failure = try std.fmt.allocPrint(ctx.allocator, "write_stdin failed: {s}", .{@errorName(err)}) };
+    };
     defer result.deinit(ctx.allocator);
     reportResultMemory(ctx, result) catch return error.OutOfMemory;
     if (ctx.command_result_json_sink) |sink| {

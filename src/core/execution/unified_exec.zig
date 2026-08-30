@@ -59,6 +59,7 @@ pub const Manager = struct {
         command_artifact_dir: ?[]const u8 = null,
         command_artifact_threshold: usize = 0,
         output_sink: ?OutputSink = null,
+        cancel_flag: ?*const std.atomic.Value(bool) = null,
     };
 
     pub const WriteRequest = struct {
@@ -67,6 +68,7 @@ pub const Manager = struct {
         yield_time_ms: u64 = 250,
         max_output_tokens: ?u64 = null,
         output_sink: ?OutputSink = null,
+        cancel_flag: ?*const std.atomic.Value(bool) = null,
     };
 
     /// Borrowed for one exec or write_stdin operation. Pipe readers only queue
@@ -112,12 +114,13 @@ pub const Manager = struct {
 
     pub fn exec(self: *Manager, alloc: Allocator, request: ExecRequest) !Result {
         if (!supported()) return error.UnsupportedHost;
+        if (request.cancel_flag) |flag| if (flag.load(.seq_cst)) return error.Cancelled;
         const process = try self.createProcess(request);
         defer self.releaseActive(process);
         defer process.finishOutputProjection(request.output_sink);
         const id = process.id;
         const yield_ms = clampInitialYield(request.yield_time_ms);
-        if (!process.waitUntilDone(yield_ms, request.output_sink)) {
+        if (!process.waitUntilDone(yield_ms, request.output_sink, request.cancel_flag)) {
             return process.snapshot(alloc, id, .running, request.max_output_tokens, .model);
         }
         if (!self.detachHeld(id, process)) return error.ProcessUnavailable;
@@ -129,6 +132,7 @@ pub const Manager = struct {
     }
 
     pub fn writeStdin(self: *Manager, alloc: Allocator, request: WriteRequest) !Result {
+        if (request.cancel_flag) |flag| if (flag.load(.seq_cst)) return error.Cancelled;
         const process = self.acquire(request.process_id) orelse return error.UnknownProcessId;
         defer self.releaseActive(process);
         try process.beginOutputProjection(request.output_sink, true);
@@ -138,7 +142,7 @@ pub const Manager = struct {
             clampPollYield(request.yield_time_ms)
         else
             clampInitialYield(request.yield_time_ms);
-        if (!process.waitUntilDone(yield_ms, request.output_sink)) {
+        if (!process.waitUntilDone(yield_ms, request.output_sink, request.cancel_flag)) {
             return process.snapshot(alloc, request.process_id, .running, request.max_output_tokens, .model);
         }
         if (!self.detachHeld(request.process_id, process)) return error.ProcessUnavailable;
@@ -498,6 +502,7 @@ const Process = struct {
         self: *Process,
         yield_ms: u64,
         output_sink: ?Manager.OutputSink,
+        cancel_flag: ?*const std.atomic.Value(bool),
     ) bool {
         const deadline = io_mod.milliTimestamp() + @as(i64, @intCast(yield_ms));
         while (true) {
@@ -506,6 +511,7 @@ const Process = struct {
             const finished = self.done;
             self.mutex.unlock(io_mod.getIo());
             if (finished) return true;
+            if (cancel_flag) |flag| if (flag.load(.seq_cst)) return false;
             if (io_mod.milliTimestamp() >= deadline) return false;
             io_mod.sleep(5 * std.time.ns_per_ms);
         }
@@ -1110,6 +1116,16 @@ const TerminateContext = struct {
     }
 };
 
+const DelayedCancel = struct {
+    flag: *std.atomic.Value(bool),
+    delay_ms: u64 = 50,
+
+    fn run(self: *DelayedCancel) void {
+        io_mod.sleep(self.delay_ms * std.time.ns_per_ms);
+        self.flag.store(true, .seq_cst);
+    }
+};
+
 test "unified exec keeps long process addressable and polls output" {
     if (!Manager.supported()) return error.SkipZigTest;
     var manager = Manager.init(std.testing.allocator);
@@ -1210,6 +1226,59 @@ test "blocked output sink does not hold process control or reader threads" {
     try std.testing.expect(control_finished_before_sink_release);
     try std.testing.expect(terminate_context.result);
     try std.testing.expect(exec_context.finished.load(.acquire));
+}
+
+test "unified exec cancellation releases the initial wait and preserves the live process" {
+    if (!Manager.supported()) return error.SkipZigTest;
+    var manager = Manager.init(std.heap.c_allocator);
+    defer manager.deinit();
+    var cancel_flag = std.atomic.Value(bool).init(false);
+    var delayed = DelayedCancel{ .flag = &cancel_flag };
+    const cancel_thread = try std.Thread.spawn(.{}, DelayedCancel.run, .{&delayed});
+
+    const started_ms = io_mod.milliTimestamp();
+    var result = try manager.exec(std.testing.allocator, .{
+        .command = "sleep 30",
+        .cwd = "/tmp",
+        .yield_time_ms = max_yield_ms,
+        .cancel_flag = &cancel_flag,
+    });
+    cancel_thread.join();
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(Manager.Status.running, result.status);
+    try std.testing.expect(io_mod.milliTimestamp() - started_ms < 2_000);
+    try std.testing.expect(manager.terminate(result.process_id.?));
+}
+
+test "unified exec cancellation releases an empty poll without consuming the process" {
+    if (!Manager.supported()) return error.SkipZigTest;
+    var manager = Manager.init(std.heap.c_allocator);
+    defer manager.deinit();
+    var running = try manager.exec(std.testing.allocator, .{
+        .command = "sleep 30",
+        .cwd = "/tmp",
+        .yield_time_ms = 250,
+    });
+    const process_id = running.process_id.?;
+    running.deinit(std.testing.allocator);
+
+    var cancel_flag = std.atomic.Value(bool).init(false);
+    var delayed = DelayedCancel{ .flag = &cancel_flag };
+    const cancel_thread = try std.Thread.spawn(.{}, DelayedCancel.run, .{&delayed});
+    const started_ms = io_mod.milliTimestamp();
+    var result = try manager.writeStdin(std.testing.allocator, .{
+        .process_id = process_id,
+        .yield_time_ms = max_poll_yield_ms,
+        .cancel_flag = &cancel_flag,
+    });
+    cancel_thread.join();
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(Manager.Status.running, result.status);
+    try std.testing.expectEqual(process_id, result.process_id.?);
+    try std.testing.expect(io_mod.milliTimestamp() - started_ms < 2_000);
+    try std.testing.expect(manager.terminate(process_id));
 }
 
 test "unified exec returns short commands synchronously" {
