@@ -1284,6 +1284,7 @@ describe("acp: model-independent", () => {
           switch: true,
           login: true,
           configureByok: true,
+          usage: true,
         });
 
         client.send({
