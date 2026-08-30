@@ -219,6 +219,7 @@ const AcpContext = struct {
     /// session/set_mode changes never mutate a running turn.
     captured_mode: ?[]const u8 = null,
     captured_permission_mode: ?PermissionMode = null,
+    bash_first: bool = false,
 
     fn deinitPublishedToolCalls(self: *AcpContext) void {
         var terminals = self.tool_terminals.valueIterator();
@@ -819,6 +820,7 @@ fn handleCompactCommand(
                 session.provider,
                 session.model,
             ),
+            .bash_first = ctx.bash_first,
         },
     );
     defer tool_projection.deinit(ctx.alloc);
@@ -892,6 +894,7 @@ pub fn handlePrompt(
     msg: *jsonrpc.Message,
     captured_mode: []const u8,
     captured_permission_mode: PermissionMode,
+    bash_first: bool,
 ) !TerminalOutcome {
     const session = if (state.active_session) |*active| active else return .{
         .rpc_error = no_active_session_rpc_error,
@@ -971,6 +974,7 @@ pub fn handlePrompt(
         .session_id = session.session_id,
         .captured_mode = captured_mode,
         .captured_permission_mode = captured_permission_mode,
+        .bash_first = bash_first,
     };
     defer ctx.deinitPublishedToolCalls();
     if (!prompt_input.continue_recovery and isCompactCommand(prompt_text)) {
@@ -1005,6 +1009,7 @@ pub fn handlePrompt(
             session.provider,
             session.model,
         ),
+        .bash_first = bash_first,
     });
     defer tool_projection.deinit(alloc);
 
@@ -1697,6 +1702,7 @@ pub fn runSubagentChild(
     };
     const session_id = active.session_id;
     const captured_mode = active.mode;
+    const bash_first = state.bash_first;
     const mcp = active.mcp;
     state.subagent_authority_mutex.unlock(io_mod.getIo());
     var ctx = AcpContext{
@@ -1705,6 +1711,7 @@ pub fn runSubagentChild(
         .session_id = session_id,
         .captured_mode = captured_mode,
         .captured_permission_mode = admission.permission_mode,
+        .bash_first = bash_first,
     };
     defer ctx.deinitPublishedToolCalls();
     var child_projection = state.cfg.mode_registry.buildModelToolProjection(
@@ -1721,6 +1728,7 @@ pub fn runSubagentChild(
                 admission.provider,
                 admission.model,
             ),
+            .bash_first = bash_first,
         },
     ) catch return error.OutOfMemory;
     defer child_projection.deinit(alloc);
@@ -4183,7 +4191,7 @@ test "acp exposes web_search progress updates" {
 
     try std.testing.expect(std.mem.find(u8, out.written(), "\"toolCallId\":\"call_search\"") != null);
     try std.testing.expect(std.mem.find(u8, out.written(), "\"status\":\"in_progress\"") != null);
-    try std.testing.expect(std.mem.find(u8, out.written(), "Found 4 results for current news") != null);
+    try std.testing.expect(std.mem.find(u8, out.written(), "Found 4 web results for current news") != null);
     try std.testing.expectEqual(acp_types.ToolCallKind.search, mapToolKind("web_search"));
 }
 
@@ -4830,7 +4838,7 @@ test "ACP prompt propagates context provider errors before pending prompt state"
         AcpContextRegistryFixture.gather_error = expected_error;
         try std.testing.expectError(
             expected_error,
-            handlePrompt(&state, alloc, &msg, "code", .ask),
+            handlePrompt(&state, alloc, &msg, "code", .ask, false),
         );
         try std.testing.expectEqual(@as(usize, 1), AcpContextRegistryFixture.gather_calls);
         try std.testing.expect(state.active_session.?.pending_prompt_id == null);

@@ -1123,12 +1123,12 @@ fn formatWebSearchProgress(alloc: std.mem.Allocator, progress: types.WebSearchPr
     return switch (progress) {
         .query_started => |query| std.fmt.allocPrint(
             alloc,
-            "● Searching\x1b[0m \x1b[38;5;245m{s}\x1b[0m",
+            "● Searching web\x1b[0m \x1b[38;5;245m{s}\x1b[0m",
             .{text_utils.clippedLabel(&query_buf, query, 120)},
         ),
         .results_received => |entry| std.fmt.allocPrint(
             alloc,
-            "● Found {d} result{s}\x1b[0m \x1b[38;5;245m{s}\x1b[0m",
+            "● Found {d} web result{s} for\x1b[0m \x1b[38;5;245m{s}\x1b[0m",
             .{ entry.result_count, if (entry.result_count == 1) "" else "s", text_utils.clippedLabel(&query_buf, entry.query, 120) },
         ),
     };
@@ -1174,11 +1174,11 @@ test "core.app_worker_runtime web progress labels keep the non-bold status style
         try std.testing.expect(std.mem.find(u8, label, "\x1b[1m") == null);
     }
     try std.testing.expectEqualStrings(
-        "● Searching\x1b[0m \x1b[38;5;245mzig terminal\x1b[0m",
+        "● Searching web\x1b[0m \x1b[38;5;245mzig terminal\x1b[0m",
         cases[0],
     );
     try std.testing.expectEqualStrings(
-        "● Found 2 results\x1b[0m \x1b[38;5;245mzig terminal\x1b[0m",
+        "● Found 2 web results for\x1b[0m \x1b[38;5;245mzig terminal\x1b[0m",
         cases[1],
     );
     try std.testing.expectEqualStrings(

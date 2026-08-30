@@ -63,6 +63,7 @@ pub const SlashKind = enum {
     alias,
     paste,
     fast,
+    bash_first,
     statusline,
     notifications,
     workspace,
@@ -2083,8 +2084,9 @@ test "slash completion descriptions follow completion matches" {
 
 test "slash completion aliases participate in ranked order" {
     try std.testing.expectEqualStrings("/background", firstSlashCompletion(testSlashRegistry(), "/ba").?);
-    try std.testing.expectEqual(@as(usize, 1), slashCompletionCount(testSlashRegistry(), "/ba"));
+    try std.testing.expectEqual(@as(usize, 2), slashCompletionCount(testSlashRegistry(), "/ba"));
     try std.testing.expectEqualStrings("/background", nthSlashCompletion(testSlashRegistry(), "/ba", 0).?);
+    try std.testing.expectEqualStrings("/bash-first", nthSlashCompletion(testSlashRegistry(), "/ba", 1).?);
 }
 
 test "rendered slash welcome excludes non-welcome help entries" {

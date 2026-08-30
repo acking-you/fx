@@ -4724,7 +4724,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         expect(countTraceEvent(observed.trace, "before_tool_execution")).toBe(0);
         expect(observed.trace).toContain("LifecycleReconciliationCollision");
         expect(observed.pane).toContain("● Reading");
-        expect(observed.pane).toContain(`Searching ${CANONICAL_GREP_PATTERN}`);
+        expect(observed.pane).toContain(`Searching text ${CANONICAL_GREP_PATTERN}`);
         expect(normalizedPane).not.toContain(CANONICAL_PRE_TOOL_TEXT);
         expect(observed.stderr).toBe(
           stage === "baseline-silent"
@@ -4758,7 +4758,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       expect(
         countOccurrences(
           normalizedPane,
-          `└ Searched ${CANONICAL_GREP_PATTERN}`,
+          `└ Searched text ${CANONICAL_GREP_PATTERN}`,
         ),
       ).toBe(1);
       expect(countOccurrences(normalizedPane, CANONICAL_FINAL_TEXT)).toBe(1);
@@ -7225,16 +7225,16 @@ describe.skipIf(!tmuxAvailable())("transcript scrollback release", () => {
           (_, index) =>
             `Read docs/source-${String(index + 1).padStart(2, "0")}.md`,
         ),
-        "Searched useServerQuerySWR",
-        "Searched revalidateNever",
-        "Searched ScopedPromisesProvider",
-        "Searched revalidateOnFocus",
-        "Searched ContextSWRProvider",
-        "Searched getWritableScopedAtoms",
-        "Searched AltProvidersProbe",
-        "Searched scope change",
-        "Searched router.",
-        "Matched **/*.md",
+        "Searched text useServerQuerySWR",
+        "Searched text revalidateNever",
+        "Searched text ScopedPromisesProvider",
+        "Searched text revalidateOnFocus",
+        "Searched text ContextSWRProvider",
+        "Searched text getWritableScopedAtoms",
+        "Searched text AltProvidersProbe",
+        "Searched text scope change",
+        "Searched text router.",
+        "Matched files **/*.md",
       ];
       for (const marker of childMarkers) {
         expect(countOccurrences(scrollback, marker)).toBe(1);

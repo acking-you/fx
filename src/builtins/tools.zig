@@ -294,8 +294,8 @@ pub const glob_files = ToolSpec{
     .executor_kind = .glob_files,
     .activity_kind = .list,
     .requires_approval = false,
-    .action_label = "Matching",
-    .completed_action_label = "Matched",
+    .action_label = "Matching files",
+    .completed_action_label = "Matched files",
     .label_arg_kind = .pattern,
     .label_arg_default = "pattern",
     .permission_target_kind = .path_optional_existing,
@@ -329,8 +329,8 @@ pub const grep_files = ToolSpec{
     .executor_kind = .grep_files,
     .activity_kind = .read,
     .requires_approval = false,
-    .action_label = "Searching",
-    .completed_action_label = "Searched",
+    .action_label = "Searching text",
+    .completed_action_label = "Searched text",
     .label_arg_kind = .pattern,
     .label_arg_default = "pattern",
     .permission_target_kind = .path_optional_existing,
@@ -624,8 +624,8 @@ pub const semantic_search = ToolSpec{
     .executor_kind = .semantic_search,
     .activity_kind = .read,
     .requires_approval = false,
-    .action_label = "Searching",
-    .completed_action_label = "Searched",
+    .action_label = "Exploring code",
+    .completed_action_label = "Explored code",
     .label_arg_kind = .query,
     .label_arg_default = "query",
     .permission_target_kind = .path_optional_existing,
@@ -713,8 +713,8 @@ pub const web_search = ToolSpec{
     .executor_kind = .web_search,
     .activity_kind = .read,
     .requires_approval = false,
-    .action_label = "Searching",
-    .completed_action_label = "Searched",
+    .action_label = "Searching web",
+    .completed_action_label = "Searched web",
     .label_arg_kind = .query,
     .label_arg_default = "web",
     .permission_target_kind = .none,
@@ -1374,8 +1374,8 @@ test "built-in glob_files owns product metadata schema and callbacks" {
     try std.testing.expectEqual(tool_dispatch.LabelArgKind.pattern, glob_files.label_arg_kind);
     try std.testing.expectEqualStrings("pattern", glob_files.label_arg_default);
     try std.testing.expectEqual(tool_dispatch.PermissionTargetKind.path_optional_existing, glob_files.permission_target_kind);
-    try std.testing.expectEqualStrings("Matching", glob_files.action_label);
-    try std.testing.expectEqualStrings("Matched", glob_files.completed_action_label);
+    try std.testing.expectEqualStrings("Matching files", glob_files.action_label);
+    try std.testing.expectEqualStrings("Matched files", glob_files.completed_action_label);
     try std.testing.expect(glob_files.decode == glob_files_impl.decode);
     try std.testing.expect(glob_files.validate.? == glob_files_impl.validate);
     try std.testing.expect(glob_files.call == glob_files_impl.call);
@@ -1413,8 +1413,8 @@ test "built-in grep_files owns product metadata schema and callbacks" {
     try std.testing.expectEqual(tool_dispatch.LabelArgKind.pattern, grep_files.label_arg_kind);
     try std.testing.expectEqualStrings("pattern", grep_files.label_arg_default);
     try std.testing.expectEqual(tool_dispatch.PermissionTargetKind.path_optional_existing, grep_files.permission_target_kind);
-    try std.testing.expectEqualStrings("Searching", grep_files.action_label);
-    try std.testing.expectEqualStrings("Searched", grep_files.completed_action_label);
+    try std.testing.expectEqualStrings("Searching text", grep_files.action_label);
+    try std.testing.expectEqualStrings("Searched text", grep_files.completed_action_label);
     try std.testing.expect(grep_files.decode == grep_files_impl.decode);
     try std.testing.expect(grep_files.validate.? == grep_files_impl.validate);
     try std.testing.expect(grep_files.call == grep_files_impl.call);
@@ -1726,8 +1726,8 @@ test "built-in semantic_search owns product metadata schema and callbacks" {
     try std.testing.expectEqual(tool_dispatch.LabelArgKind.query, semantic_search.label_arg_kind);
     try std.testing.expectEqualStrings("query", semantic_search.label_arg_default);
     try std.testing.expectEqual(tool_dispatch.PermissionTargetKind.path_optional_existing, semantic_search.permission_target_kind);
-    try std.testing.expectEqualStrings("Searching", semantic_search.action_label);
-    try std.testing.expectEqualStrings("Searched", semantic_search.completed_action_label);
+    try std.testing.expectEqualStrings("Exploring code", semantic_search.action_label);
+    try std.testing.expectEqualStrings("Explored code", semantic_search.completed_action_label);
     try std.testing.expect(semantic_search.decode == semantic_search_impl.decode);
     try std.testing.expect(semantic_search.validate.? == semantic_search_impl.validate);
     try std.testing.expect(semantic_search.call == semantic_search_impl.call);
@@ -1814,8 +1814,8 @@ test "built-in web_search owns product metadata and schema" {
     try std.testing.expect(!web_search.requires_approval);
     try std.testing.expectEqual(tool_dispatch.LabelArgKind.query, web_search.label_arg_kind);
     try std.testing.expectEqual(tool_dispatch.PermissionTargetKind.none, web_search.permission_target_kind);
-    try std.testing.expectEqualStrings("Searching", web_search.action_label);
-    try std.testing.expectEqualStrings("Searched", web_search.completed_action_label);
+    try std.testing.expectEqualStrings("Searching web", web_search.action_label);
+    try std.testing.expectEqualStrings("Searched web", web_search.completed_action_label);
 }
 
 test "built-in provider advertisements declare provider execution" {

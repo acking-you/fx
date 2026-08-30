@@ -580,6 +580,10 @@ const App = struct {
     context_enabled: bool = true,
     context_limits: config_runtime.context_limits.Values = .{},
     fast_mode: bool = false,
+    /// Session-local tool projection preference. In bash-first mode the model
+    /// uses the unified shell for discovery and `rg` search instead of the
+    /// overlapping specialized search built-ins.
+    bash_first: bool = false,
     thought_entry_id: ?u32 = null,
     thought_body: std.ArrayList(u8) = .empty,
     thought_heading_locked: bool = false,
@@ -1619,6 +1623,8 @@ const App = struct {
         provider: model_provider.ProviderId,
         model: []const u8,
     ) !tool_projection.EffectiveToolProjection {
+        self.permission_state.authority_mutex.lockUncancelable(io_mod.getIo());
+        defer self.permission_state.authority_mutex.unlock(io_mod.getIo());
         return self.snapshotModelToolProjectionForRulesAndRoute(
             alloc,
             permission_mode,
@@ -1660,6 +1666,7 @@ const App = struct {
             .web_search_available = bundle.webSearchAvailable(
                 self.resolvedModelCapabilitiesForProvider(provider, model),
             ),
+            .bash_first = self.bash_first,
         });
     }
 

@@ -1661,7 +1661,7 @@ test "provider-hosted web search uses one idempotent local lifecycle" {
     switch (capture.events.items[2]) {
         .terminal => |event| {
             try std.testing.expectEqual(types.ToolOutcomeKind.completed, event.outcome.kind);
-            try std.testing.expectEqualStrings("Searched Zig 0.16", event.outcome.summary);
+            try std.testing.expectEqualStrings("Searched web Zig 0.16", event.outcome.summary);
         },
         else => return error.TestExpectedEqual,
     }
@@ -2006,7 +2006,7 @@ test "provisional lifecycle cleans up every copied-id allocation failure" {
 }
 
 test "native web_search completion status includes searches and duration" {
-    const line = try formatWebSearchCompletion(std.testing.allocator, "Searched current news", .{
+    const line = try formatWebSearchCompletion(std.testing.allocator, "Searched web current news", .{
         .searches = 2,
         .duration_ms = 17,
     });

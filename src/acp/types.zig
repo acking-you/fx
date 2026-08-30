@@ -285,7 +285,7 @@ pub fn writeInitializeResponseWithOptions(
     try w.writeAll("\"authMethods\":[],");
     try w.writeAll("\"_meta\":{\"fx\":{");
     try w.writeAll("\"turnSteer\":true,\"turnStatus\":true,");
-    try w.writeAll("\"backgroundTerminals\":true,\"processStatusCommand\":\"/ps\"");
+    try w.writeAll("\"backgroundTerminals\":true,\"processStatusCommand\":\"/ps\",\"toolModes\":{\"bashFirst\":true}");
     if (options.unified_exec_capable) {
         try w.writeAll(",\"unifiedExec\":{\"writeStdin\":true,\"kill\":true}");
     }
@@ -494,6 +494,7 @@ test "writeInitializeResponse contains required fields" {
     try std.testing.expect(fx_meta.get("turnStatus").?.bool);
     try std.testing.expect(fx_meta.get("backgroundTerminals").?.bool);
     try std.testing.expectEqualStrings("/ps", fx_meta.get("processStatusCommand").?.string);
+    try std.testing.expect(fx_meta.get("toolModes").?.object.get("bashFirst").?.bool);
     const unified_exec = fx_meta.get("unifiedExec").?.object;
     try std.testing.expect(unified_exec.get("writeStdin").?.bool);
     try std.testing.expect(unified_exec.get("kill").?.bool);

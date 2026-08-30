@@ -40,6 +40,7 @@ pub const ParsedCommand = union(enum) {
     alias: []const u8,
     paste,
     fast,
+    bash_first: []const u8,
     statusline: []const u8,
     notifications: []const u8,
     workspace: []const u8,
@@ -83,6 +84,7 @@ pub const CommandHandlers = struct {
     handle_alias: *const fn (ctx: *anyopaque, rest: []const u8) anyerror!void,
     paste_clipboard: *const fn (ctx: *anyopaque) anyerror!void,
     toggle_fast: *const fn (ctx: *anyopaque) anyerror!void,
+    bash_first: *const fn (ctx: *anyopaque, rest: []const u8) anyerror!void,
     handle_statusline: *const fn (ctx: *anyopaque, rest: []const u8) anyerror!void,
     rename_session: *const fn (ctx: *anyopaque, rest: []const u8) anyerror!void,
     handle_notifications: *const fn (ctx: *anyopaque, rest: []const u8) anyerror!void,
@@ -132,6 +134,7 @@ fn parsedCommand(kind: SlashKind, payload: []const u8) ParsedCommand {
         .alias => .{ .alias = payload },
         .paste => .paste,
         .fast => .fast,
+        .bash_first => .{ .bash_first = payload },
         .statusline => .{ .statusline = payload },
         .notifications => .{ .notifications = payload },
         .workspace => .{ .workspace = payload },
@@ -189,6 +192,7 @@ pub fn route(registry: SlashRegistry, handlers: *const CommandHandlers, cmd: []c
         .alias => |rest| try handlers.handle_alias(handlers.ctx, rest),
         .paste => try handlers.paste_clipboard(handlers.ctx),
         .fast => try handlers.toggle_fast(handlers.ctx),
+        .bash_first => |rest| try handlers.bash_first(handlers.ctx, rest),
         .statusline => |rest| try handlers.handle_statusline(handlers.ctx, rest),
         .notifications => |rest| try handlers.handle_notifications(handlers.ctx, rest),
         .workspace => |rest| try handlers.handle_workspace(handlers.ctx, rest),
@@ -239,6 +243,17 @@ test "parse extracts sound command payload" {
     switch (parse(testSlashRegistry(), "/sound")) {
         .notifications => |rest| try std.testing.expectEqualStrings("", rest),
         else => return error.TestExpectedEqual,
+    }
+}
+
+test "parse extracts bash-first mode payload and supports toggling" {
+    switch (parse(testSlashRegistry(), "/bash-first on")) {
+        .bash_first => |rest| try std.testing.expectEqualStrings("on", rest),
+        else => return error.TestExpectedBashFirstCommand,
+    }
+    switch (parse(testSlashRegistry(), "/bash-first")) {
+        .bash_first => |rest| try std.testing.expectEqualStrings("", rest),
+        else => return error.TestExpectedBashFirstCommand,
     }
 }
 
@@ -523,6 +538,7 @@ fn testHandlers(ctx: *TestContext) CommandHandlers {
         .handle_alias = unexpectedPayload,
         .paste_clipboard = unexpectedNoPayload,
         .toggle_fast = unexpectedNoPayload,
+        .bash_first = unexpectedPayload,
         .handle_statusline = unexpectedPayload,
         .rename_session = unexpectedPayload,
         .handle_notifications = unexpectedPayload,

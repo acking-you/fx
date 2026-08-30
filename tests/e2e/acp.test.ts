@@ -1753,6 +1753,7 @@ describe("acp: model-independent", () => {
           (command: any) => command.name,
         );
         expect(commandNames).toContain("compact");
+        expect(commandNames).toContain("bash-first");
         expect(commandNames).not.toContain("summary");
         expect(client.stderr).toBe("");
       } finally {
@@ -8495,8 +8496,23 @@ describe.skipIf(!HAS_API_KEY)("acp: model-backed protocol", () => {
         expect(Array.isArray(modeOpt.options)).toBe(true);
         expect(modeOpt.options.map((option: any) => option.value)).toEqual(["code", "ask"]);
 
+        const bashFirstOpt = resp.result.configOptions.find((o: any) => o.id === "bash_first");
+        expect(bashFirstOpt).toMatchObject({
+          name: "Bash-first mode",
+          type: "select",
+          currentValue: "off",
+        });
         const notification = await client.readLine() as any;
         expect(notification.method).toBe("session/update");
+        const enabled = await client.request("fx/toolMode/set", { mode: "bash-first" }, 3) as any;
+        expect(enabled.result).toEqual({ mode: "bash-first", bashFirst: true });
+        const disabled = await client.request("fx/toolMode/set", { bashFirst: false }, 4) as any;
+        expect(disabled.result).toEqual({ mode: "standard", bashFirst: false });
+        const configured = await client.request("session/set_config_option", {
+          configId: "bash_first",
+          value: "on",
+        }, 5) as any;
+        expect(configured.result.configOptions.find((o: any) => o.id === "bash_first").currentValue).toBe("on");
       } finally {
         await client?.close();
         gateway.stop();

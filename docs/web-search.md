@@ -31,7 +31,7 @@ Projection rejects duplicate local and native declarations. This prevents a mode
 
 ## Lifecycle and replay
 
-Provider-hosted Responses events are normalized into `provider_tool_started` and `provider_tool_completed`. The ordinary tool-lifecycle publisher then owns the visible `Searching` and `Searched` rows for TUI, ACP, noninteractive CLI, and child sessions. Gateway callbacks only emit events; UI-owned transcript state still mutates on the UI thread.
+Provider-hosted Responses events are normalized into `provider_tool_started` and `provider_tool_completed`. The ordinary tool-lifecycle publisher then owns the visible `Searching web` and `Searched web` rows for TUI, ACP, noninteractive CLI, and child sessions. Gateway callbacks only emit events; UI-owned transcript state still mutates on the UI thread.
 
 Completed hosted `web_search_call` output items remain in provider state and are replayed in later Responses input. Grok therefore receives the same search evidence that its own client preserves, while local function search continues through the normal function-call result path.
 
