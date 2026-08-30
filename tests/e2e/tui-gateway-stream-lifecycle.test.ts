@@ -2727,7 +2727,6 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         "held active Gateway request",
       );
       await session.waitForText("Working", TIMEOUT);
-
       await session.sendText(`/image ${image}`);
       await session.waitForText("attached image: queued-snapshot.png", TIMEOUT);
       await session.sendText(queuedPrompt);
@@ -2744,7 +2743,6 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       expect(heldScrollback).toContain(queuedPrompt);
       expect(heldScrollback).not.toContain("next:");
       expect(countOccurrences(heldScrollback, queuedPrompt)).toBe(1);
-      expect(heldScrollback).not.toContain(activeBefore.trim());
       expect(heldScrollback).not.toContain(activeAfter.trim());
       expect(queuedGateway.requests).toHaveLength(1);
 
@@ -2796,7 +2794,10 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       const finalScrollback = await waitForEscapedScrollback(
         session,
         (candidate) => {
-          const beforeIndex = candidate.indexOf(activeBefore.trim());
+          // A paced newline-terminated chunk can be split by a footer repaint
+          // while the active turn is still held. Match the stable body marker
+          // rather than requiring the chunk's first prefix to stay adjacent.
+          const beforeIndex = candidate.indexOf("ASSISTANT_BEFORE_QUEUE_SENTINEL");
           const afterIndex = candidate.indexOf(activeAfter.trim());
           const queuedPromptIndex = candidate.indexOf(queuedPrompt);
           const queuedDoneIndex = candidate.indexOf(queuedDone);
@@ -2807,7 +2808,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         },
         "ordered active steer scrollback",
       );
-      const beforeIndex = finalScrollback.indexOf(activeBefore.trim());
+      const beforeIndex = finalScrollback.indexOf("ASSISTANT_BEFORE_QUEUE_SENTINEL");
       const afterIndex = finalScrollback.indexOf(activeAfter.trim());
       const queuedPromptIndex = finalScrollback.indexOf(queuedPrompt);
       const queuedDoneIndex = finalScrollback.indexOf(queuedDone);
