@@ -2795,10 +2795,12 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         session,
         (candidate) => {
           // A paced newline-terminated chunk can be split by a footer repaint
-          // while the active turn is still held. Match the stable body marker
-          // rather than requiring the chunk's first prefix to stay adjacent.
-          const beforeIndex = candidate.indexOf("ASSISTANT_BEFORE_QUEUE_SENTINEL");
-          const afterIndex = candidate.indexOf(activeAfter.trim());
+          // while the active turn is still held. Remove the queued prompt and
+          // line framing before matching the marker so the assertion follows
+          // the streamed body rather than terminal cell boundaries.
+          const streamed = candidate.replaceAll(queuedPrompt, "").replace(/[\r\n]/g, "");
+          const beforeIndex = streamed.indexOf(activeBefore.trim());
+          const afterIndex = streamed.indexOf(activeAfter.trim());
           const queuedPromptIndex = candidate.indexOf(queuedPrompt);
           const queuedDoneIndex = candidate.indexOf(queuedDone);
           return beforeIndex >= 0 &&
@@ -2808,8 +2810,9 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         },
         "ordered active steer scrollback",
       );
-      const beforeIndex = finalScrollback.indexOf("ASSISTANT_BEFORE_QUEUE_SENTINEL");
-      const afterIndex = finalScrollback.indexOf(activeAfter.trim());
+      const streamedFinal = finalScrollback.replaceAll(queuedPrompt, "").replace(/[\r\n]/g, "");
+      const beforeIndex = streamedFinal.indexOf(activeBefore.trim());
+      const afterIndex = streamedFinal.indexOf(activeAfter.trim());
       const queuedPromptIndex = finalScrollback.indexOf(queuedPrompt);
       const queuedDoneIndex = finalScrollback.indexOf(queuedDone);
       expect(beforeIndex).toBeGreaterThanOrEqual(0);
