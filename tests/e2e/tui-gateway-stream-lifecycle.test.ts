@@ -2802,7 +2802,8 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
           // sequences between cells from one streamed chunk. Compare a
           // compact alphanumeric transcript so those presentation boundaries
           // cannot make a complete assistant marker appear missing.
-          const normalize = (value: string) => value.replace(/[^A-Za-z0-9_]/g, "");
+          const normalize = (value: string) =>
+            value.replace(/\[Image \d+\]/g, "").replace(/[^A-Za-z0-9_]/g, "");
           const streamed = normalize(candidate.replaceAll(queuedPrompt, ""));
           const beforeIndex = streamed.indexOf(normalize(activeBefore));
           const afterIndex = streamed.indexOf(normalize(activeAfter));
@@ -2815,7 +2816,8 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         },
         "ordered active steer scrollback",
       );
-      const normalize = (value: string) => value.replace(/[^A-Za-z0-9_]/g, "");
+      const normalize = (value: string) =>
+        value.replace(/\[Image \d+\]/g, "").replace(/[^A-Za-z0-9_]/g, "");
       const streamedFinal = normalize(finalScrollback.replaceAll(queuedPrompt, ""));
       const beforeIndex = streamedFinal.indexOf(normalize(activeBefore));
       const afterIndex = streamedFinal.indexOf(normalize(activeAfter));
