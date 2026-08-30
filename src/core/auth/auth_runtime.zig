@@ -1,7 +1,6 @@
 const std = @import("std");
 const credentials = @import("credentials.zig");
-const chatgpt_oauth = @import("chatgpt_oauth.zig");
-const grok_oauth = @import("grok_oauth.zig");
+const provider_oauth = @import("provider_oauth.zig");
 const host = @import("../hosts/host.zig");
 const host_target = @import("../hosts/target.zig");
 const login_flow = @import("login_flow.zig");
@@ -759,8 +758,8 @@ pub const Runtime = struct {
     ) !bool {
         self.exitSignInStage(alloc);
         const started = switch (source) {
-            .chatgpt_subscription => try chatgpt_oauth.startSignIn(&self.sign_in_flow, alloc, self.oauth_transport),
-            .grok_subscription => try grok_oauth.startSignIn(&self.sign_in_flow, alloc, self.oauth_transport),
+            .chatgpt_subscription => try provider_oauth.startSignIn(.codex, &self.sign_in_flow, alloc, self.oauth_transport),
+            .grok_subscription => try provider_oauth.startSignIn(.grok, &self.sign_in_flow, alloc, self.oauth_transport),
             else => return error.InvalidSignInSource,
         };
         if (!started) return false;

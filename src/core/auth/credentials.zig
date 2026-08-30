@@ -1,6 +1,5 @@
 const std = @import("std");
-const chatgpt_oauth = @import("chatgpt_oauth.zig");
-const grok_oauth = @import("grok_oauth.zig");
+const provider_oauth = @import("provider_oauth.zig");
 const debug_trace = @import("../shared/debug_trace.zig");
 const host = @import("../hosts/host.zig");
 const io_mod = @import("../shared/io.zig");
@@ -279,8 +278,8 @@ pub fn sourceExists(
 ) !bool {
     return switch (source) {
         .openai_api_key => nonEmptyEnvValue("OPENAI_API_KEY") != null,
-        .chatgpt_subscription => chatgpt_oauth.sourceExists(alloc),
-        .grok_subscription => grok_oauth.sourceExists(alloc),
+        .chatgpt_subscription => provider_oauth.sourceExists(.codex, alloc),
+        .grok_subscription => provider_oauth.sourceExists(.grok, alloc),
     };
 }
 
@@ -299,9 +298,13 @@ fn loadEnvCredential(
 fn loadChatGptCredential(
     alloc: std.mem.Allocator,
     transport: oauth_transport.Provider,
-    mode: chatgpt_oauth.RefreshMode,
+    mode: provider_oauth.RefreshMode,
 ) !?Credential {
-    var access = (try chatgpt_oauth.loadAccess(alloc, transport, mode)) orelse return null;
+    var access = (try provider_oauth.loadAccess(.codex, alloc, transport, switch (mode) {
+        .if_needed => .if_needed,
+        .force => .force,
+        .stored => .stored,
+    })) orelse return null;
     defer access.deinit(alloc);
     const token = access.access_token;
     access.access_token = &.{};
@@ -322,9 +325,13 @@ fn loadStoredChatGptCredential(alloc: std.mem.Allocator) !?Credential {
 fn loadGrokCredential(
     alloc: std.mem.Allocator,
     transport: oauth_transport.Provider,
-    mode: grok_oauth.RefreshMode,
+    mode: provider_oauth.RefreshMode,
 ) !?Credential {
-    var access = (try grok_oauth.loadAccess(alloc, transport, mode)) orelse return null;
+    var access = (try provider_oauth.loadAccess(.grok, alloc, transport, switch (mode) {
+        .if_needed => .if_needed,
+        .force => .force,
+        .stored => .stored,
+    })) orelse return null;
     defer access.deinit(alloc);
     const token = access.access_token;
     access.access_token = &.{};

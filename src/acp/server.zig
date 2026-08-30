@@ -14,12 +14,11 @@ const app_runtime_setup = @import("../core/app/app_runtime_setup.zig");
 const builtin_skills = @import("../builtins/skills.zig");
 const builtin_tools = @import("../builtins/tools.zig");
 const credentials = @import("../core/auth/credentials.zig");
+const provider_oauth = @import("../core/auth/provider_oauth.zig");
 const secret = @import("../core/auth/secret.zig");
 const auth_runtime = @import("../core/auth/auth_runtime.zig");
 const provider_activation = @import("../core/auth/provider_activation.zig");
 const login_flow = @import("../core/auth/login_flow.zig");
-const chatgpt_oauth = @import("../core/auth/chatgpt_oauth.zig");
-const grok_oauth = @import("../core/auth/grok_oauth.zig");
 const model_capabilities = @import("../core/config/model_capabilities.zig");
 const model_provider = @import("../core/config/model_provider.zig");
 const debug_trace = @import("../core/shared/debug_trace.zig");
@@ -35,6 +34,7 @@ const session_log = @import("../core/session/session_log.zig");
 const session_store = @import("../core/session/session_store.zig");
 const session_runtime = @import("../core/session/session.zig");
 const session_usage = @import("../core/session/session_usage.zig");
+const provider_usage = @import("../core/session/provider_usage.zig");
 const image_attachments = @import("../core/images/image_attachments.zig");
 const worker_runtime = @import("../core/agent/worker_runtime.zig");
 const background_runtime = @import("../core/background/background_runtime.zig");
@@ -79,6 +79,7 @@ const AcpMethod = enum {
     fx_provider_login_status,
     fx_provider_login_submit_code,
     fx_provider_login_cancel,
+    fx_provider_usage,
     fx_tool_mode_set,
     unknown,
 
@@ -105,6 +106,7 @@ const AcpMethod = enum {
         if (std.mem.eql(u8, method, "fx/provider/login/status")) return .fx_provider_login_status;
         if (std.mem.eql(u8, method, "fx/provider/login/submitCode")) return .fx_provider_login_submit_code;
         if (std.mem.eql(u8, method, "fx/provider/login/cancel")) return .fx_provider_login_cancel;
+        if (std.mem.eql(u8, method, "fx/provider/usage")) return .fx_provider_usage;
         if (std.mem.eql(u8, method, "fx/toolMode/set")) return .fx_tool_mode_set;
         return .unknown;
     }
@@ -126,6 +128,7 @@ const AcpMethod = enum {
             .fx_provider_login_status,
             .fx_provider_login_submit_code,
             .fx_provider_login_cancel,
+            .fx_provider_usage,
             .fx_tool_mode_set,
             => false,
             .session_list,
@@ -150,6 +153,7 @@ const AcpMethod = enum {
             .fx_provider_login_status,
             .fx_provider_login_submit_code,
             .fx_provider_login_cancel,
+            .fx_provider_usage,
             .fx_tool_mode_set,
             => true,
             else => false,
@@ -403,6 +407,7 @@ pub const ServerState = struct {
     provider_job_running: std.atomic.Value(bool) = .init(false),
     provider_job_cancel: std.atomic.Value(bool) = .init(false),
     provider_login: login_flow.SignInRuntime = .{},
+    provider_login_provider: ?provider_oauth.Provider = null,
     subagent_store: ?session_store.Store = null,
     subagent_host: ?*subagent_tool_host.Runtime = null,
     capability_resolver: gateway_provider.CapabilityResolver = .{},
@@ -1418,6 +1423,7 @@ fn dispatch(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message) !void 
         .fx_provider_login_status => handleProviderLoginStatus(state, alloc, msg),
         .fx_provider_login_submit_code => handleProviderLoginSubmitCode(state, alloc, msg),
         .fx_provider_login_cancel => handleProviderLoginCancel(state, alloc, msg),
+        .fx_provider_usage => handleProviderUsage(state, alloc, msg),
         .fx_tool_mode_set => handleToolModeSet(state, alloc, msg),
         .initialize,
         .session_cancel,
@@ -1959,7 +1965,7 @@ fn requiredProviderString(root: std.json.Value, name: []const u8) ?[]const u8 {
 }
 
 fn handleProviderLoginStart(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message) !void {
-    const params = parseProviderParams(state, alloc, msg, true) catch |err| {
+    const params = parseProviderParams(state, alloc, msg, false) catch |err| {
         if (err == error.ResponseWritten) return;
         return state.writer.writeError(alloc, msg.id, .{
             .code = ErrorCode.invalid_params,
@@ -1967,31 +1973,39 @@ fn handleProviderLoginStart(state: *ServerState, alloc: Allocator, msg: *jsonrpc
         });
     };
     defer params.parsed.deinit();
-    const provider = model_provider.parse(params.provider.?) orelse
-        return state.writer.writeError(alloc, msg.id, .{
+    const auto_provider = params.provider == null;
+    var provider = if (params.provider) |value|
+        provider_oauth.Provider.parse(value) orelse return state.writer.writeError(alloc, msg.id, .{
             .code = ErrorCode.invalid_params,
             .message = "provider must be codex or grok",
-        });
-    const started = switch (provider) {
-        .codex => try chatgpt_oauth.startSignIn(
+        })
+    else
+        (provider_oauth.detectStored(alloc) catch null) orelse .codex;
+    const started = started_login: {
+        break :started_login provider_oauth.startSignIn(
+            provider,
             &state.provider_login,
             alloc,
             state.cfg.gateway_provider.oauth_transport,
-        ),
-        .grok => try grok_oauth.startSignIn(
-            &state.provider_login,
-            alloc,
-            state.cfg.gateway_provider.oauth_transport,
-        ),
-        .gateway => return state.writer.writeError(alloc, msg.id, .{
-            .code = ErrorCode.invalid_params,
-            .message = "provider must be codex or grok",
-        }),
+        ) catch |err| {
+            if (!auto_provider or provider != .codex) return err;
+            // Browser callback setup can fail locally (for example when the
+            // preferred callback port is occupied). In auto mode only, retry
+            // the other OAuth implementation before surfacing the error.
+            provider = .grok;
+            break :started_login provider_oauth.startSignIn(
+                provider,
+                &state.provider_login,
+                alloc,
+                state.cfg.gateway_provider.oauth_transport,
+            ) catch |fallback_err| return fallback_err;
+        };
     };
     if (!started) return state.writer.writeError(alloc, msg.id, .{
         .code = ErrorCode.invalid_request,
         .message = "Provider login already in progress",
     });
+    state.provider_login_provider = provider;
     try writeProviderLoginSnapshot(state, alloc, msg.id, state.provider_login.snapshot(), null);
 }
 
@@ -2046,6 +2060,57 @@ fn handleProviderLoginCancel(state: *ServerState, alloc: Allocator, msg: *jsonrp
     );
 }
 
+/// Returns the same provider-neutral usage summary that the TUI footer uses.
+/// This endpoint is intentionally local and non-blocking: remote account
+/// quota requests stay on the explicit CLI/provider usage path and never hold
+/// the ACP read loop while a network request is in flight.
+fn handleProviderUsage(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message) !void {
+    const params = parseProviderParams(state, alloc, msg, false) catch |err| {
+        if (err == error.ResponseWritten) return;
+        return state.writer.writeError(alloc, msg.id, .{
+            .code = ErrorCode.invalid_params,
+            .message = "Invalid provider usage params",
+        });
+    };
+    defer params.parsed.deinit();
+
+    const provider = if (params.provider) |value|
+        model_provider.parse(value) orelse return state.writer.writeError(alloc, msg.id, .{
+            .code = ErrorCode.invalid_params,
+            .message = "provider must be gateway, codex, or grok",
+        })
+    else
+        state.provider;
+
+    var summary = provider_usage.Summary.fromCounters(
+        provider,
+        state.credential_source,
+        state.account_id,
+        0,
+        0,
+        0,
+        null,
+    );
+    if (state.active_session) |*active| {
+        var usage = try active.session_rt.usage.snapshot(alloc);
+        defer usage.deinit(alloc);
+        summary = provider_usage.Summary.fromSession(
+            provider,
+            active.credential_source,
+            active.account_id,
+            usage,
+            null,
+        );
+    }
+
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+    try out.writer.writeAll("{\"kind\":\"provider_usage\",\"schemaVersion\":1,\"snapshot\":");
+    try summary.writeJson(&out.writer);
+    try out.writer.writeByte('}');
+    try state.writer.writeResponse(alloc, msg.id, out.writer.buffered());
+}
+
 fn writeProviderLoginSnapshot(
     state: *ServerState,
     alloc: Allocator,
@@ -2060,6 +2125,10 @@ fn writeProviderLoginSnapshot(
     if (snapshot.authorization_url.len > 0) {
         try out.writer.writeAll(",\"authorizationUrl\":");
         try writeJsonStr(snapshot.authorization_url, &out.writer);
+    }
+    if (state.provider_login_provider) |provider| {
+        try out.writer.writeAll(",\"provider\":");
+        try writeJsonStr(provider.label(), &out.writer);
     }
     try out.writer.print(",\"acceptsManualCode\":{s}", .{
         if (snapshot.accepts_manual_code) "true" else "false",
@@ -2970,6 +3039,7 @@ test "ACP method parser classifies request dispatch methods" {
     try std.testing.expectEqual(AcpMethod.fx_provider_login_status, AcpMethod.parse("fx/provider/login/status"));
     try std.testing.expectEqual(AcpMethod.fx_provider_login_submit_code, AcpMethod.parse("fx/provider/login/submitCode"));
     try std.testing.expectEqual(AcpMethod.fx_provider_login_cancel, AcpMethod.parse("fx/provider/login/cancel"));
+    try std.testing.expectEqual(AcpMethod.fx_provider_usage, AcpMethod.parse("fx/provider/usage"));
     try std.testing.expectEqual(AcpMethod.fx_tool_mode_set, AcpMethod.parse("fx/toolMode/set"));
     try std.testing.expectEqual(AcpMethod.unknown, AcpMethod.parse("workspace/unknown"));
 }
@@ -2996,6 +3066,7 @@ test "ACP prompt gate policy keeps lifecycle interruption responsive" {
     try std.testing.expect(!AcpMethod.fx_provider_login_status.waitsForActivePrompt());
     try std.testing.expect(!AcpMethod.fx_provider_login_submit_code.waitsForActivePrompt());
     try std.testing.expect(!AcpMethod.fx_provider_login_cancel.waitsForActivePrompt());
+    try std.testing.expect(!AcpMethod.fx_provider_usage.waitsForActivePrompt());
     try std.testing.expect(!AcpMethod.fx_tool_mode_set.waitsForActivePrompt());
     try std.testing.expect(AcpMethod.unknown.waitsForActivePrompt());
 }
@@ -3008,6 +3079,7 @@ test "ACP provider job gate leaves control-plane methods responsive" {
     try std.testing.expect(AcpMethod.fx_provider_login_status.allowedDuringProviderJob());
     try std.testing.expect(AcpMethod.fx_provider_login_submit_code.allowedDuringProviderJob());
     try std.testing.expect(AcpMethod.fx_provider_login_cancel.allowedDuringProviderJob());
+    try std.testing.expect(AcpMethod.fx_provider_usage.allowedDuringProviderJob());
     try std.testing.expect(AcpMethod.fx_tool_mode_set.allowedDuringProviderJob());
     try std.testing.expect(!AcpMethod.session_prompt.allowedDuringProviderJob());
     try std.testing.expect(!AcpMethod.fx_provider_switch.allowedDuringProviderJob());

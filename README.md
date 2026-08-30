@@ -163,6 +163,13 @@ fx usage --period 7d
 fx usage --codex
 ```
 
+Codex and Grok OAuth use one provider-neutral login boundary. ACP clients may
+omit `provider` from `fx/provider/login/start`; fx detects an existing Codex
+session first and falls back to Grok when Codex is not connected. The active
+session's aggregate usage is available through the same summary used by the
+TUI footer (`Usage: Nk`) and ACP `fx/provider/usage`; this local endpoint never
+blocks on a remote quota request. See [Unified OAuth and usage](docs/unified-oauth-usage.md).
+
 With `--json`, `output` contains accumulated assistant Markdown across the request, while `final_output` contains only a completed final assistant response and is `""` for interrupted, failed, background, or otherwise absent final responses.
 
 Model shell execution has one Codex-style Unified Exec family: `exec_command` starts a command and `write_stdin` polls or interacts with that same process. There is no second model-facing command executor or command-shaped skill shortcut. `exec_command` returns output immediately when the process finishes within the yield window; a still-running command returns a numeric session ID. The shell defaults to the user's configured shell. Output is continuously drained, bounded, UTF-8 safe, and streamed into the active TUI tool row without waiting for command completion. TUI, ACP, noninteractive CLI, and child sessions share the same lifecycle labels: `Running` becomes `Ran`, while empty polls and input use `Waiting/Waited` and `Interacting/Interacted`. Yielding never kills the process, and the manager keeps sessions alive across turns until they exit or the owning fx session is closed. Hosts without native process support advertise neither tool and do not fall back to the removed `terminal` API.
