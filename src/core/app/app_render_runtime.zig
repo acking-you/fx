@@ -693,6 +693,10 @@ pub fn Runtime(comptime App: type) type {
                 else
                     .ask,
                 .queued_count = if (queued_cards.cards.len > 0) queued_cards.cards.len else queue_preview.count,
+                .steering_count = if (queued_cards.cards.len > 0 or queue_preview.paused)
+                    0
+                else
+                    queue_preview.steering_count,
                 .queued_prompt_preview = if (queued_cards.cards.len == 0)
                     queuedPromptPreview(app)
                 else

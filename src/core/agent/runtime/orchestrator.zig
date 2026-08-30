@@ -1609,6 +1609,19 @@ fn onProviderEvent(raw: *anyopaque, event: agent_stream_provider.Event) void {
             onRequiredVisionStreamToolStart(ctx.stream, tool.id, tool.name, tool.label)
         else
             runtime_assistant_stream.onStreamToolStart(ctx.stream, tool.id, tool.name, tool.label),
+        .provider_tool_started => |tool| runtime_assistant_stream.onStreamProviderToolStart(
+            ctx.stream,
+            tool.id,
+            tool.name,
+            tool.label,
+        ),
+        .provider_tool_completed => |tool| runtime_assistant_stream.onStreamProviderToolDone(
+            ctx.stream,
+            tool.id,
+            tool.name,
+            tool.label,
+            tool.succeeded,
+        ),
     }
 }
 

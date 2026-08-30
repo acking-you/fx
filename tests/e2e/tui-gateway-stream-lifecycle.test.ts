@@ -886,10 +886,10 @@ function countOccurrences(value: string, needle: string): number {
   return value.split(needle).length - 1;
 }
 
-function queuedSummaryText(count: number): string {
+function steeringSummaryText(count: number): string {
   return count === 1
-    ? "1 queued message · ↑ to edit"
-    : `${count} queued messages · ↑ to edit`;
+    ? "1 message steering current turn · ↑ to edit"
+    : `${count} messages steering current turn · ↑ to edit`;
 }
 
 function writeDelayedMcpFixture(
@@ -2584,7 +2584,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       await session.sendText(
         "Why did preflight fail? Do not write anything; just explain briefly.",
       );
-      await session.waitForText(queuedSummaryText(1), TIMEOUT);
+      await session.waitForText(steeringSummaryText(1), TIMEOUT);
       await session.sendKeys("C-c");
       await session.waitForPane(
         (candidate) =>
@@ -2643,7 +2643,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
   );
 
   test(
-    "queued prompt stays pending until active assistant text completes",
+    "active-turn steer stays pending until active assistant text completes",
     async () => {
       root = realpathSync(mkdtempSync(join(tmpdir(), "fx-tui-queued-order-")));
       const home = join(root, "home");
@@ -2736,7 +2736,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         (candidate) =>
           queuedGateway.requests.length === 1 &&
           hold.started &&
-          candidate.includes(queuedSummaryText(1)) &&
+          candidate.includes(steeringSummaryText(1)) &&
           candidate.includes(queuedPrompt),
         "queued prompt preview shown before active turn releases",
       );
@@ -2779,15 +2779,12 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       expect(countOccurrences(queuedBody, oldGlobalRule)).toBe(1);
       expect(countOccurrences(queuedBody, oldAncestorRule)).toBe(1);
       expect(countOccurrences(queuedBody, oldRootRule)).toBe(1);
-      expect(countOccurrences(queuedBody, oldNestedRule)).toBe(1);
+      expect(queuedBody).not.toContain(oldNestedRule);
       expect(queuedBody.indexOf(oldGlobalRule)).toBeLessThan(
         queuedBody.indexOf(oldAncestorRule),
       );
       expect(queuedBody.indexOf(oldAncestorRule)).toBeLessThan(
         queuedBody.indexOf(oldRootRule),
-      );
-      expect(queuedBody.indexOf(oldRootRule)).toBeLessThan(
-        queuedBody.indexOf(oldNestedRule),
       );
       expect(queuedBody).not.toContain(oldSiblingRule);
       expect(queuedBody).not.toContain(newGlobalRule);
@@ -2801,20 +2798,14 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       const afterIndex = finalScrollback.indexOf(activeAfter.trim());
       const queuedPromptIndex = finalScrollback.indexOf(queuedPrompt);
       const queuedDoneIndex = finalScrollback.indexOf(queuedDone);
-      const summaryOffset = finalScrollback
-        .slice(afterIndex)
-        .search(
-          / {2}(?:\d+s|\d+m \d+s|\d+h \d{2}m) \(↑\d+(?:\.\d)?k? ↓\d+(?:\.\d)?k?\)/,
-        );
-      const firstSummaryAfterActiveIndex =
-        summaryOffset < 0 ? -1 : afterIndex + summaryOffset;
       expect(beforeIndex).toBeGreaterThanOrEqual(0);
       expect(afterIndex).toBeGreaterThan(beforeIndex);
-      expect(firstSummaryAfterActiveIndex).toBeGreaterThan(afterIndex);
-      expect(firstSummaryAfterActiveIndex).toBeLessThan(queuedPromptIndex);
       expect(queuedPromptIndex).toBeGreaterThan(afterIndex);
       expect(queuedDoneIndex).toBeGreaterThan(queuedPromptIndex);
       expect(countOccurrences(finalScrollback, queuedPrompt)).toBe(1);
+      expect(readFileSync(tracePath, "utf8")).toContain(
+        "event=pending_steers_applied",
+      );
       expect(readFileSync(stderrPath, "utf8")).toBe("");
       expect(existsSync(tapePath)).toBe(true);
       expect(session.isAlive()).toBe(true);
@@ -2930,6 +2921,81 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
   );
 
   test(
+    "active-turn input steers the next model step instead of starting a queued turn",
+    async () => {
+      const artifacts = createArtifactRoot();
+      const home = join(artifacts, "home");
+      const workspacePath = join(artifacts, "workspace");
+      const stderrPath = join(artifacts, "stderr.log");
+      const tracePath = join(artifacts, "trace.log");
+      const hold: SplitHoldState = { started: false, cancelled: false };
+      const initialBefore = "STEER_INITIAL_BEFORE\n";
+      const initialAfter = "STEER_INITIAL_AFTER\n";
+      const steeringPrompt = "Apply STEER_CURRENT_TURN_SENTINEL before finishing.";
+      const steeredDone = "STEER_CURRENT_TURN_DONE";
+      mkdirSync(join(home, ".fx"), { recursive: true });
+      mkdirSync(workspacePath, { recursive: true });
+      writeFileSync(join(home, ".fx", "settings.json"), "{}");
+      const steeringGateway = startFakeGateway([
+        () => splitHeldTextResponse(hold, initialBefore, initialAfter),
+        fakeGatewayFinalText(steeredDone),
+      ]);
+      gateway = steeringGateway;
+
+      session = await TmuxSession.create({
+        cwd: realpathSync(workspacePath),
+        stderrPath,
+        width: 120,
+        height: 40,
+        env: {
+          HOME: home,
+          OPENAI_API_KEY: "fake-active-steer-key",
+          FX_RESPONSES_BASE_URL: steeringGateway.baseUrl,
+          FX_MODEL: MODEL,
+          FX_TRACE_LOG: tracePath,
+          FX_TRACE_SCOPES: "agent,gateway,stream,worker,input,prompt",
+        },
+      });
+
+      await session.waitForComposer(TIMEOUT);
+      await session.sendText("Hold the current model turn open for steering.");
+      await waitForCondition(
+        () => steeringGateway.requests.length === 1 && hold.started,
+        "held active turn before steering",
+      );
+      await session.sendText(steeringPrompt);
+      await session.waitForPane(
+        (pane) =>
+          pane.includes(steeringSummaryText(1)) &&
+          pane.includes(steeringPrompt),
+        TIMEOUT,
+      );
+      expect(steeringGateway.requests).toHaveLength(1);
+
+      hold.release?.();
+      await waitForCondition(
+        () => steeringGateway.requests.length === 2,
+        "same-turn model step after steering",
+      );
+      await session.waitForText(steeredDone, TIMEOUT);
+      const steeredRequest = JSON.parse(steeringGateway.requests[1]!.body) as {
+        input: unknown[];
+      };
+      const steeredInput = JSON.stringify(steeredRequest.input);
+      expect(steeredInput).toContain(initialBefore.trim());
+      expect(steeredInput).toContain(initialAfter.trim());
+      expect(steeredInput).toContain(steeringPrompt);
+      expect(readFileSync(tracePath, "utf8")).toContain(
+        "event=pending_steers_applied",
+      );
+      expect(steeringGateway.requests).toHaveLength(2);
+      expect(readFileSync(stderrPath, "utf8")).toBe("");
+      expect(session.paneStatus()).toEqual({ dead: false, status: null });
+    },
+    TIMEOUT * 2,
+  );
+
+  test(
     "Up pauses queued admission and commits every edited prompt in FIFO order",
     async () => {
       root = realpathSync(mkdtempSync(join(tmpdir(), "fx-tui-queued-review-")));
@@ -2981,7 +3047,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       await session.sendText(secondQueued);
       await session.waitForPane(
         (pane) =>
-          pane.includes(queuedSummaryText(2)) &&
+          pane.includes(steeringSummaryText(2)) &&
           pane.includes(firstQueued) &&
           !pane.includes(secondQueued),
         TIMEOUT,
@@ -3165,7 +3231,6 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       const longPrompt =
         `QUEUE_CURSOR_HEAD_${"e".repeat(1800)}_QUEUE_CURSOR_TAIL`;
       const longEdit = "_EDITED_AT_TAIL";
-      const pastedDone = "QUEUE_PASTE_DONE";
       const longDone = "QUEUE_CURSOR_DONE";
       const queuedGateway = startFakeGateway([
         () =>
@@ -3174,7 +3239,6 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
             "ACTIVE_SEMANTIC_QUEUE_STARTED\n",
             "ACTIVE_SEMANTIC_QUEUE_FINISHED",
           ),
-        fakeGatewayFinalText(pastedDone),
         fakeGatewayFinalText(longDone),
       ]);
       gateway = queuedGateway;
@@ -3210,7 +3274,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       await session.sendLiteralText(longPrompt);
       await session.sendKeys("Enter");
       await session.waitForPane(
-        (pane) => pane.includes(queuedSummaryText(2)),
+        (pane) => pane.includes(steeringSummaryText(2)),
         TIMEOUT,
       );
 
@@ -3249,14 +3313,17 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       hold.release?.();
       await session.waitForText(longDone, TIMEOUT);
       await waitForCondition(
-        () => queuedGateway.requests.length === 3,
-        "semantic queued prompts after active turn",
+        () => queuedGateway.requests.length === 2,
+        "semantic steering batch after active turn",
       );
 
       expect(queuedGateway.requests[1].body).toContain(
         pastedPrompt + pastedEdit,
       );
-      expect(queuedGateway.requests[2].body).toContain(longPrompt + longEdit);
+      expect(queuedGateway.requests[1].body).toContain(longPrompt + longEdit);
+      expect(queuedGateway.requests[1].body.indexOf(pastedPrompt)).toBeLessThan(
+        queuedGateway.requests[1].body.indexOf(longPrompt),
+      );
       expect(readFileSync(tracePath, "utf8")).toContain(
         "event=queue_review_batch_committed",
       );
@@ -3294,7 +3361,6 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
             "ACTIVE_FILE_PICKER_QUEUE_STARTED\n",
             "ACTIVE_FILE_PICKER_QUEUE_FINISHED",
           ),
-        fakeGatewayFinalText(olderPrompt),
         fakeGatewayFinalText(queuedDone),
       ]);
       gateway = queuedGateway;
@@ -3323,7 +3389,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       await session.sendText(olderPrompt);
       await session.sendText(completedPrompt);
       await session.waitForPane(
-        (pane) => pane.includes(queuedSummaryText(2)),
+        (pane) => pane.includes(steeringSummaryText(2)),
         TIMEOUT,
       );
 
@@ -3357,11 +3423,15 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       hold.release?.();
       await session.waitForText(queuedDone, TIMEOUT);
       await waitForCondition(
-        () => queuedGateway.requests.length === 3,
-        "queued prompts after file picker review",
+        () => queuedGateway.requests.length === 2,
+        "steering batch after file picker review",
       );
 
-      expect(queuedGateway.requests[2].body).toContain(completedPrompt);
+      expect(queuedGateway.requests[1].body).toContain(olderPrompt);
+      expect(queuedGateway.requests[1].body).toContain(completedPrompt);
+      expect(queuedGateway.requests[1].body.indexOf(olderPrompt)).toBeLessThan(
+        queuedGateway.requests[1].body.indexOf(completedPrompt),
+      );
       expect(readFileSync(tracePath, "utf8")).toContain(
         "file picker Enter consumed selected=true",
       );
@@ -3550,7 +3620,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       );
       await session.sendText("QUEUED_MODEL_PICKER_DRAFT");
       await session.waitForPane(
-        (pane) => pane.includes(queuedSummaryText(1)),
+        (pane) => pane.includes(steeringSummaryText(1)),
         TIMEOUT,
       );
 
@@ -3632,7 +3702,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       await session.sendText(queuedPrompt);
       await session.waitForPane(
         (pane) =>
-          pane.includes(queuedSummaryText(1)) &&
+          pane.includes(steeringSummaryText(1)) &&
           pane.includes(queuedPrompt),
         TIMEOUT,
       );
@@ -3732,7 +3802,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       await session.sendText(secondQueued);
       await session.waitForPane(
         (pane) =>
-          pane.includes(queuedSummaryText(2)) &&
+          pane.includes(steeringSummaryText(2)) &&
           pane.includes(firstQueued) &&
           !pane.includes(secondQueued),
         TIMEOUT,
@@ -3910,7 +3980,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       await session.sendText(queuedPrompt);
       await session.waitForPane(
         (pane) =>
-          pane.includes(queuedSummaryText(1)) &&
+          pane.includes(steeringSummaryText(1)) &&
           pane.includes(queuedPrompt),
         TIMEOUT,
       );
@@ -4032,7 +4102,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       await session.sendText(secondQueued);
       await session.waitForPane(
         (pane) =>
-          pane.includes(queuedSummaryText(2)) &&
+          pane.includes(steeringSummaryText(2)) &&
           pane.includes(firstQueued) &&
           !pane.includes(secondQueued),
         TIMEOUT,
@@ -4194,7 +4264,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         await session.sendText(secondQueued);
         await session.waitForPane(
           (pane) =>
-            pane.includes(queuedSummaryText(2)) &&
+            pane.includes(steeringSummaryText(2)) &&
             pane.includes(firstQueued) &&
             !pane.includes(secondQueued),
           TIMEOUT,
@@ -4349,7 +4419,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       await session.sendText(secondQueued);
       await session.waitForPane(
         (pane) =>
-          pane.includes(queuedSummaryText(2)) &&
+          pane.includes(steeringSummaryText(2)) &&
           pane.includes(firstQueued) &&
           !pane.includes(secondQueued),
         TIMEOUT,

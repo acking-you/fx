@@ -9,6 +9,7 @@ const responses_protocol = @import("../core/gateway/responses_protocol.zig");
 const debug_trace = @import("../core/shared/debug_trace.zig");
 const io_mod = @import("../core/shared/io.zig");
 const model_tool_schema = @import("../core/tooling/model_tool_schema.zig");
+const web_search_projection = @import("../core/gateway/web_search_projection.zig");
 const types = @import("../core/shared/types.zig");
 const gateway_client = @import("client.zig");
 
@@ -277,6 +278,14 @@ fn buildPayload(
 
     var tools = try responses_protocol.prepareTools(alloc, request.tools);
     defer tools.deinit(alloc);
+    const projected_tools = try web_search_projection.projectToolsAlloc(
+        alloc,
+        tools.base_json,
+        .{
+            .kind = if (request.provider_options.native_web_search) .hosted else .function,
+        },
+    );
+    defer alloc.free(projected_tools);
 
     var schema_json: ?[]u8 = null;
     defer if (schema_json) |schema| alloc.free(schema);
@@ -303,7 +312,7 @@ fn buildPayload(
         .session_id = session_id,
         .model = wire_model,
         .tool_registry = request.tools.registry,
-        .serialized_tools = tools.base_json,
+        .serialized_tools = projected_tools,
         .selected_dynamic_tool_schemas = tools.dynamic_json,
         .messages = request.messages,
         .tool_choice = request.tool_choice,
@@ -380,6 +389,8 @@ fn streamPreparedWithBinding(
             .admission = request.admission,
             .on_reasoning_chunk = EventBridge.reasoning,
             .on_tool_input_chunk = EventBridge.toolInput,
+            .on_provider_tool_done = EventBridge.providerToolDone,
+            .on_provider_tool_start = EventBridge.providerToolStart,
             .provider_attempt_owner = switch (request.provider_attempt_owner) {
                 .transport => .transport,
                 .agent => .agent,
@@ -437,6 +448,19 @@ const EventBridge = struct {
 
     fn toolStart(raw: *anyopaque, id: []const u8, name: []const u8, label: ?[]const u8) void {
         sink(raw).emit(.{ .tool_started = .{ .id = id, .name = name, .label = label } });
+    }
+
+    fn providerToolDone(raw: *anyopaque, id: []const u8, name: []const u8, label: ?[]const u8, succeeded: bool) void {
+        sink(raw).emit(.{ .provider_tool_completed = .{
+            .id = id,
+            .name = name,
+            .label = label,
+            .succeeded = succeeded,
+        } });
+    }
+
+    fn providerToolStart(raw: *anyopaque, id: []const u8, name: []const u8, label: ?[]const u8) void {
+        sink(raw).emit(.{ .provider_tool_started = .{ .id = id, .name = name, .label = label } });
     }
 };
 

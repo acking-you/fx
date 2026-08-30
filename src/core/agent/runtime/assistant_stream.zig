@@ -284,6 +284,45 @@ pub fn recordStreamToolStart(ctx: *anyopaque, tool_name: []const u8) void {
     }
 }
 
+pub fn onStreamProviderToolStart(
+    ctx: *anyopaque,
+    tool_id: []const u8,
+    tool_name: []const u8,
+    label_value: ?[]const u8,
+) void {
+    const stream_ctx: *StreamChunkContext = @ptrCast(@alignCast(ctx));
+    onStreamToolStart(ctx, tool_id, tool_name, label_value);
+    stream_ctx.saw_provider_tool_start = true;
+}
+
+pub fn onStreamProviderToolDone(
+    ctx: *anyopaque,
+    tool_id: []const u8,
+    tool_name: []const u8,
+    label_value: ?[]const u8,
+    succeeded: bool,
+) void {
+    const stream_ctx: *StreamChunkContext = @ptrCast(@alignCast(ctx));
+    stream_ctx.markModelOutput();
+    stream_ctx.saw_tool_start = true;
+    stream_ctx.saw_provider_tool_start = true;
+    flushAssistantStream(stream_ctx) catch {};
+    var arena_state = std.heap.ArenaAllocator.init(stream_ctx.alloc);
+    defer arena_state.deinit();
+    stream_ctx.provisional_statuses.finishProviderCall(
+        stream_ctx.hooks,
+        stream_ctx.alloc,
+        arena_state.allocator(),
+        stream_ctx.turn_id,
+        tool_id,
+        tool_name,
+        label_value,
+        succeeded,
+    ) catch |err| {
+        debug_trace.logf("agent", "provider tool completion publication failed tool={s} err={s}", .{ tool_name, @errorName(err) });
+    };
+}
+
 fn streamAssistantChunk(stream_ctx: *StreamChunkContext, chunk: []const u8) !void {
     if (!stream_ctx.continuation_resolved) {
         try stream_ctx.continuation_pending.appendSlice(stream_ctx.alloc, chunk);

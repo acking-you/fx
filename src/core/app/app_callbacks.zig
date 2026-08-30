@@ -307,9 +307,7 @@ pub fn Bindings(comptime App: type) type {
                 .execute_tool_call = agentExecuteToolCall,
                 .publish_committed_file_handoff = agentPublishCommittedFileHandoff,
                 .propagate_history_turn = agentPropagateHistoryTurn,
-                // Interactive submissions retain the established queue/review
-                // semantics. Same-turn steering is an explicit ACP operation.
-                .take_pending_steer = null,
+                .take_pending_steer = agentTakePendingSteer,
                 .recovery_checkpoint = if (comptime @hasField(App, "session_persistence"))
                     if (app.session_persistence.writable != null)
                         .{
@@ -802,6 +800,17 @@ pub fn Bindings(comptime App: type) type {
         fn agentPropagateHistoryTurn(ctx: *anyopaque, turn: HistoryTurn) !void {
             const app: *App = @ptrCast(@alignCast(ctx));
             try app_worker_runtime.Runtime(App).propagateHistoryTurn(app, turn, app.session.max_history_turns);
+        }
+
+        fn agentTakePendingSteer(
+            ctx: *anyopaque,
+            alloc: Allocator,
+            turn_id: u64,
+            finish_if_empty: bool,
+        ) !?worker_runtime.QueuedPrompt {
+            _ = finish_if_empty;
+            const app: *App = @ptrCast(@alignCast(ctx));
+            return app.worker.takePendingSteer(alloc, turn_id);
         }
 
         fn agentSetRecoveryCheckpoint(

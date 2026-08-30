@@ -127,7 +127,6 @@ pub const Context = struct {
     account_id: ?[]const u8 = null,
     provider: model_provider.ProviderId = .gateway,
     provider_capabilities: provider_set.Bundle.Capabilities = .{
-        .fx_search = true,
         .vision_fallback = true,
     },
     oauth_transport: oauth_transport.Provider = oauth_transport.unavailable_provider,
@@ -1512,7 +1511,6 @@ const TestRuntime = struct {
     api_key: []const u8 = "",
     provider: model_provider.ProviderId = .gateway,
     provider_capabilities: provider_set.Bundle.Capabilities = .{
-        .fx_search = true,
         .vision_fallback = true,
     },
     gateway_retry_count: usize = 0,

@@ -18,6 +18,7 @@ pub const Inputs = struct {
 };
 
 pub const PreferredBackendsFn = *const fn (?*anyopaque) anyerror!?[]const web_search_contract.SearchBackendId;
+pub const AvailableFn = *const fn (?*anyopaque) bool;
 
 pub const ExecuteFn = *const fn (
     ?*anyopaque,
@@ -32,8 +33,13 @@ pub const Provider = struct {
     context: ?*anyopaque = null,
     policy: web_search_policy.WebSearchPolicy,
     input_overhead_bytes: usize = 0,
+    available_fn: ?AvailableFn = null,
     preferred_backends_fn: PreferredBackendsFn,
     execute_fn: ExecuteFn,
+
+    pub fn isAvailable(self: Provider) bool {
+        return if (self.available_fn) |available| available(self.context) else true;
+    }
 
     pub fn preferredBackends(self: Provider) !?[]const web_search_contract.SearchBackendId {
         return self.preferred_backends_fn(self.context);

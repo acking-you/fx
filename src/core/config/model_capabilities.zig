@@ -4,6 +4,7 @@ const types = @import("../shared/types.zig");
 pub const ResolvedProviderOptions = struct {
     reasoning: ?types.ReasoningEffort = null,
     fast: bool = false,
+    native_web_search: bool = false,
     parallel_tool_calls: ?bool = null,
     prompt_caching: bool = false,
 };
@@ -169,6 +170,7 @@ pub fn resolveProviderOptionsForCapabilities(
         resolved.reasoning = effort;
     }
     resolved.fast = fast_mode and capabilities.supports_fast_mode;
+    resolved.native_web_search = capabilities.supports_web_search;
     return resolved;
 }
 

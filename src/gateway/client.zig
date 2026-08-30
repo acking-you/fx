@@ -233,6 +233,8 @@ pub const GatewayJsonResult = union(enum) {
 
 pub const StreamCallback = agent_stream_provider.StreamCallback;
 pub const ToolStartCallback = agent_stream_provider.ToolStartCallback;
+pub const ProviderToolDoneCallback = agent_stream_provider.ProviderToolDoneCallback;
+pub const ProviderToolStartCallback = agent_stream_provider.ProviderToolStartCallback;
 
 const gateway_retry_base_delay_ns: u64 = 150 * std.time.ns_per_ms;
 const gateway_connection_setup_timeout_ms: i64 = 30_000;
@@ -1207,6 +1209,8 @@ pub const StreamRequest = struct {
     admission: ?agent_stream_provider.Admission = null,
     on_reasoning_chunk: ?StreamCallback = null,
     on_tool_input_chunk: ?StreamCallback = null,
+    on_provider_tool_done: ?ProviderToolDoneCallback = null,
+    on_provider_tool_start: ?ProviderToolStartCallback = null,
     /// Receives exact raw JSON for Responses events that the semantic fx
     /// completion contract does not consume. Slices are borrowed for the
     /// duration of the callback.
@@ -1613,6 +1617,8 @@ fn streamGatewayCompletionCoreWithOptions(
             .context = callback_ctx,
             .on_content_chunk = on_content_chunk,
             .on_tool_start = on_tool_start,
+            .on_provider_tool_done = request.on_provider_tool_done,
+            .on_provider_tool_start = request.on_provider_tool_start,
             .on_reasoning_chunk = request.on_reasoning_chunk,
             .on_tool_input_chunk = request.on_tool_input_chunk,
             .on_unknown_event = request.on_responses_unhandled_event,

@@ -23,6 +23,14 @@ pub const ToolStartCallback = *const fn (
     tool_name: []const u8,
     label_value: ?[]const u8,
 ) void;
+pub const ProviderToolStartCallback = ToolStartCallback;
+pub const ProviderToolDoneCallback = *const fn (
+    ctx: *anyopaque,
+    tool_id: []const u8,
+    tool_name: []const u8,
+    label_value: ?[]const u8,
+    succeeded: bool,
+) void;
 
 pub const Event = union(enum) {
     content_delta: []const u8,
@@ -31,6 +39,17 @@ pub const Event = union(enum) {
         id: []const u8,
         name: []const u8,
         label: ?[]const u8 = null,
+    },
+    provider_tool_started: struct {
+        id: []const u8,
+        name: []const u8,
+        label: ?[]const u8 = null,
+    },
+    provider_tool_completed: struct {
+        id: []const u8,
+        name: []const u8,
+        label: ?[]const u8 = null,
+        succeeded: bool = true,
     },
     tool_input_delta: []const u8,
 };

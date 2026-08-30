@@ -31,8 +31,13 @@ const tmuxTest = test.skipIf(!HAS_TMUX);
 const TIMEOUT = 30_000;
 const ENV_TOKEN = "env-api-key-token";
 
-function grokSubscriptionModel(id: string, contextWindow: number, efforts: string[] = []) {
-  return {
+function grokSubscriptionModel(
+  id: string,
+  contextWindow: number,
+  efforts: string[] = [],
+  supportsBackendSearch?: boolean,
+) {
+  const model = {
     id,
     model: id,
     api_backend: "responses",
@@ -40,6 +45,9 @@ function grokSubscriptionModel(id: string, contextWindow: number, efforts: strin
     supports_reasoning_effort: efforts.length > 0,
     reasoning_efforts: efforts.map((value) => ({ value })),
   };
+  return supportsBackendSearch === undefined
+    ? model
+    : { ...model, supportsBackendSearch };
 }
 
 function grokModalityModel(id: string, vision: boolean) {
@@ -723,6 +731,120 @@ function startFakeGrokToolLoop(options: {
     responsesUrl: `http://127.0.0.1:${server.port}/responses`,
     modelsUrl: `http://127.0.0.1:${server.port}/models`,
     modalitiesUrl: `http://127.0.0.1:${server.port}/modalities`,
+    stop() { server.stop(true); },
+  };
+}
+
+function startFakeGrokWebSearch() {
+  const bodies: string[] = [];
+  const accessToken = "grok-web-search-token";
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request) {
+      const path = new URL(request.url).pathname;
+      if (path === "/models") {
+        return Response.json({
+          data: [grokSubscriptionModel("grok-4.20", 1_000_000, [], true)],
+        });
+      }
+      if (path === "/modalities") {
+        return Response.json({
+          models: [grokModalityModel("grok-4.20", true)],
+        });
+      }
+      bodies.push(await request.text());
+      if (bodies.length === 1) {
+        return new Response(
+          'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"web_search_call","id":"ws_grok_e2e","status":"in_progress"}}\n\n' +
+            'data: {"type":"response.output_item.done","output_index":0,"item":{"type":"web_search_call","id":"ws_grok_e2e","status":"completed","action":{"type":"search","query":"Zig 0.16","sources":[]}}}\n\n' +
+            'data: {"type":"response.output_text.delta","delta":"GROK_WEB_SEARCH_DONE"}\n\n' +
+            'data: {"type":"response.output_item.done","output_index":1,"item":{"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"GROK_WEB_SEARCH_DONE","annotations":[]}]}}\n\n' +
+            'data: {"type":"response.completed","response":{"id":"resp_grok_search","status":"completed","usage":{"input_tokens":6,"output_tokens":3}}}\n\n',
+          { headers: { "content-type": "text/event-stream" } },
+        );
+      }
+      return new Response(
+        'data: {"type":"response.output_text.delta","delta":"GROK_WEB_SEARCH_REPLAY_DONE"}\n\n' +
+          'data: {"type":"response.completed","response":{"id":"resp_grok_replay","status":"completed","usage":{"input_tokens":8,"output_tokens":3}}}\n\n',
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    },
+  });
+  return {
+    accessToken,
+    bodies,
+    responsesUrl: `http://127.0.0.1:${server.port}/responses`,
+    modelsUrl: `http://127.0.0.1:${server.port}/models`,
+    modalitiesUrl: `http://127.0.0.1:${server.port}/modalities`,
+    stop() { server.stop(true); },
+  };
+}
+
+function startFakeGrokConfiguredSearchFallback() {
+  const grokBodies: string[] = [];
+  const fallbackBodies: string[] = [];
+  const fallbackAuthorizations: Array<string | null> = [];
+  const accessToken = "grok-configured-search-fallback-token";
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request) {
+      const path = new URL(request.url).pathname;
+      if (path === "/models") {
+        return Response.json({
+          data: [grokSubscriptionModel("grok-no-backend-search", 1_000_000, [], false)],
+        });
+      }
+      if (path === "/modalities") {
+        return Response.json({
+          models: [grokModalityModel("grok-no-backend-search", false)],
+        });
+      }
+      if (path === "/fallback/responses") {
+        fallbackAuthorizations.push(request.headers.get("authorization"));
+        fallbackBodies.push(await request.text());
+        return Response.json({
+          output: [{
+            type: "message",
+            role: "assistant",
+            content: [{
+              type: "output_text",
+              text: "Configured search found the current Zig release.",
+              annotations: [{
+                type: "url_citation",
+                url: "https://ziglang.org/download/",
+                title: "Zig downloads",
+              }],
+            }],
+          }],
+        });
+      }
+      grokBodies.push(await request.text());
+      if (grokBodies.length === 1) {
+        return new Response(
+          'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","call_id":"call_search_fallback","name":"web_search"}}\n\n' +
+            'data: {"type":"response.function_call_arguments.done","output_index":0,"arguments":"{\\"query\\":\\"current Zig release\\"}"}\n\n' +
+            'data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":5,"output_tokens":2}}}\n\n',
+          { headers: { "content-type": "text/event-stream" } },
+        );
+      }
+      return new Response(
+        'data: {"type":"response.output_text.delta","delta":"GROK_CONFIGURED_SEARCH_FALLBACK_DONE"}\n\n' +
+          'data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":8,"output_tokens":3}}}\n\n',
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    },
+  });
+  return {
+    accessToken,
+    grokBodies,
+    fallbackBodies,
+    fallbackAuthorizations,
+    responsesUrl: `http://127.0.0.1:${server.port}/grok-responses`,
+    modelsUrl: `http://127.0.0.1:${server.port}/models`,
+    modalitiesUrl: `http://127.0.0.1:${server.port}/modalities`,
+    fallbackBaseUrl: `http://127.0.0.1:${server.port}/fallback`,
     stop() { server.stop(true); },
   };
 }
@@ -2097,6 +2219,132 @@ test(
       }
     } finally {
       grok.stop();
+    }
+  },
+  60_000,
+);
+
+tmuxTest(
+  "Grok hosted web search uses the unified TUI lifecycle and replays provider state",
+  async () => {
+    home = mkdtempSync(join(tmpdir(), "fx-grok-web-search-"));
+    stderrPath = join(home, "stderr.log");
+    gateway = startFakeGateway([]);
+    const grok = startFakeGrokWebSearch();
+    try {
+      writeSeededGrokLogin(home, grok.accessToken, "acct_web_search");
+      writeFileSync(
+        join(home, ".fx", "settings.json"),
+        JSON.stringify({ provider: "grok", grok_model: "grok-4.20" }) + "\n",
+        { mode: 0o600 },
+      );
+      session = await TmuxSession.create({
+        cmd: FX_BIN,
+        cwd: REPO_ROOT,
+        stderrPath,
+        width: 110,
+        height: 36,
+        env: {
+          HOME: home,
+          OPENAI_API_KEY: "gateway-grok-search-sentinel",
+          FX_DISABLE_KEYCHAIN: "1",
+          FX_SKIP_ONBOARDING: "1",
+          FX_RESPONSES_BASE_URL: gateway.baseUrl,
+          FX_E2E_XAI_GROK_RESPONSES_URL: grok.responsesUrl,
+          FX_E2E_XAI_GROK_MODELS_URL: grok.modelsUrl,
+          FX_E2E_XAI_GROK_MODALITIES_URL: grok.modalitiesUrl,
+        },
+      });
+
+      await session.waitForComposer(TIMEOUT);
+      await session.sendText("Search for the current Zig 0.16 status.");
+      await session.waitForText("Searched Zig 0.16", TIMEOUT);
+      await session.waitForText("GROK_WEB_SEARCH_DONE", TIMEOUT);
+      expect(grok.bodies).toHaveLength(1);
+      const first = JSON.parse(grok.bodies[0]!) as {
+        tools?: Array<{ type?: string; name?: string }>;
+      };
+      expect(first.tools?.some((tool) => tool.type === "web_search")).toBe(true);
+      expect(first.tools?.some((tool) => tool.name === "web_search")).toBe(false);
+
+      await session.sendText("Use the prior search evidence and finish.");
+      await session.waitForText("GROK_WEB_SEARCH_REPLAY_DONE", TIMEOUT);
+      expect(grok.bodies).toHaveLength(2);
+      const second = JSON.parse(grok.bodies[1]!) as { input?: unknown[] };
+      expect(JSON.stringify(second.input)).toContain('"type":"web_search_call"');
+      expect(JSON.stringify(second.input)).toContain('"id":"ws_grok_e2e"');
+      expect(gateway.requests).toHaveLength(0);
+      expect(readFileSync(stderrPath, "utf8")).toBe("");
+      expect(session.paneStatus()).toEqual({ dead: false, status: null });
+    } finally {
+      grok.stop();
+    }
+  },
+  60_000,
+);
+
+tmuxTest(
+  "Grok without backend search uses the separately configured Responses fallback",
+  async () => {
+    home = mkdtempSync(join(tmpdir(), "fx-grok-configured-search-fallback-"));
+    stderrPath = join(home, "stderr.log");
+    gateway = startFakeGateway([]);
+    const fixture = startFakeGrokConfiguredSearchFallback();
+    try {
+      writeSeededGrokLogin(home, fixture.accessToken, "acct_search_fallback");
+      writeFileSync(
+        join(home, ".fx", "settings.json"),
+        JSON.stringify({ provider: "grok", grok_model: "grok-no-backend-search" }) + "\n",
+        { mode: 0o600 },
+      );
+      session = await TmuxSession.create({
+        cmd: FX_BIN,
+        cwd: REPO_ROOT,
+        stderrPath,
+        width: 110,
+        height: 36,
+        env: {
+          HOME: home,
+          OPENAI_API_KEY: "gateway-search-fallback-sentinel",
+          FX_DISABLE_KEYCHAIN: "1",
+          FX_SKIP_ONBOARDING: "1",
+          FX_RESPONSES_BASE_URL: gateway.baseUrl,
+          FX_E2E_XAI_GROK_RESPONSES_URL: fixture.responsesUrl,
+          FX_E2E_XAI_GROK_MODELS_URL: fixture.modelsUrl,
+          FX_E2E_XAI_GROK_MODALITIES_URL: fixture.modalitiesUrl,
+          FX_WEB_SEARCH_API_KEY: "configured-search-key",
+          FX_WEB_SEARCH_MODEL: "configured-search-model",
+          FX_WEB_SEARCH_BASE_URL: fixture.fallbackBaseUrl,
+        },
+      });
+
+      await session.waitForComposer(TIMEOUT);
+      await session.sendText("Find the current Zig release using web search.");
+      await session.waitForText("Searched current Zig release", TIMEOUT);
+      await session.waitForText("GROK_CONFIGURED_SEARCH_FALLBACK_DONE", TIMEOUT);
+
+      expect(fixture.grokBodies).toHaveLength(2);
+      const first = JSON.parse(fixture.grokBodies[0]!) as {
+        tools?: Array<{ type?: string; name?: string }>;
+      };
+      expect(first.tools?.some((tool) => tool.type === "web_search")).toBe(false);
+      expect(first.tools?.some((tool) => tool.name === "web_search")).toBe(true);
+      expect(fixture.fallbackBodies).toHaveLength(1);
+      expect(fixture.fallbackAuthorizations).toEqual([
+        "Bearer configured-search-key",
+      ]);
+      const fallback = JSON.parse(fixture.fallbackBodies[0]!) as {
+        model?: string;
+        tools?: Array<{ type?: string }>;
+      };
+      expect(fallback.model).toBe("configured-search-model");
+      expect(fallback.tools).toEqual([{ type: "web_search" }]);
+      expect(fixture.grokBodies[1]).toContain("https://ziglang.org/download/");
+      expect(gateway.requests).toHaveLength(0);
+      expect(readFileSync(stderrPath, "utf8")).toBe("");
+      expect(session.paneStatus()).toEqual({ dead: false, status: null });
+    } finally {
+      fixture.stop();
     }
   },
   60_000,

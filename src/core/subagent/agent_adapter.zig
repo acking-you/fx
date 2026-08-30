@@ -3,6 +3,7 @@ const agent_runtime = @import("../agent/agent_runtime.zig");
 const worker_runtime = @import("../agent/worker_runtime.zig");
 const auth_runtime = @import("../auth/auth_runtime.zig");
 const credentials = @import("../auth/credentials.zig");
+const model_capabilities = @import("../config/model_capabilities.zig");
 const model_provider = @import("../config/model_provider.zig");
 const provider_set = @import("../gateway/provider_set.zig");
 const auto_classifier = @import("../permissions/auto_classifier.zig");
@@ -47,6 +48,10 @@ pub const Config = struct {
     host: *tool_host.Runtime,
     tool_context: tool_runtime.Context,
     provider_set: provider_set.Set,
+    /// Immutable model capabilities resolved for the admitted child route.
+    /// A child must not consult mutable parent provider/catalog state once its
+    /// turn starts.
+    resolved_model_capabilities: model_capabilities.Capabilities,
     system_prompt: []const u8,
     model_prompt_overlay: ?[]const u8 = null,
     skills_prompt_section: []const u8 = "",
@@ -195,9 +200,7 @@ pub fn run(
     // The backend points at the parent runtime's credential snapshot. A
     // cross-provider subagent must not reuse it until subagents own a routed
     // search runtime of their own.
-    if (!routed_config.tool_context.provider_capabilities.fx_search or
-        admission.provider != config.tool_context.provider)
-    {
+    if (admission.provider != config.tool_context.provider) {
         routed_config.tool_context.web_search_backend = null;
         routed_config.tool_context.web_search_runtime_ready = false;
     }
@@ -338,7 +341,25 @@ fn runtimeDeps(context: *Context) agent_runtime.AgentRuntimeDeps {
         .report_usage = reportUsage,
         .usage = &context.turn.sessionRuntime().usage,
         .usage_allocator = context.turn.alloc,
+        .available_model_capabilities = availableModelCapabilities,
+        .resolve_model_capabilities = resolveModelCapabilities,
     };
+}
+
+fn availableModelCapabilities(
+    raw: *anyopaque,
+    _: []const u8,
+) model_capabilities.Capabilities {
+    const context: *Context = @ptrCast(@alignCast(raw));
+    return context.config.resolved_model_capabilities;
+}
+
+fn resolveModelCapabilities(
+    raw: *anyopaque,
+    _: Allocator,
+    _: []const u8,
+) !model_capabilities.Capabilities {
+    return availableModelCapabilities(raw, "");
 }
 
 fn refreshGatewayCredential(

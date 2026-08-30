@@ -273,6 +273,7 @@ pub const RenderContext = struct {
     composer_visible: bool = true,
     permission_mode: types.PermissionMode = .ask,
     queued_count: usize,
+    steering_count: usize = 0,
     /// First queued follow-up, matching codex-cli's pending-input preview.
     /// Empty means the queue is represented by its aggregate summary only.
     queued_prompt_preview: []const u8 = "",
