@@ -227,10 +227,6 @@ fn normalizeInstallRequest(alloc: Allocator, raw_source: []const u8, explicit_fi
     };
 }
 
-pub fn looksLikeInstallCommand(input: []const u8) bool {
-    return looksLikeSkillsInstallCommand(std.mem.trim(u8, input, " \t\r\n"));
-}
-
 pub fn removeSkill(skills_dir: []const u8, name: []const u8) !void {
     try skill_contract.validateManagedSkillName(name);
 
@@ -1780,13 +1776,6 @@ test "normalizeInstallRequest ignores empty filters and allows identical duplica
 
     try std.testing.expectEqualStrings("example/agent-skills", request.source);
     try std.testing.expectEqualStrings("same", request.filter.?);
-}
-
-test "looksLikeInstallCommand trims and rejects non npx bunx commands" {
-    try std.testing.expect(looksLikeInstallCommand(" \n\tnpx skills add example/agent-skills\r\n"));
-    try std.testing.expect(looksLikeInstallCommand("bunx skills add example/agent-skills"));
-    try std.testing.expect(!looksLikeInstallCommand("pnpm dlx skills add example/agent-skills"));
-    try std.testing.expect(!looksLikeInstallCommand("npx skills list"));
 }
 
 test "installFromDirectory installs root skill using fallback when no frontmatter name exists" {

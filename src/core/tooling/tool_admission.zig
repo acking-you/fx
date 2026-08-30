@@ -110,23 +110,19 @@ fn toolApprovalPolicy(input: Input, name: []const u8) tool_dispatch.ApprovalPoli
 
 pub fn callUsesCommandAuthority(
     registry: tool_dispatch.Registry,
-    arena: Allocator,
+    _: Allocator,
     call: ToolCall,
 ) !bool {
     const tool = registry.lookup(call.name) orelse return false;
-    if (tool.executor_kind == .run_command or tool.executor_kind == .exec_command) return true;
-    const expected_action = tool.captured_command_action orelse return false;
-    const args = try tool_args.parseToolArgsObject(arena, call.arguments_json);
-    const action = tool_args.optionalStringArg(args, "action") orelse return false;
-    return std.mem.eql(u8, action, expected_action);
+    return tool.executor_kind == .exec_command;
 }
 
-fn isRunCommandCall(input: Input, arena: Allocator, call: ToolCall) !bool {
+fn isCommandCall(input: Input, arena: Allocator, call: ToolCall) !bool {
     return callUsesCommandAuthority(input.tool_registry, arena, call);
 }
 
-fn permissionNameForCall(input: Input, arena: Allocator, call: ToolCall) ![]const u8 {
-    return if (try isRunCommandCall(input, arena, call)) "run_command" else call.name;
+fn permissionNameForCall(_: Input, _: Allocator, call: ToolCall) ![]const u8 {
+    return call.name;
 }
 
 fn permissionTargetKindForCall(
@@ -134,7 +130,7 @@ fn permissionTargetKindForCall(
     arena: Allocator,
     call: ToolCall,
 ) !permissions.PermissionTargetKind {
-    return if (try isRunCommandCall(input, arena, call))
+    return if (try isCommandCall(input, arena, call))
         .command_cwd
     else
         permissionTargetKind(input.tool_registry, call.name);
@@ -751,8 +747,8 @@ fn reviewRequestForCall(
                 .deletions = prepared.review.deletions,
                 .review = prepared.review,
             } };
-        } else if (try isRunCommandCall(input, arena, call)) blk: {
-            const command = try runCommandContext(input, arena, call);
+        } else if (try isCommandCall(input, arena, call)) blk: {
+            const command = try commandContext(input, arena, call);
             break :blk .{ .command = .{
                 .command = command.command,
                 .resolved_cwd = command.resolved_cwd,
@@ -1063,9 +1059,9 @@ fn resolveOrdinaryPermissionOutcome(
     is_dynamic_tool: bool,
     permission_mode: PermissionMode,
 ) !command_admission.PermissionOutcome {
-    const command_call = try isRunCommandCall(input, arena, call);
+    const command_call = try isCommandCall(input, arena, call);
     if (command_call) {
-        const default_outcome = defaultRunCommandPermissionOutcome(
+        const default_outcome = defaultCommandPermissionOutcome(
             input,
             arena,
             call,
@@ -1085,7 +1081,7 @@ fn resolveOrdinaryPermissionOutcome(
 
     if (permission_mode == .auto) {
         if (command_call) {
-            const command = try runCommandContext(input, arena, call);
+            const command = try commandContext(input, arena, call);
             if (try command_effect.knownReversibleAutoCommand(
                 arena,
                 command.command,
@@ -1276,7 +1272,7 @@ fn requestPermissionOutcomeResolved(
         );
     }
     const is_mcp_tool = isAvailableDynamicTool(input, call.name);
-    const command_call = try isRunCommandCall(input, arena, call);
+    const command_call = try isCommandCall(input, arena, call);
     if (!toolHasPermissionContract(input, call.name) and
         !is_mcp_tool and
         !command_call)
@@ -1401,10 +1397,10 @@ fn requestPermissionOutcomeResolved(
         return ordinaryPermissionOutcome(.once);
     }
     if (input.host_sandbox_default == .allow_sandboxed and
-        try isRunCommandCall(input, arena, call))
+        try isCommandCall(input, arena, call))
     {
         return shellPermissionOutcome(
-            try runCommandContext(input, arena, call),
+            try commandContext(input, arena, call),
             .once,
             .js_host,
         );
@@ -1424,7 +1420,7 @@ fn requestPermissionOutcomeResolved(
     if (input.permission_prompter == null) {
         _ = noninteractivePermissionRequired(
             call,
-            if (try isRunCommandCall(input, arena, call))
+            if (try isCommandCall(input, arena, call))
                 "command_requires_approval"
             else
                 "tool_requires_approval",
@@ -1465,7 +1461,7 @@ fn exactApprovalLocalGrants(
             @memcpy(grants[local_grants.len..], offer.grants);
             return grants;
         },
-        .ordinary, .run_command => {
+        .ordinary, .command => {
             var targets = try permissionTargetsForCall(input, arena, call);
             defer targets.deinit(arena);
             const permission_name = try permissionNameForCall(input, arena, call);
@@ -1548,7 +1544,7 @@ pub fn revalidateLiveActionPermissionOutcome(
             permission_mode,
             revalidation_grants,
         ),
-        .run_command => |expected| blk: {
+        .command => |expected| blk: {
             const outcome = try requestPermissionOutcome(
                 input,
                 arena,
@@ -1559,7 +1555,7 @@ pub fn revalidateLiveActionPermissionOutcome(
             if (!outcome.decision.isDenied()) {
                 const actual = switch (outcome.execution_authority orelse
                     break :blk invalidLiveActionOutcome()) {
-                    .run_command => |value| value,
+                    .command => |value| value,
                     .ordinary, .file_mutation, .vision_paths => break :blk invalidLiveActionOutcome(),
                 };
                 if (!commandAuthorityFingerprint(expected).eql(
@@ -1588,7 +1584,7 @@ pub fn revalidateLiveActionPermissionOutcome(
                 const actual = switch (refreshed.execution_authority orelse
                     break :blk invalidLiveActionOutcome()) {
                     .vision_paths => |value| value,
-                    .ordinary, .run_command, .file_mutation => break :blk invalidLiveActionOutcome(),
+                    .ordinary, .command, .file_mutation => break :blk invalidLiveActionOutcome(),
                 };
                 if (!visionPathAuthoritiesEqual(expected, actual)) {
                     break :blk invalidLiveActionOutcome();
@@ -1860,7 +1856,7 @@ fn bindVisionPathExecutionAuthority(
     if (bound.execution_authority) |execution_authority| {
         switch (execution_authority) {
             .ordinary => bound.execution_authority = .{ .vision_paths = authority },
-            .run_command, .file_mutation, .vision_paths => {},
+            .command, .file_mutation, .vision_paths => {},
         }
     }
     return bound;
@@ -1874,10 +1870,10 @@ fn permissionOutcomeForDecision(
     source: command_admission.ShellAuthorizationSource,
 ) !command_admission.PermissionOutcome {
     if (decision.isDenied()) return .{ .decision = decision };
-    if (!try isRunCommandCall(input, arena, call)) {
+    if (!try isCommandCall(input, arena, call)) {
         return ordinaryPermissionOutcome(decision);
     }
-    const command_ctx = runCommandContext(input, arena, call) catch {
+    const command_ctx = commandContext(input, arena, call) catch {
         return .{ .decision = .permission_required };
     };
     return shellPermissionOutcome(command_ctx, decision, source);
@@ -1891,7 +1887,7 @@ fn shellPermissionOutcome(
     if (decision.isDenied()) return .{ .decision = decision };
     return .{
         .decision = decision,
-        .execution_authority = .{ .run_command = .{ .shell_allowed = .{
+        .execution_authority = .{ .command = .{ .shell_allowed = .{
             .fingerprint = .init(command_ctx),
             .source = source,
         } } },
@@ -1946,7 +1942,7 @@ fn promptPermissionOutcome(
         .auto_review_result = auto_review_result,
     };
     const prompter = input.permission_prompter orelse return unavailable;
-    const grant_offer = if (try isRunCommandCall(input, arena, call))
+    const grant_offer = if (try isCommandCall(input, arena, call))
         try exactApprovalLocalGrants(input, arena, call, &.{}, .ordinary)
     else
         null;
@@ -2000,65 +1996,46 @@ fn copyPermissionFeedback(
     return @as([]const u8, try arena.dupe(u8, feedback));
 }
 
-fn defaultRunCommandPermissionOutcome(
+fn defaultCommandPermissionOutcome(
     input: Input,
     arena: Allocator,
     call: ToolCall,
     permission_mode: PermissionMode,
 ) command_admission.PermissionOutcome {
-    const command_ctx = runCommandContext(input, arena, call) catch {
+    const command_ctx = commandContext(input, arena, call) catch {
         return .{ .decision = .permission_required };
     };
-    return switch (command_admission.defaultForRunCommand(
+    return switch (command_admission.defaultForCommand(
         arena,
         command_ctx,
         permission_mode,
     )) {
         .direct_only => |fingerprint| .{
             .decision = .once,
-            .execution_authority = .{ .run_command = .{ .direct_only = fingerprint } },
+            .execution_authority = .{ .command = .{ .direct_only = fingerprint } },
         },
         .approval_required => .{ .decision = .permission_required },
     };
 }
 
-pub fn runCommandContext(
+pub fn commandContext(
     input: Input,
     arena: Allocator,
     call: ToolCall,
 ) !command_admission.CommandContext {
-    if (!try isRunCommandCall(input, arena, call)) return error.NotRunCommand;
+    if (!try isCommandCall(input, arena, call)) return error.NotCommandTool;
     const args = try tool_args.parseToolArgsObject(arena, call.arguments_json);
-    const command = try tool_args.requiredStringArg(args, if (std.mem.eql(u8, call.name, "exec_command")) "cmd" else "command");
-    const tool = registeredTool(input, call.name) orelse return error.NotRunCommand;
-    const cwd = switch (tool.captured_command_host) {
-        .workspace_clean => try arena.dupe(u8, input.workspace_root),
-        .native => blk: {
-            const cwd_arg = tool_args.nullablePlaceholderStringArg(args, if (std.mem.eql(u8, call.name, "exec_command")) "workdir" else "cwd") orelse ".";
-            break :blk if (std.mem.eql(u8, cwd_arg, "."))
-                try arena.dupe(u8, input.workspace_root)
-            else
-                try pathing.resolveWorkspaceOrExternalPath(arena, input.workspace_root, cwd_arg);
-        },
-    };
-    const environment_value: command_environment.Environment = switch (tool.captured_command_host) {
-        .workspace_clean => .workspace_clean,
-        .native => blk: {
-            const profile_raw = tool_args.nullablePlaceholderStringArg(args, "profile");
-            const profile: ?command_environment.Profile = if (profile_raw) |raw|
-                std.meta.stringToEnum(command_environment.Profile, raw) orelse
-                    return error.InvalidCommandProfile
-            else
-                null;
-            var login_shell_buffer: [4096]u8 = undefined;
-            const configured = shell_resolver.configuredOrDefaultLoginShellInto(&login_shell_buffer);
-            const requested = if (std.mem.eql(u8, call.name, "exec_command"))
-                tool_args.nullablePlaceholderStringArg(args, "shell") orelse configured
-            else
-                configured;
-            break :blk try shell_resolver.environment(arena, requested, profile);
-        },
-    };
+    const command = try tool_args.requiredStringArg(args, "cmd");
+    _ = registeredTool(input, call.name) orelse return error.NotCommandTool;
+    const cwd_arg = tool_args.nullablePlaceholderStringArg(args, "workdir") orelse ".";
+    const cwd = if (std.mem.eql(u8, cwd_arg, "."))
+        try arena.dupe(u8, input.workspace_root)
+    else
+        try pathing.resolveWorkspaceOrExternalPath(arena, input.workspace_root, cwd_arg);
+    var login_shell_buffer: [4096]u8 = undefined;
+    const configured = shell_resolver.configuredOrDefaultLoginShellInto(&login_shell_buffer);
+    const requested = tool_args.nullablePlaceholderStringArg(args, "shell") orelse configured;
+    const environment_value = try shell_resolver.environment(arena, requested, null);
     return .{
         .command = command,
         .resolved_cwd = cwd,
@@ -2076,8 +2053,8 @@ pub fn permissionStateKeyForCall(
     if (file_mutation_contract.isToolName(call.name)) {
         return error.PreparedFileMutationRequired;
     }
-    if (try isRunCommandCall(input, arena, call)) {
-        const command = try runCommandContext(input, arena, call);
+    if (try isCommandCall(input, arena, call)) {
+        const command = try commandContext(input, arena, call);
         return session_permission_state.commandKeyV2(
             arena,
             command.command,
@@ -2239,8 +2216,8 @@ fn interactivePermissionRequest(
     call: ToolCall,
     label_override: ?[]const u8,
 ) !permission_request.PermissionRequest {
-    if (try isRunCommandCall(input, arena, call)) {
-        const context = try runCommandContext(input, arena, call);
+    if (try isCommandCall(input, arena, call)) {
+        const context = try commandContext(input, arena, call);
         if (label_override) |label| {
             return .{
                 .label = label,
@@ -2248,7 +2225,7 @@ fn interactivePermissionRequest(
             };
         }
         return .{
-            .label = try tool_presentation.formatRunCommandPermissionLabel(
+            .label = try tool_presentation.formatCommandPermissionLabel(
                 arena,
                 context.command,
             ),
@@ -2355,7 +2332,7 @@ fn permissionTargetsForCall(input: Input, arena: Allocator, call: ToolCall) !per
         return .{ .items = items };
     }
     const tool = registeredTool(input, call.name) orelse return error.UnsupportedTool;
-    if (try isRunCommandCall(input, arena, call)) {
+    if (try isCommandCall(input, arena, call)) {
         const items = try arena.alloc(permissions.PermissionCallTarget, 1);
         errdefer arena.free(items);
         items[0] = .{
@@ -2377,7 +2354,7 @@ fn commandPermissionTarget(
     arena: Allocator,
     call: ToolCall,
 ) ![]u8 {
-    const context = try runCommandContext(input, arena, call);
+    const context = try commandContext(input, arena, call);
     const identity = try command_environment.permissionCommandIdentity(
         arena,
         context.environment,
@@ -2401,7 +2378,7 @@ pub fn permissionTargetForCall(input: Input, arena: Allocator, call: ToolCall) !
     if (isAvailableDynamicTool(input, call.name)) return arena.dupe(u8, call.name);
     if (registeredWebSearchTarget(input, call.name)) |target_name| return arena.dupe(u8, target_name);
     const tool = registeredTool(input, call.name) orelse return error.UnsupportedTool;
-    if (try isRunCommandCall(input, arena, call)) {
+    if (try isCommandCall(input, arena, call)) {
         return commandPermissionTarget(input, arena, call);
     }
     return permissions.permissionTargetForCallInScope(
@@ -3459,7 +3436,7 @@ test "interactive admission routes prompts through the supplied prompter" {
         command_environment.commandFromPermissionIdentity(grant_offer[0].target_path),
     );
     try std.testing.expectEqual(ToolPermissionDecision.once, outcome.decision);
-    const authority = outcome.execution_authority.?.run_command;
+    const authority = outcome.execution_authority.?.command;
     try std.testing.expectEqual(
         command_admission.ShellAuthorizationSource.interactive_once,
         authority.shell_allowed.source,

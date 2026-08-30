@@ -2376,7 +2376,7 @@ test.skipIf(!tmuxAvailable())(
           pane.includes(beforeMarker) &&
           pane.includes("1 tool call") &&
           pane.includes("Ran ") &&
-          pane.includes("1 line ·") &&
+          pane.includes("1 output line") &&
           pane.includes(outputMarker) &&
           pane.includes(afterMarker),
         TIMEOUT,
@@ -2385,7 +2385,7 @@ test.skipIf(!tmuxAvailable())(
       const before = grid.findIndex((line) => line.includes(beforeMarker));
       const header = grid.findIndex((line) => line.includes("1 tool call"));
       const tool = grid.findIndex((line) => line.includes("Ran "));
-      const metadata = grid.findIndex((line) => line.includes("1 line ·"));
+      const metadata = grid.findIndex((line) => line.includes("1 output line"));
       const output = grid.findIndex((line) =>
         /^│\s+CTRL_O_SPACING_OUTPUT\s*$/.test(line),
       );

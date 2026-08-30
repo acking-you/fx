@@ -467,7 +467,7 @@ fn permissionOutcomeSource(
     if (outcome.execution_authority) |authority| {
         switch (authority) {
             .ordinary => {},
-            .run_command => |command_authority| switch (command_authority) {
+            .command => |command_authority| switch (command_authority) {
                 .direct_only => return "direct_only",
                 .shell_allowed => |shell| return @tagName(shell.source),
             },
@@ -793,7 +793,7 @@ pub fn applyInitialSessionGrants(
         arena,
         call,
     );
-    const permission_name = if (command_call) "run_command" else call.name;
+    const permission_name = call.name;
     const target_kind = if (command_call)
         tool_dispatch.PermissionTargetKind.command_cwd
     else if (hooks.tool_registry.lookup(call.name)) |tool|

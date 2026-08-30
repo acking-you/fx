@@ -5198,7 +5198,7 @@ test "fx ask default user commands require configured authority or review" {
         .name = "exec_command",
         .arguments_json = "{\"cmd\":\"touch configured.txt\"}",
     }, .ask, &.{}, &.{}));
-    switch ((configured.execution_authority orelse return error.TestExpectedEqual).run_command) {
+    switch ((configured.execution_authority orelse return error.TestExpectedEqual).command) {
         .direct_only => return error.TestExpectedShellAllowed,
         .shell_allowed => |authority| try std.testing.expectEqual(command_admission.ShellAuthorizationSource.configured_rule, authority.source),
     }
@@ -5770,7 +5770,7 @@ test "fx ask auto mode applies automatic clear and caution without a prompt" {
     );
     try std.testing.expectEqual(
         command_admission.ShellAuthorizationSource.auto_classifier,
-        direct.execution_authority.?.run_command.shell_allowed.source,
+        direct.execution_authority.?.command.shell_allowed.source,
     );
     try std.testing.expectEqual(@as(usize, 1), fake.calls);
 
@@ -5791,7 +5791,7 @@ test "fx ask auto mode applies automatic clear and caution without a prompt" {
         null,
         &.{},
     );
-    switch ((accepted.execution_authority orelse return error.TestExpectedEqual).run_command) {
+    switch ((accepted.execution_authority orelse return error.TestExpectedEqual).command) {
         .direct_only => return error.TestExpectedShellAllowed,
         .shell_allowed => |authority| try std.testing.expectEqual(
             command_admission.ShellAuthorizationSource.auto_classifier,
@@ -5845,7 +5845,7 @@ test "fx ask terminal permission prompt approves and denies run_command" {
         .name = "exec_command",
         .arguments_json = "{\"cmd\":\"touch approved.txt\"}",
     }, .ask, &.{}, &.{}));
-    switch ((approved.execution_authority orelse return error.TestExpectedEqual).run_command) {
+    switch ((approved.execution_authority orelse return error.TestExpectedEqual).command) {
         .direct_only => return error.TestExpectedShellAllowed,
         .shell_allowed => |authority| try std.testing.expectEqual(
             command_admission.ShellAuthorizationSource.interactive_once,

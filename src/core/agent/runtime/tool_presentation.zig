@@ -913,7 +913,8 @@ pub fn finishExecutedToolStatus(
 ) !void {
     if (!status_started) return;
     const activity_kind = activityKindForCall(arena, hooks.tool_registry, call);
-    const command_decision = if (activity_kind == .command)
+    const command_decision = if (activity_kind == .command and
+        !successfulWriteStdinCompletion(call, result_memory.command_process_presentation))
         try commandOutcomeDecision(arena, result_memory.command_process_presentation)
     else
         null;
@@ -992,6 +993,18 @@ pub fn finishExecutedToolStatus(
             .command_artifact_handle = command_artifact_handle,
         },
     });
+}
+
+fn successfulWriteStdinCompletion(
+    call: ToolCall,
+    presentation: ?types.CommandProcessPresentation,
+) bool {
+    if (!std.mem.eql(u8, call.name, "write_stdin")) return false;
+    const value = presentation orelse return false;
+    return switch (value) {
+        .exit_code => |code| code == 0,
+        else => false,
+    };
 }
 
 pub const ToolOutcomeDecision = struct {

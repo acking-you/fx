@@ -130,6 +130,17 @@ pub fn validateWrite(_: tool_dispatch.DispatchContext, _: tool_dispatch.ToolInpu
     return null;
 }
 
+pub fn writePresentation(args: std.json.ObjectMap) ?tool_dispatch.CallPresentation {
+    const chars = tool_args.optionalStringArg(args, "chars") orelse "";
+    return .{
+        .activity_kind = .command,
+        .action_label = if (chars.len == 0) "Waiting for" else "Interacting with",
+        .completed_action_label = if (chars.len == 0) "Waited for" else "Interacted with",
+        .label_arg_kind = .session_id,
+        .label_arg_default = "exec session",
+    };
+}
+
 pub fn callExec(ctx: tool_dispatch.DispatchContext, erased: tool_dispatch.ToolInput) tool_dispatch.DispatchError!tool_dispatch.ToolResult {
     const input = erased.as(ExecInput);
     const manager = ctx.unified_exec orelse return .{ .failure = try ctx.allocator.dupe(u8, "exec_command is unavailable on this host") };
@@ -147,7 +158,7 @@ pub fn callExec(ctx: tool_dispatch.DispatchContext, erased: tool_dispatch.ToolIn
     const fingerprint = switch (ctx.execution_authority orelse {
         return .{ .failure = try ctx.allocator.dupe(u8, "exec_command requires command execution authority") };
     }) {
-        .run_command => |authority| switch (authority) {
+        .command => |authority| switch (authority) {
             .direct_only => |value| value,
             .shell_allowed => |value| value.fingerprint,
         },
@@ -166,7 +177,12 @@ pub fn callExec(ctx: tool_dispatch.DispatchContext, erased: tool_dispatch.ToolIn
         .command_artifact_capability = ctx.session_child_capability,
         .command_artifact_dir = ctx.command_artifact_dir,
         .command_artifact_threshold = ctx.max_command_output_bytes,
-    }) catch |err| return .{ .failure = try std.fmt.allocPrint(ctx.allocator, "exec_command failed: {s}", .{@errorName(err)}) };
+        .output_sink = outputSink(ctx),
+        .cancel_flag = ctx.cancel_flag,
+    }) catch |err| {
+        if (err == error.Cancelled) return error.Cancelled;
+        return .{ .failure = try std.fmt.allocPrint(ctx.allocator, "exec_command failed: {s}", .{@errorName(err)}) };
+    };
     defer result.deinit(ctx.allocator);
     reportResultMemory(ctx, result) catch return error.OutOfMemory;
     if (ctx.command_result_json_sink) |sink| {
@@ -188,7 +204,12 @@ pub fn callWrite(ctx: tool_dispatch.DispatchContext, erased: tool_dispatch.ToolI
         .chars = input.chars,
         .yield_time_ms = input.yield_time_ms,
         .max_output_tokens = input.max_output_tokens,
-    }) catch |err| return .{ .failure = try std.fmt.allocPrint(ctx.allocator, "write_stdin failed: {s}", .{@errorName(err)}) };
+        .output_sink = outputSink(ctx),
+        .cancel_flag = ctx.cancel_flag,
+    }) catch |err| {
+        if (err == error.Cancelled) return error.Cancelled;
+        return .{ .failure = try std.fmt.allocPrint(ctx.allocator, "write_stdin failed: {s}", .{@errorName(err)}) };
+    };
     defer result.deinit(ctx.allocator);
     reportResultMemory(ctx, result) catch return error.OutOfMemory;
     if (ctx.command_result_json_sink) |sink| {
@@ -205,6 +226,16 @@ pub fn callWrite(ctx: tool_dispatch.DispatchContext, erased: tool_dispatch.ToolI
         .{ .failure = body }
     else
         .{ .success = body };
+}
+
+fn outputSink(ctx: tool_dispatch.DispatchContext) ?unified_exec.Manager.OutputSink {
+    const context = ctx.output_chunk_ctx orelse return null;
+    const callback = ctx.on_output_chunk orelse return null;
+    return .{
+        .context = context,
+        .lifecycle_id = ctx.output_chunk_lifecycle_id,
+        .callback = callback,
+    };
 }
 
 fn reportResultMemory(ctx: tool_dispatch.DispatchContext, result: unified_exec.Manager.Result) !void {
@@ -290,4 +321,28 @@ test "unified exec tool formats a completed result" {
     try std.testing.expect(std.mem.find(u8, body, "\"output\":\"ok\"") != null);
     try std.testing.expect(std.mem.find(u8, body, "\"wall_time_seconds\":0.000") != null);
     try std.testing.expect(std.mem.find(u8, body, "\"original_token_count\":1") != null);
+}
+
+test "write stdin presentation distinguishes polling from interaction" {
+    var empty = try std.json.parseFromSlice(
+        std.json.Value,
+        std.testing.allocator,
+        "{\"session_id\":7}",
+        .{},
+    );
+    defer empty.deinit();
+    const waited = writePresentation(empty.value.object).?;
+    try std.testing.expectEqualStrings("Waiting for", waited.action_label);
+    try std.testing.expectEqualStrings("Waited for", waited.completed_action_label);
+
+    var input = try std.json.parseFromSlice(
+        std.json.Value,
+        std.testing.allocator,
+        "{\"session_id\":7,\"chars\":\"yes\\n\"}",
+        .{},
+    );
+    defer input.deinit();
+    const interacted = writePresentation(input.value.object).?;
+    try std.testing.expectEqualStrings("Interacting with", interacted.action_label);
+    try std.testing.expectEqualStrings("Interacted with", interacted.completed_action_label);
 }

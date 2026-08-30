@@ -144,7 +144,14 @@ pub fn writeUserMessageChunk(w: *std.Io.Writer, text: []const u8) !void {
     try w.writeAll("}}");
 }
 
-pub fn writeToolCall(w: *std.Io.Writer, tool_call_id: []const u8, title: []const u8, kind: ToolCallKind, status: ToolCallStatus) !void {
+pub fn writeToolCall(
+    w: *std.Io.Writer,
+    tool_call_id: []const u8,
+    title: []const u8,
+    kind: ToolCallKind,
+    status: ToolCallStatus,
+    raw_input_json: ?[]const u8,
+) !void {
     try w.writeAll("{\"sessionUpdate\":\"tool_call\",\"toolCallId\":");
     try writeJsonStr(tool_call_id, w);
     try w.writeAll(",\"title\":");
@@ -153,6 +160,10 @@ pub fn writeToolCall(w: *std.Io.Writer, tool_call_id: []const u8, title: []const
     try writeJsonStr(kind.jsonString(), w);
     try w.writeAll(",\"status\":");
     try writeJsonStr(status.jsonString(), w);
+    if (raw_input_json) |json| {
+        try w.writeAll(",\"rawInput\":");
+        try w.writeAll(json);
+    }
     try w.writeAll("}");
 }
 
@@ -180,7 +191,46 @@ pub fn writeToolCallUpdateWithCommandResult(
         try w.writeAll(",\"command_result\":");
         try w.writeAll(json);
     }
+    if (content_text != null or command_result_json != null) {
+        try w.writeAll(",\"rawOutput\":");
+        if (command_result_json) |json| {
+            try w.writeAll("{\"output\":");
+            if (content_text) |text| {
+                try writeJsonStr(text, w);
+            } else {
+                try w.writeAll("null");
+            }
+            try w.writeAll(",\"commandResult\":");
+            try w.writeAll(json);
+            try w.writeByte('}');
+        } else {
+            try writeJsonStr(content_text.?, w);
+        }
+    }
     try w.writeAll("}");
+}
+
+pub fn writeCommandOutputUpdate(
+    w: *std.Io.Writer,
+    tool_call_id: []const u8,
+    stream: []const u8,
+    chunk: []const u8,
+    aggregated_output: []const u8,
+    truncated: bool,
+) !void {
+    try w.writeAll("{\"sessionUpdate\":\"tool_call_update\",\"toolCallId\":");
+    try writeJsonStr(tool_call_id, w);
+    try w.writeAll(",\"status\":\"in_progress\",\"content\":[{\"type\":\"content\",\"content\":{\"type\":\"text\",\"text\":");
+    try writeJsonStr(aggregated_output, w);
+    try w.writeAll("}}],\"rawOutput\":{\"stream\":");
+    try writeJsonStr(stream, w);
+    try w.writeAll(",\"chunk\":");
+    try writeJsonStr(chunk, w);
+    try w.writeAll(",\"aggregatedOutput\":");
+    try writeJsonStr(aggregated_output, w);
+    try w.writeAll(",\"truncated\":");
+    try w.writeAll(if (truncated) "true" else "false");
+    try w.writeAll("}}");
 }
 
 pub const InitializeOptions = struct {
@@ -256,9 +306,17 @@ test "writeToolCall produces valid json" {
     const alloc = std.testing.allocator;
     var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();
-    try writeToolCall(&out.writer, "call_001", "Reading file", .read, .pending);
+    try writeToolCall(
+        &out.writer,
+        "call_001",
+        "Reading file",
+        .read,
+        .pending,
+        "{\"path\":\"src/main.zig\"}",
+    );
     try std.testing.expect(std.mem.find(u8, out.writer.buffered(), "\"toolCallId\":\"call_001\"") != null);
     try std.testing.expect(std.mem.find(u8, out.writer.buffered(), "\"kind\":\"read\"") != null);
+    try std.testing.expect(std.mem.find(u8, out.writer.buffered(), "\"rawInput\":{\"path\":\"src/main.zig\"}") != null);
 }
 
 test "writePromptResponse produces valid json" {
@@ -320,6 +378,32 @@ test "writeToolCallUpdate can include structured command result" {
     try std.testing.expectEqualStrings("foreground", command_result.get("kind").?.string);
     try std.testing.expectEqual(@as(i64, 0), command_result.get("exit_code").?.integer);
     try std.testing.expect(parsed.value.object.get("content") != null);
+    const raw_output = parsed.value.object.get("rawOutput").?.object;
+    try std.testing.expectEqualStrings("printf ok", raw_output.get("commandResult").?.object.get("command").?.string);
+}
+
+test "writeCommandOutputUpdate preserves stream and accumulated preview" {
+    const alloc = std.testing.allocator;
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+    try writeCommandOutputUpdate(
+        &out.writer,
+        "call_exec",
+        "stderr",
+        "warning\n",
+        "ready\nwarning\n",
+        false,
+    );
+    var parsed = try std.json.parseFromSlice(std.json.Value, alloc, out.writer.buffered(), .{});
+    defer parsed.deinit();
+    const raw_output = parsed.value.object.get("rawOutput").?.object;
+    try std.testing.expectEqualStrings("stderr", raw_output.get("stream").?.string);
+    try std.testing.expectEqualStrings("warning\n", raw_output.get("chunk").?.string);
+    try std.testing.expectEqualStrings("ready\nwarning\n", raw_output.get("aggregatedOutput").?.string);
+    try std.testing.expectEqualStrings(
+        "ready\nwarning\n",
+        parsed.value.object.get("content").?.array.items[0].object.get("content").?.object.get("text").?.string,
+    );
 }
 
 test "writeToolCallUpdate without content" {

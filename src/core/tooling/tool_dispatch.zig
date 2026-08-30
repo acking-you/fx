@@ -4,7 +4,6 @@ const command_admission = @import("../permissions/command_admission.zig");
 const core_permissions = @import("../permissions/permissions.zig");
 const core_types = @import("../shared/types.zig");
 const debug_trace = @import("../shared/debug_trace.zig");
-const command_environment = @import("../execution/command_environment.zig");
 const file_mutation_contract = @import("file_mutation_contract.zig");
 const io_mod = @import("../shared/io.zig");
 const message = @import("../shared/message.zig");
@@ -149,33 +148,6 @@ pub const DispatchError = std.json.ParseError(std.json.Scanner) || error{
     Cancelled,
 };
 
-/// Core-owned execution backend used by the registered run_command callback.
-pub const RunCommandRequest = struct {
-    command: []const u8,
-    resolved_cwd: []const u8,
-    environment: command_environment.Environment,
-    timeout_ms: u64,
-};
-
-pub const RunCommandBackendFn = *const fn (
-    ?*anyopaque,
-    DispatchContext,
-    RunCommandRequest,
-) DispatchError!ToolResult;
-
-pub const RunCommandBackend = struct {
-    ctx: ?*anyopaque = null,
-    execute_fn: RunCommandBackendFn,
-
-    pub fn execute(
-        self: RunCommandBackend,
-        ctx: DispatchContext,
-        request: RunCommandRequest,
-    ) DispatchError!ToolResult {
-        return self.execute_fn(self.ctx, ctx, request);
-    }
-};
-
 pub const PreviousAssistantTurn = struct {
     user_text: []const u8,
     assistant_text: []const u8,
@@ -224,8 +196,6 @@ pub const DispatchContext = struct {
     unified_exec: ?*unified_exec_runtime.Manager = null,
     background_lifecycle_allocator: Allocator = std.heap.c_allocator,
     command_timeout_ms: ?usize = null,
-    captured_command_host: command_environment.Host = .native,
-    run_command_backend: ?RunCommandBackend = null,
     subagent_provider: ?subagent_tool_provider.Provider = null,
     vision_provider: ?VisionProvider = null,
     ask_question_ctx: ?*anyopaque = null,
@@ -320,12 +290,6 @@ pub const AuthorizedResultMapperFn = *const fn (
     DispatchResult,
 ) Allocator.Error!DispatchResult;
 
-pub const RunCommandCompatibility = struct {
-    matches: *const fn ([]const u8) bool,
-    /// Returns success or failure text owned by `ctx.allocator`.
-    execute: *const fn (DispatchContext, []const u8) DispatchError!ToolResult,
-};
-
 /// Consumes a decoded tool input and transfers its owned fields into Core's
 /// canonical file-mutation contract. The caller owns the returned input and
 /// must not deinitialize the consumed ToolInput.
@@ -388,7 +352,6 @@ pub const ExecutorKind = enum {
     open_file,
     web_fetch,
     web_search,
-    run_command,
     exec_command,
     write_stdin,
     skill,
@@ -409,12 +372,9 @@ pub const ApprovalPolicy = enum {
 
 pub const RuntimeProviderKind = enum {
     none,
-    run_command,
     subagent,
     vision,
 };
-
-pub const CapturedCommandFn = *const fn (ToolInput) bool;
 
 pub const CallPresentation = struct {
     activity_kind: core_types.ToolActivityKind,
@@ -453,13 +413,9 @@ pub const Tool = struct {
     validate: ?ValidateFn = null,
     call: CallFn,
     runtime_provider: RuntimeProviderKind = .none,
-    captured_command_host: command_environment.Host = .native,
-    captured_command_action: ?[]const u8 = null,
-    captured_command_fn: ?CapturedCommandFn = null,
     authorized_call_adapter: ?AuthorizedCallAdapterFn = null,
     authorized_result_mapper: ?AuthorizedResultMapperFn = null,
     cancel_if_requested_after_call: bool = false,
-    run_command_compatibility: ?RunCommandCompatibility = null,
     take_file_mutation_input_fn: ?TakeFileMutationInputFn = null,
     reads_only_fn: ReadsOnlyFn,
     irreversible_fn: IrreversibleFn,
@@ -486,44 +442,6 @@ fn startsWithProgressLabel(text: []const u8, label: []const u8) bool {
     if (!std.mem.startsWith(u8, text, label)) return false;
     if (text.len == label.len) return true;
     return text[label.len] == ' ';
-}
-
-pub const RunCommandCompatibilityMatch = struct {
-    tool: *const Tool,
-    compatibility: RunCommandCompatibility,
-};
-
-pub const RunCommandCompatibilityMatchError = error{AmbiguousRunCommandCompatibility};
-
-pub fn matchRunCommandCompatibility(
-    registry: Registry,
-    command: []const u8,
-) RunCommandCompatibilityMatchError!?RunCommandCompatibilityMatch {
-    var matched: ?RunCommandCompatibilityMatch = null;
-    for (registry.tools) |*tool| {
-        const compatibility = tool.run_command_compatibility orelse continue;
-        if (!compatibility.matches(command)) continue;
-        if (matched != null) return error.AmbiguousRunCommandCompatibility;
-        matched = .{
-            .tool = tool,
-            .compatibility = compatibility,
-        };
-    }
-    return matched;
-}
-
-pub fn dispatchRunCommandCompatibility(
-    ctx: DispatchContext,
-    registry: Registry,
-    request: RunCommandRequest,
-) (DispatchError || RunCommandCompatibilityMatchError)!?ToolResult {
-    if (std.meta.activeTag(request.environment) != .legacy) return null;
-    const matched = (try matchRunCommandCompatibility(
-        registry,
-        request.command,
-    )) orelse return null;
-    if (std.mem.indexOfAny(u8, request.command, "|;&\n") != null) return null;
-    return try matched.compatibility.execute(ctx, request.command);
 }
 
 pub fn toolActivityKind(registry: Registry, tool_name: []const u8) core_types.ToolActivityKind {
@@ -712,20 +630,14 @@ pub fn admitToolCall(ctx: DispatchContext, registry: Registry, call: message.Too
                 },
             }
 
-            const captured_command = input.tool.executor_kind == .run_command or
-                input.tool.executor_kind == .exec_command or
-                if (input.tool.captured_command_fn) |classify|
-                    classify(input.value)
-                else
-                    false;
-            if (captured_command) {
+            if (input.tool.executor_kind == .exec_command) {
                 const authority = decision.execution_authority orelse {
-                    return .{ .failure = try call_ctx.allocator.dupe(u8, "captured command permission allowed without execution authority") };
+                    return .{ .failure = try call_ctx.allocator.dupe(u8, "exec_command permission allowed without execution authority") };
                 };
                 call_ctx.execution_authority = switch (authority) {
-                    .run_command => |command_authority| .{ .run_command = command_authority },
+                    .command => |command_authority| .{ .command = command_authority },
                     else => {
-                        return .{ .failure = try call_ctx.allocator.dupe(u8, "captured command permission returned invalid execution authority") };
+                        return .{ .failure = try call_ctx.allocator.dupe(u8, "exec_command permission returned invalid execution authority") };
                     },
                 };
             } else {
@@ -1090,43 +1002,6 @@ const mock_tool = Tool{
     .irreversible_fn = mockIrreversible,
 };
 
-fn matchesCompatibilityFixture(_: []const u8) bool {
-    return true;
-}
-
-fn executeCompatibilityFixture(ctx: DispatchContext, _: []const u8) DispatchError!ToolResult {
-    return .{ .success = try ctx.allocator.dupe(u8, "compatibility fixture") };
-}
-
-const first_compatibility_tool = blk: {
-    var tool = mock_tool;
-    tool.name = "first_compatibility";
-    tool.run_command_compatibility = .{
-        .matches = matchesCompatibilityFixture,
-        .execute = executeCompatibilityFixture,
-    };
-    break :blk tool;
-};
-
-const second_compatibility_tool = blk: {
-    var tool = mock_tool;
-    tool.name = "second_compatibility";
-    tool.run_command_compatibility = .{
-        .matches = matchesCompatibilityFixture,
-        .execute = executeCompatibilityFixture,
-    };
-    break :blk tool;
-};
-
-test "run command compatibility rejects overlapping matches" {
-    const registry = Registry{ .tools = &.{ first_compatibility_tool, second_compatibility_tool } };
-
-    try std.testing.expectError(
-        error.AmbiguousRunCommandCompatibility,
-        matchRunCommandCompatibility(registry, "matching command"),
-    );
-}
-
 test "Registry.lookup returns hit and miss" {
     const registry = Registry{ .tools = &.{mock_tool} };
 
@@ -1471,7 +1346,6 @@ test "DispatchContext command runner fields default to inactive values" {
     try std.testing.expect(ctx.background_log_dir == null);
     try std.testing.expect(ctx.command_artifact_dir == null);
     try std.testing.expect(ctx.command_timeout_ms == null);
-    try std.testing.expect(ctx.run_command_backend == null);
     try std.testing.expect(ctx.subagent_provider == null);
     try std.testing.expect(ctx.ask_question_ctx == null);
     try std.testing.expect(ctx.ask_question_batch == null);

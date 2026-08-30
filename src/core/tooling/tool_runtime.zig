@@ -5,10 +5,6 @@ const auth_runtime = @import("../auth/auth_runtime.zig");
 const oauth_transport = @import("../auth/oauth_transport.zig");
 const host_mod = @import("../hosts/host.zig");
 const command_contract = @import("../execution/command_contract.zig");
-const command_environment = @import("../execution/command_environment.zig");
-const background_process_provider = @import(
-    "../execution/background_process_provider.zig",
-);
 const debug_trace = @import("../shared/debug_trace.zig");
 const diagnostics = @import("../workspace/diagnostics.zig");
 const image_attachments = @import("../images/image_attachments.zig");
@@ -16,8 +12,6 @@ const io_mod = @import("../shared/io.zig");
 const tool_contracts = @import("../agent/runtime/tool_contracts.zig");
 const vision_executor = @import("../agent/runtime/vision_executor.zig");
 const background_runtime = @import("../background/background_runtime.zig");
-const background_launch_identity = @import("../background/background_launch_identity.zig");
-const process_supervisor = @import("../background/process_supervisor.zig");
 const change_tracker = @import("../workspace/change_tracker.zig");
 const diff_mod = @import("../output/diff.zig");
 const file_mutation = @import("file_mutation.zig");
@@ -29,7 +23,6 @@ const permission_prompter = @import("../permissions/permission_prompter.zig");
 const permission_request = @import("../permissions/permission_request.zig");
 const command_admission = @import("../permissions/command_admission.zig");
 const pathing = @import("../workspace/pathing.zig");
-const execution_router = @import("../execution/router.zig");
 const skill_runtime = @import("../skills/skill_runtime.zig");
 const subagent_authority = @import("../subagent/authority.zig");
 const subagent_communication_store = @import("../subagent/communication_store.zig");
@@ -333,8 +326,7 @@ pub fn validateToolCall(ctx: Context, arena: Allocator, call: ToolCall) !tool_co
         else => {},
     }
 
-    var dispatch_ctx = typedDispatchContext(ctx, arena);
-    dispatch_ctx.captured_command_host = spec.captured_command_host;
+    const dispatch_ctx = typedDispatchContext(ctx, arena);
     return switch (try tool_dispatch.validateRegisteredToolCall(dispatch_ctx, ctx.tool_registry, call)) {
         .not_registered => .not_registered,
         .valid => .valid,
@@ -611,7 +603,6 @@ fn executeRegisteredTool(
 ) !ToolExecutionResult {
     var selected_dynamic_tool_sink = SelectedDynamicToolSinkState{ .allocator = arena };
     var context_notice_sink = ContextNoticeSinkState{ .allocator = arena };
-    var command_backend = RunCommandBackendState{ .runtime = ctx };
     var vision_provider = VisionProviderState{
         .runtime = ctx,
         .authorized_image_catalog = authorized_image_catalog,
@@ -638,15 +629,8 @@ fn executeRegisteredTool(
         tool.runtime_provider
     else
         .none;
-    if (registry.lookup(call.name)) |tool| {
-        dispatch_ctx.captured_command_host = tool.captured_command_host;
-    }
     switch (runtime_provider) {
         .none => {},
-        .run_command => dispatch_ctx.run_command_backend = .{
-            .ctx = &command_backend,
-            .execute_fn = executeRunCommandBackend,
-        },
         .vision => dispatch_ctx.vision_provider = .{
             .ctx = &vision_provider,
             .execute_fn = executeVisionProvider,
@@ -664,10 +648,6 @@ fn executeRegisteredTool(
         registry,
         call,
     );
-    if (command_backend.execution_error) |err| {
-        dispatched.deinit(arena);
-        return err;
-    }
     if (vision_provider.execution_error) |err| {
         dispatched.deinit(arena);
         return err;
@@ -677,9 +657,7 @@ fn executeRegisteredTool(
         return err;
     }
 
-    var execution = if (command_backend.completion) |completion|
-        completion
-    else if (vision_provider.completion) |completion|
+    var execution = if (vision_provider.completion) |completion|
         completion
     else
         toolExecutionResultFromDispatch(dispatched);
@@ -697,45 +675,6 @@ fn executeRegisteredTool(
     execution.selected_dynamic_tool_schema_json = selected_dynamic_tool_sink.schema_json;
     execution.context_notices = context_notice_sink.notices.items;
     return execution;
-}
-
-const RunCommandBackendState = struct {
-    runtime: Context,
-    completion: ?ToolExecutionResult = null,
-    execution_error: ?anyerror = null,
-};
-
-fn executeRunCommandBackend(
-    maybe_ctx: ?*anyopaque,
-    dispatch_ctx: tool_dispatch.DispatchContext,
-    request: tool_dispatch.RunCommandRequest,
-) tool_dispatch.DispatchError!tool_dispatch.ToolResult {
-    const raw_ctx = maybe_ctx orelse unreachable;
-    const state: *RunCommandBackendState = @ptrCast(@alignCast(raw_ctx));
-    const authority = switch (dispatch_ctx.execution_authority orelse {
-        state.execution_error = error.InvalidRunCommandExecutionAuthority;
-        return .{ .failure = try dispatch_ctx.allocator.dupe(u8, "") };
-    }) {
-        .run_command => |command_authority| command_authority,
-        .ordinary, .file_mutation, .vision_paths => {
-            state.execution_error = error.InvalidRunCommandExecutionAuthority;
-            return .{ .failure = try dispatch_ctx.allocator.dupe(u8, "") };
-        },
-    };
-    const execution = toolRunCommand(
-        state.runtime,
-        dispatch_ctx.allocator,
-        request,
-        authority,
-    ) catch |err| {
-        state.execution_error = err;
-        return .{ .failure = try dispatch_ctx.allocator.dupe(u8, "") };
-    };
-    state.completion = execution;
-    return switch (execution.status) {
-        .success => .{ .success = @constCast(execution.model_output) },
-        .failure => .{ .failure = @constCast(execution.model_output) },
-    };
 }
 
 fn toolExecutionResultFromDispatch(result: tool_dispatch.DispatchResult) ToolExecutionResult {
@@ -1000,7 +939,7 @@ fn executeVisionRequest(
 
     const approved_targets = switch (authority) {
         .vision_paths => |vision_authority| vision_authority.targets,
-        .ordinary, .run_command, .file_mutation => return error.InvalidVisionExecutionAuthority,
+        .ordinary, .command, .file_mutation => return error.InvalidVisionExecutionAuthority,
     };
     const raw_paths = request.paths() orelse return error.InvalidVisionExecutionAuthority;
     if (raw_paths.len != approved_targets.len) return error.InvalidVisionExecutionAuthority;
@@ -1139,413 +1078,6 @@ pub fn withAdvertisedDynamicToolNames(ctx: Context, advertised_dynamic_tool_name
     var copy = ctx;
     copy.advertised_dynamic_tool_names = advertised_dynamic_tool_names;
     return copy;
-}
-
-const EffectiveCommandTimeout = struct {
-    timeout_ms: usize,
-    started_ms: i64,
-};
-
-fn effectiveCommandTimeout(
-    request_timeout_ms: u64,
-    ambient_timeout_ms: ?usize,
-    ambient_started_ms: ?i64,
-    now_ms: i64,
-) !EffectiveCommandTimeout {
-    const requested = std.math.cast(usize, request_timeout_ms) orelse
-        return error.InvalidToolArguments;
-    const ambient = ambient_timeout_ms orelse return .{
-        .timeout_ms = requested,
-        .started_ms = now_ms,
-    };
-    const ambient_started = ambient_started_ms orelse now_ms;
-    const elapsed: usize = if (now_ms <= ambient_started)
-        0
-    else
-        std.math.cast(usize, now_ms - ambient_started) orelse std.math.maxInt(usize);
-    return .{
-        .timeout_ms = @min(requested, ambient -| elapsed),
-        .started_ms = now_ms,
-    };
-}
-
-fn commandReplayPolicy(
-    environment: command_environment.Environment,
-    has_replay_capability: bool,
-    interactive: bool,
-    continued: ?command_replay_store.CapturePolicy,
-) ?command_replay_store.CapturePolicy {
-    if (continued) |policy| return policy;
-    return switch (environment) {
-        .workspace_clean => null,
-        .legacy => if (has_replay_capability or interactive)
-            .best_effort
-        else
-            null,
-        .clean, .user => if (has_replay_capability)
-            .required
-        else if (interactive)
-            .best_effort
-        else
-            null,
-    };
-}
-
-fn toolRunCommand(
-    ctx: Context,
-    arena: Allocator,
-    request: tool_dispatch.RunCommandRequest,
-    authority: command_admission.CommandExecutionAuthority,
-) !ToolExecutionResult {
-    const command = request.command;
-    const cwd = request.resolved_cwd;
-    const command_ctx = command_admission.CommandContext{
-        .command = command,
-        .resolved_cwd = cwd,
-        .background = false,
-        .target_os = builtin.os.tag,
-        .environment = request.environment,
-    };
-    const timeout = try effectiveCommandTimeout(
-        request.timeout_ms,
-        ctx.command_timeout_ms,
-        ctx.command_timeout_started_ms,
-        io_mod.milliTimestamp(),
-    );
-    const replay_policy = commandReplayPolicy(
-        request.environment,
-        ctx.session_child_capability != null or
-            ctx.ephemeral_command_replay != null,
-        ctx.interactive,
-        if (ctx.command_replay_capture) |capture| capture.policy() else null,
-    );
-
-    if (comptime builtin.os.tag == .wasi) return error.WorkspaceUnavailable;
-
-    try execution_router.validateConfigContext(.{
-        .max_command_output_bytes = ctx.max_command_output_bytes,
-    }, command_ctx);
-    var route = try execution_router.prepareAuthorizedRoute(arena, command_ctx, authority);
-    defer route.deinit(arena);
-
-    const compatibility_result = try tool_dispatch.dispatchRunCommandCompatibility(
-        typedDispatchContext(ctx, arena),
-        ctx.tool_registry,
-        request,
-    );
-    if (compatibility_result) |compatibility| {
-        if (route != .approved_shell) return error.CommandAdmissionChanged;
-        const intercepted_replay = try initCommandReplayCapture(
-            arena,
-            replay_policy,
-            ctx.max_command_output_bytes,
-            ctx.max_command_output_bytes,
-            ctx.session_child_capability,
-            ctx.ephemeral_command_replay,
-            ctx.command_replay_capture,
-            ctx.command_replay_unavailable,
-        );
-        const capture = intercepted_replay.capture;
-        var transferred = false;
-        defer if (!transferred) {
-            if (capture) |candidate| candidate.abort(arena);
-        };
-        var callback = CommandReplayCaptureCallback{
-            .alloc = arena,
-            .capture = capture,
-        };
-        const output = switch (compatibility) {
-            .success => |body| body,
-            .failure => |body| body,
-        };
-        if (compatibility == .success and capture != null and output.len > 0) {
-            callback.accept(
-                ctx.output_chunk_lifecycle_id,
-                .stdout,
-                output,
-            ) catch |err| {
-                if (err != error.CommandOutputCaptureFailed) return err;
-                return finishCommandToolResult(
-                    arena,
-                    capture,
-                    false,
-                    &transferred,
-                    null,
-                    try command_result_mapping.Foreground.outputCaptureFailure(arena),
-                );
-            };
-        }
-        if (compatibility == .success and ctx.interactive and output.len > 0) {
-            try ctx.on_output_chunk(
-                ctx.output_chunk_ctx,
-                ctx.output_chunk_lifecycle_id,
-                .stdout,
-                output,
-            );
-        }
-        return finishCommandToolResult(
-            arena,
-            capture,
-            intercepted_replay.unavailable and
-                (ctx.command_replay_unavailable or callback.had_accepted_output),
-            &transferred,
-            null,
-            .{
-                .status = switch (compatibility) {
-                    .success => .success,
-                    .failure => .failure,
-                },
-                .model_output = output,
-            },
-        );
-    }
-
-    const replay_init = try initCommandReplayCapture(
-        arena,
-        replay_policy,
-        ctx.max_command_output_bytes,
-        execution_router.foregroundResultComparisonLimit(
-            route,
-            ctx.max_command_output_bytes,
-        ),
-        ctx.session_child_capability,
-        ctx.ephemeral_command_replay,
-        ctx.command_replay_capture,
-        ctx.command_replay_unavailable,
-    );
-    const replay_capture = replay_init.capture;
-    var replay_transferred = false;
-    defer if (!replay_transferred) {
-        if (replay_capture) |capture| capture.abort(arena);
-    };
-    var replay_callback = CommandReplayCaptureCallback{
-        .alloc = arena,
-        .capture = replay_capture,
-    };
-
-    const routed = execution_router.executePreparedRoute(.{
-        .max_command_output_bytes = ctx.max_command_output_bytes,
-        .cancel_flag = runtimeCancelFlag(ctx),
-        .output_chunk_lifecycle_id = ctx.output_chunk_lifecycle_id,
-        .output_chunk_ctx = ctx.output_chunk_ctx,
-        .on_output_chunk = ctx.on_output_chunk,
-        .accepted_output_chunk_ctx = if (replay_capture != null) @ptrCast(&replay_callback) else null,
-        .on_accepted_output_chunk = if (replay_capture != null) CommandReplayCaptureCallback.onChunk else null,
-        .callback_projection = if (ctx.interactive) .raw else .model_safe,
-        .timeout_ms = timeout.timeout_ms,
-        .timeout_started_ms = timeout.started_ms,
-        .command_artifact_capability = ctx.session_child_capability,
-        .command_artifact_dir = ctx.command_artifact_dir,
-    }, arena, route) catch |err| {
-        if (err == error.TimeoutExpired) {
-            return finishCommandToolResult(
-                arena,
-                replay_capture,
-                replay_init.unavailable and
-                    (ctx.command_replay_unavailable or replay_callback.had_accepted_output),
-                &replay_transferred,
-                null,
-                try command_result_mapping.Foreground.timeoutFailure(
-                    arena,
-                    command,
-                    cwd,
-                    timeout.timeout_ms,
-                    timeout.started_ms,
-                ),
-            );
-        }
-        if (err == error.CommandOutputCaptureFailed) return finishCommandToolResult(
-            arena,
-            replay_capture,
-            false,
-            &replay_transferred,
-            null,
-            try command_result_mapping.Foreground.outputCaptureFailure(arena),
-        );
-        if (err == error.Cancelled and runtimeCancelFlag(ctx).load(.seq_cst)) {
-            return finishCommandToolResult(
-                arena,
-                replay_capture,
-                replay_init.unavailable and
-                    (ctx.command_replay_unavailable or replay_callback.had_accepted_output),
-                &replay_transferred,
-                null,
-                .{
-                    .status = .failure,
-                    .cancelled = true,
-                    .model_output = "command cancelled\n",
-                },
-            );
-        }
-        return err;
-    };
-    const result = routed.result;
-
-    if (try command_result_mapping.Foreground.cancelledFailure(arena, result)) |cancelled| {
-        return finishCommandToolResult(
-            arena,
-            replay_capture,
-            replay_init.unavailable and
-                (ctx.command_replay_unavailable or replay_callback.had_accepted_output),
-            &replay_transferred,
-            result,
-            cancelled,
-        );
-    }
-
-    if (try command_result_mapping.Foreground.nonZeroFailure(arena, result)) |failure| {
-        return finishCommandToolResult(
-            arena,
-            replay_capture,
-            replay_init.unavailable and
-                (ctx.command_replay_unavailable or replay_callback.had_accepted_output),
-            &replay_transferred,
-            result,
-            failure,
-        );
-    }
-
-    return finishCommandToolResult(
-        arena,
-        replay_capture,
-        replay_init.unavailable and
-            (ctx.command_replay_unavailable or replay_callback.had_accepted_output),
-        &replay_transferred,
-        result,
-        .{
-            .model_output = result.output,
-            .command_result_json = if (result.command_result) |command_result| try command_result.toJson(arena) else null,
-        },
-    );
-}
-
-const CommandReplayCaptureCallback = struct {
-    alloc: Allocator,
-    capture: ?*command_replay_store.Capture,
-    had_accepted_output: bool = false,
-
-    fn onChunk(
-        raw_ctx: *anyopaque,
-        lifecycle_id: ?types.ToolLifecycleId,
-        stream: command_contract.CommandOutputStream,
-        chunk: []const u8,
-    ) !void {
-        const self: *@This() = @ptrCast(@alignCast(raw_ctx));
-        return self.accept(lifecycle_id, stream, chunk);
-    }
-
-    fn accept(
-        self: *@This(),
-        lifecycle_id: ?types.ToolLifecycleId,
-        stream: command_contract.CommandOutputStream,
-        chunk: []const u8,
-    ) !void {
-        _ = lifecycle_id;
-        if (chunk.len == 0) return;
-        self.had_accepted_output = true;
-        if (self.capture) |capture| {
-            switch (capture.policy()) {
-                .required => try capture.appendAcceptedRequired(
-                    self.alloc,
-                    stream,
-                    chunk,
-                ),
-                .best_effort => capture.appendAccepted(self.alloc, stream, chunk),
-            }
-        }
-    }
-};
-
-const CommandReplayCaptureInit = struct {
-    capture: ?*command_replay_store.Capture = null,
-    unavailable: bool = false,
-};
-
-fn initCommandReplayCapture(
-    arena: Allocator,
-    replay_policy: ?command_replay_store.CapturePolicy,
-    inline_limit: usize,
-    comparison_limit: usize,
-    capability: ?*session_child_store.SessionChildCapability,
-    ephemeral_store: ?*command_replay_store.EphemeralStore,
-    continued_capture: ?*command_replay_store.Capture,
-    continued_unavailable: bool,
-) !CommandReplayCaptureInit {
-    const policy = replay_policy orelse return .{};
-    if (continued_unavailable) {
-        if (policy == .required) return error.CommandOutputCaptureFailed;
-        return .{ .unavailable = true };
-    }
-    if (continued_capture) |capture| {
-        capture.setComparisonLimit(comparison_limit);
-        return .{ .capture = capture };
-    }
-    const capture_inline_limit = if (policy == .required) 0 else inline_limit;
-    const capture = (if (capability) |saved|
-        command_replay_store.Capture.create(arena, capture_inline_limit, saved)
-    else if (ephemeral_store) |ephemeral|
-        command_replay_store.Capture.createEphemeral(arena, capture_inline_limit, ephemeral)
-    else
-        command_replay_store.Capture.create(arena, capture_inline_limit, null)) catch |err| {
-        if (policy == .required) return err;
-        debug_trace.logf(
-            "session",
-            "command replay capture initialization unavailable err={s}",
-            .{@errorName(err)},
-        );
-        return .{ .unavailable = true };
-    };
-    capture.setPolicyBeforeCapture(policy);
-    capture.setComparisonLimit(comparison_limit);
-    return .{ .capture = capture };
-}
-
-fn finishCommandToolResult(
-    arena: Allocator,
-    capture: ?*command_replay_store.Capture,
-    replay_unavailable: bool,
-    replay_transferred: *bool,
-    process_result: ?command_contract.RunCommandResult,
-    result: ToolExecutionResult,
-) !ToolExecutionResult {
-    var owned = result;
-    if (capture) |candidate| switch (candidate.policy()) {
-        .required => candidate.sealRequired(arena) catch {
-            owned = try command_result_mapping.Foreground.outputCaptureFailure(arena);
-        },
-        .best_effort => {},
-    };
-    if (process_result) |command_result| {
-        if (commandProcessPresentation(command_result)) |presentation| {
-            var memory = owned.tool_result_memory orelse types.ToolResultMemory{};
-            memory.command_process_presentation = presentation;
-            owned.tool_result_memory = memory;
-        }
-    }
-    if (replay_unavailable) {
-        var memory = owned.tool_result_memory orelse types.ToolResultMemory{};
-        memory.command_output_replay = .unavailable;
-        owned.tool_result_memory = memory;
-    }
-    owned.command_replay_capture = capture;
-    if (capture != null) replay_transferred.* = true;
-    return owned;
-}
-
-fn commandProcessPresentation(
-    result: command_contract.RunCommandResult,
-) ?types.CommandProcessPresentation {
-    const command_result = result.command_result orelse return null;
-    const foreground = switch (command_result) {
-        .foreground => |value| value,
-        .background => return null,
-    };
-    if (foreground.timed_out) return .timed_out;
-    if (foreground.signal) |signal| return .{ .signal = signal };
-    if (foreground.exit_code) |exit_code| {
-        if (exit_code != 0) return .{ .exit_code = exit_code };
-    }
-    return null;
 }
 
 const SubagentProviderState = struct {
@@ -1924,50 +1456,6 @@ const test_tool_registry = tool_dispatch.Registry{ .tools = &.{
     test_builtin_tools.ask_user_question,
     test_builtin_tools.read_tool_result,
 } };
-
-fn matchesTestRunCommandCompatibility(command: []const u8) bool {
-    return std.mem.startsWith(u8, command, "fx-compatibility-probe");
-}
-
-fn executeTestRunCommandCompatibility(
-    ctx: tool_dispatch.DispatchContext,
-    _: []const u8,
-) tool_dispatch.DispatchError!tool_dispatch.ToolResult {
-    return .{ .success = try ctx.allocator.dupe(u8, "registered compatibility\n") };
-}
-
-const test_compatible_tool = blk: {
-    var tool = test_builtin_tools.install_skill;
-    tool.run_command_compatibility = .{
-        .matches = matchesTestRunCommandCompatibility,
-        .execute = executeTestRunCommandCompatibility,
-    };
-    break :blk tool;
-};
-
-fn executeFailingRunCommandCompatibility(
-    ctx: tool_dispatch.DispatchContext,
-    _: []const u8,
-) tool_dispatch.DispatchError!tool_dispatch.ToolResult {
-    return .{ .failure = try tool_result_errors.formatToolExecutionErrorJson(
-        ctx.allocator,
-        "install_skill",
-        error.SkillInstallFailed,
-    ) };
-}
-
-const test_failing_compatible_tool = blk: {
-    var tool = test_builtin_tools.install_skill;
-    tool.run_command_compatibility = .{
-        .matches = matchesTestRunCommandCompatibility,
-        .execute = executeFailingRunCommandCompatibility,
-    };
-    break :blk tool;
-};
-
-const test_compatibility_registry = tool_dispatch.Registry{ .tools = &.{test_compatible_tool} };
-
-const test_failing_compatibility_registry = tool_dispatch.Registry{ .tools = &.{test_failing_compatible_tool} };
 
 fn gatherNoopTestContext(_: Allocator, _: context_contract.InitialContextInput) context_contract.ProviderError!context_contract.ProviderContext {
     return .{};
@@ -2934,64 +2422,6 @@ test "subagent identity evidence prefers canonical active-turn results and authe
         .corrupt => {},
         .absent, .replay => return error.TestUnexpectedResult,
     }
-}
-
-test "captured command compatibility bypasses compound commands" {
-    var rt = TestRuntime{ .tool_registry = test_compatibility_registry };
-    defer rt.deinit(std.testing.allocator);
-
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-
-    try std.testing.expect((try tool_dispatch.dispatchRunCommandCompatibility(typedDispatchContext(rt.context(), arena), rt.tool_registry, .{
-        .command = "fx-compatibility-probe; printf shell-fallback",
-        .resolved_cwd = "/tmp",
-        .environment = .legacy,
-        .timeout_ms = 600_000,
-    })) == null);
-
-    for ([_]command_environment.Environment{
-        .{ .clean = "/bin/zsh" },
-        .{ .user = "/bin/zsh" },
-    }) |environment| {
-        try std.testing.expect((try tool_dispatch.dispatchRunCommandCompatibility(
-            typedDispatchContext(rt.context(), arena),
-            rt.tool_registry,
-            .{
-                .command = "fx-compatibility-probe",
-                .resolved_cwd = "/tmp",
-                .environment = environment,
-                .timeout_ms = 600_000,
-            },
-        )) == null);
-    }
-}
-
-test "run command compatibility returns installer failure without shell fallback" {
-    var rt = TestRuntime{
-        .tool_registry = test_failing_compatibility_registry,
-        .interactive = false,
-    };
-    defer rt.deinit(std.testing.allocator);
-
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const result = (try tool_dispatch.dispatchRunCommandCompatibility(
-        typedDispatchContext(rt.context(), arena_state.allocator()),
-        rt.tool_registry,
-        .{
-            .command = "fx-compatibility-probe",
-            .resolved_cwd = "/tmp",
-            .environment = .legacy,
-            .timeout_ms = 600_000,
-        },
-    )) orelse return error.TestExpectedEqual;
-
-    const failure = result.failure;
-    try expectToolErrorField(failure, "type", "tool_execution_failed");
-    try expectToolErrorField(failure, "tool_name", "install_skill");
-    try expectToolErrorDetailString(failure, "error", "SkillInstallFailed");
 }
 
 fn unexpectedTestPrompt(
@@ -5117,8 +4547,14 @@ test "disabled automatic reviewer returns a recoverable denial without a human p
     try std.testing.expect(rt.worker.pending_permission_request_shared == null);
 }
 
-test "web_fetch permits valid public hosts by default" {
-    var rt = TestRuntime{ .workspace_root = "/tmp/workspace", .permission_mode = .auto, .interactive = false };
+test "web_fetch bypasses automatic review for valid public hosts by default" {
+    var reviewer = TestAutoReview{};
+    var rt = TestRuntime{
+        .workspace_root = "/tmp/workspace",
+        .permission_mode = .auto,
+        .interactive = false,
+        .auto_classifier = reviewer.classifier(),
+    };
     defer rt.deinit(std.testing.allocator);
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
@@ -5129,6 +4565,7 @@ test "web_fetch permits valid public hosts by default" {
         .name = "web_fetch",
         .arguments_json = "{\"url\":\"https://example.com/frameworks/sample\"}",
     }, .auto, &.{})).decision);
+    try std.testing.expectEqual(@as(usize, 0), reviewer.calls);
 }
 
 test "web_fetch exact session grant authorizes only matching canonical domain" {
@@ -5519,168 +4956,6 @@ test "request tool permission checks copy and rename destinations" {
     try std.testing.expect(!absolutePathExists(try std.fs.path.join(arena, &.{ root, "blocked/copied.txt" })));
     try std.testing.expect(!absolutePathExists(try std.fs.path.join(arena, &.{ root, "blocked/renamed.txt" })));
     try std.testing.expect(absolutePathExists(try std.fs.path.join(arena, &.{ root, "src/source.txt" })));
-}
-
-test "effective command timeout uses the earlier remaining budget" {
-    try std.testing.expectEqual(
-        EffectiveCommandTimeout{ .timeout_ms = 5000, .started_ms = 700 },
-        try effectiveCommandTimeout(5000, null, null, 700),
-    );
-    try std.testing.expectEqual(
-        EffectiveCommandTimeout{ .timeout_ms = 700, .started_ms = 400 },
-        try effectiveCommandTimeout(5000, 1000, 100, 400),
-    );
-    try std.testing.expectEqual(
-        EffectiveCommandTimeout{ .timeout_ms = 100, .started_ms = 400 },
-        try effectiveCommandTimeout(100, 5000, 100, 400),
-    );
-    try std.testing.expectEqual(
-        EffectiveCommandTimeout{ .timeout_ms = 0, .started_ms = 1200 },
-        try effectiveCommandTimeout(5000, 1000, 100, 1200),
-    );
-}
-
-test "command replay policy is decided once from typed execution context" {
-    const Case = struct {
-        environment: command_environment.Environment,
-        has_replay_capability: bool,
-        interactive: bool,
-        continued: ?command_replay_store.CapturePolicy = null,
-        expected: ?command_replay_store.CapturePolicy,
-    };
-    const cases = [_]Case{
-        .{
-            .environment = .{ .clean = "/bin/zsh" },
-            .has_replay_capability = true,
-            .interactive = false,
-            .expected = .required,
-        },
-        .{
-            .environment = .{ .user = "/bin/zsh" },
-            .has_replay_capability = false,
-            .interactive = true,
-            .expected = .best_effort,
-        },
-        .{
-            .environment = .{ .clean = "/bin/zsh" },
-            .has_replay_capability = false,
-            .interactive = false,
-            .expected = null,
-        },
-        .{
-            .environment = .legacy,
-            .has_replay_capability = true,
-            .interactive = false,
-            .expected = .best_effort,
-        },
-        .{
-            .environment = .workspace_clean,
-            .has_replay_capability = true,
-            .interactive = true,
-            .expected = null,
-        },
-        .{
-            .environment = .{ .clean = "/bin/zsh" },
-            .has_replay_capability = true,
-            .interactive = false,
-            .continued = .best_effort,
-            .expected = .best_effort,
-        },
-    };
-
-    for (cases) |case| {
-        try std.testing.expectEqual(
-            case.expected,
-            commandReplayPolicy(
-                case.environment,
-                case.has_replay_capability,
-                case.interactive,
-                case.continued,
-            ),
-        );
-    }
-}
-
-test "interactive command replay capture allocation fails open" {
-    var failing = std.testing.FailingAllocator.init(
-        std.testing.allocator,
-        .{ .fail_index = 0 },
-    );
-    const init = try initCommandReplayCapture(
-        failing.allocator(),
-        .best_effort,
-        64 * 1024,
-        64 * 1024,
-        null,
-        null,
-        null,
-        false,
-    );
-    try std.testing.expect(init.capture == null);
-    try std.testing.expect(init.unavailable);
-
-    var callback = CommandReplayCaptureCallback{
-        .alloc = std.testing.allocator,
-        .capture = null,
-    };
-    try CommandReplayCaptureCallback.onChunk(
-        @ptrCast(&callback),
-        null,
-        .stdout,
-        "accepted output\n",
-    );
-    try std.testing.expect(callback.had_accepted_output);
-
-    var transferred = false;
-    const result = try finishCommandToolResult(
-        std.testing.allocator,
-        null,
-        init.unavailable and callback.had_accepted_output,
-        &transferred,
-        null,
-        .{ .model_output = "exit_code=0\n(no output)\n" },
-    );
-    try std.testing.expect(!transferred);
-    switch (result.tool_result_memory.?.command_output_replay.?) {
-        .unavailable => {},
-        .available => return error.TestExpectedUnavailableReplay,
-    }
-}
-
-test "required replay finalizer overrides every recoverable command result" {
-    const alloc = std.testing.allocator;
-    var arena_state = std.heap.ArenaAllocator.init(alloc);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-    const initial_results = [_]ToolExecutionResult{
-        .{ .status = .success, .model_output = "compatibility success\n" },
-        .{ .status = .failure, .model_output = "timeout\n" },
-        .{ .status = .failure, .cancelled = true, .model_output = "cancelled\n" },
-        .{ .status = .failure, .model_output = "nonzero\n" },
-        .{ .status = .success, .model_output = "success\n" },
-    };
-
-    for (initial_results) |initial| {
-        const capture = try command_replay_store.Capture.create(arena, 0, null);
-        defer capture.abort(arena);
-        capture.setPolicyBeforeCapture(.required);
-        try std.testing.expectError(
-            error.CommandOutputCaptureFailed,
-            capture.appendAcceptedRequired(arena, .stdout, "accepted\n"),
-        );
-        var transferred = false;
-        const result = try finishCommandToolResult(
-            arena,
-            capture,
-            false,
-            &transferred,
-            null,
-            initial,
-        );
-        try std.testing.expect(transferred);
-        try std.testing.expectEqual(tool_contracts.ToolExecutionStatus.failure, result.status);
-        try expectContains(result.model_output, "\"output_capture_failed\":true");
-    }
 }
 
 const PermissionThreadState = struct {

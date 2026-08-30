@@ -5014,7 +5014,7 @@ test "processQueuedPrompt interrupted active call preserves prior completed exec
     );
 }
 
-test "execution cancellation closes every later streamed tool action" {
+test "execution cancellation after a yielded command closes every later streamed tool action" {
     const alloc = std.testing.allocator;
     const calls = [_]ToolCall{
         toolCall("active_command", "exec_command", "{\"cmd\":\"sleep 10\"}"),
@@ -5036,7 +5036,10 @@ test "execution cancellation closes every later streamed tool action" {
     var deps = FakeAgentRuntimeDeps.init(alloc);
     defer deps.deinit();
     deps.permission_decisions = &.{.once};
-    deps.exec_plans = &.{.{ .err = error.Cancelled }};
+    deps.exec_plans = &.{.{ .result = .{
+        .model_output = "{\"status\":\"running\",\"process_id\":7}",
+        .command_result_json = "{\"kind\":\"foreground\",\"process_id\":7}",
+    } }};
     var fixture = PromptFixture{};
     deps.cancel_on_execute = &fixture.cancel_flag;
     deps.cancel_on_execute_name = "exec_command";

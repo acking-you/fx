@@ -4,7 +4,6 @@ const io_mod = @import("../../core/shared/io.zig");
 const model_context_encoding = @import("../../core/shared/model_context_encoding.zig");
 const tool_args = @import("../../core/tooling/tool_args.zig");
 const tool_dispatch = @import("../../core/tooling/tool_dispatch.zig");
-const tool_result_errors = @import("../../core/tooling/tool_result_errors.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -70,25 +69,6 @@ pub fn call(ctx: tool_dispatch.DispatchContext, erased: tool_dispatch.ToolInput)
     const output = executeFromSource(ctx.allocator, ctx.skills_dir, input.source, input.skill) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return .{ .failure = try std.fmt.allocPrint(ctx.allocator, "install_skill failed: {s}", .{@errorName(err)}) },
-    };
-    return .{ .success = output };
-}
-
-pub fn matchesRunCommand(command: []const u8) bool {
-    return builtin_skills.looksLikeInstallCommand(command);
-}
-
-pub fn executeRunCommand(
-    ctx: tool_dispatch.DispatchContext,
-    command: []const u8,
-) tool_dispatch.DispatchError!tool_dispatch.ToolResult {
-    const output = executeFromSource(ctx.allocator, ctx.skills_dir, command, null) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return .{ .failure = try tool_result_errors.formatToolExecutionErrorJson(
-            ctx.allocator,
-            "install_skill",
-            err,
-        ) },
     };
     return .{ .success = output };
 }
@@ -282,43 +262,6 @@ test "install_skill owner reports no matching skills" {
         checkNoMatchAllocationFailures,
         .{repo_root},
     );
-}
-
-test "run command compatibility reports managed filesystem failures" {
-    const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    try tmp.dir.createDirPath(io_mod.getIo(), "repo/workflow");
-    try writeTempFile(
-        &tmp,
-        "repo/workflow/SKILL.md",
-        "---\nname: workflow\ndescription: workflow helper\n---\n\nbody\n",
-    );
-    try writeTempFile(&tmp, "skills-blocker", "not a directory\n");
-
-    const repo_root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "repo");
-    defer alloc.free(repo_root);
-    const blocked_root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "skills-blocker");
-    defer alloc.free(blocked_root);
-    const command = try std.fmt.allocPrint(
-        alloc,
-        "npx skills add {s} --skill workflow -g -y",
-        .{repo_root},
-    );
-    defer alloc.free(command);
-
-    var arena_state = std.heap.ArenaAllocator.init(alloc);
-    defer arena_state.deinit();
-    const result = try executeRunCommand(.{
-        .allocator = arena_state.allocator(),
-        .skills_dir = blocked_root,
-    }, command);
-
-    switch (result) {
-        .success => try std.testing.expect(false),
-        .failure => |body| try std.testing.expect(tool_result_errors.isToolExecutionFailedOutput(body)),
-    }
 }
 
 test "install_skill owner keeps an unmatched source inside the status line" {

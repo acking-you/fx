@@ -6315,7 +6315,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       await session.waitForText("Review · ←/→ switch · ctrl o close", TIMEOUT);
       const reviewEscapes = await session.capturePaneEscapes();
       expect(reviewEscapes).not.toContain("\x1b[38;5;245m│");
-      expect(reviewEscapes).toContain("│\x1b[38;5;245m  30 lines");
+      expect(reviewEscapes).toContain("│\x1b[38;5;245m  30 output lines");
       await session.sendKeys("Right");
       for (let page = 0; page < 10; page += 1) {
         await session.sendHexBytes(["1b", "5b", "36", "7e"]);

@@ -87,6 +87,92 @@ pub const TerminalOutcome = union(enum) {
     rpc_error: jsonrpc.RpcError,
 };
 
+const max_acp_command_preview_bytes: usize = 64 * 1024;
+
+const AcpCommandOutputSink = struct {
+    alloc: Allocator,
+    bytes: *std.ArrayList(u8),
+
+    pub fn appendText(self: *AcpCommandOutputSink, text: []const u8) !void {
+        try self.bytes.appendSlice(self.alloc, text);
+    }
+
+    pub fn finishLine(self: *AcpCommandOutputSink) !void {
+        try self.bytes.append(self.alloc, '\n');
+    }
+
+    pub fn replaceLine(self: *AcpCommandOutputSink) !void {
+        try self.bytes.append(self.alloc, '\r');
+    }
+};
+
+const AcpCommandOutputPreview = struct {
+    bytes: std.ArrayList(u8) = .empty,
+    decoders: [2]command_output_content.Decoder = .{ .{}, .{} },
+    truncated: bool = false,
+
+    fn deinit(self: *AcpCommandOutputPreview, alloc: Allocator) void {
+        self.bytes.deinit(alloc);
+        self.* = undefined;
+    }
+
+    fn decode(
+        self: *AcpCommandOutputPreview,
+        alloc: Allocator,
+        stream: command_output_content.Stream,
+        raw: []const u8,
+    ) ![]u8 {
+        var visible: std.ArrayList(u8) = .empty;
+        errdefer visible.deinit(alloc);
+        var sink = AcpCommandOutputSink{ .alloc = alloc, .bytes = &visible };
+        try self.decoders[@intFromEnum(stream)].append(raw, &sink);
+        return visible.toOwnedSlice(alloc);
+    }
+
+    fn finishDecoder(
+        self: *AcpCommandOutputPreview,
+        alloc: Allocator,
+        stream: command_output_content.Stream,
+    ) ![]u8 {
+        var visible: std.ArrayList(u8) = .empty;
+        errdefer visible.deinit(alloc);
+        var sink = AcpCommandOutputSink{ .alloc = alloc, .bytes = &visible };
+        try self.decoders[@intFromEnum(stream)].finish(&sink);
+        return visible.toOwnedSlice(alloc);
+    }
+
+    fn appendVisible(self: *AcpCommandOutputPreview, alloc: Allocator, chunk: []const u8) !void {
+        if (chunk.len >= max_acp_command_preview_bytes) {
+            self.bytes.clearRetainingCapacity();
+            var start = chunk.len - max_acp_command_preview_bytes;
+            while (start < chunk.len and isUtf8Continuation(chunk[start])) : (start += 1) {}
+            try self.bytes.appendSlice(
+                alloc,
+                chunk[start..],
+            );
+            self.truncated = true;
+            return;
+        }
+        const overflow = self.bytes.items.len +| chunk.len -| max_acp_command_preview_bytes;
+        if (overflow > 0) {
+            var drop = overflow;
+            while (drop < self.bytes.items.len and isUtf8Continuation(self.bytes.items[drop])) : (drop += 1) {}
+            std.mem.copyForwards(
+                u8,
+                self.bytes.items[0 .. self.bytes.items.len - drop],
+                self.bytes.items[drop..],
+            );
+            self.bytes.items.len -= drop;
+            self.truncated = true;
+        }
+        try self.bytes.appendSlice(alloc, chunk);
+    }
+};
+
+fn isUtf8Continuation(byte: u8) bool {
+    return byte & 0xc0 == 0x80;
+}
+
 const AcpContext = struct {
     const GatewayRouteView = union(enum) {
         live,
@@ -100,6 +186,12 @@ const AcpContext = struct {
     /// copies of provider call ids so the ID stays stable from permission
     /// review through execution.
     published_tool_calls: std.StringHashMapUnmanaged(void) = .empty,
+    /// Bounded accumulated command output for ACP's replace-semantics
+    /// ToolCallUpdate.content field. Keys borrow published_tool_calls keys.
+    /// Unified Exec queues both pipe readers and drains their owned chunks on
+    /// the model operation thread, so this map has one writer and transport
+    /// backpressure never holds a process-control lock.
+    command_output_previews: std.StringHashMapUnmanaged(AcpCommandOutputPreview) = .empty,
     stop_reason: acp_types.StopReason = .end_turn,
     auto_classifier: permission_auto_classifier.Classifier =
         permission_auto_classifier.Classifier.disabled(),
@@ -109,6 +201,9 @@ const AcpContext = struct {
     captured_permission_mode: ?PermissionMode = null,
 
     fn deinitPublishedToolCalls(self: *AcpContext) void {
+        var previews = self.command_output_previews.valueIterator();
+        while (previews.next()) |preview| preview.deinit(self.alloc);
+        self.command_output_previews.deinit(self.alloc);
         var keys = self.published_tool_calls.keyIterator();
         while (keys.next()) |key| self.alloc.free(key.*);
         self.published_tool_calls.deinit(self.alloc);
@@ -165,12 +260,26 @@ const AcpContext = struct {
         const registry = self.toolRegistry();
         const title = describeToolTitle(registry, arena, call) catch "Tool call";
         const kind = mapToolKind(call.name);
+        var validated_arguments: std.Io.Writer.Allocating = .init(arena);
+        defer validated_arguments.deinit();
+        const raw_input_json: ?[]const u8 = if (writeValidatedToolArguments(
+            arena,
+            &validated_arguments.writer,
+            call.arguments_json,
+        )) |_| validated_arguments.written() else |_| null;
 
         const owned_id = try self.alloc.dupe(u8, call.id);
         errdefer self.alloc.free(owned_id);
         var out: std.Io.Writer.Allocating = .init(self.alloc);
         defer out.deinit();
-        try acp_types.writeToolCall(&out.writer, owned_id, title, kind, .pending);
+        try acp_types.writeToolCall(
+            &out.writer,
+            owned_id,
+            title,
+            kind,
+            .pending,
+            raw_input_json,
+        );
         try self.sendUpdate(out.writer.buffered());
         try self.published_tool_calls.put(self.alloc, owned_id, {});
         return owned_id;
@@ -185,6 +294,60 @@ const AcpContext = struct {
         defer out.deinit();
         try acp_types.writeToolCallUpdate(&out.writer, tool_call_id, .in_progress, plain);
         try self.sendUpdate(out.writer.buffered());
+    }
+
+    fn sendCommandOutputDelta(
+        self: *AcpContext,
+        tool_call_id: []const u8,
+        stream: command_output_content.Stream,
+        chunk: []const u8,
+    ) !void {
+        const stable_id = self.published_tool_calls.getKey(tool_call_id) orelse return;
+        const entry = try self.command_output_previews.getOrPut(self.alloc, stable_id);
+        if (!entry.found_existing) entry.value_ptr.* = .{};
+        const visible = try entry.value_ptr.decode(self.alloc, stream, chunk);
+        defer self.alloc.free(visible);
+        if (visible.len == 0) return;
+        try self.sendVisibleCommandOutputDelta(stable_id, stream, visible, entry.value_ptr);
+    }
+
+    fn sendVisibleCommandOutputDelta(
+        self: *AcpContext,
+        stable_id: []const u8,
+        stream: command_output_content.Stream,
+        visible: []const u8,
+        preview: *AcpCommandOutputPreview,
+    ) !void {
+        try preview.appendVisible(self.alloc, visible);
+
+        var out: std.Io.Writer.Allocating = .init(self.alloc);
+        defer out.deinit();
+        try acp_types.writeCommandOutputUpdate(
+            &out.writer,
+            stable_id,
+            @tagName(stream),
+            visible,
+            preview.bytes.items,
+            preview.truncated,
+        );
+        try self.sendUpdate(out.writer.buffered());
+    }
+
+    fn flushCommandOutputPreview(self: *AcpContext, tool_call_id: []const u8) !void {
+        const stable_id = self.published_tool_calls.getKey(tool_call_id) orelse return;
+        const preview = self.command_output_previews.getPtr(stable_id) orelse return;
+        for ([_]command_output_content.Stream{ .stdout, .stderr }) |stream| {
+            const visible = try preview.finishDecoder(self.alloc, stream);
+            defer self.alloc.free(visible);
+            if (visible.len == 0) continue;
+            try self.sendVisibleCommandOutputDelta(stable_id, stream, visible, preview);
+        }
+    }
+
+    fn clearCommandOutputPreview(self: *AcpContext, tool_call_id: []const u8) void {
+        const removed = self.command_output_previews.fetchRemove(tool_call_id) orelse return;
+        var preview = removed.value;
+        preview.deinit(self.alloc);
     }
 
     fn sendWebSearchProgress(self: *AcpContext, tool_call_id: []const u8, progress: types.WebSearchProgress) !void {
@@ -202,6 +365,8 @@ const AcpContext = struct {
     }
 
     fn sendToolCallCompletedWithCommandResult(self: *AcpContext, tool_call_id: []const u8, result_text: ?[]const u8, command_result_json: ?[]const u8) !void {
+        try self.flushCommandOutputPreview(tool_call_id);
+        self.clearCommandOutputPreview(tool_call_id);
         var out: std.Io.Writer.Allocating = .init(self.alloc);
         defer out.deinit();
         try acp_types.writeToolCallUpdateWithCommandResult(&out.writer, tool_call_id, .completed, result_text, command_result_json);
@@ -213,6 +378,8 @@ const AcpContext = struct {
     }
 
     fn sendToolCallErrorWithCommandResult(self: *AcpContext, tool_call_id: []const u8, err_text: []const u8, command_result_json: ?[]const u8) !void {
+        try self.flushCommandOutputPreview(tool_call_id);
+        self.clearCommandOutputPreview(tool_call_id);
         var out: std.Io.Writer.Allocating = .init(self.alloc);
         defer out.deinit();
         try acp_types.writeToolCallUpdateWithCommandResult(&out.writer, tool_call_id, .failed, err_text, command_result_json);
@@ -2798,10 +2965,10 @@ fn formatToolExecutionError(_: *anyopaque, arena: Allocator, tool_name: []const 
     return tool_result_errors.formatToolExecutionErrorJson(arena, tool_name, err);
 }
 
-fn onCommandOutputChunk(raw_ctx: *anyopaque, lifecycle_id: ?types.ToolLifecycleId, _: command_output_content.Stream, chunk: []const u8) !void {
+fn onCommandOutputChunk(raw_ctx: *anyopaque, lifecycle_id: ?types.ToolLifecycleId, stream: command_output_content.Stream, chunk: []const u8) !void {
     const ctx: *AcpContext = @ptrCast(@alignCast(raw_ctx));
     const id = lifecycle_id orelse return;
-    try ctx.sendToolCallProgressText(id.call_id, chunk);
+    try ctx.sendCommandOutputDelta(id.call_id, stream, chunk);
 }
 
 fn onMcpProgress(raw_ctx: *anyopaque, lifecycle_id: types.ToolLifecycleId, text: []const u8) void {
@@ -3298,6 +3465,14 @@ pub fn mapToolKind(tool_name: []const u8) acp_types.ToolCallKind {
 }
 
 fn describeToolTitle(registry: tool_dispatch.Registry, arena: Allocator, call: ToolCall) ![]const u8 {
+    if (registry.lookup(call.name)) |spec| {
+        if (spec.executor_kind == .exec_command or spec.executor_kind == .write_stdin) {
+            return tool_presentation.formatPlainAction(arena, .{
+                .tool_registry = registry,
+                .call = call,
+            });
+        }
+    }
     if (tool_dispatch.toolCallPresentation(arena, registry, call)) |presentation| {
         return std.fmt.allocPrint(arena, "{s}", .{presentation.action_label});
     }
@@ -3844,6 +4019,64 @@ test "acp exposes web_search progress updates" {
     try std.testing.expect(std.mem.find(u8, out.written(), "\"status\":\"in_progress\"") != null);
     try std.testing.expect(std.mem.find(u8, out.written(), "Found 4 results for current news") != null);
     try std.testing.expectEqual(acp_types.ToolCallKind.search, mapToolKind("web_search"));
+}
+
+test "ACP command output preview repairs split and invalid UTF-8" {
+    const alloc = std.testing.allocator;
+    var preview = AcpCommandOutputPreview{};
+    defer preview.deinit(alloc);
+
+    const partial = try preview.decode(alloc, .stdout, "\xe4\xb8");
+    defer alloc.free(partial);
+    try std.testing.expectEqual(@as(usize, 0), partial.len);
+
+    const completed = try preview.decode(alloc, .stdout, "\xad\xff");
+    defer alloc.free(completed);
+    try std.testing.expectEqualStrings("中\\xff", completed);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(completed));
+    try preview.appendVisible(alloc, completed);
+    var notification: std.Io.Writer.Allocating = .init(alloc);
+    defer notification.deinit();
+    try acp_types.writeCommandOutputUpdate(
+        &notification.writer,
+        "call_utf8",
+        "stdout",
+        completed,
+        preview.bytes.items,
+        preview.truncated,
+    );
+    var parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        alloc,
+        notification.written(),
+        .{},
+    );
+    defer parsed.deinit();
+
+    const trailing = try preview.decode(alloc, .stderr, "\xe4");
+    defer alloc.free(trailing);
+    try std.testing.expectEqual(@as(usize, 0), trailing.len);
+    const flushed = try preview.finishDecoder(alloc, .stderr);
+    defer alloc.free(flushed);
+    try std.testing.expectEqualStrings("\\xe4", flushed);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(flushed));
+}
+
+test "ACP command output preview truncates only at UTF-8 boundaries" {
+    const alloc = std.testing.allocator;
+    var preview = AcpCommandOutputPreview{};
+    defer preview.deinit(alloc);
+    const repeated_len = ((max_acp_command_preview_bytes / 3) + 2) * 3;
+    const repeated = try alloc.alloc(u8, repeated_len);
+    defer alloc.free(repeated);
+    var index: usize = 0;
+    while (index < repeated.len) : (index += 3) {
+        @memcpy(repeated[index .. index + 3], "中");
+    }
+    try preview.appendVisible(alloc, repeated);
+    try std.testing.expect(preview.truncated);
+    try std.testing.expect(preview.bytes.items.len <= max_acp_command_preview_bytes);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(preview.bytes.items));
 }
 
 test "ACP tool notifications preserve UTF-8 for clipped and unsafe output" {
@@ -4594,7 +4827,7 @@ test "ACP default user commands require configured authority or review" {
         .name = "exec_command",
         .arguments_json = "{\"cmd\":\"touch configured.txt\"}",
     }, .ask, &.{}, &.{}));
-    switch ((configured.execution_authority orelse return error.TestExpectedEqual).run_command) {
+    switch ((configured.execution_authority orelse return error.TestExpectedEqual).command) {
         .direct_only => return error.TestExpectedShellAllowed,
         .shell_allowed => |authority| try std.testing.expectEqual(command_admission.ShellAuthorizationSource.configured_rule, authority.source),
     }
@@ -4669,7 +4902,7 @@ test "ACP auto mode uses automatic review clear and caution without prompting" {
     );
     try std.testing.expectEqual(
         command_admission.ShellAuthorizationSource.auto_classifier,
-        direct.execution_authority.?.run_command.shell_allowed.source,
+        direct.execution_authority.?.command.shell_allowed.source,
     );
     try std.testing.expectEqual(@as(usize, 1), fake.calls);
 
@@ -4680,7 +4913,7 @@ test "ACP auto mode uses automatic review clear and caution without prompting" {
     };
     var accepted_review = TestReviewTurn.init("Create accepted.txt.", accepted_call);
     const accepted = try requestToolPermissionOutcomeWithRequest(&ctx, arena, accepted_call, accepted_review.context(), .auto, &.{}, null, null, &.{});
-    switch ((accepted.execution_authority orelse return error.TestExpectedEqual).run_command) {
+    switch ((accepted.execution_authority orelse return error.TestExpectedEqual).command) {
         .direct_only => return error.TestExpectedShellAllowed,
         .shell_allowed => |authority| try std.testing.expectEqual(
             command_admission.ShellAuthorizationSource.auto_classifier,

@@ -1166,11 +1166,9 @@ fn formatToolAction(
         }
         return formatMissingSpecToolAction(arena, state, denied_label, call.name);
     };
-    if (try tool_presentation.formatRunCommandActivity(arena, ctx.tool_registry, ctx.workspace_root, call)) |activity| {
+    if (try tool_presentation.formatCommandActivity(arena, ctx.tool_registry, ctx.workspace_root, call)) |activity| {
         defer arena.free(activity.detail);
-        const label = if (activity.compatibility_tool) |compatibility_tool|
-            specLabel(compatibility_tool, state, denied_label)
-        else switch (state) {
+        const label = switch (state) {
             .active => "Running",
             .completed => "Ran",
             .denied => denied_label.?,

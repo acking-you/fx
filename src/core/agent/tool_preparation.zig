@@ -329,7 +329,7 @@ fn prepareRegisteredApplicableTargets(
     call: ToolCall,
     tool: tool_dispatch.Tool,
 ) Allocator.Error!RegisteredTargetPreparation {
-    if (try usesCommandCwdTarget(alloc, call, tool)) {
+    if (tool.executor_kind == .exec_command) {
         const command_cwd = permissions.resolveCommandCwdForCallInScope(
             alloc,
             access_scope orelse workspace_access.AccessScope.primaryOnly(workspace_root),
@@ -375,23 +375,6 @@ fn prepareRegisteredApplicableTargets(
         @constCast(&.{});
 
     return .{ .prepared = applicable_targets };
-}
-
-fn usesCommandCwdTarget(
-    alloc: Allocator,
-    call: ToolCall,
-    tool: tool_dispatch.Tool,
-) Allocator.Error!bool {
-    if (tool.executor_kind == .run_command or tool.executor_kind == .exec_command) return true;
-    const expected_action = tool.captured_command_action orelse return false;
-    var parsed = std.json.parseFromSlice(std.json.Value, alloc, call.arguments_json, .{}) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return false,
-    };
-    defer parsed.deinit();
-    if (parsed.value != .object) return false;
-    const action = parsed.value.object.get("action") orelse return false;
-    return action == .string and std.mem.eql(u8, action.string, expected_action);
 }
 
 /// Reprojects a prepared registered ordinary candidate immediately before its

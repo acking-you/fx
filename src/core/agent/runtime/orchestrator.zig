@@ -6564,7 +6564,7 @@ fn processQueuedPromptLoop(
                 call_allocator,
                 tool_call,
             )) {
-                if (execution_authority != .run_command) return error.InvalidRunCommandExecutionAuthority;
+                if (execution_authority != .command) return error.InvalidCommandExecutionAuthority;
             } else if (is_file_mutation) {
                 if (execution_authority != .file_mutation) {
                     return error.InvalidFileMutationExecutionAuthority;
@@ -6572,7 +6572,7 @@ fn processQueuedPromptLoop(
             } else if (std.mem.eql(u8, tool_call.name, "vision")) {
                 switch (execution_authority) {
                     .ordinary, .vision_paths => {},
-                    .run_command, .file_mutation => return error.InvalidVisionExecutionAuthority,
+                    .command, .file_mutation => return error.InvalidVisionExecutionAuthority,
                 }
             } else if (execution_authority != .ordinary) {
                 return error.UnexpectedCommandExecutionAuthority;
@@ -6733,7 +6733,9 @@ fn processQueuedPromptLoop(
                 break :blk ToolExecutionResult{ .status = .failure, .model_output = try deps.format_tool_execution_error(deps.ctx, arena, tool_call.name, err) };
             };
 
-            if (execution.cancelled and config.cancel_flag.load(.seq_cst)) {
+            if ((execution.cancelled or execution_is_command) and
+                config.cancel_flag.load(.seq_cst))
+            {
                 runtime_telemetry.traceCancelObserved(step_ctx, true);
                 var replay_handed_off = execution.command_replay_capture == null;
                 defer if (!replay_handed_off) {
