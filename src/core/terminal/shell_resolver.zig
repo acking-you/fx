@@ -255,9 +255,19 @@ pub fn commandInvocation(
     command: []const u8,
 ) ResolveError!Invocation {
     if (!std.fs.path.isAbsolute(path)) return error.RelativeShellPath;
-    const kind = shellKind(path) orelse return error.UnsupportedShell;
     var invocation = Invocation{ .path = path };
     invocation.append(path);
+    const kind = shellKind(path) orelse {
+        // Unified Exec historically accepted any absolute Unix shell and
+        // invoked it with the conventional sh-compatible flags. Preserve
+        // that contract while requiring an explicitly supported invocation
+        // shape on Windows, where cmd and PowerShell use different syntax.
+        if (comptime builtin.os.tag == .windows) return error.UnsupportedShell;
+        invocation.append(if (login) "-lc" else "-c");
+        invocation.append(command);
+        invocation.append("fx-exec");
+        return invocation;
+    };
     switch (kind) {
         .bash, .zsh => invocation.append(if (login) "-lc" else "-c"),
         .cmd => {
@@ -468,6 +478,24 @@ test "resolver builds Windows command invocations" {
             "Write-Output ready",
         },
         powershell.argv(),
+    );
+}
+
+test "resolver preserves generic Unix command invocations" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const command = try commandInvocation("/bin/sh", false, "printf ready");
+    try std.testing.expectEqualSlices(
+        []const u8,
+        &.{ "/bin/sh", "-c", "printf ready", "fx-exec" },
+        command.argv(),
+    );
+
+    const login = try commandInvocation("/usr/bin/fish", true, "printf ready");
+    try std.testing.expectEqualSlices(
+        []const u8,
+        &.{ "/usr/bin/fish", "-lc", "printf ready", "fx-exec" },
+        login.argv(),
     );
 }
 
