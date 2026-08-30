@@ -2793,7 +2793,20 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       expect(queuedBody).not.toContain(newNestedRule);
       expect(queuedBody).not.toContain(newSiblingRule);
 
-      const finalScrollback = await session.captureFullScrollbackEscapes();
+      const finalScrollback = await waitForEscapedScrollback(
+        session,
+        (candidate) => {
+          const beforeIndex = candidate.indexOf(activeBefore.trim());
+          const afterIndex = candidate.indexOf(activeAfter.trim());
+          const queuedPromptIndex = candidate.indexOf(queuedPrompt);
+          const queuedDoneIndex = candidate.indexOf(queuedDone);
+          return beforeIndex >= 0 &&
+            afterIndex > beforeIndex &&
+            queuedPromptIndex > afterIndex &&
+            queuedDoneIndex > queuedPromptIndex;
+        },
+        "ordered active steer scrollback",
+      );
       const beforeIndex = finalScrollback.indexOf(activeBefore.trim());
       const afterIndex = finalScrollback.indexOf(activeAfter.trim());
       const queuedPromptIndex = finalScrollback.indexOf(queuedPrompt);
