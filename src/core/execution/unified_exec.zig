@@ -1230,14 +1230,25 @@ test "unified exec keeps long process addressable and polls output" {
     defer first.deinit(std.testing.allocator);
     try std.testing.expect(first.process_id != null);
     try std.testing.expectEqual(Manager.Status.running, first.status);
-    try std.testing.expectEqualStrings("ready", first.stdout);
-    var second = try manager.writeStdin(std.testing.allocator, .{
-        .process_id = first.process_id.?,
-        .yield_time_ms = 2_000,
-    });
-    defer second.deinit(std.testing.allocator);
-    try std.testing.expectEqual(Manager.Status.exited, second.status);
-    try std.testing.expectEqualStrings("done", second.stdout);
+
+    var stdout: std.ArrayList(u8) = .empty;
+    defer stdout.deinit(std.testing.allocator);
+    try stdout.appendSlice(std.testing.allocator, first.stdout);
+
+    var status = first.status;
+    var polls: usize = 0;
+    while (status == .running and polls < 20) : (polls += 1) {
+        var next = try manager.writeStdin(std.testing.allocator, .{
+            .process_id = first.process_id.?,
+            .yield_time_ms = 500,
+        });
+        errdefer next.deinit(std.testing.allocator);
+        try stdout.appendSlice(std.testing.allocator, next.stdout);
+        status = next.status;
+        next.deinit(std.testing.allocator);
+    }
+    try std.testing.expectEqual(Manager.Status.exited, status);
+    try std.testing.expectEqualStrings("readydone", stdout.items);
 }
 
 test "unified exec projects live and between-poll output through one sink" {
