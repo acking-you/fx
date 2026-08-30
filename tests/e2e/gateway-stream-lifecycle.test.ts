@@ -749,7 +749,7 @@ describe("gateway stream lifecycle", () => {
       expect(serializedToolNames(oracleRequest)).toEqual(
         AUTO_RESPONSES_WITHOUT_DURABLE_TOOLS_SERIALIZED_TOOL_NAMES,
       );
-      expect(request.tools).toHaveLength(24);
+      expect(request.tools).toHaveLength(25);
       expect(findUnavailableCapabilityReferences(oracleRequest)).toEqual([]);
       expect(request.instructions).toContain("# Identity and context");
       expect(toolByName(oracleRequest, "exec_command")?.description).toContain(

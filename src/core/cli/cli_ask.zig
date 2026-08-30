@@ -3976,7 +3976,7 @@ fn testProcessQueuedPromptChecksTimeout(deps: *const agent_runtime.AgentRuntimeD
     try testPushAssistantText(deps, "assistant text");
 }
 
-fn testProcessQueuedPromptChecksExecOnlyTerminal(deps: *const agent_runtime.AgentRuntimeDeps, semantic_presentation: ?agent_runtime.SemanticPresentationSink, _: agent_runtime.LifecycleContext, cfg: agent_runtime.Config, _: worker_runtime.QueuedPrompt) !void {
+fn testProcessQueuedPromptChecksExecAndWebSearch(deps: *const agent_runtime.AgentRuntimeDeps, semantic_presentation: ?agent_runtime.SemanticPresentationSink, _: agent_runtime.LifecycleContext, cfg: agent_runtime.Config, _: worker_runtime.QueuedPrompt) !void {
     try std.testing.expect(semantic_presentation == null);
     try std.testing.expect(cfg.session_child_capability == null);
     try std.testing.expect(cfg.ephemeral_command_replay != null);
@@ -3986,7 +3986,7 @@ fn testProcessQueuedPromptChecksExecOnlyTerminal(deps: *const agent_runtime.Agen
     try std.testing.expect(tool_projection_mod.containsName(cfg.advertised_tool_names, "read_file"));
     try std.testing.expect(tool_projection_mod.containsName(cfg.advertised_tool_names, "exec_command"));
     try std.testing.expect(!tool_projection_mod.containsName(cfg.advertised_tool_names, "run_command"));
-    try std.testing.expect(!tool_projection_mod.containsName(cfg.advertised_tool_names, "web_search"));
+    try std.testing.expect(tool_projection_mod.containsName(cfg.advertised_tool_names, "web_search"));
     const advertised_terminal = for (cfg.advertised_functions) |function| {
         if (std.mem.eql(u8, function.name, "exec_command")) break function;
     } else return error.TestExpectedEqual;
@@ -6635,7 +6635,7 @@ test "runWithDeps projects unified exec when saved setup has no capability" {
         alloc,
         &.{"hello"},
         testConfig(),
-        testPromptRunDepsWithProcess(&stdout_capture, &stderr_capture, testProcessQueuedPromptChecksExecOnlyTerminal),
+        testPromptRunDepsWithProcess(&stdout_capture, &stderr_capture, testProcessQueuedPromptChecksExecAndWebSearch),
     );
 
     try std.testing.expectEqual(@as(u8, 0), exit_code);
@@ -6707,7 +6707,7 @@ test "runWithDeps honors no-save by skipping ask session stores" {
     defer stderr_capture.deinit(alloc);
 
     test_initialize_session_store_calls = 0;
-    var deps = testPromptRunDepsWithProcess(&stdout_capture, &stderr_capture, testProcessQueuedPromptChecksExecOnlyTerminal);
+    var deps = testPromptRunDepsWithProcess(&stdout_capture, &stderr_capture, testProcessQueuedPromptChecksExecAndWebSearch);
     deps.initialize_session_stores = testCountSessionStores;
 
     const exit_code = try runWithDeps(
