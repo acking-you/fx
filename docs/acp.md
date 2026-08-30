@@ -27,7 +27,7 @@ The initialize response advertises fx-specific capabilities under `_meta.fx`:
       "backgroundTerminals": true,
       "processStatusCommand": "/ps",
       "unifiedExec": {"writeStdin": true, "kill": true},
-      "providerControl": {"switch": true, "login": true, "configureByok": true}
+      "providerControl": {"switch": true, "login": true, "configureByok": true, "usage": true}
     }
   }
 }
@@ -70,6 +70,10 @@ Start browser login for Codex or Grok:
 ```json
 {"jsonrpc":"2.0","id":21,"method":"fx/provider/login/start","params":{"provider":"codex"}}
 ```
+
+The `provider` field is optional. When omitted, fx detects a valid stored
+subscription session without network I/O, preferring Codex and falling back to
+Grok. Explicit provider values remain strict and never cross-send credentials.
 
 The result contains `state`, `authorizationUrl`, and `acceptsManualCode`. Open
 the authorization URL in the user's browser, then query completion without
@@ -159,6 +163,21 @@ While a turn is running, the result includes its stable turn ID:
 ```
 
 When no turn is active, `state` is `idle` and `activeTurnId` is `null`.
+
+## Query provider usage
+
+`fx/provider/usage` returns the provider-neutral aggregate used by the TUI
+footer. It is safe to call while a turn or provider job is active because it
+only snapshots the local session ledger and never performs network I/O:
+
+```json
+{"jsonrpc":"2.0","id":7,"method":"fx/provider/usage","params":{}}
+```
+
+The `snapshot` object includes provider and credential-source labels, account
+identity presence, input/output/total tokens, request count, and context
+fields. Remote account limits remain an explicit CLI operation (`fx usage
+--codex`) so an ACP control-plane read cannot be held by a slow provider.
 
 ## Steer an active turn
 

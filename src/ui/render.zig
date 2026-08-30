@@ -4,6 +4,7 @@ const host = @import("../core/hosts/host.zig");
 const display_width = @import("../core/shared/display_width.zig");
 const text_utils = @import("../core/shared/text_utils.zig");
 const types = @import("../core/shared/types.zig");
+const provider_usage = @import("../core/session/provider_usage.zig");
 const image_attachments = @import("../core/images/image_attachments.zig");
 const assistant_presentation = @import("../core/agent/assistant_presentation.zig");
 const main = @import("../main.zig");
@@ -180,6 +181,7 @@ pub const StatuslineItems = struct {
     context_used: u64 = 0,
     context_total: ?u32 = null,
     session_title: ?[]const u8 = null,
+    usage: ?provider_usage.Summary = null,
 };
 
 /// Cell budget for the session title segment. The title is capped at 8 words
@@ -404,6 +406,11 @@ pub fn buildHintLine(
     }
     if (show_fast) {
         appendStatusSegment(out, &end, "⚡︎");
+    }
+
+    if (statusline.usage) |usage| {
+        var usage_buf: [32]u8 = undefined;
+        appendStatusSegment(out, &end, usage.statusline(&usage_buf));
     }
 
     if (statusline.session_title) |title| {
@@ -910,6 +917,14 @@ test "buildHintLine shows full context usage" {
         .context_total = 1_000_000,
     }, 80, &buf);
     try std.testing.expectEqualStrings("ask · opus 4.8 · Context: 43k/1000k 4%", line);
+}
+
+test "buildHintLine shows provider usage from the shared summary" {
+    var buf: [256]u8 = undefined;
+    const line = buildHintLine(false, false, true, "openai/gpt-5", .ask, 0, null, false, false, .auto, .{
+        .usage = provider_usage.Summary.fromCounters(.codex, .chatgpt_subscription, "acct", 1200, 800, 1, null),
+    }, 120, &buf);
+    try std.testing.expect(std.mem.find(u8, line, "Usage: 2k") != null);
 }
 
 test "buildHintLine shows the session title" {

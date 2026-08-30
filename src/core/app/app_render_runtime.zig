@@ -26,6 +26,7 @@ const subagent_domain = @import("../subagent/domain.zig");
 const subagent_projection = @import("../subagent/ui_projection.zig");
 const file_index = @import("../workspace/file_index.zig");
 const statusline_identity = @import("../workspace/statusline_identity.zig");
+const provider_usage = @import("../session/provider_usage.zig");
 const activity_runtime = @import("../output/activity_runtime.zig");
 const transcript_presentation = @import("../output/transcript_presentation.zig");
 const event_loop = @import("../../ui/event_loop.zig");
@@ -1443,6 +1444,21 @@ pub fn Runtime(comptime App: type) type {
                 items.context_used = app.total_input_tokens +| output_tokens;
                 items.context_total = model_capabilities.effectiveContextWindowTokens(
                     model_capabilities.resolveForApp(App, app, visible_model),
+                );
+            }
+            const usage_output_tokens: u64 = if (comptime @hasField(App, "total_output_tokens"))
+                app.total_output_tokens
+            else
+                0;
+            if (app.total_input_tokens > 0 or usage_output_tokens > 0) {
+                items.usage = provider_usage.Summary.fromCounters(
+                    provider_runtime.provider(app),
+                    app.auth.credentialSource(),
+                    app.auth.accountId(),
+                    app.total_input_tokens,
+                    usage_output_tokens,
+                    0,
+                    items.context_total,
                 );
             }
             if (comptime @hasField(App, "statusline_session")) {
@@ -4956,7 +4972,7 @@ test "core.app_render_runtime projects Opus 4.8 one million token context to foo
         100,
         &buf,
     );
-    try std.testing.expectEqualStrings("ask · opus 4.8 · Context: 43k/1000k 4%", line);
+    try std.testing.expectEqualStrings("ask · opus 4.8 · Usage: 43k · Context: 43k/1000k 4%", line);
 }
 
 test "core.app_render_runtime uses Gateway context window from resolved capabilities" {
