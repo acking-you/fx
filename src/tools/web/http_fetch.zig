@@ -1,7 +1,7 @@
 const std = @import("std");
 const debug_trace = @import("../../core/shared/debug_trace.zig");
 const io_mod = @import("../../core/shared/io.zig");
-const url_policy = @import("url_policy.zig");
+const web_url = @import("url.zig");
 
 const Allocator = std.mem.Allocator;
 const IpAddress = std.Io.net.IpAddress;
@@ -66,8 +66,8 @@ pub fn defaultTransport() Transport {
 }
 
 pub const PinnedTarget = struct {
-    url: url_policy.ValidatedUrl,
-    admitted_addresses: []const IpAddress,
+    url: web_url.ParsedUrl,
+    resolved_addresses: []const IpAddress,
     tls_server_name: []const u8,
     host_header: []const u8,
 };
@@ -124,19 +124,17 @@ pub const Failure = struct {
 pub const Result = union(enum) {
     success: Success,
     failure: Failure,
-    cross_host_redirect: []u8,
 
     pub fn deinit(self: *Result, alloc: Allocator) void {
         switch (self.*) {
             .success => |*success| success.deinit(alloc),
             .failure => |*failure| failure.deinit(alloc),
-            .cross_host_redirect => |url| alloc.free(url),
         }
         self.* = .{ .failure = .{ .kind = .non_success_status } };
     }
 };
 
-pub fn fetch(alloc: Allocator, initial: url_policy.ValidatedUrl, options: FetchOptions, transport: Transport) anyerror!Result {
+pub fn fetch(alloc: Allocator, initial: web_url.ParsedUrl, options: FetchOptions, transport: Transport) anyerror!Result {
     var current = try cloneUrl(alloc, initial);
     defer current.deinit(alloc);
 
@@ -147,16 +145,12 @@ pub fn fetch(alloc: Allocator, initial: url_policy.ValidatedUrl, options: FetchO
         defer alloc.free(addresses);
 
         if (addresses.len == 0) return error.NoAddressReturned;
-        for (addresses) |address| {
-            if (!url_policy.isPublicAddress(address)) return error.NonPublicDnsAnswer;
-        }
-
         const host_header = try hostHeader(alloc, current);
         defer alloc.free(host_header);
 
         const pinned: PinnedTarget = .{
             .url = current,
-            .admitted_addresses = addresses,
+            .resolved_addresses = addresses,
             .tls_server_name = current.canonical_host,
             .host_header = host_header,
         };
@@ -166,19 +160,11 @@ pub fn fetch(alloc: Allocator, initial: url_policy.ValidatedUrl, options: FetchO
 
         if (isRedirectStatus(response.status)) {
             const location = response.location orelse return error.MissingRedirectLocation;
-            var redirect = try url_policy.redirectTarget(alloc, current, location);
+            var redirect = try web_url.redirectTarget(alloc, current, location);
             defer redirect.deinit(alloc);
-
-            switch (redirect.kind) {
-                .follow => {
-                    current.deinit(alloc);
-                    current = try cloneUrl(alloc, redirect.target.?);
-                    continue;
-                },
-                .cross_host => {
-                    return .{ .cross_host_redirect = try alloc.dupe(u8, redirect.cross_host_url.?) };
-                },
-            }
+            current.deinit(alloc);
+            current = try cloneUrl(alloc, redirect);
+            continue;
         }
 
         if (response.content_encoding_count > 1)
@@ -290,7 +276,7 @@ fn normalizedOptions(options: FetchOptions) FetchOptions {
     };
 }
 
-fn resolveAddresses(alloc: Allocator, target: url_policy.ValidatedUrl, options: FetchOptions, resolver: Resolver) ![]IpAddress {
+fn resolveAddresses(alloc: Allocator, target: web_url.ParsedUrl, options: FetchOptions, resolver: Resolver) ![]IpAddress {
     if (target.literal_address) |literal| {
         var address = literal;
         address.setPort(target.port);
@@ -301,19 +287,28 @@ fn resolveAddresses(alloc: Allocator, target: url_policy.ValidatedUrl, options: 
     return resolver.resolve(resolver.ctx, alloc, target.canonical_host, target.port, normalizedOptions(options));
 }
 
-fn cloneUrl(alloc: Allocator, source: url_policy.ValidatedUrl) !url_policy.ValidatedUrl {
+fn cloneUrl(alloc: Allocator, source: web_url.ParsedUrl) !web_url.ParsedUrl {
+    const canonical_host = try alloc.dupe(u8, source.canonical_host);
+    errdefer alloc.free(canonical_host);
+    const path_query = try alloc.dupe(u8, source.path_query);
+    errdefer alloc.free(path_query);
+    const retrieval_url = try alloc.dupe(u8, source.retrieval_url);
+    errdefer alloc.free(retrieval_url);
+    const basic_credentials = if (source.basic_credentials) |value| try alloc.dupe(u8, value) else null;
+    errdefer if (basic_credentials) |value| alloc.free(value);
     return .{
         .scheme = source.scheme,
-        .canonical_host = try alloc.dupe(u8, source.canonical_host),
+        .canonical_host = canonical_host,
         .port = source.port,
         .explicit_port = source.explicit_port,
-        .path_query = try alloc.dupe(u8, source.path_query),
-        .retrieval_url = try alloc.dupe(u8, source.retrieval_url),
+        .path_query = path_query,
+        .retrieval_url = retrieval_url,
+        .basic_credentials = basic_credentials,
         .literal_address = source.literal_address,
     };
 }
 
-fn hostHeader(alloc: Allocator, target: url_policy.ValidatedUrl) ![]u8 {
+fn hostHeader(alloc: Allocator, target: web_url.ParsedUrl) ![]u8 {
     const host = try hostForHeader(alloc, target.canonical_host);
     defer alloc.free(host);
     if (target.explicit_port) |port| return std.fmt.allocPrint(alloc, "{s}:{d}", .{ host, port });
@@ -418,7 +413,7 @@ fn connectDefaultDialer(_: *anyopaque, address: IpAddress, options: FetchOptions
     return connectPinned(address, options);
 }
 
-fn connectAdmitted(addresses: []const IpAddress, options: FetchOptions, dialer: Dialer) anyerror!posix.fd_t {
+fn connectResolved(addresses: []const IpAddress, options: FetchOptions, dialer: Dialer) anyerror!posix.fd_t {
     if (addresses.len == 0) return error.NoAddressReturned;
 
     for (addresses, 0..) |address, index| {
@@ -455,7 +450,7 @@ fn connectDefault(_: *anyopaque, alloc: Allocator, target: PinnedTarget, options
         .ctx = @ptrCast(&default_connector_ctx),
         .connect_fn = connectDefaultDialer,
     };
-    const fd = connectAdmitted(target.admitted_addresses, effective, dialer) catch |err| {
+    const fd = connectResolved(target.resolved_addresses, effective, dialer) catch |err| {
         traceFailure(.connect, err);
         return err;
     };
@@ -574,10 +569,15 @@ fn writeRequest(writer: *std.Io.Writer, target: PinnedTarget, options: FetchOpti
             "User-Agent: fx (web_fetch; +https://github.com/acking-you/fx)\r\n" ++
             "Accept: text/markdown, text/html, */*\r\n" ++
             "Accept-Encoding: gzip, deflate, zstd\r\n" ++
-            "Connection: close\r\n" ++
-            "\r\n",
+            "Connection: close\r\n",
         .{ target.url.path_query, target.host_header },
     );
+    if (target.url.basic_credentials) |credentials| {
+        try writer.writeAll("Authorization: Basic ");
+        try std.base64.standard.Encoder.encodeWriter(writer, credentials);
+        try writer.writeAll("\r\n");
+    }
+    try writer.writeAll("\r\n");
 }
 
 fn readResponse(
@@ -2714,12 +2714,12 @@ const FakeConnector = struct {
     responses: []const ResponseSpec = &.{},
     err: ?anyerror = null,
     calls: usize = 0,
-    last_admitted_len: ?usize = null,
+    last_resolved_len: ?usize = null,
     last_canonical_host: ?[]u8 = null,
     last_tls_server_name: ?[]u8 = null,
     last_host_header: ?[]u8 = null,
     last_path_query: ?[]u8 = null,
-    last_first_admitted_address: ?IpAddress = null,
+    last_first_resolved_address: ?IpAddress = null,
     last_max_body_bytes: ?usize = null,
     last_deadline_ms: ?i64 = null,
     deadlines: [fake_recorded_calls]?i64 = [_]?i64{null} ** fake_recorded_calls,
@@ -2741,9 +2741,9 @@ const FakeConnector = struct {
         const self: *@This() = @ptrCast(@alignCast(raw));
         const call_index = self.calls;
         self.calls += 1;
-        self.last_admitted_len = target.admitted_addresses.len;
-        self.last_first_admitted_address = if (target.admitted_addresses.len > 0)
-            target.admitted_addresses[0]
+        self.last_resolved_len = target.resolved_addresses.len;
+        self.last_first_resolved_address = if (target.resolved_addresses.len > 0)
+            target.resolved_addresses[0]
         else
             null;
         self.last_max_body_bytes = options.max_body_bytes;
@@ -2797,14 +2797,14 @@ fn compressFlateForTest(alloc: Allocator, plain: []const u8, container: std.comp
 
 test "web_fetch advertises supported content codings" {
     const alloc = std.testing.allocator;
-    var url = try url_policy.normalize(alloc, "https://example.com/docs?q=1");
+    var url = try web_url.parse(alloc, "https://example.com/docs?q=1");
     defer url.deinit(alloc);
 
     var request: std.Io.Writer.Allocating = .init(alloc);
     defer request.deinit();
     try writeRequest(&request.writer, .{
         .url = url,
-        .admitted_addresses = &.{},
+        .resolved_addresses = &.{},
         .tls_server_name = "example.com",
         .host_header = "example.com",
     }, .{});
@@ -2821,6 +2821,25 @@ test "web_fetch advertises supported content codings" {
     );
 }
 
+test "web_fetch sends credential URL userinfo as basic authorization" {
+    const alloc = std.testing.allocator;
+    var url = try web_url.parse(alloc, "http://user:pass@127.0.0.1/private");
+    defer url.deinit(alloc);
+
+    var request: std.Io.Writer.Allocating = .init(alloc);
+    defer request.deinit();
+    try writeRequest(&request.writer, .{
+        .url = url,
+        .resolved_addresses = &.{},
+        .tls_server_name = "127.0.0.1",
+        .host_header = "127.0.0.1",
+    }, .{});
+
+    try std.testing.expect(std.mem.find(u8, request.written(), "Authorization: Basic dXNlcjpwYXNz\r\n") != null);
+    try std.testing.expect(std.mem.find(u8, request.written(), "Host: 127.0.0.1\r\n") != null);
+    try std.testing.expect(std.mem.find(u8, request.written(), "user:pass@") == null);
+}
+
 test "web_fetch decodes each supported content coding" {
     const alloc = std.testing.allocator;
     const cases = [_]struct { encoding: []const u8, body: []const u8 }{
@@ -2834,7 +2853,7 @@ test "web_fetch decodes each supported content coding" {
         defer resolver.deinit(alloc);
         var connector = FakeConnector{ .responses = &.{.{ .status = .ok, .body = case.body, .content_encoding = case.encoding }} };
         defer connector.deinit(alloc);
-        var target = try url_policy.normalize(alloc, "https://example.com/compressed");
+        var target = try web_url.parse(alloc, "https://example.com/compressed");
         defer target.deinit(alloc);
 
         var result = try fetch(alloc, target, .{}, .{
@@ -2867,7 +2886,7 @@ test "web_fetch rejects repeated or chained content encodings" {
         var resolver = FakeResolver{ .addresses = &.{try ip("93.184.216.34", 443)} };
         defer resolver.deinit(alloc);
         var connector = RawResponseConnector{ .payload = payload };
-        var target = try url_policy.normalize(alloc, "https://example.com/chained");
+        var target = try web_url.parse(alloc, "https://example.com/chained");
         defer target.deinit(alloc);
 
         var result = try fetch(alloc, target, .{}, .{
@@ -2883,7 +2902,7 @@ test "web_fetch rejects repeated or chained content encodings" {
 
 test "web_fetch decoded body cap is inclusive" {
     const alloc = std.testing.allocator;
-    var target = try url_policy.normalize(alloc, "https://example.com/capped");
+    var target = try web_url.parse(alloc, "https://example.com/capped");
     defer target.deinit(alloc);
 
     for ([_]usize{ max_body_bytes, max_body_bytes + 1 }) |plain_len| {
@@ -2917,7 +2936,7 @@ test "web_fetch decoded body cap is inclusive" {
 
 test "web_fetch leaves redirects ahead of content encoding and rejects encoded error statuses" {
     const alloc = std.testing.allocator;
-    var target = try url_policy.normalize(alloc, "https://example.com/start");
+    var target = try web_url.parse(alloc, "https://example.com/start");
     defer target.deinit(alloc);
 
     {
@@ -2963,7 +2982,7 @@ fn ip(text: []const u8, port: u16) !IpAddress {
     return std.Io.net.IpAddress.parse(text, port);
 }
 
-test "web_fetch rejects mixed public private dns answers without dialing" {
+test "web_fetch forwards every resolved address without network classification" {
     const alloc = std.testing.allocator;
 
     var resolver = FakeResolver{ .addresses = &.{
@@ -2971,18 +2990,21 @@ test "web_fetch rejects mixed public private dns answers without dialing" {
         try ip("10.0.0.5", 443),
     } };
     defer resolver.deinit(alloc);
-    var connector = FakeConnector{};
+    var connector = FakeConnector{ .responses = &.{.{ .status = .ok, .body = "ok" }} };
     defer connector.deinit(alloc);
 
-    var target = try url_policy.normalize(alloc, "https://example.com/docs");
+    var target = try web_url.parse(alloc, "https://example.com/docs");
     defer target.deinit(alloc);
 
-    try std.testing.expectError(error.NonPublicDnsAnswer, fetch(alloc, target, .{}, .{
+    var result = try fetch(alloc, target, .{}, .{
         .resolver = resolver.resolver(),
         .connector = connector.connector(),
-    }));
+    });
+    defer result.deinit(alloc);
+    try std.testing.expect(result == .success);
     try std.testing.expectEqual(@as(usize, 1), resolver.calls);
-    try std.testing.expectEqual(@as(usize, 0), connector.calls);
+    try std.testing.expectEqual(@as(usize, 1), connector.calls);
+    try std.testing.expectEqual(@as(usize, 2), connector.last_resolved_len.?);
 }
 
 test "web_fetch pinned connector never performs a second hostname lookup" {
@@ -2993,7 +3015,7 @@ test "web_fetch pinned connector never performs a second hostname lookup" {
     var connector = FakeConnector{ .responses = &.{.{ .status = .ok, .body = "ok" }} };
     defer connector.deinit(alloc);
 
-    var target = try url_policy.normalize(alloc, "https://example.com/docs");
+    var target = try web_url.parse(alloc, "https://example.com/docs");
     defer target.deinit(alloc);
 
     var result = try fetch(alloc, target, .{}, .{
@@ -3005,7 +3027,7 @@ test "web_fetch pinned connector never performs a second hostname lookup" {
     try std.testing.expect(result == .success);
     try std.testing.expectEqual(@as(usize, 1), resolver.calls);
     try std.testing.expectEqual(@as(usize, 1), connector.calls);
-    try std.testing.expectEqual(@as(usize, 1), connector.last_admitted_len.?);
+    try std.testing.expectEqual(@as(usize, 1), connector.last_resolved_len.?);
 }
 
 test "web_fetch default call shares one hop deadline across resolver and connector" {
@@ -3016,7 +3038,7 @@ test "web_fetch default call shares one hop deadline across resolver and connect
     var connector = FakeConnector{ .responses = &.{.{ .status = .ok, .body = "ok" }} };
     defer connector.deinit(alloc);
 
-    var target = try url_policy.normalize(alloc, "https://example.com/docs");
+    var target = try web_url.parse(alloc, "https://example.com/docs");
     defer target.deinit(alloc);
 
     var result = try fetch(alloc, target, .{}, .{
@@ -3045,7 +3067,7 @@ test "web_fetch followed redirects get fresh hop deadline while sharing deadline
     };
     defer connector.deinit(alloc);
 
-    var target = try url_policy.normalize(alloc, "https://example.com/start");
+    var target = try web_url.parse(alloc, "https://example.com/start");
     defer target.deinit(alloc);
 
     var result = try fetch(alloc, target, .{}, .{
@@ -3067,7 +3089,7 @@ test "web_fetch followed redirects get fresh hop deadline while sharing deadline
     try std.testing.expect(second_resolver_deadline > first_resolver_deadline);
 }
 
-test "web_fetch preserves canonical tls and host identity while dialing admitted address" {
+test "web_fetch preserves canonical tls and host identity while dialing resolved address" {
     const alloc = std.testing.allocator;
 
     var resolver = FakeResolver{ .addresses = &.{try ip("93.184.216.34", 443)} };
@@ -3075,7 +3097,7 @@ test "web_fetch preserves canonical tls and host identity while dialing admitted
     var connector = FakeConnector{ .responses = &.{.{ .status = .ok, .body = "ok" }} };
     defer connector.deinit(alloc);
 
-    var target = try url_policy.normalize(alloc, "https://Example.COM.:443/a#frag");
+    var target = try web_url.parse(alloc, "https://Example.COM.:443/a#frag");
     defer target.deinit(alloc);
 
     var result = try fetch(alloc, target, .{}, .{
@@ -3089,10 +3111,10 @@ test "web_fetch preserves canonical tls and host identity while dialing admitted
     try std.testing.expectEqualStrings("example.com", connector.last_tls_server_name.?);
     try std.testing.expectEqualStrings("example.com", connector.last_host_header.?);
     try std.testing.expectEqualStrings("/a", connector.last_path_query.?);
-    try std.testing.expect(connector.last_first_admitted_address.?.eql(&resolver.addresses[0]));
+    try std.testing.expect(connector.last_first_resolved_address.?.eql(&resolver.addresses[0]));
 }
 
-test "web_fetch safe redirect repeats hostname policy dns admission and pinned dialing" {
+test "web_fetch resolves and connects each redirect hop" {
     const alloc = std.testing.allocator;
 
     var resolver = FakeResolver{ .addresses = &.{try ip("93.184.216.34", 443)} };
@@ -3103,7 +3125,7 @@ test "web_fetch safe redirect repeats hostname policy dns admission and pinned d
     } };
     defer connector.deinit(alloc);
 
-    var target = try url_policy.normalize(alloc, "https://example.com/start");
+    var target = try web_url.parse(alloc, "https://example.com/start");
     defer target.deinit(alloc);
 
     var result = try fetch(alloc, target, .{}, .{
@@ -3130,7 +3152,7 @@ test "web_fetch follows HTTP 303 See Other redirects" {
     } };
     defer connector.deinit(alloc);
 
-    var target = try url_policy.normalize(alloc, "https://example.com/start");
+    var target = try web_url.parse(alloc, "https://example.com/start");
     defer target.deinit(alloc);
 
     var result = try fetch(alloc, target, .{}, .{
@@ -3147,17 +3169,18 @@ test "web_fetch follows HTTP 303 See Other redirects" {
     try std.testing.expectEqualStrings("next", result.success.body);
 }
 
-test "web_fetch cross host redirect returns reinvocation result without following" {
+test "web_fetch follows cross host redirects directly" {
     const alloc = std.testing.allocator;
 
     var resolver = FakeResolver{ .addresses = &.{try ip("93.184.216.34", 443)} };
     defer resolver.deinit(alloc);
     var connector = FakeConnector{ .responses = &.{
         .{ .status = .found, .body = "", .location = "https://example.org/next" },
+        .{ .status = .ok, .body = "next" },
     } };
     defer connector.deinit(alloc);
 
-    var target = try url_policy.normalize(alloc, "https://example.com/start");
+    var target = try web_url.parse(alloc, "https://example.com/start");
     defer target.deinit(alloc);
 
     var result = try fetch(alloc, target, .{}, .{
@@ -3166,10 +3189,11 @@ test "web_fetch cross host redirect returns reinvocation result without followin
     });
     defer result.deinit(alloc);
 
-    try std.testing.expect(result == .cross_host_redirect);
-    try std.testing.expectEqual(@as(usize, 1), resolver.calls);
-    try std.testing.expectEqual(@as(usize, 1), connector.calls);
-    try std.testing.expectEqualStrings("https://example.org/next", result.cross_host_redirect);
+    try std.testing.expect(result == .success);
+    try std.testing.expectEqual(@as(usize, 2), resolver.calls);
+    try std.testing.expectEqual(@as(usize, 2), connector.calls);
+    try std.testing.expectEqualStrings("https://example.org/next", result.success.final_url);
+    try std.testing.expectEqualStrings("next", result.success.body);
 }
 
 test "web_fetch ordinary non success and unexpected content encoding never convert cache or extract" {
@@ -3179,7 +3203,7 @@ test "web_fetch ordinary non success and unexpected content encoding never conve
     defer resolver.deinit(alloc);
     var non_success_connector = FakeConnector{ .responses = &.{.{ .status = .not_found, .body = "nope" }} };
     defer non_success_connector.deinit(alloc);
-    var target = try url_policy.normalize(alloc, "https://example.com/missing");
+    var target = try web_url.parse(alloc, "https://example.com/missing");
     defer target.deinit(alloc);
 
     var non_success = try fetch(alloc, target, .{}, .{
@@ -3209,7 +3233,7 @@ test "web_fetch body timeout cancellation and ten mebibyte cap are bounded" {
     var connector = FakeConnector{ .err = error.Canceled };
     defer connector.deinit(alloc);
 
-    var target = try url_policy.normalize(alloc, "https://example.com/slow");
+    var target = try web_url.parse(alloc, "https://example.com/slow");
     defer target.deinit(alloc);
 
     try std.testing.expectError(error.Canceled, fetch(alloc, target, .{
@@ -3415,7 +3439,7 @@ test "web_fetch transport traces stable stages and redact sensitive values" {
         .errors = &.{ error.ConnectionRefused, error.NetworkUnreachable },
         .returned_fds = &.{ -1, -1 },
     };
-    try std.testing.expectError(error.NetworkUnreachable, connectAdmitted(
+    try std.testing.expectError(error.NetworkUnreachable, connectResolved(
         &addresses,
         .{},
         scripted.dialer(),
@@ -3481,7 +3505,7 @@ const ScriptedDialer = struct {
     }
 };
 
-test "web_fetch admitted dialing preserves order and one shared deadline" {
+test "web_fetch resolved-address dialing preserves order and one shared deadline" {
     var fds: [2]std.c.fd_t = undefined;
     if (std.c.pipe(&fds) != 0) return error.PipeFailed;
     defer closeFd(fds[1]);
@@ -3496,7 +3520,7 @@ test "web_fetch admitted dialing preserves order and one shared deadline" {
         .returned_fds = &.{ -1, fds[0] },
     };
 
-    const fd = try connectAdmitted(&addresses, .{
+    const fd = try connectResolved(&addresses, .{
         .deadline = .{ .deadline_ms = deadline_ms },
     }, scripted.dialer());
     defer closeFd(fd);
@@ -3508,7 +3532,7 @@ test "web_fetch admitted dialing preserves order and one shared deadline" {
     try std.testing.expectEqual(deadline_ms, scripted.deadlines[1].?);
 }
 
-test "web_fetch admitted dialing stops on control and local resource failures" {
+test "web_fetch resolved-address dialing stops on control and local resource failures" {
     const addresses = [_]IpAddress{
         try ip("93.184.216.34", 443),
         try ip("93.184.216.35", 443),
@@ -3521,7 +3545,7 @@ test "web_fetch admitted dialing stops on control and local resource failures" {
         .cancel_after_call = 1,
         .cancel_flag = &cancel_flag,
     };
-    try std.testing.expectError(error.Canceled, connectAdmitted(&addresses, .{
+    try std.testing.expectError(error.Canceled, connectResolved(&addresses, .{
         .cancel_flag = &cancel_flag,
     }, canceled.dialer()));
     try std.testing.expectEqual(@as(usize, 1), canceled.calls);
@@ -3530,7 +3554,7 @@ test "web_fetch admitted dialing stops on control and local resource failures" {
         .errors = &.{ error.SystemResources, null },
         .returned_fds = &.{ -1, -1 },
     };
-    try std.testing.expectError(error.SystemResources, connectAdmitted(
+    try std.testing.expectError(error.SystemResources, connectResolved(
         &addresses,
         .{},
         resources.dialer(),
@@ -3541,7 +3565,7 @@ test "web_fetch admitted dialing stops on control and local resource failures" {
         .errors = &.{null},
         .returned_fds = &.{-1},
     };
-    try std.testing.expectError(error.Timeout, connectAdmitted(&addresses, .{
+    try std.testing.expectError(error.Timeout, connectResolved(&addresses, .{
         .deadline = .{ .deadline_ms = monotonicMillis() - 1 },
     }, expired.dialer()));
     try std.testing.expectEqual(@as(usize, 0), expired.calls);
@@ -3550,14 +3574,14 @@ test "web_fetch admitted dialing stops on control and local resource failures" {
         .errors = &.{ error.ConnectionRefused, error.HostUnreachable },
         .returned_fds = &.{ -1, -1 },
     };
-    try std.testing.expectError(error.HostUnreachable, connectAdmitted(
+    try std.testing.expectError(error.HostUnreachable, connectResolved(
         &addresses,
         .{},
         exhausted.dialer(),
     ));
     try std.testing.expectEqual(@as(usize, 2), exhausted.calls);
 
-    try std.testing.expectError(error.NoAddressReturned, connectAdmitted(
+    try std.testing.expectError(error.NoAddressReturned, connectResolved(
         &.{},
         .{},
         exhausted.dialer(),

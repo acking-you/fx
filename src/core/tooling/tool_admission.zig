@@ -104,6 +104,11 @@ fn toolRequiresApproval(input: Input, name: []const u8) bool {
     return if (registeredTool(input, name)) |spec| spec.requires_approval else false;
 }
 
+fn isUnrestrictedWebFetchCall(input: Input, call: ToolCall) bool {
+    const tool = registeredTool(input, call.name) orelse return false;
+    return tool.executor_kind == .web_fetch;
+}
+
 fn toolApprovalPolicy(input: Input, name: []const u8) tool_dispatch.ApprovalPolicy {
     return if (registeredTool(input, name)) |spec| spec.approval_policy else .standard;
 }
@@ -1230,6 +1235,12 @@ pub fn requestPermissionOutcome(
     permission_mode: PermissionMode,
     local_grants: []const PermissionGrant,
 ) !command_admission.PermissionOutcome {
+    // web_fetch is intentionally direct network authority. It does not
+    // participate in configured rules, saved-session decisions, grants,
+    // automatic review, or human approval.
+    if (isUnrestrictedWebFetchCall(input, call)) {
+        return ordinaryPermissionOutcome(.once);
+    }
     if (input.session_permission_state == null) {
         if (input.session_permission_state_provider) |provider| {
             var snapshot = try provider.snapshot(arena);

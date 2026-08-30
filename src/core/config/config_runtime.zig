@@ -2494,7 +2494,6 @@ test "removeAllowlistRules removes allow entries by scope and preserves policy r
     _ = try addPermissionRule(std.testing.allocator, .local, workspace_root, "bash", "rm -rf *", .deny);
     _ = try addPermissionRule(std.testing.allocator, .local, workspace_root, "read", "*", .allow);
     _ = try addPermissionRule(std.testing.allocator, .local, workspace_root, "url", "https://example.com/*", .allow);
-    _ = try addPermissionRule(std.testing.allocator, .local, workspace_root, "web_fetch", "domain:example.com", .allow);
 
     {
         var outcome = try removeAllowlistRules(std.testing.allocator, .local, workspace_root, .commands);
@@ -2504,11 +2503,10 @@ test "removeAllowlistRules removes allow entries by scope and preserves policy r
 
     var after_commands = try loadMergedSettings(std.testing.allocator, workspace_root);
     defer after_commands.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(usize, 4), after_commands.permission_rules.rules.len);
+    try std.testing.expectEqual(@as(usize, 3), after_commands.permission_rules.rules.len);
     try expectPermissionRule(after_commands.permission_rules.rules[0], "bash", "rm -rf *", .deny);
     try expectPermissionRule(after_commands.permission_rules.rules[1], "read", "*", .allow);
     try expectPermissionRule(after_commands.permission_rules.rules[2], "url", "https://example.com/*", .allow);
-    try expectPermissionRule(after_commands.permission_rules.rules[3], "web_fetch", "domain:example.com", .allow);
 
     {
         var outcome = try removeAllowlistRules(std.testing.allocator, .local, workspace_root, .tools);
@@ -2518,22 +2516,9 @@ test "removeAllowlistRules removes allow entries by scope and preserves policy r
 
     var after_tools = try loadMergedSettings(std.testing.allocator, workspace_root);
     defer after_tools.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(usize, 3), after_tools.permission_rules.rules.len);
+    try std.testing.expectEqual(@as(usize, 2), after_tools.permission_rules.rules.len);
     try expectPermissionRule(after_tools.permission_rules.rules[0], "bash", "rm -rf *", .deny);
     try expectPermissionRule(after_tools.permission_rules.rules[1], "url", "https://example.com/*", .allow);
-    try expectPermissionRule(after_tools.permission_rules.rules[2], "web_fetch", "domain:example.com", .allow);
-
-    {
-        var outcome = try removeAllowlistRules(std.testing.allocator, .local, workspace_root, .web_fetch_domains);
-        defer outcome.deinit(std.testing.allocator);
-        try std.testing.expectEqual(@as(usize, 1), outcome.committed.permission_rules_removed);
-    }
-
-    var after_web_fetch = try loadMergedSettings(std.testing.allocator, workspace_root);
-    defer after_web_fetch.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(usize, 2), after_web_fetch.permission_rules.rules.len);
-    try expectPermissionRule(after_web_fetch.permission_rules.rules[0], "bash", "rm -rf *", .deny);
-    try expectPermissionRule(after_web_fetch.permission_rules.rules[1], "url", "https://example.com/*", .allow);
 
     {
         var outcome = try removeAllowlistRules(std.testing.allocator, .local, workspace_root, .all);

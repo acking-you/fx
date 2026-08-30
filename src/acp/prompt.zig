@@ -296,6 +296,24 @@ const AcpContext = struct {
         try self.sendUpdate(out.writer.buffered());
     }
 
+    fn sendToolCallTerminalPresentation(
+        self: *AcpContext,
+        tool_call_id: []const u8,
+        outcome: types.ToolOutcome,
+    ) !void {
+        const stable_id = self.published_tool_calls.getKey(tool_call_id) orelse return;
+        const plain = try stripAnsiAlloc(self.alloc, outcome.summary);
+        defer if (plain.ptr != outcome.summary.ptr) self.alloc.free(plain);
+        const status: acp_types.ToolCallStatus = switch (outcome.kind) {
+            .completed, .deferred => .completed,
+            .denied, .cancelled, .failed => .failed,
+        };
+        var out: std.Io.Writer.Allocating = .init(self.alloc);
+        defer out.deinit();
+        try acp_types.writeToolCallPresentationUpdate(&out.writer, stable_id, status, plain);
+        try self.sendUpdate(out.writer.buffered());
+    }
+
     fn sendCommandOutputDelta(
         self: *AcpContext,
         tool_call_id: []const u8,
@@ -2400,23 +2418,22 @@ fn resolveToolActionDisplayTarget(raw_ctx: *anyopaque, arena: Allocator, call: T
 
 fn describeToolActionCompleted(raw_ctx: *anyopaque, arena: Allocator, call: ToolCall, display_target: ?[]const u8, advertised_dynamic_tool_names: []const []const u8) ![]const u8 {
     const ctx: *AcpContext = @ptrCast(@alignCast(raw_ctx));
-    return tool_presentation.formatPlainAction(arena, .{
+    return tool_presentation.formatPlainActionForState(arena, .{
         .tool_registry = ctx.toolRegistry(),
         .call = call,
         .display_target = display_target,
         .is_available_dynamic_mcp_tool = lifecycleDynamicMcpToolAvailable(ctx, call.name, advertised_dynamic_tool_names),
-    });
+    }, .completed, null);
 }
 
 fn describeToolActionDenied(raw_ctx: *anyopaque, arena: Allocator, call: ToolCall, display_target: ?[]const u8, label: []const u8, advertised_dynamic_tool_names: []const []const u8) ![]const u8 {
     const ctx: *AcpContext = @ptrCast(@alignCast(raw_ctx));
-    const action = try tool_presentation.formatPlainAction(arena, .{
+    return tool_presentation.formatPlainActionForState(arena, .{
         .tool_registry = ctx.toolRegistry(),
         .call = call,
         .display_target = display_target,
         .is_available_dynamic_mcp_tool = lifecycleDynamicMcpToolAvailable(ctx, call.name, advertised_dynamic_tool_names),
-    });
-    return std.fmt.allocPrint(arena, "{s}: {s}", .{ label, action });
+    }, .denied, label);
 }
 
 fn lifecycleDynamicMcpToolAvailable(ctx: *AcpContext, name: []const u8, advertised_dynamic_tool_names: []const []const u8) bool {
@@ -2922,7 +2939,11 @@ fn pushToolLifecycle(raw_ctx: *anyopaque, event: types.ToolLifecycleEvent) !void
                 .arguments_json = started.arguments_json orelse "{}",
             });
         },
-        .provisional, .progress, .terminal, .turn_finished => {},
+        .terminal => |terminal| try ctx.sendToolCallTerminalPresentation(
+            terminal.id.call_id,
+            terminal.outcome,
+        ),
+        .provisional, .progress, .turn_finished => {},
     }
 }
 
@@ -4540,6 +4561,45 @@ test "ACP pending tool_call updates keep provider ids stable and dedupe" {
     try std.testing.expectEqual(@as(usize, 1), pending_count);
 }
 
+test "ACP terminal lifecycle replaces Running command title with Ran" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var capture = try tmp.dir.createFile(io_mod.getIo(), "acp-command-lifecycle.jsonl", .{ .read = true });
+    defer capture.close(io_mod.getIo());
+    var state = try initTestAcpState(alloc, "/tmp/workspace", .ask);
+    defer state.deinit();
+    state.writer = .{ .stdout = capture };
+    var ctx = AcpContext{
+        .alloc = alloc,
+        .state = &state,
+        .session_id = "session_1",
+    };
+    defer ctx.deinitPublishedToolCalls();
+
+    _ = try ctx.sendToolCallPending(alloc, .{
+        .id = "call_exec",
+        .name = "exec_command",
+        .arguments_json = "{\"cmd\":\"zig build\"}",
+    });
+    try pushToolLifecycle(&ctx, .{ .terminal = .{
+        .id = .{ .turn_id = 1, .call_id = "call_exec" },
+        .outcome = .{ .kind = .completed, .summary = "Ran zig build" },
+    } });
+    try capture.sync(io_mod.getIo());
+
+    var captured_file = try tmp.dir.openFile(io_mod.getIo(), "acp-command-lifecycle.jsonl", .{});
+    defer captured_file.close(io_mod.getIo());
+    const captured = try io_mod.readFileToEnd(alloc, &captured_file, 64 * 1024);
+    try std.testing.expect(std.mem.find(u8, captured, "\"title\":\"Running zig build\"") != null);
+    try std.testing.expect(std.mem.find(u8, captured, "\"sessionUpdate\":\"tool_call_update\"") != null);
+    try std.testing.expect(std.mem.find(u8, captured, "\"title\":\"Ran zig build\"") != null);
+    try std.testing.expect(std.mem.find(u8, captured, "\"status\":\"completed\"") != null);
+}
+
 test "ACP propagateGrant stores deduped runtime session grants" {
     const alloc = std.testing.allocator;
     var state = try initTestAcpState(alloc, "/tmp/workspace", .ask);
@@ -5044,7 +5104,7 @@ test "ACP auto mode automatic review clears or cautions prepared external file m
     try std.testing.expectEqualStrings("test reviewer rationale", blocked_classifier.rationale);
 }
 
-test "ACP admits default-safe web fetch without a rule" {
+test "ACP web_fetch ignores configured ask and deny rules" {
     const alloc = std.testing.allocator;
     var arena_state = std.heap.ArenaAllocator.init(alloc);
     defer arena_state.deinit();
@@ -5062,14 +5122,14 @@ test "ACP admits default-safe web fetch without a rule" {
     try std.testing.expectEqual(ToolPermissionDecision.once, default_outcome.decision);
     try std.testing.expect(default_outcome.execution_authority != null);
 
-    state.active_session.?.permission_rules = try testPermissionRuleSet(alloc, "web_fetch", "domain:example.com", .ask);
+    state.active_session.?.permission_rules = try testPermissionRuleSet(alloc, "web_fetch", "*", .ask);
     const asked_outcome = try requestToolPermissionOutcome(&ctx, arena, call, .auto, &.{}, &.{});
-    try std.testing.expectEqual(ToolPermissionDecision.permission_required, asked_outcome.decision);
+    try std.testing.expectEqual(ToolPermissionDecision.once, asked_outcome.decision);
 
     state.active_session.?.permission_rules.deinit(alloc);
-    state.active_session.?.permission_rules = try testPermissionRuleSet(alloc, "web_fetch", "domain:example.com", .deny);
+    state.active_session.?.permission_rules = try testPermissionRuleSet(alloc, "web_fetch", "*", .deny);
     const denied_outcome = try requestToolPermissionOutcome(&ctx, arena, call, .auto, &.{}, &.{});
-    try std.testing.expectEqual(ToolPermissionDecision.policy_denied, denied_outcome.decision);
+    try std.testing.expectEqual(ToolPermissionDecision.once, denied_outcome.decision);
     state.active_session.?.permission_rules.deinit(alloc);
     state.active_session.?.permission_rules = .{};
 }
@@ -5164,7 +5224,7 @@ test "ACP admits default-safe web_search before execution" {
     try std.testing.expectEqual(ToolPermissionDecision.once, decision);
 }
 
-test "ACP admits default-safe web_fetch before execution" {
+test "ACP admits unrestricted web_fetch before execution" {
     const alloc = std.testing.allocator;
     var arena_state = std.heap.ArenaAllocator.init(alloc);
     defer arena_state.deinit();

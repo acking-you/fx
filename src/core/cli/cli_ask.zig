@@ -2330,25 +2330,24 @@ fn resolveToolActionDisplayTarget(raw_ctx: *anyopaque, arena: Allocator, call: T
 
 fn describeToolActionCompleted(raw_ctx: *anyopaque, arena: Allocator, call: ToolCall, display_target: ?[]const u8, advertised_dynamic_tool_names: []const []const u8) ![]const u8 {
     const ctx: *AskContext = @ptrCast(@alignCast(raw_ctx));
-    return tool_presentation.formatPlainAction(arena, .{
+    return tool_presentation.formatPlainActionForState(arena, .{
         .tool_registry = ctx.toolRegistry(),
         .call = call,
         .workspace_root = ctx.workspace_root,
         .display_target = display_target,
         .is_available_dynamic_mcp_tool = lifecycleDynamicMcpToolAvailable(ctx, call.name, advertised_dynamic_tool_names),
-    });
+    }, .completed, null);
 }
 
 fn describeToolActionDenied(raw_ctx: *anyopaque, arena: Allocator, call: ToolCall, display_target: ?[]const u8, label: []const u8, advertised_dynamic_tool_names: []const []const u8) ![]const u8 {
     const ctx: *AskContext = @ptrCast(@alignCast(raw_ctx));
-    const action = try tool_presentation.formatPlainAction(arena, .{
+    return tool_presentation.formatPlainActionForState(arena, .{
         .tool_registry = ctx.toolRegistry(),
         .call = call,
         .workspace_root = ctx.workspace_root,
         .display_target = display_target,
         .is_available_dynamic_mcp_tool = lifecycleDynamicMcpToolAvailable(ctx, call.name, advertised_dynamic_tool_names),
-    });
-    return std.fmt.allocPrint(arena, "{s}: {s}", .{ label, action });
+    }, .denied, label);
 }
 
 fn lifecycleDynamicMcpToolAvailable(ctx: *AskContext, name: []const u8, advertised_dynamic_tool_names: []const []const u8) bool {

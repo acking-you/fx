@@ -4547,7 +4547,7 @@ test "disabled automatic reviewer returns a recoverable denial without a human p
     try std.testing.expect(rt.worker.pending_permission_request_shared == null);
 }
 
-test "web_fetch bypasses automatic review for valid public hosts by default" {
+test "web_fetch bypasses automatic review" {
     var reviewer = TestAutoReview{};
     var rt = TestRuntime{
         .workspace_root = "/tmp/workspace",
@@ -4568,7 +4568,7 @@ test "web_fetch bypasses automatic review for valid public hosts by default" {
     try std.testing.expectEqual(@as(usize, 0), reviewer.calls);
 }
 
-test "web_fetch exact session grant authorizes only matching canonical domain" {
+test "web_fetch ignores session grants and configured rules" {
     var rt = TestRuntime{ .workspace_root = "/tmp/workspace", .permission_mode = .auto, .interactive = false };
     defer rt.deinit(std.testing.allocator);
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -4576,13 +4576,12 @@ test "web_fetch exact session grant authorizes only matching canonical domain" {
     const arena = arena_state.allocator();
 
     const grants = [_]PermissionGrant{
-        .{ .tool_name = @constCast("web_fetch"), .target_path = @constCast("domain:example.com") },
+        .{ .tool_name = @constCast("web_fetch"), .target_path = @constCast("*") },
     };
-    var ask_rules = [_]types.PermissionRule{
-        .{ .permission = @constCast("web_fetch"), .pattern = @constCast("domain:example.com"), .action = .ask },
-        .{ .permission = @constCast("web_fetch"), .pattern = @constCast("domain:example.org"), .action = .ask },
+    var configured_rules = [_]types.PermissionRule{
+        .{ .permission = @constCast("web_fetch"), .pattern = @constCast("*"), .action = .deny },
     };
-    rt.permission_rules = .{ .rules = &ask_rules };
+    rt.permission_rules = .{ .rules = &configured_rules };
 
     try std.testing.expectEqual(ToolPermissionDecision.once, (try tool_admission.requestPermissionOutcome(rt.context().admissionInput(), arena, .{
         .id = "fetch",
@@ -4590,7 +4589,7 @@ test "web_fetch exact session grant authorizes only matching canonical domain" {
         .arguments_json = "{\"url\":\"https://example.com/docs\"}",
     }, .auto, &grants)).decision);
 
-    try std.testing.expectEqual(ToolPermissionDecision.permission_required, (try tool_admission.requestPermissionOutcome(rt.context().admissionInput(), arena, .{
+    try std.testing.expectEqual(ToolPermissionDecision.once, (try tool_admission.requestPermissionOutcome(rt.context().admissionInput(), arena, .{
         .id = "fetch_other",
         .name = "web_fetch",
         .arguments_json = "{\"url\":\"https://example.org/docs\"}",

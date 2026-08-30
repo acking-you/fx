@@ -290,6 +290,18 @@ input, or termination. The terminal result update includes standard
 top-level `command_result` field remains as an fx compatibility extension for
 existing clients.
 
+The terminal lifecycle also replaces the active title, using the same formatter
+as the TUI, noninteractive CLI, and child sessions:
+
+```json
+{"sessionUpdate":"tool_call_update","toolCallId":"CALL_ID","title":"Ran zig build","status":"completed"}
+```
+
+For `write_stdin`, an empty poll transitions from `Waiting for 7` to
+`Waited for 7`; a write transitions from `Interacting with 7` to
+`Interacted with 7`. A failed command uses its terminal failure summary instead
+of leaving an obsolete `Running` title visible.
+
 ### Direct Unified Exec interaction
 
 The model-facing `exec_command` result includes a numeric `session_id` whenever

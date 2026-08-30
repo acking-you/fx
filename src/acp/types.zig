@@ -168,7 +168,7 @@ pub fn writeToolCall(
 }
 
 pub fn writeToolCallUpdate(w: *std.Io.Writer, tool_call_id: []const u8, status: ToolCallStatus, content_text: ?[]const u8) !void {
-    try writeToolCallUpdateWithCommandResult(w, tool_call_id, status, content_text, null);
+    try writeToolCallUpdateFields(w, tool_call_id, status, null, content_text, null);
 }
 
 pub fn writeToolCallUpdateWithCommandResult(
@@ -178,8 +178,32 @@ pub fn writeToolCallUpdateWithCommandResult(
     content_text: ?[]const u8,
     command_result_json: ?[]const u8,
 ) !void {
+    try writeToolCallUpdateFields(w, tool_call_id, status, null, content_text, command_result_json);
+}
+
+pub fn writeToolCallPresentationUpdate(
+    w: *std.Io.Writer,
+    tool_call_id: []const u8,
+    status: ToolCallStatus,
+    title: []const u8,
+) !void {
+    try writeToolCallUpdateFields(w, tool_call_id, status, title, null, null);
+}
+
+fn writeToolCallUpdateFields(
+    w: *std.Io.Writer,
+    tool_call_id: []const u8,
+    status: ToolCallStatus,
+    title: ?[]const u8,
+    content_text: ?[]const u8,
+    command_result_json: ?[]const u8,
+) !void {
     try w.writeAll("{\"sessionUpdate\":\"tool_call_update\",\"toolCallId\":");
     try writeJsonStr(tool_call_id, w);
+    if (title) |value| {
+        try w.writeAll(",\"title\":");
+        try writeJsonStr(value, w);
+    }
     try w.writeAll(",\"status\":");
     try writeJsonStr(status.jsonString(), w);
     if (content_text) |text| {
@@ -413,6 +437,22 @@ test "writeToolCallUpdate without content" {
     try writeToolCallUpdate(&out.writer, "call_003", .in_progress, null);
     try std.testing.expect(std.mem.find(u8, out.writer.buffered(), "\"in_progress\"") != null);
     try std.testing.expect(std.mem.find(u8, out.writer.buffered(), "content") == null);
+}
+
+test "writeToolCallPresentationUpdate replaces the active title" {
+    const alloc = std.testing.allocator;
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+    try writeToolCallPresentationUpdate(&out.writer, "call_exec", .completed, "Ran zig build");
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, alloc, out.writer.buffered(), .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("tool_call_update", parsed.value.object.get("sessionUpdate").?.string);
+    try std.testing.expectEqualStrings("call_exec", parsed.value.object.get("toolCallId").?.string);
+    try std.testing.expectEqualStrings("completed", parsed.value.object.get("status").?.string);
+    try std.testing.expectEqualStrings("Ran zig build", parsed.value.object.get("title").?.string);
+    try std.testing.expect(parsed.value.object.get("content") == null);
+    try std.testing.expect(parsed.value.object.get("rawOutput") == null);
 }
 
 test "writeInitializeResponse contains required fields" {
