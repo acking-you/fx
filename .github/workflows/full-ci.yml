@@ -21,6 +21,10 @@ jobs:
     runs-on: windows-2025
     timeout-minutes: 60
     steps:
+      - name: Preserve repository line endings
+        shell: pwsh
+        run: git config --global core.autocrlf false
+
       - uses: actions/checkout@v4
 
       - name: Setup Zig
