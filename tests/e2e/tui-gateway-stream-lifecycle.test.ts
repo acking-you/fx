@@ -2798,9 +2798,14 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
           // while the active turn is still held. Remove the queued prompt and
           // line framing before matching the marker so the assertion follows
           // the streamed body rather than terminal cell boundaries.
-          const streamed = candidate.replaceAll(queuedPrompt, "").replace(/[\r\n]/g, "");
-          const beforeIndex = streamed.indexOf(activeBefore.trim());
-          const afterIndex = streamed.indexOf(activeAfter.trim());
+          // Inline images and footer repaints may insert terminal control
+          // sequences between cells from one streamed chunk. Compare a
+          // compact alphanumeric transcript so those presentation boundaries
+          // cannot make a complete assistant marker appear missing.
+          const normalize = (value: string) => value.replace(/[^A-Za-z0-9_]/g, "");
+          const streamed = normalize(candidate.replaceAll(queuedPrompt, ""));
+          const beforeIndex = streamed.indexOf(normalize(activeBefore));
+          const afterIndex = streamed.indexOf(normalize(activeAfter));
           const queuedPromptIndex = candidate.indexOf(queuedPrompt);
           const queuedDoneIndex = candidate.indexOf(queuedDone);
           return beforeIndex >= 0 &&
@@ -2810,9 +2815,10 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         },
         "ordered active steer scrollback",
       );
-      const streamedFinal = finalScrollback.replaceAll(queuedPrompt, "").replace(/[\r\n]/g, "");
-      const beforeIndex = streamedFinal.indexOf(activeBefore.trim());
-      const afterIndex = streamedFinal.indexOf(activeAfter.trim());
+      const normalize = (value: string) => value.replace(/[^A-Za-z0-9_]/g, "");
+      const streamedFinal = normalize(finalScrollback.replaceAll(queuedPrompt, ""));
+      const beforeIndex = streamedFinal.indexOf(normalize(activeBefore));
+      const afterIndex = streamedFinal.indexOf(normalize(activeAfter));
       const queuedPromptIndex = finalScrollback.indexOf(queuedPrompt);
       const queuedDoneIndex = finalScrollback.indexOf(queuedDone);
       expect(beforeIndex).toBeGreaterThanOrEqual(0);
