@@ -123,6 +123,31 @@ describe.skipIf(TMUX_SKIP)("tui: no-key slash commands", () => {
   );
 
   test(
+    "/bash-first toggles the session-local shell search mode",
+    async () => {
+      const launched = await launchNoKeyAndWait();
+      session = launched.terminal;
+
+      await session.sendText("/bash-first on");
+      const enabled = await session.waitForText(
+        "Bash-first mode enabled. Workspace search uses exec_command with rg.",
+        5_000,
+      );
+      expect(enabled).toContain("Bash-first mode enabled");
+
+      await session.sendText("/bash-first off");
+      const disabled = await session.waitForText(
+        "Bash-first mode disabled. Specialized workspace search tools are available.",
+        5_000,
+      );
+      expect(disabled).toContain("Specialized workspace search tools are available");
+      expect(session.paneStatus()).toEqual({ dead: false, status: null });
+      expect(readFileSync(launched.stderrPath, "utf8")).toBe("");
+    },
+    TIMEOUT,
+  );
+
+  test(
     "compact status notice preserves native scrollback",
     async () => {
       const root = mkdtempSync(join(tmpdir(), "fx-status-compact-"));

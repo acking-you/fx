@@ -63,6 +63,7 @@ pub const SlashKind = enum {
     alias,
     paste,
     fast,
+    bash_first,
     statusline,
     notifications,
     workspace,

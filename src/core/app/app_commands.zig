@@ -399,6 +399,7 @@ pub fn Handlers(comptime App: type) type {
                 .handle_alias = commandHandleAlias,
                 .paste_clipboard = commandPasteClipboard,
                 .toggle_fast = commandToggleFast,
+                .bash_first = commandBashFirst,
                 .handle_statusline = commandHandleStatusline,
                 .rename_session = commandRenameSession,
                 .handle_notifications = commandHandleNotifications,
@@ -1710,6 +1711,47 @@ pub fn Handlers(comptime App: type) type {
             try session_commands.Commands(App).toggleFast(app);
         }
 
+        fn commandBashFirst(ctx: *anyopaque, rest: []const u8) !void {
+            const app: *App = @ptrCast(@alignCast(ctx));
+            if (comptime !@hasField(App, "bash_first") or !@hasField(App, "permission_state")) {
+                try app.writeDomainNotice(.{
+                    .topic = "tool_mode",
+                    .tone = .@"error",
+                    .body = "bash-first mode is not available in this runtime",
+                }, true);
+                return;
+            }
+
+            const trimmed = std.mem.trim(u8, rest, " \t");
+            const next = if (trimmed.len == 0 or std.mem.eql(u8, trimmed, "toggle"))
+                !app.bash_first
+            else if (std.mem.eql(u8, trimmed, "on"))
+                true
+            else if (std.mem.eql(u8, trimmed, "off"))
+                false
+            else {
+                try app.writeDomainNotice(.{
+                    .topic = "tool_mode",
+                    .tone = .neutral,
+                    .body = "Use: /bash-first [on|off] (no argument toggles the mode).",
+                }, true);
+                return;
+            };
+
+            app.permission_state.authority_mutex.lockUncancelable(io_mod.getIo());
+            app.bash_first = next;
+            app.permission_state.authority_mutex.unlock(io_mod.getIo());
+            try app.writeDomainNotice(.{
+                .topic = "tool_mode",
+                .tone = .neutral,
+                .body = if (next)
+                    "Bash-first mode enabled. Workspace search uses exec_command with rg."
+                else
+                    "Bash-first mode disabled. Specialized workspace search tools are available.",
+            }, true);
+            app.shell.render_requests.request(.footer);
+        }
+
         fn commandHandleStatusline(ctx: *anyopaque, rest: []const u8) !void {
             const app: *App = @ptrCast(@alignCast(ctx));
             if (std.mem.trim(u8, rest, " \t").len == 0) {
@@ -1872,6 +1914,9 @@ fn buildTraceReport(app: anytype) ![]u8 {
     try out.writer.print("build: {s}\n", .{@tagName(builtin.mode)});
     try out.writer.print("model: {s}\n", .{provider_runtime.model(app)});
     if (app.fast_mode) try out.writer.writeAll("fast_mode: on\n");
+    if (comptime @hasField(App, "bash_first")) {
+        try out.writer.print("bash_first: {s}\n", .{if (app.bash_first) "on" else "off"});
+    }
     const perm_label = permissions.permissionModeLabel(app.permission_engine.mode);
     try out.writer.print("permission_mode: {s}\n", .{perm_label});
     try out.writer.print("workspace: {s}\n", .{app.workspace_root});

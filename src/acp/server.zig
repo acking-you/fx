@@ -79,6 +79,7 @@ const AcpMethod = enum {
     fx_provider_login_status,
     fx_provider_login_submit_code,
     fx_provider_login_cancel,
+    fx_tool_mode_set,
     unknown,
 
     fn parse(method: []const u8) AcpMethod {
@@ -104,6 +105,7 @@ const AcpMethod = enum {
         if (std.mem.eql(u8, method, "fx/provider/login/status")) return .fx_provider_login_status;
         if (std.mem.eql(u8, method, "fx/provider/login/submitCode")) return .fx_provider_login_submit_code;
         if (std.mem.eql(u8, method, "fx/provider/login/cancel")) return .fx_provider_login_cancel;
+        if (std.mem.eql(u8, method, "fx/toolMode/set")) return .fx_tool_mode_set;
         return .unknown;
     }
 
@@ -124,6 +126,7 @@ const AcpMethod = enum {
             .fx_provider_login_status,
             .fx_provider_login_submit_code,
             .fx_provider_login_cancel,
+            .fx_tool_mode_set,
             => false,
             .session_list,
             .session_remove,
@@ -147,6 +150,7 @@ const AcpMethod = enum {
             .fx_provider_login_status,
             .fx_provider_login_submit_code,
             .fx_provider_login_cancel,
+            .fx_tool_mode_set,
             => true,
             else => false,
         };
@@ -280,6 +284,8 @@ pub const ActivePrompt = struct {
     /// Mid-turn mode changes apply to the next prompt, never the running one.
     mode: []const u8,
     permission_mode: types.PermissionMode,
+    /// Captured with the prompt so a mid-turn toggle applies only to the next turn.
+    bash_first: bool = false,
     thread: if (host_target.is_wasm) void else std.Thread = if (host_target.is_wasm) {} else undefined,
     reapable: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     steer_mutex: std.Io.Mutex = .init,
@@ -382,6 +388,8 @@ pub const ServerState = struct {
     effort: types.ReasoningEffort = .auto,
     first_call_tool_choice: types.ToolChoice = .auto,
     context_enabled: bool = true,
+    /// Connection/session-local tool projection preference.
+    bash_first: bool = false,
     active_session: ?ActiveSessionState = null,
     active_prompt: ?*ActivePrompt = null,
     subagent_authority_mutex: std.Io.Mutex = .init,
@@ -1380,6 +1388,7 @@ fn dispatch(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message) !void 
             .session_prompt => startPrompt(state, alloc, msg),
             .session_set_config_option => handleSetConfigOption(state, alloc, msg),
             .session_set_mode => handleSetMode(state, alloc, msg),
+            .fx_tool_mode_set => handleToolModeSet(state, alloc, msg),
             .fx_turn_status => prompt_handler.handleTurnStatus(state, alloc, msg),
             .fx_background_terminals_list => prompt_handler.handleBackgroundTerminalsList(state, alloc, msg),
             else => state.writer.writeError(alloc, msg.id, .{
@@ -1409,6 +1418,7 @@ fn dispatch(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message) !void 
         .fx_provider_login_status => handleProviderLoginStatus(state, alloc, msg),
         .fx_provider_login_submit_code => handleProviderLoginSubmitCode(state, alloc, msg),
         .fx_provider_login_cancel => handleProviderLoginCancel(state, alloc, msg),
+        .fx_tool_mode_set => handleToolModeSet(state, alloc, msg),
         .initialize,
         .session_cancel,
         .session_remove,
@@ -1430,6 +1440,7 @@ fn startPrompt(state: *ServerState, alloc: Allocator, msg: *const jsonrpc.Messag
         .msg = try cloneMessage(alloc, msg),
         .mode = session.mode,
         .permission_mode = session.permission_mode,
+        .bash_first = state.bash_first,
     };
     errdefer jsonrpc.freeMessage(alloc, &active.msg);
 
@@ -1453,6 +1464,7 @@ fn promptWorkerMain(active: *ActivePrompt) void {
         &active.msg,
         active.mode,
         active.permission_mode,
+        active.bash_first,
     ) catch |err| .{
         .rpc_error = .{
             .code = ErrorCode.internal_error,
@@ -2509,6 +2521,15 @@ fn handleSetConfigOption(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Me
             .{ .fast_mode = fast_mode },
             session_test_controls.logOptions(),
         ) catch |err| return writeConfigCommitError(state, alloc, msg, err, "Invalid Fast mode");
+    } else if (std.mem.eql(u8, config_id, "bash_first")) {
+        const bash_first = parseBashFirstConfig(value) orelse
+            return state.writer.writeError(alloc, msg.id, .{
+                .code = ErrorCode.invalid_params,
+                .message = "Invalid bash-first mode",
+            });
+        state.subagent_authority_mutex.lockUncancelable(io_mod.getIo());
+        state.bash_first = bash_first;
+        state.subagent_authority_mutex.unlock(io_mod.getIo());
     } else if (std.mem.eql(u8, config_id, "mode")) {
         if (state.cfg.mode_registry.lookup(value) == null) return state.writer.writeError(alloc, msg.id, .{
             .code = ErrorCode.invalid_params,
@@ -2563,6 +2584,8 @@ fn writeConfigOptionsResponse(
     try out.writer.writeAll(",");
     try sessions.writeFastModeConfigOption(&out.writer, session.fast_mode, current_capabilities.supports_fast_mode);
     try out.writer.writeAll(",");
+    try sessions.writeBashFirstConfigOption(&out.writer, state.bash_first);
+    try out.writer.writeAll(",");
     try sessions.writeModeConfigOption(&out.writer, state.cfg.mode_registry, current_mode);
     try out.writer.writeAll("]}");
     try state.writer.writeResponse(alloc, id, out.writer.buffered());
@@ -2593,6 +2616,12 @@ fn normalizeModelControls(
 fn parseFastModeConfig(value: []const u8) ?bool {
     if (std.mem.eql(u8, value, "normal")) return false;
     if (std.mem.eql(u8, value, "fast")) return true;
+    return null;
+}
+
+fn parseBashFirstConfig(value: []const u8) ?bool {
+    if (std.mem.eql(u8, value, "on") or std.mem.eql(u8, value, "bash-first") or std.mem.eql(u8, value, "bash_first")) return true;
+    if (std.mem.eql(u8, value, "off") or std.mem.eql(u8, value, "standard") or std.mem.eql(u8, value, "default")) return false;
     return null;
 }
 
@@ -2808,6 +2837,55 @@ pub fn applySessionMode(registry: mode_registry.Registry, session: *ActiveSessio
     session.permission_mode = mode.permission_mode;
 }
 
+fn handleToolModeSet(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message) !void {
+    const params = msg.params_raw orelse return state.writer.writeError(alloc, msg.id, .{
+        .code = ErrorCode.invalid_params,
+        .message = "Missing params",
+    });
+    const parsed = std.json.parseFromSlice(std.json.Value, alloc, params, .{}) catch
+        return state.writer.writeError(alloc, msg.id, .{
+            .code = ErrorCode.invalid_params,
+            .message = "Invalid params",
+        });
+    defer parsed.deinit();
+    if (parsed.value != .object) return state.writer.writeError(alloc, msg.id, .{
+        .code = ErrorCode.invalid_params,
+        .message = "Expected an object with mode or bashFirst",
+    });
+
+    const enabled: bool = if (parsed.value.object.get("bashFirst")) |value| switch (value) {
+        .bool => |flag| flag,
+        else => return state.writer.writeError(alloc, msg.id, .{
+            .code = ErrorCode.invalid_params,
+            .message = "bashFirst must be a boolean",
+        }),
+    } else if (parsed.value.object.get("mode")) |value| switch (value) {
+        .string => |mode| parseBashFirstConfig(mode) orelse
+            return state.writer.writeError(alloc, msg.id, .{
+                .code = ErrorCode.invalid_params,
+                .message = "mode must be bash-first or standard",
+            }),
+        else => return state.writer.writeError(alloc, msg.id, .{
+            .code = ErrorCode.invalid_params,
+            .message = "mode must be a string",
+        }),
+    } else return state.writer.writeError(alloc, msg.id, .{
+        .code = ErrorCode.invalid_params,
+        .message = "Expected mode or bashFirst",
+    });
+
+    state.subagent_authority_mutex.lockUncancelable(io_mod.getIo());
+    state.bash_first = enabled;
+    state.subagent_authority_mutex.unlock(io_mod.getIo());
+
+    var response: std.Io.Writer.Allocating = .init(alloc);
+    defer response.deinit();
+    try response.writer.writeAll("{\"mode\":");
+    try writeJsonStr(if (enabled) "bash-first" else "standard", &response.writer);
+    try response.writer.print(",\"bashFirst\":{s}}}", .{if (enabled) "true" else "false"});
+    try state.writer.writeResponse(alloc, msg.id, response.writer.buffered());
+}
+
 test "applySessionMode uses registered mode policy and ignores unknown modes" {
     const mode_specs = [_]mode_registry.ModeSpec{
         .{ .id = "inspect", .name = "Inspect", .permission_mode = .ask },
@@ -2892,6 +2970,7 @@ test "ACP method parser classifies request dispatch methods" {
     try std.testing.expectEqual(AcpMethod.fx_provider_login_status, AcpMethod.parse("fx/provider/login/status"));
     try std.testing.expectEqual(AcpMethod.fx_provider_login_submit_code, AcpMethod.parse("fx/provider/login/submitCode"));
     try std.testing.expectEqual(AcpMethod.fx_provider_login_cancel, AcpMethod.parse("fx/provider/login/cancel"));
+    try std.testing.expectEqual(AcpMethod.fx_tool_mode_set, AcpMethod.parse("fx/toolMode/set"));
     try std.testing.expectEqual(AcpMethod.unknown, AcpMethod.parse("workspace/unknown"));
 }
 
@@ -2917,6 +2996,7 @@ test "ACP prompt gate policy keeps lifecycle interruption responsive" {
     try std.testing.expect(!AcpMethod.fx_provider_login_status.waitsForActivePrompt());
     try std.testing.expect(!AcpMethod.fx_provider_login_submit_code.waitsForActivePrompt());
     try std.testing.expect(!AcpMethod.fx_provider_login_cancel.waitsForActivePrompt());
+    try std.testing.expect(!AcpMethod.fx_tool_mode_set.waitsForActivePrompt());
     try std.testing.expect(AcpMethod.unknown.waitsForActivePrompt());
 }
 
@@ -2928,6 +3008,7 @@ test "ACP provider job gate leaves control-plane methods responsive" {
     try std.testing.expect(AcpMethod.fx_provider_login_status.allowedDuringProviderJob());
     try std.testing.expect(AcpMethod.fx_provider_login_submit_code.allowedDuringProviderJob());
     try std.testing.expect(AcpMethod.fx_provider_login_cancel.allowedDuringProviderJob());
+    try std.testing.expect(AcpMethod.fx_tool_mode_set.allowedDuringProviderJob());
     try std.testing.expect(!AcpMethod.session_prompt.allowedDuringProviderJob());
     try std.testing.expect(!AcpMethod.fx_provider_switch.allowedDuringProviderJob());
 }

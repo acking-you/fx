@@ -2258,7 +2258,7 @@ tmuxTest(
 
       await session.waitForComposer(TIMEOUT);
       await session.sendText("Search for the current Zig 0.16 status.");
-      await session.waitForText("Searched Zig 0.16", TIMEOUT);
+      await session.waitForText("Searched web Zig 0.16", TIMEOUT);
       await session.waitForText("GROK_WEB_SEARCH_DONE", TIMEOUT);
       expect(grok.bodies).toHaveLength(1);
       const first = JSON.parse(grok.bodies[0]!) as {
@@ -2320,7 +2320,7 @@ tmuxTest(
 
       await session.waitForComposer(TIMEOUT);
       await session.sendText("Find the current Zig release using web search.");
-      await session.waitForText("Searched current Zig release", TIMEOUT);
+      await session.waitForText("Searched web current Zig release", TIMEOUT);
       await session.waitForText("GROK_CONFIGURED_SEARCH_FALLBACK_DONE", TIMEOUT);
 
       expect(fixture.grokBodies).toHaveLength(2);

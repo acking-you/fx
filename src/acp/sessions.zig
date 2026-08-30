@@ -267,6 +267,8 @@ fn writeNewSessionResponse(
     try out.writer.writeAll(",");
     try writeFastModeConfigOption(&out.writer, active.fast_mode, active_capabilities.supports_fast_mode);
     try out.writer.writeAll(",");
+    try writeBashFirstConfigOption(&out.writer, state.bash_first);
+    try out.writer.writeAll(",");
     try writeModeConfigOption(
         &out.writer,
         state.cfg.mode_registry,
@@ -716,6 +718,8 @@ fn writeLoadSessionResponse(
     try out.writer.writeAll(",");
     try writeFastModeConfigOption(&out.writer, active.fast_mode, active_capabilities.supports_fast_mode);
     try out.writer.writeAll(",");
+    try writeBashFirstConfigOption(&out.writer, state.bash_first);
+    try out.writer.writeAll(",");
     try writeModeConfigOption(
         &out.writer,
         state.cfg.mode_registry,
@@ -1038,6 +1042,7 @@ fn buildSlashCommandsJson(alloc: Allocator) ![]u8 {
         .{ .name = "mcp", .description = "Show MCP server status", .hint = null },
         .{ .name = "skills", .description = "Show installed skills", .hint = null },
         .{ .name = "fast", .description = "Toggle fast mode for supported models", .hint = null },
+        .{ .name = "bash-first", .description = "Prefer exec_command with rg for workspace search", .hint = "on|off" },
     };
 
     try out.writer.writeAll("[");
@@ -1157,6 +1162,12 @@ pub fn writeFastModeConfigOption(
     try writer.writeAll("]}");
 }
 
+pub fn writeBashFirstConfigOption(writer: *std.Io.Writer, current: bool) !void {
+    try writer.writeAll("{\"id\":\"bash_first\",\"name\":\"Bash-first mode\",\"description\":\"Prefer exec_command with rg for workspace discovery and code search\",\"category\":\"tools\",\"type\":\"select\",\"currentValue\":");
+    try writeJsonStr(if (current) "on" else "off", writer);
+    try writer.writeAll(",\"options\":[{\"value\":\"off\",\"name\":\"Off\"},{\"value\":\"on\",\"name\":\"On\"}]}");
+}
+
 pub fn writeModeConfigOption(
     w: *std.Io.Writer,
     registry: mode_registry.Registry,
@@ -1220,10 +1231,10 @@ test "buildSlashCommandsJson includes all expected commands" {
     defer alloc.free(json);
 
     const expected_commands = [_][]const u8{
-        "compact",   "undo",  "changes",  "review",  "clear",
-        "reset",     "help",  "status",   "model",   "permissions",
-        "allowlist", "rules", "settings", "credits", "mcp",
-        "skills",    "fast",
+        "compact",   "undo",  "changes",    "review",  "clear",
+        "reset",     "help",  "status",     "model",   "permissions",
+        "allowlist", "rules", "settings",   "credits", "mcp",
+        "skills",    "fast",  "bash-first",
     };
     for (expected_commands) |cmd| {
         try std.testing.expect(std.mem.find(u8, json, cmd) != null);

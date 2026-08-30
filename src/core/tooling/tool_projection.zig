@@ -15,6 +15,10 @@ pub const Options = struct {
     mcp_runtime: ?*mcp_runtime.McpRuntime = null,
     subagent_available: bool = false,
     web_search_available: bool = true,
+    /// Prefer the unified shell for workspace discovery and code search.
+    /// When enabled, the model projection omits the overlapping built-ins and
+    /// adds Codex-style `rg` guidance to the shell contract.
+    bash_first: bool = false,
 };
 
 const BuildKind = enum { full, read_only };
@@ -175,8 +179,8 @@ const test_semantic_search = blk: {
     spec.executor_kind = .semantic_search;
     spec.activity_kind = .read;
     spec.requires_approval = false;
-    spec.action_label = "Searching";
-    spec.completed_action_label = "Searched";
+    spec.action_label = "Exploring code";
+    spec.completed_action_label = "Explored code";
     spec.label_arg_kind = .query;
     spec.label_arg_default = "query";
     spec.permission_target_kind = .path_optional_existing;
@@ -376,8 +380,8 @@ const test_glob_files = blk: {
         },
     };
     spec.executor_kind = .glob_files;
-    spec.action_label = "Matching";
-    spec.completed_action_label = "Matched";
+    spec.action_label = "Matching files";
+    spec.completed_action_label = "Matched files";
     spec.label_arg_kind = .pattern;
     spec.label_arg_default = "pattern";
     break :blk spec;
@@ -400,8 +404,8 @@ const test_grep_files = blk: {
     spec.executor_kind = .grep_files;
     spec.activity_kind = .read;
     spec.requires_approval = false;
-    spec.action_label = "Searching";
-    spec.completed_action_label = "Searched";
+    spec.action_label = "Searching text";
+    spec.completed_action_label = "Searched text";
     spec.label_arg_kind = .pattern;
     spec.label_arg_default = "pattern";
     spec.permission_target_kind = .path_optional_existing;
@@ -438,6 +442,8 @@ const test_web_search_base = blk: {
         .description = spec.description,
     };
     spec.executor_kind = .web_search;
+    spec.action_label = "Searching web";
+    spec.completed_action_label = "Searched web";
     spec.label_arg_kind = .query;
     spec.label_arg_default = "web";
     break :blk spec;
@@ -703,6 +709,9 @@ pub const EffectiveToolProjection = struct {
     }
 };
 
+const bash_first_guidance =
+    "Bash-first mode is active. Use exec_command for workspace discovery and code search; prefer `rg` for text and `rg --files` for file lists (fall back only when rg is unavailable). The specialized list_files, glob_files, grep_files, and semantic_search tools are intentionally hidden in this mode.";
+
 pub fn containsName(names: []const []const u8, expected: []const u8) bool {
     for (names) |name| if (std.mem.eql(u8, name, expected)) return true;
     return false;
@@ -827,6 +836,11 @@ fn buildToolProjection(alloc: Allocator, tool_set: tool_set_contract.ToolSet, ki
         }
     }
 
+    if (options.bash_first) {
+        if (!first_custom_guidance) try guidance_out.writer.writeAll("\n\n");
+        try guidance_out.writer.writeAll(bash_first_guidance);
+    }
+
     const custom_guidance = try guidance_out.toOwnedSlice();
     errdefer alloc.free(custom_guidance);
     const names = try advertised_names.toOwnedSlice(alloc);
@@ -850,6 +864,7 @@ fn appendBuiltinTool(
     options: Options,
 ) !void {
     if (!tool.model_visible) return;
+    if (options.bash_first and isBashFirstHiddenTool(tool)) return;
     if (!includeBuiltinForKind(tool.name, kind, tool_set)) return;
     if ((tool.executor_kind == .exec_command or tool.executor_kind == .write_stdin) and
         !unifiedExecSupported()) return;
@@ -872,6 +887,13 @@ fn appendBuiltinTool(
         }
         try guidance_writer.writeAll(tool.description);
     }
+}
+
+fn isBashFirstHiddenTool(tool: tool_dispatch.Tool) bool {
+    return switch (tool.executor_kind) {
+        .list_files, .glob_files, .grep_files, .semantic_search => true,
+        else => false,
+    };
 }
 
 fn unifiedExecSupported() bool {
@@ -1036,6 +1058,30 @@ test "ask keeps advertising locally executed tools" {
     );
     defer projection.deinit(std.testing.allocator);
     try expectContainsName(projection.advertised_names, "web_search");
+}
+
+test "bash-first projection hides overlapping discovery tools and guides rg" {
+    var projection = try buildTestModelToolProjection(std.testing.allocator, .{ .bash_first = true });
+    defer projection.deinit(std.testing.allocator);
+
+    try expectContainsName(projection.advertised_names, "exec_command");
+    try expectContainsName(projection.advertised_names, "read_file");
+    try expectNotContainsName(projection.advertised_names, "list_files");
+    try expectNotContainsName(projection.advertised_names, "glob_files");
+    try expectNotContainsName(projection.advertised_names, "grep_files");
+    try expectNotContainsName(projection.advertised_names, "semantic_search");
+    try std.testing.expect(std.mem.find(u8, projection.custom_guidance, "rg --files") != null);
+}
+
+test "bash-first leaves the default projection unchanged" {
+    var standard = try buildTestModelToolProjection(std.testing.allocator, .{});
+    defer standard.deinit(std.testing.allocator);
+    var bash_first = try buildTestModelToolProjection(std.testing.allocator, .{ .bash_first = true });
+    defer bash_first.deinit(std.testing.allocator);
+
+    try expectContainsName(standard.advertised_names, "grep_files");
+    try expectContainsName(standard.advertised_names, "semantic_search");
+    try std.testing.expect(std.mem.find(u8, standard.custom_guidance, "Bash-first mode") == null);
 }
 
 test "yolo advertisement ignores permission filtering" {

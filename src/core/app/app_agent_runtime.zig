@@ -2027,11 +2027,11 @@ test "tool labels preserve semantic_search query value and default fallback" {
         .arguments_json = "{\"query\":\"state machines\"}",
     };
     const active = try app.describeToolAction(arena, search_call);
-    try std.testing.expect(std.mem.find(u8, active, "Searching") != null);
+    try std.testing.expect(std.mem.find(u8, active, "Exploring code") != null);
     try std.testing.expect(std.mem.find(u8, active, "state machines") != null);
 
     const completed = try app.describeToolActionCompleted(arena, search_call);
-    try std.testing.expect(std.mem.find(u8, completed, "Searched") != null);
+    try std.testing.expect(std.mem.find(u8, completed, "Explored code") != null);
     try std.testing.expect(std.mem.find(u8, completed, "state machines") != null);
 
     const defaulted_call: ToolCall = .{
@@ -2040,7 +2040,7 @@ test "tool labels preserve semantic_search query value and default fallback" {
         .arguments_json = "{\"query\":3}",
     };
     const defaulted = try app.describeToolAction(arena, defaulted_call);
-    try std.testing.expect(std.mem.find(u8, defaulted, "Searching") != null);
+    try std.testing.expect(std.mem.find(u8, defaulted, "Exploring code") != null);
     try std.testing.expect(std.mem.find(u8, defaulted, "query") != null);
 }
 
@@ -2059,12 +2059,12 @@ test "native web_search labels preserve bounded query and domain filters" {
         .arguments_json = "{\"query\":\"current Zig release\",\"allowed_domains\":[\"ziglang.org\",\"github.com\"]}",
     };
     const active = try app.describeToolAction(arena, call);
-    try std.testing.expect(std.mem.find(u8, active, "Searching") != null);
+    try std.testing.expect(std.mem.find(u8, active, "Searching web") != null);
     try std.testing.expect(std.mem.find(u8, active, "current Zig release") != null);
     try std.testing.expect(std.mem.find(u8, active, "allowed: ziglang.org, github.com") != null);
 
     const completed = try app.describeToolActionCompleted(arena, call);
-    try std.testing.expect(std.mem.find(u8, completed, "Searched") != null);
+    try std.testing.expect(std.mem.find(u8, completed, "Searched web") != null);
     try std.testing.expect(std.mem.find(u8, completed, "current Zig release") != null);
 }
 

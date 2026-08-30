@@ -2109,7 +2109,7 @@ test "web progress callback keeps typed lifecycle facts during cancellation" {
     try std.testing.expect(std.mem.find(
         u8,
         lifecycle.progress.text,
-        "Found 3 results",
+        "Found 3 web results",
     ) != null);
 
     app.worker.active_turn_id = 0;

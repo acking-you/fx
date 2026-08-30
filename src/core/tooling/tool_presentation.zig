@@ -241,7 +241,7 @@ fn resolveAction(
     const presentation = tool_dispatch.presentationForArgs(spec.*, args);
     if (spec.executor_kind == .web_search) {
         return .{
-            .label = lifecycleLabel("Searching", "Searched", state, denied_label),
+            .label = lifecycleLabel(spec.action_label, spec.completed_action_label, state, denied_label),
             .value = try formatWebSearchActionDetail(alloc, args),
         };
     }
@@ -364,12 +364,12 @@ pub fn formatWebSearchProgressPlain(alloc: Allocator, progress: types.WebSearchP
     return switch (progress) {
         .query_started => |query| std.fmt.allocPrint(
             alloc,
-            "Searching {s}",
+            "Searching web {s}",
             .{text_utils.clippedLabel(&query_buf, query, 120)},
         ),
         .results_received => |entry| std.fmt.allocPrint(
             alloc,
-            "Found {d} result{s} for {s}",
+            "Found {d} web result{s} for {s}",
             .{ entry.result_count, if (entry.result_count == 1) "" else "s", text_utils.clippedLabel(&query_buf, entry.query, 120) },
         ),
     };
@@ -457,8 +457,8 @@ const test_web_search = blk: {
     tool.name = "web_search";
     tool.model_schema.name = "web_search";
     tool.executor_kind = .web_search;
-    tool.action_label = "Searching";
-    tool.completed_action_label = "Searched";
+    tool.action_label = "Searching web";
+    tool.completed_action_label = "Searched web";
     tool.label_arg_kind = .query;
     tool.label_arg_default = "web";
     break :blk tool;
@@ -534,8 +534,8 @@ test "tool presentation formats plain web progress variants" {
             fetch: types.WebFetchProgress,
         },
     }{
-        .{ .text = "Searching current Zig release", .progress = .{ .search = .{ .query_started = "current Zig release" } } },
-        .{ .text = "Found 1 result for current Zig release", .progress = .{ .search = .{ .results_received = .{ .query = "current Zig release", .result_count = 1 } } } },
+        .{ .text = "Searching web current Zig release", .progress = .{ .search = .{ .query_started = "current Zig release" } } },
+        .{ .text = "Found 1 web result for current Zig release", .progress = .{ .search = .{ .results_received = .{ .query = "current Zig release", .result_count = 1 } } } },
         .{ .text = "Fetching https://ziglang.org", .progress = .{ .fetch = .{ .fetching = "https://ziglang.org" } } },
         .{ .text = "Converting https://ziglang.org", .progress = .{ .fetch = .{ .converting = "https://ziglang.org" } } },
     };
@@ -699,7 +699,7 @@ test "tool presentation formats bounded web search action detail" {
         },
     });
     defer alloc.free(label);
-    try std.testing.expectEqualStrings("Searching current Zig release | blocked: spam.example, ads.example", label);
+    try std.testing.expectEqualStrings("Searching web current Zig release | blocked: spam.example, ads.example", label);
 }
 
 test "tool presentation bounds a large multiline run command activity" {
@@ -825,7 +825,7 @@ test "tool presentation frees all formatted output with a normal allocator" {
         },
     });
     defer alloc.free(search);
-    try std.testing.expectEqualStrings("Searching current Zig release | allowed: ziglang.org", search);
+    try std.testing.expectEqualStrings("Searching web current Zig release | allowed: ziglang.org", search);
 
     const provider_search = try formatPlainAction(alloc, .{
         .tool_registry = test_tool_registry,

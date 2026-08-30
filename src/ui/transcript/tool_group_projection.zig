@@ -1112,7 +1112,7 @@ test "small minimal tool groups surface canonical action targets" {
     const alloc = std.testing.allocator;
     const entries = [_]TranscriptEntry{
         .{ .raw_bytes = .{ .id = 1, .bytes = "● Read\x1b[0m \x1b[38;5;245mruntime.zig\x1b[0m\n", .class = .tool_status } },
-        .{ .raw_bytes = .{ .id = 2, .bytes = "● Searched\x1b[0m \x1b[38;5;245msnapshot\x1b[0m\n", .class = .tool_status } },
+        .{ .raw_bytes = .{ .id = 2, .bytes = "● Searched text\x1b[0m \x1b[38;5;245msnapshot\x1b[0m\n", .class = .tool_status } },
         .{ .raw_bytes = .{ .id = 3, .bytes = "● Editing\x1b[0m \x1b[38;5;245mstore.zig\x1b[0m\n", .class = .tool_status } },
     };
     const details = [_]ToolDetailRecord{
@@ -1127,7 +1127,7 @@ test "small minimal tool groups surface canonical action targets" {
     try std.testing.expectEqualStrings(
         "● 3 tool calls · 2 read · 1 edit\n" ++
             "├ Read runtime.zig\n" ++
-            "├ Searched snapshot\n" ++
+            "├ Searched text snapshot\n" ++
             "└ Editing store.zig",
         projection.entry_actions.items[0].override.bytes,
     );
