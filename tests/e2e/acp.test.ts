@@ -2288,7 +2288,7 @@ describe("acp: model-independent", () => {
           .filter((message: any) => message.params?.update?.toolCallId === toolCallId)
           .map((message: any) => message.params.update);
         const started = updates.find((update: any) => update.sessionUpdate === "tool_call");
-        expect(started.title).toContain("printf ACP_PUBLIC_EXEC_");
+        expect(started.title).toBe(`Running ${command}`);
         expect(started.rawInput).toEqual({
           cmd: command,
         });
@@ -2308,6 +2308,10 @@ describe("acp: model-independent", () => {
           .toContain("ACP_PUBLIC_EXEC_NATIVE");
         const completed = updates.find((update: any) => update.status === "completed");
         expect(completed.rawOutput.commandResult.exit_code).toBe(0);
+        const terminalPresentation = updates.findLast(
+          (update: any) => update.status === "completed" && typeof update.title === "string",
+        );
+        expect(terminalPresentation?.title).toBe(`Ran ${command}`);
         expect(client.stderr).toBe("");
       } finally {
         await client?.close();

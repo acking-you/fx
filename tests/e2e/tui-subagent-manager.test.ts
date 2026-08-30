@@ -6590,7 +6590,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         const liveTool = await active.waitForPane(
           (pane) =>
             pane.includes("● 1 tool call · 1 read") &&
-            pane.includes(`└ Reading ${childToolPath}`) &&
+            pane.includes(`└ Read ${childToolPath}`) &&
             pane.includes("MANAGER_HUMAN_TWO_LIVE_"),
           TIMEOUT,
         );

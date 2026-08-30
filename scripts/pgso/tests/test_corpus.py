@@ -63,7 +63,6 @@ VERIFICATION_E2E_TESTS = (
     "tui-slash-commands.test.ts",
     "tui-slash-extra.test.ts",
     "tui-slash-menu.test.ts",
-    "web-fetch-permission-progress.test.ts",
     "yolo-permission-mode.test.ts",
 )
 
@@ -354,7 +353,7 @@ class PgsoCorpusTests(unittest.TestCase):
             tuple(test_file for test_file, _ in corpus.intentional_exclusions),
         )
         self.assertEqual(34, len(corpus.scenarios))
-        self.assertEqual(48, len(corpus.candidate_scenarios))
+        self.assertEqual(47, len(corpus.candidate_scenarios))
         self.assertEqual(
             100,
             next(

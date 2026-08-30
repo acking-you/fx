@@ -14,7 +14,7 @@ const web_fetch_artifacts = @import("../../core/session/web_fetch_artifacts.zig"
 const content = @import("content.zig");
 const html_to_markdown = @import("html_to_markdown.zig");
 const http_fetch = @import("http_fetch.zig");
-const url_policy = @import("url_policy.zig");
+const web_url = @import("url.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -177,7 +177,7 @@ const OutputView = struct {
 };
 
 fn fetchConvertedOutcome(ctx: tool_dispatch.DispatchContext, url: []const u8, transport: http_fetch.Transport) tool_dispatch.DispatchError!FetchOutcome {
-    var target = url_policy.normalize(ctx.allocator, url) catch |err| {
+    var target = web_url.parse(ctx.allocator, url) catch |err| {
         return .{ .failure = try fetchFailureBody(ctx.allocator, err, url) };
     };
     defer target.deinit(ctx.allocator);
@@ -203,10 +203,6 @@ fn fetchConvertedOutcome(ctx: tool_dispatch.DispatchContext, url: []const u8, tr
         .failure => |failure| blk: {
             recordTargetHttpDiagnostic(transport_started_at_ms, if (failure.status) |status| @intFromEnum(status) else 0, failure.body.len, "");
             break :blk .{ .failure = try fetchResultFailure(ctx.allocator, url, failure) };
-        },
-        .cross_host_redirect => |cross_host_url| blk: {
-            recordTargetHttpDiagnostic(transport_started_at_ms, 0, 0, "");
-            break :blk .{ .failure = try crossHostRedirectFailure(ctx.allocator, url, cross_host_url) };
         },
     };
 }
@@ -238,7 +234,7 @@ fn clampUsizeToU32(value: usize) u32 {
     return if (value > std.math.maxInt(u32)) std.math.maxInt(u32) else @intCast(value);
 }
 
-fn fetchFailureBody(alloc: Allocator, err: url_policy.Error, url: []const u8) tool_dispatch.DispatchError![]u8 {
+fn fetchFailureBody(alloc: Allocator, err: web_url.Error, url: []const u8) tool_dispatch.DispatchError![]u8 {
     const display_url = try text_utils.redactUrlForDisplay(alloc, url);
     defer alloc.free(display_url);
     const details = [_]tool_result_errors.Detail{
@@ -250,7 +246,7 @@ fn fetchFailureBody(alloc: Allocator, err: url_policy.Error, url: []const u8) to
         .tool_name = "web_fetch",
         .message = "web_fetch failed",
         .details = &details,
-        .suggestion = "Use web_fetch only for known public HTTP(S) URLs. Use gh for GitHub metadata and web_search for broad web research.",
+        .suggestion = "Use an HTTP(S) URL that can be represented as a direct GET request.",
     });
 }
 
@@ -312,24 +308,6 @@ fn unexpectedEncodingFailure(alloc: Allocator, url: []const u8, failure: http_fe
         .message = "web_fetch received unsupported content encoding",
         .details = &details,
         .suggestion = "Use a URL that serves identity-encoded text content.",
-    });
-}
-
-fn crossHostRedirectFailure(alloc: Allocator, url: []const u8, redirected_url: []const u8) tool_dispatch.DispatchError![]u8 {
-    const display_url = try text_utils.redactUrlForDisplay(alloc, url);
-    defer alloc.free(display_url);
-    const display_redirected_url = try text_utils.redactUrlForDisplay(alloc, redirected_url);
-    defer alloc.free(display_redirected_url);
-    const details = [_]tool_result_errors.Detail{
-        .{ .name = "field", .value = .{ .string = "url" } },
-        .{ .name = "url", .value = .{ .string = display_url } },
-        .{ .name = "redirected_url", .value = .{ .string = display_redirected_url } },
-    };
-    return try tool_result_errors.toolExecutionFailureJson(alloc, .{
-        .tool_name = "web_fetch",
-        .message = "web_fetch redirected to a different host",
-        .details = &details,
-        .suggestion = "Call web_fetch again with redirected_url only if that destination is intended.",
     });
 }
 
@@ -613,26 +591,6 @@ fn callUrlWithRuntimeArtifacts(
     }, stackInput(&input), runtime, transport.transport());
 }
 
-fn denyWebFetchPermission(_: *const tool_dispatch.Tool, _: tool_dispatch.ToolInput, _: tool_dispatch.DispatchContext) @import("../../core/permissions/permission_gate.zig").Decision {
-    return .{ .action = .deny, .reason = "test deny" };
-}
-
-const web_fetch_dispatch_tool = tool_dispatch.Tool{
-    .name = "web_fetch",
-    .description = "Web fetch dispatch test fixture.",
-    .model_schema = .{
-        .name = "web_fetch",
-        .description = "Web fetch dispatch test fixture.",
-    },
-    .executor_kind = .web_fetch,
-    .requires_approval = true,
-    .decode = decode,
-    .validate = validate,
-    .call = call,
-    .reads_only_fn = readsOnly,
-    .irreversible_fn = isIrreversible,
-};
-
 test "web_fetch rejects invalid arguments" {
     try expectDecodeFailure("{", "web_fetch arguments must be valid JSON");
     try expectDecodeFailure("[]", "web_fetch arguments must be an object");
@@ -647,7 +605,7 @@ test "web_fetch requires only url and rejects unknown fields" {
     try expectDecodeFailure("{\"url\":\"https://example.com\",\"extra\":true}", "web_fetch field \"extra\" is not allowed");
 }
 
-test "web_fetch validates known public HTTP URLs only" {
+test "web_fetch accepts direct HTTP targets and rejects malformed URLs" {
     const alloc = std.testing.allocator;
     const cases = [_]struct {
         url: []const u8,
@@ -657,15 +615,15 @@ test "web_fetch validates known public HTTP URLs only" {
         .{ .url = "http://example.com:8080/docs" },
         .{ .url = "", .failure = "web_fetch field \"url\" must not be empty" },
         .{ .url = "ftp://example.com", .failure = "web_fetch url must start with http:// or https://" },
-        .{ .url = "https://token@example.com/private", .failure = "web_fetch refuses credential-bearing URLs" },
-        .{ .url = "https://localhost:3000", .failure = "web_fetch only fetches known public HTTP(S) URLs" },
-        .{ .url = "https://127.0.0.1/status", .failure = "web_fetch only fetches known public HTTP(S) URLs" },
-        .{ .url = "http://192.168.1.10/status", .failure = "web_fetch only fetches known public HTTP(S) URLs" },
-        .{ .url = "http://[::1]/status", .failure = "web_fetch only fetches known public HTTP(S) URLs" },
-        .{ .url = "http://[fd00::1]/status", .failure = "web_fetch only fetches known public HTTP(S) URLs" },
-        .{ .url = "http://[fc00::1]/status", .failure = "web_fetch only fetches known public HTTP(S) URLs" },
-        .{ .url = "http://[::ffff:127.0.0.1]/status", .failure = "web_fetch only fetches known public HTTP(S) URLs" },
-        .{ .url = "http://[::ffff:192.168.1.10]/status", .failure = "web_fetch only fetches known public HTTP(S) URLs" },
+        .{ .url = "https://token@example.com/private" },
+        .{ .url = "https://localhost:3000" },
+        .{ .url = "https://127.0.0.1/status" },
+        .{ .url = "http://192.168.1.10/status" },
+        .{ .url = "http://[::1]/status" },
+        .{ .url = "http://[fd00::1]/status" },
+        .{ .url = "http://[fc00::1]/status" },
+        .{ .url = "http://[::ffff:127.0.0.1]/status" },
+        .{ .url = "http://[::ffff:192.168.1.10]/status" },
         .{ .url = "https://example.com/docs" },
     };
 
@@ -850,7 +808,7 @@ test "web_fetch binary artifact write completes before cache insertion" {
     try std.testing.expect(try store.contains(hit.artifact_ref.?.handle));
 }
 
-test "web_fetch missing cached artifact refetches only after authorization" {
+test "web_fetch missing cached artifact refetches from the target" {
     const alloc = std.testing.allocator;
     var runtime = web_fetch_runtime.Runtime.init(.{ .allocator = alloc });
     defer runtime.deinit(alloc);
@@ -873,19 +831,6 @@ test "web_fetch missing cached artifact refetches only after authorization" {
             .byte_count = 10,
         },
     });
-
-    var denied = try tool_dispatch.dispatchToolCall(.{
-        .allocator = alloc,
-        .permission_decider = denyWebFetchPermission,
-        .web_fetch_runtime = &runtime,
-        .web_fetch_artifact_store = &store,
-    }, .{ .tools = &.{web_fetch_dispatch_tool} }, .{
-        .id = "fetch",
-        .name = "web_fetch",
-        .arguments_json = "{\"url\":\"https://example.com/file.pdf\"}",
-    });
-    defer denied.deinit(alloc);
-    try std.testing.expectEqual(tool_dispatch.DispatchResult.Status.failure, denied.status);
 
     var transport = MockTransport{ .body = "new pdf text", .content_type = "application/pdf" };
     defer transport.deinit(alloc);
@@ -983,35 +928,6 @@ test "web_fetch authorized cache hit skips dns and target http" {
     try std.testing.expect(std.mem.find(u8, body, "<cache_hit>true</cache_hit>") != null);
 }
 
-test "web_fetch denied call cannot disclose cached content" {
-    const alloc = std.testing.allocator;
-    var runtime = web_fetch_runtime.Runtime.init(.{ .allocator = alloc });
-    defer runtime.deinit(alloc);
-
-    try runtime.insert(alloc, .{
-        .submitted_url = "https://example.com/docs",
-        .final_url = "https://example.com/docs",
-        .status = .ok,
-        .mime_type = "text/plain",
-        .content_kind = .text,
-        .converted_content = "secret cached content",
-    });
-
-    var result = try tool_dispatch.dispatchToolCall(.{
-        .allocator = alloc,
-        .permission_decider = denyWebFetchPermission,
-        .web_fetch_runtime = &runtime,
-    }, .{ .tools = &.{web_fetch_dispatch_tool} }, .{
-        .id = "fetch",
-        .name = "web_fetch",
-        .arguments_json = "{\"url\":\"https://example.com/docs\"}",
-    });
-    defer result.deinit(alloc);
-
-    try std.testing.expectEqual(tool_dispatch.DispatchResult.Status.failure, result.status);
-    try std.testing.expect(std.mem.find(u8, result.body, "secret cached content") == null);
-}
-
 test "web_fetch progress queue forwards fetching and converting events" {
     const alloc = std.testing.allocator;
     var runtime = web_fetch_runtime.Runtime.init(.{ .allocator = alloc });
@@ -1053,42 +969,6 @@ test "web_fetch target retrieval receives dispatch cancellation flag" {
     defer result.deinit(alloc);
 
     try std.testing.expect(transport.seen_cancel_flag == &cancel_flag);
-}
-
-test "denied web_fetch emits no progress dns http or cache disclosure" {
-    const alloc = std.testing.allocator;
-    var runtime = web_fetch_runtime.Runtime.init(.{ .allocator = alloc });
-    defer runtime.deinit(alloc);
-    try runtime.insert(alloc, .{
-        .submitted_url = "https://example.com/docs",
-        .final_url = "https://example.com/docs",
-        .status = .ok,
-        .mime_type = "text/plain",
-        .content_kind = .text,
-        .converted_content = "cached secret body",
-    });
-    var transport = MockTransport{ .body = "network secret", .content_type = "text/plain" };
-    defer transport.deinit(alloc);
-    var progress = WebFetchProgressCapture{};
-
-    var result = try tool_dispatch.dispatchToolCall(.{
-        .allocator = alloc,
-        .permission_decider = denyWebFetchPermission,
-        .web_fetch_runtime = &runtime,
-        .web_fetch_progress_ctx = @ptrCast(&progress),
-        .on_web_fetch_progress = WebFetchProgressCapture.onProgress,
-    }, .{ .tools = &.{web_fetch_dispatch_tool} }, .{
-        .id = "fetch",
-        .name = "web_fetch",
-        .arguments_json = "{\"url\":\"https://example.com/docs\"}",
-    });
-    defer result.deinit(alloc);
-
-    try std.testing.expectEqual(tool_dispatch.DispatchResult.Status.failure, result.status);
-    try std.testing.expectEqual(@as(usize, 0), progress.fetching + progress.converting);
-    try std.testing.expectEqual(@as(usize, 0), transport.calls);
-    try std.testing.expect(std.mem.find(u8, result.body, "cached secret body") == null);
-    try std.testing.expect(std.mem.find(u8, result.body, "network secret") == null);
 }
 
 test "web_fetch completion reports bounded url bytes status duration and cache state" {
@@ -1272,28 +1152,7 @@ test "web_fetch cache lock is not held across target http" {
     try std.testing.expectEqual(false, transport.observed_cache_lock orelse true);
 }
 
-test "web_fetch blocks unsafe redirect before fetching redirected target" {
-    const alloc = std.testing.allocator;
-    var transport = MockTransport{
-        .status = .found,
-        .location = "http://127.0.0.1:3000/private",
-    };
-    defer transport.deinit(alloc);
-
-    var result = try callUrl(alloc, "https://example.com/redirect", &transport);
-    defer result.deinit(alloc);
-
-    const body = switch (result) {
-        .success => return error.TestExpectedEqual,
-        .failure => |body| body,
-    };
-    try std.testing.expectEqualStrings("https://example.com/redirect", transport.seen_url.?);
-    try std.testing.expectEqual(@as(usize, 1), transport.calls);
-    try std.testing.expect(tool_result_errors.isToolExecutionFailedOutput(body));
-    try std.testing.expect(std.mem.find(u8, body, "NonPublicAddress") != null);
-}
-
-test "web_fetch returns structured failures for non success encoding and cross host redirects" {
+test "web_fetch returns structured failures for status and encoding errors" {
     const alloc = std.testing.allocator;
 
     {
@@ -1322,21 +1181,6 @@ test "web_fetch returns structured failures for non success encoding and cross h
         try std.testing.expect(tool_result_errors.isToolExecutionFailedOutput(body));
         try std.testing.expect(std.mem.find(u8, body, "unsupported content encoding") != null);
         try std.testing.expect(std.mem.find(u8, body, "gzip") != null);
-    }
-
-    {
-        var transport = MockTransport{ .status = .found, .location = "https://example.org/next" };
-        defer transport.deinit(alloc);
-        var result = try callUrl(alloc, "https://example.com/redirect", &transport);
-        defer result.deinit(alloc);
-        const body = switch (result) {
-            .success => return error.TestExpectedEqual,
-            .failure => |body| body,
-        };
-        try std.testing.expectEqual(@as(usize, 1), transport.calls);
-        try std.testing.expect(tool_result_errors.isToolExecutionFailedOutput(body));
-        try std.testing.expect(std.mem.find(u8, body, "redirected to a different host") != null);
-        try std.testing.expect(std.mem.find(u8, body, "https://example.org/next") != null);
     }
 }
 
@@ -1382,7 +1226,6 @@ test "web_fetch transport failures preserve root causes and network protocol gui
         try std.testing.expect(std.mem.find(u8, body, "\"message\":\"web_fetch transport failed\"") != null);
         try std.testing.expect(std.mem.find(u8, body, @errorName(expected_error)) != null);
         try std.testing.expect(std.mem.find(u8, body, "DNS, network, TLS, or HTTP") != null);
-        try std.testing.expect(std.mem.find(u8, body, "known public HTTP") == null);
         try std.testing.expect(std.mem.find(u8, body, "\"stage\"") == null);
     }
 }

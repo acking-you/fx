@@ -1,6 +1,6 @@
 const std = @import("std");
 const tool_dispatch = @import("../../core/tooling/tool_dispatch.zig");
-const url_policy = @import("url_policy.zig");
+const web_url = @import("url.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -59,7 +59,7 @@ pub fn validate(ctx: tool_dispatch.DispatchContext, erased: tool_dispatch.ToolIn
         input.url = owned;
     }
 
-    var normalized = url_policy.normalize(ctx.allocator, input.url) catch |err| {
+    var normalized = web_url.parse(ctx.allocator, input.url) catch |err| {
         return try ctx.allocator.dupe(u8, urlValidationMessage(err));
     };
     defer normalized.deinit(ctx.allocator);
@@ -86,27 +86,16 @@ fn inputDeinit(ptr: *anyopaque, alloc: Allocator) void {
     alloc.destroy(input);
 }
 
-fn urlValidationMessage(err: url_policy.Error) []const u8 {
+fn urlValidationMessage(err: web_url.Error) []const u8 {
     return switch (err) {
         error.EmptyUrl => "web_fetch field \"url\" must not be empty",
-        error.UrlTooLong => "web_fetch field \"url\" must be at most 2000 bytes",
         error.UnsupportedScheme => "web_fetch url must start with http:// or https://",
         error.MissingHost => "web_fetch url must include a host",
-        error.CredentialedUrl => "web_fetch refuses credential-bearing URLs",
-        error.NonPublicAddress,
-        error.SingleLabelHost,
-        => "web_fetch only fetches known public HTTP(S) URLs",
         error.MalformedPercentEncoding,
-        error.PercentEncodedHost,
-        error.UnicodeHost,
         error.ControlByte,
         error.InvalidPort,
-        error.InvalidIpv4,
-        error.ScopeIdRejected,
         error.MalformedHost,
         error.MalformedLocation,
-        error.PortChanged,
-        error.ProtocolChanged,
         error.RequestTargetWhitespace,
         error.OutOfMemory,
         error.WriteFailed,

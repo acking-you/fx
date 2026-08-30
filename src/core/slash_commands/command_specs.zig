@@ -696,27 +696,21 @@ fn allowlistCompletionHasArgs(command: []const u8) bool {
         "/allowlist add command",
         "/allowlist add tool",
         "/allowlist add url",
-        "/allowlist add web-fetch-domain",
         "/allowlist remove command",
         "/allowlist remove tool",
         "/allowlist remove url",
-        "/allowlist remove web-fetch-domain",
         "/allowlist local add command",
         "/allowlist local add tool",
         "/allowlist local add url",
-        "/allowlist local add web-fetch-domain",
         "/allowlist local remove command",
         "/allowlist local remove tool",
         "/allowlist local remove url",
-        "/allowlist local remove web-fetch-domain",
         "/allowlist user add command",
         "/allowlist user add tool",
         "/allowlist user add url",
-        "/allowlist user add web-fetch-domain",
         "/allowlist user remove command",
         "/allowlist user remove tool",
         "/allowlist user remove url",
-        "/allowlist user remove web-fetch-domain",
     };
     for (completions_with_more_args) |completion| {
         if (std.mem.eql(u8, command, completion)) return true;
@@ -777,21 +771,18 @@ const allowlist_add_kind_completions = [_][]const u8{
     "/allowlist add command",
     "/allowlist add tool",
     "/allowlist add url",
-    "/allowlist add web-fetch-domain",
 };
 
 const allowlist_remove_kind_completions = [_][]const u8{
     "/allowlist remove command",
     "/allowlist remove tool",
     "/allowlist remove url",
-    "/allowlist remove web-fetch-domain",
 };
 
 const allowlist_reset_scope_completions = [_][]const u8{
     "/allowlist reset commands",
     "/allowlist reset tools",
     "/allowlist reset urls",
-    "/allowlist reset web-fetch-domains",
     "/allowlist reset all",
 };
 
@@ -1957,11 +1948,10 @@ test "slash completions include allowlist staged arguments" {
     try std.testing.expectEqualStrings("/allowlist reset", nthSlashCompletion(testSlashRegistry(), "/allowlist re", 1).?);
     try std.testing.expectEqual(@as(usize, 0), slashCompletionCount(testSlashRegistry(), "/allowlist nope "));
 
-    try std.testing.expectEqual(@as(usize, 4), slashCompletionCount(testSlashRegistry(), "/allowlist add "));
+    try std.testing.expectEqual(@as(usize, 3), slashCompletionCount(testSlashRegistry(), "/allowlist add "));
     try std.testing.expectEqualStrings("/allowlist add command", nthSlashCompletion(testSlashRegistry(), "/allowlist add ", 0).?);
     try std.testing.expectEqualStrings("/allowlist add tool", nthSlashCompletion(testSlashRegistry(), "/allowlist add ", 1).?);
     try std.testing.expectEqualStrings("/allowlist add url", nthSlashCompletion(testSlashRegistry(), "/allowlist add ", 2).?);
-    try std.testing.expectEqualStrings("/allowlist add web-fetch-domain", nthSlashCompletion(testSlashRegistry(), "/allowlist add ", 3).?);
     try std.testing.expectEqual(@as(usize, 1), slashCompletionCount(testSlashRegistry(), "/allowlist add u"));
     try std.testing.expectEqualStrings("/allowlist add url", nthSlashCompletion(testSlashRegistry(), "/allowlist add u", 0).?);
     try std.testing.expectEqual(@as(usize, allowlist_add_tool_completions.len), slashCompletionCount(testSlashRegistry(), "/allowlist add tool "));
@@ -1969,22 +1959,20 @@ test "slash completions include allowlist staged arguments" {
     try std.testing.expectEqual(@as(usize, 1), slashCompletionCount(testSlashRegistry(), "/allowlist add tool write"));
     try std.testing.expectEqualStrings("/allowlist add tool write_file", nthSlashCompletion(testSlashRegistry(), "/allowlist add tool write", 0).?);
 
-    try std.testing.expectEqual(@as(usize, 4), slashCompletionCount(testSlashRegistry(), "/allowlist remove "));
+    try std.testing.expectEqual(@as(usize, 3), slashCompletionCount(testSlashRegistry(), "/allowlist remove "));
     try std.testing.expectEqualStrings("/allowlist remove command", nthSlashCompletion(testSlashRegistry(), "/allowlist remove ", 0).?);
     try std.testing.expectEqualStrings("/allowlist remove tool", nthSlashCompletion(testSlashRegistry(), "/allowlist remove ", 1).?);
     try std.testing.expectEqualStrings("/allowlist remove url", nthSlashCompletion(testSlashRegistry(), "/allowlist remove ", 2).?);
-    try std.testing.expectEqualStrings("/allowlist remove web-fetch-domain", nthSlashCompletion(testSlashRegistry(), "/allowlist remove ", 3).?);
     try std.testing.expectEqual(@as(usize, allowlist_remove_tool_completions.len), slashCompletionCount(testSlashRegistry(), "/allowlist remove tool "));
     try std.testing.expectEqualStrings("/allowlist remove tool read_file", nthSlashCompletion(testSlashRegistry(), "/allowlist remove tool ", 0).?);
     try std.testing.expectEqual(@as(usize, 1), slashCompletionCount(testSlashRegistry(), "/allowlist remove tool skill"));
     try std.testing.expectEqualStrings("/allowlist remove tool skill", nthSlashCompletion(testSlashRegistry(), "/allowlist remove tool skill", 0).?);
 
-    try std.testing.expectEqual(@as(usize, 5), slashCompletionCount(testSlashRegistry(), "/allowlist reset "));
+    try std.testing.expectEqual(@as(usize, 4), slashCompletionCount(testSlashRegistry(), "/allowlist reset "));
     try std.testing.expectEqualStrings("/allowlist reset commands", nthSlashCompletion(testSlashRegistry(), "/allowlist reset ", 0).?);
     try std.testing.expectEqualStrings("/allowlist reset tools", nthSlashCompletion(testSlashRegistry(), "/allowlist reset ", 1).?);
     try std.testing.expectEqualStrings("/allowlist reset urls", nthSlashCompletion(testSlashRegistry(), "/allowlist reset ", 2).?);
-    try std.testing.expectEqualStrings("/allowlist reset web-fetch-domains", nthSlashCompletion(testSlashRegistry(), "/allowlist reset ", 3).?);
-    try std.testing.expectEqualStrings("/allowlist reset all", nthSlashCompletion(testSlashRegistry(), "/allowlist reset ", 4).?);
+    try std.testing.expectEqualStrings("/allowlist reset all", nthSlashCompletion(testSlashRegistry(), "/allowlist reset ", 3).?);
     try std.testing.expectEqual(@as(usize, 1), slashCompletionCount(testSlashRegistry(), "/allowlist reset c"));
     try std.testing.expectEqualStrings("/allowlist reset commands", nthSlashCompletion(testSlashRegistry(), "/allowlist reset c", 0).?);
 
@@ -1997,26 +1985,12 @@ test "slash completions include allowlist staged arguments" {
     try std.testing.expectEqualStrings("/allowlist user add", nthSlashCompletion(testSlashRegistry(), "/allowlist user ", 0).?);
     try std.testing.expectEqualStrings("/allowlist user remove", nthSlashCompletion(testSlashRegistry(), "/allowlist user ", 1).?);
     try std.testing.expectEqualStrings("/allowlist user reset", nthSlashCompletion(testSlashRegistry(), "/allowlist user ", 2).?);
-    try std.testing.expectEqual(@as(usize, 4), slashCompletionCount(testSlashRegistry(), "/allowlist user add "));
+    try std.testing.expectEqual(@as(usize, 3), slashCompletionCount(testSlashRegistry(), "/allowlist user add "));
     try std.testing.expectEqualStrings("/allowlist user add command", nthSlashCompletion(testSlashRegistry(), "/allowlist user add ", 0).?);
     try std.testing.expectEqual(@as(usize, allowlist_user_add_tool_completions.len), slashCompletionCount(testSlashRegistry(), "/allowlist user add tool "));
     try std.testing.expectEqualStrings("/allowlist user add tool read_file", nthSlashCompletion(testSlashRegistry(), "/allowlist user add tool ", 0).?);
-    try std.testing.expectEqual(@as(usize, 5), slashCompletionCount(testSlashRegistry(), "/allowlist local reset "));
-    try std.testing.expectEqualStrings("/allowlist local reset all", nthSlashCompletion(testSlashRegistry(), "/allowlist local reset ", 4).?);
-}
-
-test "slash completions include web_fetch allowlist domain forms" {
-    try std.testing.expectEqualStrings("/allowlist add web-fetch-domain", nthSlashCompletion(testSlashRegistry(), "/allowlist add web-", 0).?);
-    try std.testing.expectEqualStrings("web-fetch-domain", nthSlashCompletionLabel(testSlashRegistry(), "/allowlist add web-", 0).?);
-    try std.testing.expect(slashCompletionHasArgs(testSlashRegistry(), "/allowlist add web-fetch-domain"));
-
-    try std.testing.expectEqualStrings("/allowlist remove web-fetch-domain", nthSlashCompletion(testSlashRegistry(), "/allowlist remove web-", 0).?);
-    try std.testing.expectEqualStrings("web-fetch-domain", nthSlashCompletionLabel(testSlashRegistry(), "/allowlist remove web-", 0).?);
-    try std.testing.expect(slashCompletionHasArgs(testSlashRegistry(), "/allowlist remove web-fetch-domain"));
-
-    try std.testing.expectEqualStrings("/allowlist reset web-fetch-domains", nthSlashCompletion(testSlashRegistry(), "/allowlist reset web-", 0).?);
-    try std.testing.expectEqualStrings("web-fetch-domains", nthSlashCompletionLabel(testSlashRegistry(), "/allowlist reset web-", 0).?);
-    try std.testing.expect(!slashCompletionHasArgs(testSlashRegistry(), "/allowlist reset web-fetch-domains"));
+    try std.testing.expectEqual(@as(usize, 4), slashCompletionCount(testSlashRegistry(), "/allowlist local reset "));
+    try std.testing.expectEqualStrings("/allowlist local reset all", nthSlashCompletion(testSlashRegistry(), "/allowlist local reset ", 3).?);
 }
 
 test "allowlist staged completions with more arguments append space on tab" {

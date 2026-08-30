@@ -866,7 +866,7 @@ test "processQueuedPrompt rejects malformed provider-executed arguments before e
     );
 }
 
-test "legacy web_fetch prompt is presented but rejected before permission dns http or cache" {
+test "legacy web_fetch prompt is presented but rejected during validation" {
     const alloc = std.testing.allocator;
     const calls = [_]ToolCall{toolCall("call_1", "web_fetch", "{\"url\":\"https://example.com\",\"prompt\":\"   \"}")};
     const completions = [_]FakeCompletion{
@@ -892,7 +892,7 @@ test "legacy web_fetch prompt is presented but rejected before permission dns ht
     try expectBodyContains(&gateway, 1, "web_fetch arguments failed registered-tool validation");
 }
 
-test "invalid web_fetch is presented but fails before permission dns http or cache" {
+test "invalid web_fetch is presented but fails during validation" {
     const alloc = std.testing.allocator;
     const calls = [_]ToolCall{toolCall("call_1", "web_fetch", "{\"url\":\"ftp://example.com\"}")};
     const completions = [_]FakeCompletion{
@@ -915,38 +915,6 @@ test "invalid web_fetch is presented but fails before permission dns http or cac
     try std.testing.expectEqual(@as(usize, 0), hooks.executed_names.items.len);
     try expectSingleTerminalOutcome(hooks.lifecycle_events.items, "call_1", .failed);
     try expectBodyContains(&gateway, 1, "web_fetch arguments failed registered-tool validation");
-}
-
-test "denied web_fetch is presented without dns http or cache work" {
-    const alloc = std.testing.allocator;
-    const calls = [_]ToolCall{toolCall("call_1", "web_fetch", "{\"url\":\"https://example.com\"}")};
-    const completions = [_]FakeCompletion{
-        .{ .tool_calls = &calls },
-        .{ .content = "Final" },
-    };
-    var gateway = FakeGateway.init(alloc, &completions);
-    defer gateway.deinit();
-    var hooks = FakeAgentRuntimeDeps.init(alloc);
-    hooks.permission_decisions = &.{.permission_required};
-    defer hooks.deinit();
-    var fixture = PromptFixture{};
-    var job = fixture.job();
-    job.permission_mode = .auto;
-
-    try runFakePrompt(&gateway, &hooks, fixture.config(), job);
-
-    try std.testing.expectEqual(@as(usize, 1), hooks.validated_names.items.len);
-    try std.testing.expectEqualStrings("web_fetch", hooks.validated_names.items[0]);
-    try std.testing.expectEqual(@as(usize, 1), hooks.availability_checked_names.items.len);
-    try std.testing.expectEqualStrings("web_fetch", hooks.availability_checked_names.items[0]);
-    try std.testing.expectEqual(@as(usize, 1), hooks.permission_names.items.len);
-    try std.testing.expectEqualStrings("web_fetch", hooks.permission_names.items[0]);
-    try std.testing.expectEqual(@as(usize, 0), hooks.executed_names.items.len);
-    try std.testing.expectEqual(@as(usize, 1), hooks.rejected_names.items.len);
-    try std.testing.expectEqualStrings("web_fetch", hooks.rejected_names.items[0]);
-    try expectSingleTerminalOutcome(hooks.lifecycle_events.items, "call_1", .denied);
-    try std.testing.expectEqual(@as(usize, 0), hooks.system_notices.items.len);
-    try expectBodyContains(&gateway, 1, "permission_required");
 }
 
 test "accepted automatic review remains internal before ordinary tool execution" {
@@ -1040,36 +1008,6 @@ test "processQueuedPrompt keeps sampled root mode through permission and executi
     );
 }
 
-test "automatic review does not reposition deferred web fetch lifecycle" {
-    const alloc = std.testing.allocator;
-    const calls = [_]ToolCall{toolCall("call_1", "web_fetch", "{\"url\":\"https://example.com\"}")};
-    const completions = [_]FakeCompletion{
-        .{ .tool_calls = &calls },
-        .{ .content = "Final" },
-    };
-    var gateway = FakeGateway.init(alloc, &completions);
-    defer gateway.deinit();
-    var hooks = FakeAgentRuntimeDeps.init(alloc);
-    hooks.permission_decisions = &.{.once};
-    hooks.permission_auto_review_results = &.{.{
-        .risk = .low,
-        .decision = .clear,
-        .rationale = "bounded safe action",
-    }};
-    defer hooks.deinit();
-    var fixture = PromptFixture{};
-    var job = fixture.job();
-    job.permission_mode = .auto;
-
-    try runFakePrompt(&gateway, &hooks, fixture.config(), job);
-
-    try std.testing.expectEqual(@as(usize, 0), hooks.system_notices.items.len);
-    try std.testing.expectEqual(@as(usize, 1), hooks.executed_names.items.len);
-    try std.testing.expect(
-        !hooks.lifecycle_events.items[0].authoritative_started.place_after_current_transcript,
-    );
-}
-
 test "deterministic auto permission preserves lifecycle placement" {
     const alloc = std.testing.allocator;
     const calls = [_]ToolCall{toolCall("call_1", "exec_command", "{\"cmd\":\"pwd\"}")};
@@ -1097,7 +1035,7 @@ test "deterministic auto permission preserves lifecycle placement" {
 
 test "automatic ask permission_required does not emit auto-deny notice or rationale injection" {
     const alloc = std.testing.allocator;
-    const calls = [_]ToolCall{toolCall("call_1", "web_fetch", "{\"url\":\"https://example.com\"}")};
+    const calls = [_]ToolCall{toolCall("call_1", "exec_command", "{\"cmd\":\"printf review\"}")};
     const completions = [_]FakeCompletion{
         .{ .tool_calls = &calls },
         .{ .content = "Final" },
@@ -1139,7 +1077,7 @@ test "automatic ask permission_required does not emit auto-deny notice or ration
 
 test "automatic review cancellation remains interrupted and a later turn starts clean" {
     const alloc = std.testing.allocator;
-    const cancelled_calls = [_]ToolCall{toolCall("cancelled", "web_fetch", "{\"url\":\"https://cancel.example\"}")};
+    const cancelled_calls = [_]ToolCall{toolCall("cancelled", "exec_command", "{\"cmd\":\"printf cancelled\"}")};
     const cancelled_completions = [_]FakeCompletion{.{ .tool_calls = &cancelled_calls }};
     var cancelled_gateway = FakeGateway.init(alloc, &cancelled_completions);
     defer cancelled_gateway.deinit();
@@ -1193,7 +1131,7 @@ test "cancellation returned with permission allow starts no serial or parallel e
     };
     const parallel_calls = [_]ToolCall{
         toolCall("parallel_1", "read_file", "{\"path\":\"README.md\"}"),
-        toolCall("parallel_2", "web_fetch", "{\"url\":\"https://two.example\"}"),
+        toolCall("parallel_2", "file_info", "{\"path\":\"README.md\"}"),
     };
 
     for ([_][]const ToolCall{ &serial_calls, &parallel_calls }, 0..) |calls, case_index| {
@@ -1206,7 +1144,7 @@ test "cancellation returned with permission allow starts no serial or parallel e
         hooks.exec_plans = &.{.{ .result = .{ .model_output = "must not execute" } }};
         var fixture = PromptFixture{};
         hooks.cancel_on_permission = &fixture.cancel_flag;
-        if (case_index == 1) hooks.cancel_on_permission_name = "web_fetch";
+        if (case_index == 1) hooks.cancel_on_permission_name = "file_info";
         var job = fixture.job();
         job.permission_mode = .auto;
 
@@ -1222,10 +1160,10 @@ test "parallel streamed cancellation closes every concrete tool action" {
     const alloc = std.testing.allocator;
     const calls = [_]ToolCall{
         toolCall("call_read", "read_file", "{\"path\":\"README.md\"}"),
-        toolCall("call_fetch", "web_fetch", "{\"url\":\"https://example.com\"}"),
+        toolCall("call_list", "list_files", "{\"path\":\".\"}"),
         toolCall("call_info", "file_info", "{\"path\":\"README.md\"}"),
     };
-    const cancellation_points = [_][]const u8{ "read_file", "web_fetch" };
+    const cancellation_points = [_][]const u8{ "read_file", "list_files" };
 
     for (cancellation_points) |cancel_on_name| {
         const completions = [_]FakeCompletion{.{
@@ -3132,39 +3070,6 @@ test "parallel invalid web_fetch closes streamed and tool-call-only activity" {
             .failed,
         );
         try expectBodyContains(&gateway, 1, "web_fetch arguments failed registered-tool validation");
-    }
-}
-
-test "parallel web_fetch denial closes streamed and tool-call-only activity" {
-    const alloc = std.testing.allocator;
-    const calls = [_]ToolCall{
-        toolCall("call_fetch", "web_fetch", "{\"url\":\"https://example.com\"}"),
-        toolCall("call_read", "read_file", "{\"path\":\"README.md\"}"),
-    };
-    const streamed_shapes = [_][]const ToolCall{ &.{}, &calls };
-    for (streamed_shapes) |streamed_tool_starts| {
-        const completions = [_]FakeCompletion{
-            .{ .tool_calls = &calls, .streamed_tool_starts = streamed_tool_starts },
-            .{ .content = "Final" },
-        };
-        var gateway = FakeGateway.init(alloc, &completions);
-        defer gateway.deinit();
-        var hooks = FakeAgentRuntimeDeps.init(alloc);
-        hooks.permission_decisions = &.{ .deny, .once };
-        defer hooks.deinit();
-        var fixture = PromptFixture{};
-        var job = fixture.job();
-        job.permission_mode = .auto;
-
-        try runFakePrompt(&gateway, &hooks, fixture.config(), job);
-
-        try std.testing.expectEqual(@as(usize, 1), hooks.executed_names.items.len);
-        try std.testing.expectEqualStrings("read_file", hooks.executed_names.items[0]);
-        try expectSingleTerminalOutcome(
-            hooks.lifecycle_events.items,
-            "call_fetch",
-            .denied,
-        );
     }
 }
 

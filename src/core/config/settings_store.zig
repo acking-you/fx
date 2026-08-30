@@ -43,7 +43,6 @@ pub const AllowlistResetScope = enum {
     commands,
     tools,
     urls,
-    web_fetch_domains,
 };
 
 pub const PermissionPatch = union(enum) {
@@ -1511,13 +1510,11 @@ fn scopeMatchesCategory(scope: AllowlistResetScope, category: []const u8) bool {
     const is_url = std.mem.eql(u8, canonical, "url") or
         std.mem.eql(u8, canonical, "open_url") or
         std.mem.eql(u8, canonical, "browser_navigate");
-    const is_fetch = std.mem.eql(u8, canonical, "web_fetch");
     return switch (scope) {
         .all => true,
         .commands => std.mem.eql(u8, canonical, "bash"),
         .urls => is_url,
-        .web_fetch_domains => is_fetch,
-        .tools => !std.mem.eql(u8, canonical, "bash") and !is_url and !is_fetch and
+        .tools => !std.mem.eql(u8, canonical, "bash") and !is_url and
             !std.mem.eql(u8, canonical, "*"),
     };
 }

@@ -25,6 +25,23 @@ pub const ToolActionInput = struct {
     is_available_dynamic_mcp_tool: bool = false,
 };
 
+pub const ActionState = enum {
+    active,
+    completed,
+    denied,
+};
+
+const ActionSeparator = enum {
+    space,
+    colon,
+};
+
+const ResolvedAction = struct {
+    label: []const u8,
+    value: []const u8,
+    separator: ActionSeparator = .space,
+};
+
 pub const CommandActivity = struct {
     detail: []const u8,
 };
@@ -158,45 +175,136 @@ pub fn formatCommandActivity(
 
 /// The caller owns the returned allocation and must free it with `alloc`.
 pub fn formatPlainAction(alloc: Allocator, input: ToolActionInput) ![]const u8 {
+    return formatPlainActionForState(alloc, input, .active, null);
+}
+
+/// Formats the same lifecycle state for ACP, noninteractive CLI, and child
+/// sessions. The caller owns the returned allocation and must free it.
+pub fn formatPlainActionForState(
+    alloc: Allocator,
+    input: ToolActionInput,
+    state: ActionState,
+    denied_label: ?[]const u8,
+) ![]const u8 {
+    var scratch_state = std.heap.ArenaAllocator.init(alloc);
+    defer scratch_state.deinit();
+    const action = try resolveAction(scratch_state.allocator(), input, state, denied_label);
+    return formatResolvedAction(alloc, action, false);
+}
+
+/// Formats the shared lifecycle state for the inline TUI transcript.
+pub fn formatStyledActionForState(
+    alloc: Allocator,
+    input: ToolActionInput,
+    state: ActionState,
+    denied_label: ?[]const u8,
+) ![]const u8 {
+    var scratch_state = std.heap.ArenaAllocator.init(alloc);
+    defer scratch_state.deinit();
+    const action = try resolveAction(scratch_state.allocator(), input, state, denied_label);
+    return formatResolvedAction(alloc, action, true);
+}
+
+fn resolveAction(
+    alloc: Allocator,
+    input: ToolActionInput,
+    state: ActionState,
+    denied_label: ?[]const u8,
+) !ResolvedAction {
     const call = input.call;
     if (file_mutation_contract.isToolName(call.name)) {
-        const spec = input.tool_registry.lookup(call.name) orelse
-            return std.fmt.allocPrint(alloc, "Working: {s}", .{call.name});
-        return std.fmt.allocPrint(
-            alloc,
-            "{s} {s}",
-            .{ spec.action_label, input.display_target orelse spec.label_arg_default },
-        );
+        const spec = input.tool_registry.lookup(call.name) orelse return fallbackAction(state, denied_label, call.name);
+        return .{
+            .label = lifecycleLabel(spec.action_label, spec.completed_action_label, state, denied_label),
+            .value = input.display_target orelse spec.label_arg_default,
+        };
     }
 
     if (try formatCommandActivity(alloc, input.tool_registry, input.workspace_root, call)) |activity| {
-        defer alloc.free(activity.detail);
-        return std.fmt.allocPrint(alloc, "Running {s}", .{activity.detail});
+        return .{
+            .label = lifecycleLabel("Running", "Ran", state, denied_label),
+            .value = activity.detail,
+        };
     }
 
-    var scratch_state = std.heap.ArenaAllocator.init(alloc);
-    defer scratch_state.deinit();
-    const scratch = scratch_state.allocator();
-
     const spec = input.tool_registry.lookup(call.name) orelse {
-        if (input.is_available_dynamic_mcp_tool) return std.fmt.allocPrint(alloc, "MCP: {s}", .{call.name});
-        return std.fmt.allocPrint(alloc, "Working: {s}", .{call.name});
+        if (input.is_available_dynamic_mcp_tool) return .{
+            .label = lifecycleLabel("Running MCP", "Ran MCP", state, denied_label),
+            .value = call.name,
+        };
+        return fallbackAction(state, denied_label, call.name);
     };
-    const args = tool_args.parseToolArgsObject(scratch, call.arguments_json) catch {
-        return std.fmt.allocPrint(alloc, "Working: {s}", .{call.name});
+    const args = tool_args.parseToolArgsObject(alloc, call.arguments_json) catch {
+        return fallbackAction(state, denied_label, "tool call");
     };
 
     const presentation = tool_dispatch.presentationForArgs(spec.*, args);
     if (spec.executor_kind == .web_search) {
-        return std.fmt.allocPrint(alloc, "{s} {s}", .{ presentation.action_label, try formatWebSearchActionDetail(scratch, args) });
+        return .{
+            .label = lifecycleLabel("Searching", "Searched", state, denied_label),
+            .value = try formatWebSearchActionDetail(alloc, args),
+        };
     }
-    if (try copyRenameLabel(scratch, call.name, args)) |value| {
-        return std.fmt.allocPrint(alloc, "{s} {s}", .{ presentation.action_label, value });
+    if (try copyRenameLabel(alloc, call.name, args)) |value| {
+        return .{
+            .label = lifecycleLabel(presentation.action_label, presentation.completed_action_label, state, denied_label),
+            .value = value,
+        };
     }
     const value = input.display_target orelse
-        tool_dispatch.presentationLabelValue(presentation, args) orelse
+        try presentationValue(alloc, presentation, args) orelse
         presentation.label_arg_default;
-    return std.fmt.allocPrint(alloc, "{s} {s}", .{ presentation.action_label, value });
+    return .{
+        .label = lifecycleLabel(presentation.action_label, presentation.completed_action_label, state, denied_label),
+        .value = value,
+    };
+}
+
+fn presentationValue(
+    alloc: Allocator,
+    presentation: tool_dispatch.CallPresentation,
+    args: std.json.ObjectMap,
+) !?[]const u8 {
+    if (presentation.label_arg_kind != .session_id) {
+        return tool_dispatch.presentationLabelValue(presentation, args);
+    }
+    const value = args.get("session_id") orelse return null;
+    return switch (value) {
+        .integer => |session_id| try std.fmt.allocPrint(alloc, "{d}", .{session_id}),
+        .string => |session_id| session_id,
+        else => null,
+    };
+}
+
+fn fallbackAction(state: ActionState, denied_label: ?[]const u8, value: []const u8) ResolvedAction {
+    return .{
+        .label = lifecycleLabel("Working", "Completed", state, denied_label),
+        .value = value,
+        .separator = if (state == .active) .colon else .space,
+    };
+}
+
+fn lifecycleLabel(active: []const u8, completed: []const u8, state: ActionState, denied_label: ?[]const u8) []const u8 {
+    return switch (state) {
+        .active => active,
+        .completed => completed,
+        .denied => denied_label orelse "Denied",
+    };
+}
+
+fn formatResolvedAction(alloc: Allocator, action: ResolvedAction, styled: bool) ![]const u8 {
+    const separator: []const u8 = switch (action.separator) {
+        .space => " ",
+        .colon => ": ",
+    };
+    if (styled) {
+        return std.fmt.allocPrint(
+            alloc,
+            "● {s}\x1b[0m{s}\x1b[38;5;245m{s}\x1b[0m",
+            .{ action.label, separator, action.value },
+        );
+    }
+    return std.fmt.allocPrint(alloc, "{s}{s}{s}", .{ action.label, separator, action.value });
 }
 
 /// The caller owns the returned allocation and must free it with `alloc`.
@@ -364,6 +472,7 @@ const test_tools = [_]tool_dispatch.Tool{
     test_builtin_tools.copy_file,
     test_web_search,
     test_builtin_tools.exec_command,
+    test_builtin_tools.write_stdin,
     test_builtin_tools.memory,
     test_builtin_tools.skill,
     test_builtin_tools.install_skill,
@@ -394,7 +503,7 @@ test "tool presentation formats dynamic MCP availability distinctly" {
         .is_available_dynamic_mcp_tool = true,
     });
     defer alloc.free(available);
-    try std.testing.expectEqualStrings("MCP: mcp_lookup", available);
+    try std.testing.expectEqualStrings("Running MCP mcp_lookup", available);
 
     const unavailable = try formatPlainAction(alloc, .{ .tool_registry = test_tool_registry, .call = call });
     defer alloc.free(unavailable);
@@ -656,6 +765,51 @@ test "tool presentation preserves plain action fallbacks" {
         const label = try formatPlainAction(alloc, .{ .tool_registry = test_tool_registry, .call = case.call });
         defer alloc.free(label);
         try std.testing.expectEqualStrings(case.expected, label);
+    }
+}
+
+test "tool presentation shares Codex-style command lifecycle labels" {
+    const alloc = std.testing.allocator;
+    const cases = [_]struct {
+        call: ToolCall,
+        active: []const u8,
+        completed: []const u8,
+    }{
+        .{
+            .call = .{ .id = "exec", .name = "exec_command", .arguments_json = "{\"cmd\":\"zig build\"}" },
+            .active = "Running zig build",
+            .completed = "Ran zig build",
+        },
+        .{
+            .call = .{ .id = "poll", .name = "write_stdin", .arguments_json = "{\"session_id\":42}" },
+            .active = "Waiting for 42",
+            .completed = "Waited for 42",
+        },
+        .{
+            .call = .{ .id = "input", .name = "write_stdin", .arguments_json = "{\"session_id\":42,\"chars\":\"yes\\n\"}" },
+            .active = "Interacting with 42",
+            .completed = "Interacted with 42",
+        },
+    };
+
+    for (cases) |case| {
+        const active = try formatPlainActionForState(
+            alloc,
+            .{ .tool_registry = test_tool_registry, .call = case.call },
+            .active,
+            null,
+        );
+        defer alloc.free(active);
+        try std.testing.expectEqualStrings(case.active, active);
+
+        const completed = try formatPlainActionForState(
+            alloc,
+            .{ .tool_registry = test_tool_registry, .call = case.call },
+            .completed,
+            null,
+        );
+        defer alloc.free(completed);
+        try std.testing.expectEqualStrings(case.completed, completed);
     }
 }
 

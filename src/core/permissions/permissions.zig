@@ -93,15 +93,14 @@ pub const PermissionTargetKind = enum {
 };
 
 pub const web_search_permission = "web_search";
-pub const web_fetch_permission = "web_fetch";
 pub const yolo_warning_text = "YOLO enabled: fx permission checks disabled";
 
 pub fn isWebSearchToolName(tool_name: []const u8) bool {
     return std.mem.eql(u8, tool_name, web_search_permission);
 }
 
-pub fn isWebFetchToolName(tool_name: []const u8) bool {
-    return std.mem.eql(u8, tool_name, web_fetch_permission);
+pub fn bypassesPermissionPolicy(tool_name: []const u8) bool {
+    return std.mem.eql(u8, tool_name, "web_fetch");
 }
 
 pub fn permissionModeLabel(mode: PermissionMode) []const u8 {
@@ -173,11 +172,6 @@ pub fn permissionTargetForCall(
 
     if (isWebSearchToolName(call.name)) {
         return arena.dupe(u8, web_search_permission);
-    }
-
-    if (isWebFetchToolName(call.name)) {
-        const args = try tool_args.parseToolArgsObject(arena, call.arguments_json);
-        return webFetchDomainTargetForUrl(arena, try tool_args.requiredStringArg(args, "url"));
     }
 
     if (std.mem.eql(u8, call.name, "rename_file")) {
@@ -1194,6 +1188,7 @@ pub fn displayTargetForPolicy(alloc: std.mem.Allocator, workspace_root: []const 
 }
 
 pub fn ruleDecisionFor(alloc: std.mem.Allocator, rules: types.PermissionRuleSet, workspace_root: []const u8, tool_name: []const u8, target_path: []const u8, target_kind: PermissionTargetKind) !RuleDecision {
+    if (bypassesPermissionPolicy(tool_name)) return .none;
     const permission = permissionNameForTool(tool_name);
     const pattern = try patternForRuleMatch(alloc, workspace_root, tool_name, target_path, target_kind);
     defer alloc.free(pattern);
@@ -1202,15 +1197,17 @@ pub fn ruleDecisionFor(alloc: std.mem.Allocator, rules: types.PermissionRuleSet,
 }
 
 pub fn ruleDecisionForPermissionPattern(rules: types.PermissionRuleSet, permission: []const u8, pattern: []const u8, fallback: RuleDecision) RuleDecision {
+    if (bypassesPermissionPolicy(permission)) return fallback;
     return evaluateRuleset(rules.rules, permission, pattern) orelse fallback;
 }
 
 pub fn rulesDenyAllTargetsForPermission(rules: types.PermissionRuleSet, permission: []const u8) bool {
+    if (bypassesPermissionPolicy(permission)) return false;
     return rulesDenyAllTargetsForPermissionAndTool(rules, permission, null);
 }
 
 pub fn rulesDenyAllTargetsForTool(rules: types.PermissionRuleSet, tool_name: []const u8) bool {
-    if (isWebFetchToolName(tool_name)) return false;
+    if (bypassesPermissionPolicy(tool_name)) return false;
     return rulesDenyAllTargetsForPermissionAndTool(rules, permissionNameForTool(tool_name), tool_name);
 }
 
@@ -1241,18 +1238,9 @@ fn rulesDenyAllTargetsForPermissionAndTool(rules: types.PermissionRuleSet, permi
 }
 
 pub fn sessionGrantAllowed(grants: []const types.PermissionGrant, tool_name: []const u8, target_path: []const u8) bool {
+    if (bypassesPermissionPolicy(tool_name)) return false;
     const permission = permissionNameForTool(tool_name);
     const pattern = patternForSessionGrantMatch(tool_name, target_path);
-
-    if (std.mem.eql(u8, permission, web_fetch_permission)) {
-        if (!isCanonicalWebFetchDomainPattern(pattern)) return false;
-        for (grants) |grant| {
-            if (!std.mem.eql(u8, grant.tool_name, web_fetch_permission)) continue;
-            if (!isCanonicalWebFetchDomainPattern(grant.target_path)) continue;
-            if (std.mem.eql(u8, grant.target_path, pattern)) return true;
-        }
-        return false;
-    }
 
     for (grants) |grant| {
         if (!permissionPatternMatchesTool(grant.tool_name, permission, tool_name)) continue;
@@ -1508,7 +1496,6 @@ pub fn permissionNameForTool(tool_name: []const u8) []const u8 {
     if (std.mem.eql(u8, tool_name, "glob_files")) return "glob";
     if (std.mem.eql(u8, tool_name, "grep_files")) return "grep";
     if (std.mem.eql(u8, tool_name, "exec_command") or std.mem.eql(u8, tool_name, "run_command")) return "bash";
-    if (isWebFetchToolName(tool_name)) return web_fetch_permission;
     if (std.mem.eql(u8, tool_name, "skill") or std.mem.eql(u8, tool_name, "install_skill")) return "skill";
     return tool_name;
 }
@@ -1521,7 +1508,6 @@ pub fn permissionRuleCategoryForGrant(permission_name: []const u8) ?[]const u8 {
 pub fn permissionRulePatternForGrant(alloc: std.mem.Allocator, workspace_root: []const u8, permission_name: []const u8, pattern: []const u8) ![]u8 {
     const permission = permissionNameForTool(permission_name);
     if (isWebSearchToolName(permission)) return alloc.dupe(u8, "*");
-    if (std.mem.eql(u8, permission, web_fetch_permission)) return canonicalWebFetchDomainPattern(alloc, pattern);
     if (std.mem.eql(u8, permission, "bash")) {
         if (command_environment.isExplicitPermissionCommandIdentity(pattern)) {
             return alloc.dupe(u8, pattern);
@@ -1554,9 +1540,6 @@ pub fn permissionRulePatternForGrant(alloc: std.mem.Allocator, workspace_root: [
 
 fn patternForRuleMatch(alloc: std.mem.Allocator, workspace_root: []const u8, tool_name: []const u8, target_path: []const u8, target_kind: PermissionTargetKind) ![]u8 {
     const permission = permissionNameForTool(tool_name);
-    if (std.mem.eql(u8, permission, web_fetch_permission)) {
-        return alloc.dupe(u8, target_path);
-    }
     if (std.mem.eql(u8, permission, "bash")) {
         const identity = if (command_environment.isExplicitPermissionCommandIdentity(target_path))
             target_path
@@ -1618,10 +1601,6 @@ fn evaluateRuleset(rules: []const types.PermissionRule, permission: []const u8, 
 }
 
 fn evaluateRulesetForTool(rules: []const types.PermissionRule, permission: []const u8, tool_name: ?[]const u8, pattern: []const u8) ?RuleDecision {
-    if (std.mem.eql(u8, permission, web_fetch_permission)) {
-        return evaluateWebFetchRuleset(rules, pattern);
-    }
-
     var matched: ?RuleDecision = null;
     for (rules) |rule| {
         if (!ruleMatchesPermission(rule.permission, permission, tool_name)) continue;
@@ -1634,33 +1613,6 @@ fn evaluateRulesetForTool(rules: []const types.PermissionRule, permission: []con
         matched = action;
     }
     return matched;
-}
-
-fn evaluateWebFetchRuleset(rules: []const types.PermissionRule, pattern: []const u8) ?RuleDecision {
-    if (!isCanonicalWebFetchDomainPattern(pattern)) return null;
-
-    var matched: ?RuleDecision = null;
-    for (rules) |rule| {
-        if (!std.mem.eql(u8, rule.permission, web_fetch_permission)) continue;
-        if (!isCanonicalWebFetchDomainPattern(rule.pattern)) continue;
-        if (!std.mem.eql(u8, rule.pattern, pattern)) continue;
-        matched = switch (rule.action) {
-            .allow => .allow,
-            .ask => .ask,
-            .deny => .deny,
-        };
-    }
-    return matched;
-}
-
-pub fn webFetchRuleWarningCount(rules: []const types.PermissionRule) usize {
-    var count: usize = 0;
-    for (rules) |rule| {
-        if (!std.mem.eql(u8, rule.permission, web_fetch_permission)) continue;
-        if (isCanonicalWebFetchDomainPattern(rule.pattern)) continue;
-        count += 1;
-    }
-    return count;
 }
 
 fn ruleMatchesPermission(rule_permission: []const u8, permission: []const u8, tool_name: ?[]const u8) bool {
@@ -1837,110 +1789,6 @@ fn isGlobalTargetPattern(pattern: []const u8) bool {
         if (char != '*') return false;
     }
     return true;
-}
-
-pub fn webFetchDomainTargetForUrl(alloc: std.mem.Allocator, url: []const u8) ![]u8 {
-    const scheme_end = std.mem.find(u8, url, "://") orelse return error.InvalidToolArguments;
-    const authority_start = scheme_end + "://".len;
-    const authority_end = authorityEnd(url, authority_start);
-    if (authority_end == authority_start) return error.InvalidToolArguments;
-
-    const authority = url[authority_start..authority_end];
-    if (std.mem.findScalar(u8, authority, '@') != null) return error.InvalidToolArguments;
-    const host = hostFromAuthority(authority) orelse return error.InvalidToolArguments;
-    return canonicalWebFetchDomainPattern(alloc, host);
-}
-
-pub fn canonicalWebFetchDomainPattern(alloc: std.mem.Allocator, raw: []const u8) ![]u8 {
-    const host_raw = if (std.mem.startsWith(u8, raw, "domain:")) raw["domain:".len..] else raw;
-    if (std.mem.find(u8, host_raw, "://") != null) return error.InvalidToolArguments;
-    if (std.mem.findScalar(u8, host_raw, '/') != null) return error.InvalidToolArguments;
-    if (std.mem.findScalar(u8, host_raw, '*') != null) return error.InvalidToolArguments;
-    if (std.mem.findScalar(u8, host_raw, '?') != null) return error.InvalidToolArguments;
-
-    const host = stripOneRootDot(host_raw);
-    if (!isCanonicalizableWebFetchHost(host)) return error.InvalidToolArguments;
-
-    const target = try alloc.alloc(u8, "domain:".len + host.len);
-    errdefer alloc.free(target);
-    @memcpy(target[0.."domain:".len], "domain:");
-    for (host, 0..) |char, index| {
-        target["domain:".len + index] = std.ascii.toLower(char);
-    }
-    return target;
-}
-
-pub fn isCanonicalWebFetchDomainPattern(pattern: []const u8) bool {
-    if (!std.mem.startsWith(u8, pattern, "domain:")) return false;
-    const host = pattern["domain:".len..];
-    if (!isCanonicalizableWebFetchHost(host)) return false;
-    if (std.mem.endsWith(u8, host, ".")) return false;
-    for (host) |char| {
-        if (std.ascii.isAlphabetic(char) and std.ascii.isUpper(char)) return false;
-    }
-    return true;
-}
-
-fn stripOneRootDot(host: []const u8) []const u8 {
-    if (host.len > 1 and host[host.len - 1] == '.') return host[0 .. host.len - 1];
-    return host;
-}
-
-fn isCanonicalizableWebFetchHost(host: []const u8) bool {
-    if (host.len == 0) return false;
-    if (host[0] == '[') return isCanonicalizableWebFetchIpv6Literal(host);
-    if (std.mem.findScalar(u8, host, ':') != null) return false;
-    var label_len: usize = 0;
-    for (host) |char| {
-        if (char <= 0x20 or char >= 0x7f) return false;
-        if (char == '*' or char == '?' or char == '/' or char == '\\') return false;
-        if (char == '.') {
-            if (label_len == 0) return false;
-            label_len = 0;
-            continue;
-        }
-        if (!std.ascii.isAlphanumeric(char) and char != '-') return false;
-        label_len += 1;
-    }
-    return label_len > 0;
-}
-
-fn isCanonicalizableWebFetchIpv6Literal(host: []const u8) bool {
-    if (host.len < 3 or host[host.len - 1] != ']') return false;
-    const inner = host[1 .. host.len - 1];
-    if (std.mem.findScalar(u8, inner, '%') != null) return false;
-    for (inner) |char| {
-        if (char <= 0x20 or char >= 0x7f) return false;
-        if (std.ascii.isAlphabetic(char) and std.ascii.isUpper(char)) return false;
-        if (!std.ascii.isHex(char) and char != ':' and char != '.') return false;
-    }
-    _ = std.Io.net.Ip6Address.parse(inner, 0) catch return false;
-    return true;
-}
-
-fn authorityEnd(url: []const u8, start: usize) usize {
-    var index = start;
-    while (index < url.len) : (index += 1) {
-        switch (url[index]) {
-            '/', '?', '#' => return index,
-            else => {},
-        }
-    }
-    return url.len;
-}
-
-fn hostFromAuthority(authority: []const u8) ?[]const u8 {
-    if (authority.len == 0) return null;
-    if (authority[0] == '[') {
-        const end = std.mem.findScalar(u8, authority, ']') orelse return null;
-        if (end == 1) return null;
-        if (end + 1 < authority.len and authority[end + 1] != ':') return null;
-        return authority[0 .. end + 1];
-    }
-
-    const colon = std.mem.lastIndexOfScalar(u8, authority, ':') orelse authority.len;
-    if (colon == 0) return null;
-    return authority[0..colon];
 }
 
 fn displayPathTarget(alloc: std.mem.Allocator, workspace_root: []const u8, target_path: []const u8) ![]u8 {
@@ -2760,94 +2608,22 @@ test "command permission target treats a textual null workdir as absent" {
     try std.testing.expectEqualStrings("/tmp/workspace::ls", target);
 }
 
-test "web_fetch permission target is canonical domain rather than full url" {
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-
-    const target = try permissionTargetForCall(arena, "/tmp/workspace", .{
-        .id = "fetch",
-        .name = "web_fetch",
-        .arguments_json = "{\"url\":\"https://Example.COM./docs?q=1\",\"prompt\":\"extract\"}",
-    }, .none);
-
-    try std.testing.expectEqualStrings("domain:example.com", target);
-}
-
-test "web_fetch permission target supports bracketed ipv6 literal urls" {
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-
-    const target = try permissionTargetForCall(arena, "/tmp/workspace", .{
-        .id = "fetch",
-        .name = "web_fetch",
-        .arguments_json = "{\"url\":\"https://[2606:4700:4700::1111]/dns-query\",\"prompt\":\"extract\"}",
-    }, .none);
-
-    try std.testing.expectEqualStrings("domain:[2606:4700:4700::1111]", target);
-    try std.testing.expect(isCanonicalWebFetchDomainPattern(target));
-}
-
-test "web_fetch exact matcher never calls generic url wildcard matcher" {
+test "web_fetch bypasses configured rules and session grants" {
     const alloc = std.testing.allocator;
-    var arena_state = std.heap.ArenaAllocator.init(alloc);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-    const target = try permissionTargetForCall(arena, "/tmp/workspace", .{
-        .id = "fetch",
-        .name = "web_fetch",
-        .arguments_json = "{\"url\":\"https://example.com/docs\",\"prompt\":\"extract\"}",
-    }, .none);
-
     var rules_buf = [_]types.PermissionRule{
-        .{ .permission = @constCast("url"), .pattern = @constCast("https://example.com/*"), .action = .allow },
-        .{ .permission = @constCast("web_fetch"), .pattern = @constCast("domain:*.com"), .action = .allow },
-        .{ .permission = @constCast("web_fetch"), .pattern = @constCast("domain:example.com?"), .action = .allow },
-        .{ .permission = @constCast("web_fetch"), .pattern = @constCast("domain:example.com"), .action = .allow },
+        .{ .permission = @constCast("web_fetch"), .pattern = @constCast("*"), .action = .deny },
     };
     const rules: types.PermissionRuleSet = .{ .rules = &rules_buf };
-
-    var generic_only = [_]types.PermissionRule{
-        .{ .permission = @constCast("url"), .pattern = @constCast("https://example.com/*"), .action = .allow },
-    };
-    try std.testing.expectEqual(RuleDecision.none, try ruleDecisionFor(alloc, .{ .rules = &generic_only }, "/tmp/workspace", "web_fetch", target, .none));
-    try std.testing.expectEqual(RuleDecision.allow, try ruleDecisionFor(alloc, rules, "/tmp/workspace", "web_fetch", target, .none));
-}
-
-test "web_fetch grants do not authorize other tools" {
     const grants = [_]types.PermissionGrant{
-        .{ .tool_name = @constCast("web_fetch"), .target_path = @constCast("domain:example.com") },
+        .{ .tool_name = @constCast("web_fetch"), .target_path = @constCast("*") },
     };
 
-    try std.testing.expect(sessionGrantAllowed(&grants, "web_fetch", "domain:example.com"));
-    try std.testing.expect(!sessionGrantAllowed(&grants, "web_fetch", "domain:example.org"));
-    try std.testing.expect(!sessionGrantAllowed(&grants, "open_file", "https://example.com/docs"));
-    try std.testing.expect(!sessionGrantAllowed(&grants, "run_command", "https://example.com/docs"));
-}
-
-test "web_fetch allowlist rejects wildcard and hand edited broad authorization" {
-    const alloc = std.testing.allocator;
-    var rules_buf = [_]types.PermissionRule{
-        .{ .permission = @constCast("web_fetch"), .pattern = @constCast("*"), .action = .allow },
-        .{ .permission = @constCast("web_fetch"), .pattern = @constCast("domain:*"), .action = .allow },
-        .{ .permission = @constCast("web_fetch"), .pattern = @constCast("domain:example.?om"), .action = .allow },
-        .{ .permission = @constCast("web_fetch"), .pattern = @constCast("https://example.com/*"), .action = .allow },
-    };
-    const rules: types.PermissionRuleSet = .{ .rules = &rules_buf };
-
-    try std.testing.expectEqual(RuleDecision.none, try ruleDecisionFor(alloc, rules, "/tmp/workspace", "web_fetch", "domain:example.com", .none));
-}
-
-test "web_fetch malformed hand edited rules warn without disabling unrelated permissions" {
-    const alloc = std.testing.allocator;
-    var rules_buf = [_]types.PermissionRule{
-        .{ .permission = @constCast("web_fetch"), .pattern = @constCast("*"), .action = .allow },
-    };
-    const rules: types.PermissionRuleSet = .{ .rules = &rules_buf };
-
-    try std.testing.expectEqual(RuleDecision.none, try ruleDecisionFor(alloc, rules, "/tmp/workspace", "web_fetch", "domain:example.com", .none));
-    try std.testing.expectEqual(@as(usize, 1), webFetchRuleWarningCount(rules.rules));
+    try std.testing.expectEqual(
+        RuleDecision.none,
+        try ruleDecisionFor(alloc, rules, "/tmp/workspace", "web_fetch", "web_fetch", .none),
+    );
+    try std.testing.expect(!rulesDenyAllTargetsForTool(rules, "web_fetch"));
+    try std.testing.expect(!sessionGrantAllowed(&grants, "web_fetch", "web_fetch"));
 }
 
 test "permissionRulePatternForGrant preserves explicit command environment identity" {

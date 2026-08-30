@@ -537,15 +537,14 @@ pub fn Commands(comptime App: type) type {
             permission_scope: config_runtime.PermissionScope,
             raw: []const u8,
         ) !void {
-            const target = (try parseAllowlistTargetAlloc(app.alloc, app.toolRegistry(), raw)) orelse {
+            const target = parseAllowlistTarget(app.toolRegistry(), raw) orelse {
                 try app.writeDomainNotice(.{
                     .topic = "allowlist",
                     .tone = .@"error",
-                    .body = "usage: /allowlist add [command|tool|url|web-fetch-domain] <pattern>",
+                    .body = "usage: /allowlist add [command|tool|url] <pattern>",
                 }, true);
                 return;
             };
-            defer target.deinit(app.alloc);
 
             var outcome = config_runtime.addPermissionRule(
                 app.alloc,
@@ -579,15 +578,14 @@ pub fn Commands(comptime App: type) type {
             permission_scope: config_runtime.PermissionScope,
             raw: []const u8,
         ) !void {
-            const target = (try parseAllowlistTargetAlloc(app.alloc, app.toolRegistry(), raw)) orelse {
+            const target = parseAllowlistTarget(app.toolRegistry(), raw) orelse {
                 try app.writeDomainNotice(.{
                     .topic = "allowlist",
                     .tone = .@"error",
-                    .body = "usage: /allowlist remove [command|tool|url|web-fetch-domain] <pattern>",
+                    .body = "usage: /allowlist remove [command|tool|url] <pattern>",
                 }, true);
                 return;
             };
-            defer target.deinit(app.alloc);
 
             var outcome = config_runtime.removePermissionRule(
                 app.alloc,
@@ -630,7 +628,7 @@ pub fn Commands(comptime App: type) type {
                 try app.writeDomainNotice(.{
                     .topic = "allowlist",
                     .tone = .@"error",
-                    .body = "usage: /allowlist reset [commands|tools|urls|web-fetch-domains|all]",
+                    .body = "usage: /allowlist reset [commands|tools|urls|all]",
                 }, true);
                 return;
             };
@@ -943,19 +941,11 @@ pub fn Commands(comptime App: type) type {
             {
                 try out.writer.print("user rules are shadowed by {s}\n", .{shadow});
             }
-            const web_fetch_warning_count = permissions.webFetchRuleWarningCount(rules);
-            if (web_fetch_warning_count > 0) {
-                try out.writer.print("ignored {d} malformed web_fetch rule{s}; expected domain:<canonical-hostname>\n", .{
-                    web_fetch_warning_count,
-                    if (web_fetch_warning_count == 1) "" else "s",
-                });
-            }
-
             const text = try out.toOwnedSlice();
             defer app.alloc.free(text);
             try app.writeDomainNotice(.{
                 .topic = "allowlist",
-                .tone = if (web_fetch_warning_count == 0) .neutral else .warning,
+                .tone = .neutral,
                 .body = std.mem.trimEnd(u8, text, "\n"),
             }, true);
         }
@@ -1220,45 +1210,13 @@ const AllowlistKind = enum {
     command,
     tool,
     url,
-    web_fetch_domain,
 };
 
 const AllowlistTarget = struct {
     kind: AllowlistKind,
     category: []const u8,
     pattern: []const u8,
-    pattern_owned: bool = false,
-
-    fn deinit(self: AllowlistTarget, alloc: std.mem.Allocator) void {
-        if (self.pattern_owned) alloc.free(self.pattern);
-    }
 };
-
-fn parseAllowlistTargetAlloc(
-    alloc: std.mem.Allocator,
-    tool_registry: tool_dispatch.Registry,
-    raw: []const u8,
-) !?AllowlistTarget {
-    const trimmed = std.mem.trim(u8, raw, " \t");
-    const kind_split = splitFirstWord(trimmed) orelse return null;
-    const pattern = parseQuotedOrRest(kind_split.rest);
-    if (pattern.len == 0) return null;
-
-    if (std.ascii.eqlIgnoreCase(kind_split.word, "web-fetch-domain")) {
-        const canonical = permissions.canonicalWebFetchDomainPattern(alloc, pattern) catch |err| switch (err) {
-            error.OutOfMemory => return err,
-            else => return null,
-        };
-        return .{
-            .kind = .web_fetch_domain,
-            .category = permissions.web_fetch_permission,
-            .pattern = canonical,
-            .pattern_owned = true,
-        };
-    }
-
-    return parseAllowlistTarget(tool_registry, raw);
-}
 
 fn parseAllowlistTarget(tool_registry: tool_dispatch.Registry, raw: []const u8) ?AllowlistTarget {
     const trimmed = std.mem.trim(u8, raw, " \t");
@@ -1273,7 +1231,7 @@ fn parseAllowlistTarget(tool_registry: tool_dispatch.Registry, raw: []const u8) 
         return .{ .kind = .url, .category = "url", .pattern = pattern };
     }
     if (std.ascii.eqlIgnoreCase(kind_split.word, "tool")) {
-        if (std.mem.eql(u8, pattern, permissions.web_fetch_permission)) return null;
+        if (permissions.bypassesPermissionPolicy(pattern)) return null;
         if (!isKnownAllowlistTool(tool_registry, pattern)) return null;
         return .{ .kind = .tool, .category = permissions.permissionNameForTool(pattern), .pattern = "*" };
     }
@@ -1341,7 +1299,6 @@ fn parseAllowlistResetScope(raw: []const u8) ?config_runtime.AllowlistResetScope
     if (std.ascii.eqlIgnoreCase(trimmed, "command") or std.ascii.eqlIgnoreCase(trimmed, "commands")) return .commands;
     if (std.ascii.eqlIgnoreCase(trimmed, "tool") or std.ascii.eqlIgnoreCase(trimmed, "tools")) return .tools;
     if (std.ascii.eqlIgnoreCase(trimmed, "url") or std.ascii.eqlIgnoreCase(trimmed, "urls")) return .urls;
-    if (std.ascii.eqlIgnoreCase(trimmed, "web-fetch-domain") or std.ascii.eqlIgnoreCase(trimmed, "web-fetch-domains")) return .web_fetch_domains;
     return null;
 }
 
@@ -1374,7 +1331,6 @@ fn allowlistResetScopeLabel(scope: config_runtime.AllowlistResetScope) []const u
         .commands => "commands",
         .tools => "tools",
         .urls => "urls",
-        .web_fetch_domains => "web-fetch-domains",
     };
 }
 
@@ -1382,7 +1338,6 @@ const AllowlistDisplayKind = enum {
     tool,
     command,
     url,
-    web_fetch_domain,
 };
 
 const AllowlistRuleGroup = struct {
@@ -1401,7 +1356,6 @@ fn writeAllowlistRuleGroups(writer: *std.Io.Writer, rules: []const types.Permiss
     try writeAllowlistSection(writer, rules, .tool);
     try writeAllowlistSection(writer, rules, .command);
     try writeAllowlistSection(writer, rules, .url);
-    try writeAllowlistSection(writer, rules, .web_fetch_domain);
 }
 
 fn writeAllowlistSection(writer: *std.Io.Writer, rules: []const types.PermissionRule, kind: AllowlistDisplayKind) !void {
@@ -1411,7 +1365,6 @@ fn writeAllowlistSection(writer: *std.Io.Writer, rules: []const types.Permission
         .tool => try writer.writeAll("  tools:\n"),
         .command => try writer.writeAll("  commands:\n"),
         .url => try writer.writeAll("  urls:\n"),
-        .web_fetch_domain => try writer.writeAll("  web-fetch domains:\n"),
     }
 
     for (rules, 0..) |rule, idx| {
@@ -1434,7 +1387,7 @@ fn hasAllowlistKind(rules: []const types.PermissionRule, kind: AllowlistDisplayK
 fn writeAllowlistGroupLine(writer: *std.Io.Writer, rules: []const types.PermissionRule, group: AllowlistRuleGroup) !void {
     switch (group.kind) {
         .tool => try writer.print("    {s}: ", .{group.name}),
-        .command, .url, .web_fetch_domain => try writer.writeAll("    "),
+        .command, .url => try writer.writeAll("    "),
     }
 
     var first = true;
@@ -1489,17 +1442,12 @@ fn allowlistRuleGroup(rule: types.PermissionRule) AllowlistRuleGroup {
     if (std.mem.eql(u8, rule.permission, "url")) {
         return .{ .kind = .url, .name = "url" };
     }
-    if (std.mem.eql(u8, rule.permission, permissions.web_fetch_permission)) {
-        return .{ .kind = .web_fetch_domain, .name = "web-fetch-domain" };
-    }
     return .{ .kind = .tool, .name = rule.permission };
 }
 
 fn allowlistRuleDisplayable(rule: types.PermissionRule) bool {
     if (rule.action != .allow) return false;
-    if (std.mem.eql(u8, rule.permission, permissions.web_fetch_permission)) {
-        return permissions.isCanonicalWebFetchDomainPattern(rule.pattern);
-    }
+    if (permissions.bypassesPermissionPolicy(rule.permission)) return false;
     return true;
 }
 
@@ -1521,7 +1469,6 @@ fn formatAllowlistChange(
         .command => try out.writer.print("command: \"{s}\"", .{target.pattern}),
         .url => try out.writer.print("url: \"{s}\"", .{target.pattern}),
         .tool => try out.writer.print("tool {s}: \"{s}\"", .{ target.category, target.pattern }),
-        .web_fetch_domain => try out.writer.print("web-fetch-domain: \"{s}\"", .{target.pattern}),
     }
     try out.writer.print(" (scope={s})", .{@tagName(permission_scope)});
     if (detail.len > 0) try out.writer.print("; {s}", .{detail});
@@ -2570,64 +2517,7 @@ test "session_commands allowlist view reports unsafe settings without returning 
     try expectTranscriptContains(&app, "Failed to load settings: DurablePathUnsafe");
 }
 
-test "web_fetch allowlist add remove view and reset persist exact canonical domains" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    try tmp.dir.createDirPath(io_mod.getIo(), "home");
-    try tmp.dir.createDirPath(io_mod.getIo(), "workspace");
-    const home_root = try io_mod.dirRealpathAlloc(std.testing.allocator, tmp.dir, "home");
-    defer std.testing.allocator.free(home_root);
-    const workspace_root = try io_mod.dirRealpathAlloc(std.testing.allocator, tmp.dir, "workspace");
-    defer std.testing.allocator.free(workspace_root);
-
-    const home = try SessionCommandTestHome.install(std.testing.allocator, home_root);
-    defer home.deinit();
-
-    var app = try FakeApp.init(std.testing.allocator, workspace_root, "anthropic/claude-opus-4.6");
-    defer app.deinit();
-
-    try Commands(FakeApp).handleAllowlist(&app, "add web-fetch-domain Example.COM.");
-    try expectTranscriptContains(&app, "● Allowlist: added web-fetch-domain: \"domain:example.com\"");
-
-    var settings = try config_runtime.loadMergedSettings(std.testing.allocator, workspace_root);
-    defer settings.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(usize, 1), settings.permission_rules.rules.len);
-    try expectRule(settings.permission_rules.rules[0], "web_fetch", "domain:example.com", .allow);
-
-    app.clearTranscript();
-    try Commands(FakeApp).handleAllowlist(&app, "view");
-    try expectTranscriptContains(&app, "  web-fetch domains:\n    domain:example.com");
-
-    app.clearTranscript();
-    try Commands(FakeApp).handleAllowlist(&app, "remove web-fetch-domain EXAMPLE.com");
-    try expectTranscriptContains(&app, "● Allowlist: removed web-fetch-domain: \"domain:example.com\"");
-
-    _ = try config_runtime.addPermissionRule(std.testing.allocator, .local, workspace_root, "web_fetch", "domain:example.com", .allow);
-    _ = try config_runtime.addPermissionRule(std.testing.allocator, .local, workspace_root, "web_fetch", "domain:example.org", .allow);
-    app.clearTranscript();
-    try Commands(FakeApp).handleAllowlist(&app, "reset web-fetch-domains");
-    try expectTranscriptContains(&app, "● Allowlist: reset web-fetch-domains: removed 2 rules");
-}
-
-test "web_fetch allowlist rejects wildcard url shaped and tool wide authorization" {
-    const alloc = std.testing.allocator;
-    var app = try FakeApp.init(alloc, "/tmp/workspace", "anthropic/claude-opus-4.6");
-    defer app.deinit();
-
-    try Commands(FakeApp).handleAllowlist(&app, "add web-fetch-domain *");
-    try expectTranscriptContains(&app, "usage: /allowlist add [command|tool|url|web-fetch-domain] <pattern>");
-
-    app.clearTranscript();
-    try Commands(FakeApp).handleAllowlist(&app, "add web-fetch-domain https://example.com");
-    try expectTranscriptContains(&app, "usage: /allowlist add [command|tool|url|web-fetch-domain] <pattern>");
-
-    app.clearTranscript();
-    try Commands(FakeApp).handleAllowlist(&app, "add tool web_fetch");
-    try expectTranscriptContains(&app, "usage: /allowlist add [command|tool|url|web-fetch-domain] <pattern>");
-}
-
-test "web_fetch malformed hand edited rules render bounded allowlist warnings" {
+test "web_fetch is absent from allowlist configuration and hides stale rules" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -2647,9 +2537,13 @@ test "web_fetch malformed hand edited rules render bounded allowlist warnings" {
     _ = try config_runtime.addPermissionRule(std.testing.allocator, .local, workspace_root, "web_fetch", "*", .allow);
     _ = try config_runtime.addPermissionRule(std.testing.allocator, .local, workspace_root, "read", "*", .allow);
 
+    try Commands(FakeApp).handleAllowlist(&app, "add tool web_fetch");
+    try expectTranscriptContains(&app, "usage: /allowlist add [command|tool|url] <pattern>");
+
+    app.clearTranscript();
     try Commands(FakeApp).handleAllowlist(&app, "view");
-    try expectTranscriptContains(&app, "ignored 1 malformed web_fetch rule");
     try expectTranscriptContains(&app, "  tools:\n    read: workspace");
+    try std.testing.expect(std.mem.find(u8, app.text(), "web_fetch") == null);
 }
 
 test "session_commands handleAllowlist reports usage for invalid input" {
@@ -2658,23 +2552,23 @@ test "session_commands handleAllowlist reports usage for invalid input" {
     defer app.deinit();
 
     try Commands(FakeApp).handleAllowlist(&app, "add");
-    try expectTranscriptContains(&app, "usage: /allowlist add [command|tool|url|web-fetch-domain] <pattern>");
+    try expectTranscriptContains(&app, "usage: /allowlist add [command|tool|url] <pattern>");
 
     app.clearTranscript();
     try Commands(FakeApp).handleAllowlist(&app, "remove nope value");
-    try expectTranscriptContains(&app, "usage: /allowlist remove [command|tool|url|web-fetch-domain] <pattern>");
+    try expectTranscriptContains(&app, "usage: /allowlist remove [command|tool|url] <pattern>");
 
     app.clearTranscript();
     try Commands(FakeApp).handleAllowlist(&app, "add tool not_a_tool");
-    try expectTranscriptContains(&app, "usage: /allowlist add [command|tool|url|web-fetch-domain] <pattern>");
+    try expectTranscriptContains(&app, "usage: /allowlist add [command|tool|url] <pattern>");
 
     app.clearTranscript();
     try Commands(FakeApp).handleAllowlist(&app, "remove tool not_a_tool");
-    try expectTranscriptContains(&app, "usage: /allowlist remove [command|tool|url|web-fetch-domain] <pattern>");
+    try expectTranscriptContains(&app, "usage: /allowlist remove [command|tool|url] <pattern>");
 
     app.clearTranscript();
     try Commands(FakeApp).handleAllowlist(&app, "reset");
-    try expectTranscriptContains(&app, "usage: /allowlist reset [commands|tools|urls|web-fetch-domains|all]");
+    try expectTranscriptContains(&app, "usage: /allowlist reset [commands|tools|urls|all]");
 }
 
 test "session_commands allowlist recognizes whole-tool web_search grant" {
@@ -2723,7 +2617,7 @@ test "session_commands handleAllowlist recognizes tools from the active registry
     app.tool_registry = .{};
     app.clearTranscript();
     try Commands(FakeApp).handleAllowlist(&app, "remove tool provider_memory");
-    try expectTranscriptContains(&app, "usage: /allowlist remove [command|tool|url|web-fetch-domain] <pattern>");
+    try expectTranscriptContains(&app, "usage: /allowlist remove [command|tool|url] <pattern>");
     try std.testing.expect(parseAllowlistTarget(.{}, "tool read") != null);
 }
 

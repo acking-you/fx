@@ -315,7 +315,7 @@ fn runtimeDeps(context: *Context) agent_runtime.AgentRuntimeDeps {
         .request_prepared_file_mutation_permission = requestPreparedFileMutationPermission,
         .resolve_tool_action_display_target = resolveToolActionDisplayTarget,
         .describe_tool_action = describeToolAction,
-        .describe_tool_action_completed = describeToolAction,
+        .describe_tool_action_completed = describeToolActionCompleted,
         .describe_tool_action_denied = describeToolActionDenied,
         .permission_target_for_call = permissionTargetForCall,
         .execute_tool_call = executeToolCall,
@@ -571,6 +571,16 @@ fn describeToolAction(raw: *anyopaque, arena: Allocator, call: types.ToolCall, f
     });
 }
 
+fn describeToolActionCompleted(raw: *anyopaque, arena: Allocator, call: types.ToolCall, file_path: ?[]const u8, _: []const []const u8) ![]const u8 {
+    const context: *Context = @ptrCast(@alignCast(raw));
+    return tool_presentation.formatPlainActionForState(arena, .{
+        .tool_registry = context.config.tool_context.tool_registry,
+        .call = call,
+        .workspace_root = context.config.tool_context.workspace_root,
+        .display_target = file_path,
+    }, .completed, null);
+}
+
 fn resolveToolActionDisplayTarget(raw: *anyopaque, arena: Allocator, call: types.ToolCall) !?[]const u8 {
     _ = raw;
     _ = arena;
@@ -579,8 +589,14 @@ fn resolveToolActionDisplayTarget(raw: *anyopaque, arena: Allocator, call: types
 }
 
 fn describeToolActionDenied(raw: *anyopaque, arena: Allocator, call: types.ToolCall, file_path: ?[]const u8, label: []const u8, dynamic_names: []const []const u8) ![]const u8 {
-    const action = try describeToolAction(raw, arena, call, file_path, dynamic_names);
-    return std.fmt.allocPrint(arena, "{s}: {s}", .{ label, action });
+    _ = dynamic_names;
+    const context: *Context = @ptrCast(@alignCast(raw));
+    return tool_presentation.formatPlainActionForState(arena, .{
+        .tool_registry = context.config.tool_context.tool_registry,
+        .call = call,
+        .workspace_root = context.config.tool_context.workspace_root,
+        .display_target = file_path,
+    }, .denied, label);
 }
 
 fn permissionTargetForCall(raw: *anyopaque, arena: Allocator, call: types.ToolCall, dynamic_names: []const []const u8) ![]const u8 {

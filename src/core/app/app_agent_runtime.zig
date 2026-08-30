@@ -1145,114 +1145,23 @@ pub fn Runtime(comptime App: type) type {
     };
 }
 
-const ToolActionState = enum { active, completed, denied };
-
 fn formatToolAction(
     ctx: tool_runtime.Context,
     arena: Allocator,
     call: ToolCall,
     display_target: ?[]const u8,
-    state: ToolActionState,
+    state: tool_presentation.ActionState,
     denied_label: ?[]const u8,
 ) ![]const u8 {
-    if (std.mem.eql(u8, call.name, "web_search")) {
-        return formatWebSearchAction(arena, call, state, denied_label);
-    }
-    const spec = ctx.tool_registry.lookup(call.name) orelse {
-        if (dynamicMcpActionLabel(state)) |label| {
-            if (mcpToolAvailable(ctx, call.name)) {
-                return formatToolActionValue(arena, label, call.name);
-            }
-        }
-        return formatMissingSpecToolAction(arena, state, denied_label, call.name);
-    };
-    if (try tool_presentation.formatCommandActivity(arena, ctx.tool_registry, ctx.workspace_root, call)) |activity| {
-        defer arena.free(activity.detail);
-        const label = switch (state) {
-            .active => "Running",
-            .completed => "Ran",
-            .denied => denied_label.?,
-        };
-        return formatToolActionValue(
-            arena,
-            label,
-            activity.detail,
-        );
-    }
-    if (std.mem.eql(u8, call.name, "write_file") or
-        std.mem.eql(u8, call.name, "edit_file"))
-    {
-        return formatToolActionValue(
-            arena,
-            specLabel(spec, state, denied_label),
-            display_target orelse spec.label_arg_default,
-        );
-    }
-    const args = tool_args.parseToolArgsObject(arena, call.arguments_json) catch {
-        return formatInvalidArgsToolAction(arena, state, denied_label);
-    };
-
-    const presentation = tool_dispatch.presentationForArgs(spec.*, args);
-    const value = display_target orelse
-        tool_dispatch.presentationLabelValue(presentation, args) orelse
-        presentation.label_arg_default;
-    return formatToolActionValue(arena, presentationLabel(presentation, state, denied_label), value);
-}
-
-fn formatWebSearchAction(arena: Allocator, call: ToolCall, state: ToolActionState, denied_label: ?[]const u8) ![]const u8 {
-    const args = tool_args.parseToolArgsObject(arena, call.arguments_json) catch {
-        return formatInvalidArgsToolAction(arena, state, denied_label);
-    };
-    const label = switch (state) {
-        .active => "Searching",
-        .completed => "Searched",
-        .denied => denied_label.?,
-    };
-    return formatToolActionValue(arena, label, try tool_presentation.formatWebSearchActionDetail(arena, args));
-}
-
-fn formatMissingSpecToolAction(arena: Allocator, state: ToolActionState, denied_label: ?[]const u8, name: []const u8) ![]const u8 {
-    return switch (state) {
-        .active => formatToolActionValue(arena, "Working", name),
-        .completed => formatToolActionValue(arena, "Completed", name),
-        .denied => formatToolActionValue(arena, denied_label.?, name),
-    };
-}
-
-fn formatInvalidArgsToolAction(arena: Allocator, state: ToolActionState, denied_label: ?[]const u8) ![]const u8 {
-    return switch (state) {
-        .active => std.fmt.allocPrint(arena, "● Working…\x1b[0m", .{}),
-        .completed => formatToolActionValue(arena, "Completed", "tool call"),
-        .denied => formatToolActionValue(arena, denied_label.?, "tool call"),
-    };
-}
-
-fn formatToolActionValue(arena: Allocator, label: []const u8, value: []const u8) ![]const u8 {
-    return std.fmt.allocPrint(arena, "● {s}\x1b[0m \x1b[38;5;245m{s}\x1b[0m", .{ label, value });
-}
-
-fn specLabel(spec: *const tool_dispatch.Tool, state: ToolActionState, denied_label: ?[]const u8) []const u8 {
-    return switch (state) {
-        .active => spec.action_label,
-        .completed => spec.completed_action_label,
-        .denied => denied_label.?,
-    };
-}
-
-fn presentationLabel(presentation: tool_dispatch.CallPresentation, state: ToolActionState, denied_label: ?[]const u8) []const u8 {
-    return switch (state) {
-        .active => presentation.action_label,
-        .completed => presentation.completed_action_label,
-        .denied => denied_label.?,
-    };
-}
-
-fn dynamicMcpActionLabel(state: ToolActionState) ?[]const u8 {
-    return switch (state) {
-        .active => "Running MCP",
-        .completed => "Ran MCP",
-        .denied => null,
-    };
+    return tool_presentation.formatStyledActionForState(arena, .{
+        .tool_registry = ctx.tool_registry,
+        .call = call,
+        .workspace_root = ctx.workspace_root,
+        .display_target = display_target,
+        .is_available_dynamic_mcp_tool = ctx.tool_registry.lookup(call.name) == null and
+            state != .denied and
+            mcpToolAvailable(ctx, call.name),
+    }, state, denied_label);
 }
 
 fn mcpToolAvailable(ctx: tool_runtime.Context, name: []const u8) bool {

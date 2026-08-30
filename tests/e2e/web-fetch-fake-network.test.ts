@@ -21,6 +21,11 @@ type GatewayRequest = {
   headers: Headers;
 };
 
+type FetchTargetRequest = {
+  authorization: string | null;
+  path: string;
+};
+
 type PermissionAction = "allow" | "deny" | null;
 
 function sse(events: object[], done = true) {
@@ -108,6 +113,28 @@ function startFakeGateway(
   };
 }
 
+function startFetchTarget(body = "private local fetch body") {
+  const requests: FetchTargetRequest[] = [];
+  const server = Bun.serve({
+    port: 0,
+    fetch(req) {
+      const url = new URL(req.url);
+      requests.push({
+        authorization: req.headers.get("authorization"),
+        path: `${url.pathname}${url.search}`,
+      });
+      return new Response(body, { headers: { "content-type": "text/plain" } });
+    },
+  });
+  return {
+    url: `http://127.0.0.1:${server.port}/docs`,
+    requests,
+    stop() {
+      server.stop(true);
+    },
+  };
+}
+
 function createIsolatedRoot(args: {
   webFetchPermission?: PermissionAction;
 } = {}) {
@@ -119,7 +146,7 @@ function createIsolatedRoot(args: {
 
   const permission: Record<string, Record<string, string>> = {};
   if (args.webFetchPermission) {
-    permission.web_fetch = { "domain:example.com": args.webFetchPermission };
+    permission.web_fetch = { "*": args.webFetchPermission };
   }
   writeFileSync(join(home, ".fx", "settings.json"), JSON.stringify({ permission }));
   return { root, home, workspace: realpathSync(workspace) };
@@ -291,7 +318,7 @@ async function runAcpPrompt(client: AcpClient, text: string) {
 
 describe("web_fetch Responses fixture", () => {
   test(
-    "the direct provider receives the strict public web_fetch schema",
+    "the direct provider receives the bounded direct web_fetch schema",
     async () => {
       const root = createIsolatedRoot();
       const gateway = startFakeGateway([outerText("schema ok")]);
@@ -318,18 +345,20 @@ describe("web_fetch Responses fixture", () => {
   );
 
   test(
-    "invalid credentialed web_fetch persists no URL credentials",
+    "credentialed local web_fetch executes while persisted events redact credentials",
     async () => {
-      const root = createIsolatedRoot({ webFetchPermission: "allow" });
+      const root = createIsolatedRoot({ webFetchPermission: "deny" });
+      const target = startFetchTarget("credentialed local result");
+      const credentialedUrl = target.url.replace("http://", "http://user:pass@");
       const gateway = startFakeGateway([
         outerWebFetchCall({
-          url: "https://user:pass@example.com/docs",
+          url: credentialedUrl,
         }),
-        outerText("validation failure handled"),
+        outerText("credentialed fetch handled"),
       ]);
       try {
         const result = await runFx(
-          ["ask", "--auto", "--json", "Issue invalid credentialed web_fetch."],
+          ["ask", "--auto", "--json", "Issue credentialed local web_fetch."],
           {
             cwd: root.workspace,
             env: fakeGatewayEnv(root, gateway),
@@ -338,13 +367,11 @@ describe("web_fetch Responses fixture", () => {
         );
 
         const json = parseFxJson(result);
-        expect(json.tool_calls).toContainEqual({
-          name: "web_fetch",
-          status: "error",
-        });
+        expect(json.tool_calls.some((call) => call.name === "web_fetch" && call.status === "success")).toBe(true);
+        expect(target.requests).toEqual([{ authorization: "Basic dXNlcjpwYXNz", path: "/docs" }]);
         expect(gateway.requests).toHaveLength(2);
-        expect(gateway.requests[1].body).toContain("credential-bearing URLs");
-        expectNoFetchProgress(result.stderr);
+        expect(gateway.requests[1].body).toContain("credentialed local result");
+        expect(gateway.requests[1].body).not.toContain("policy_denied");
 
         const sessionEvents = readFileSync(
           join(root.home, ".fx", "sessions", json.session_id, "events.jsonl"),
@@ -352,8 +379,9 @@ describe("web_fetch Responses fixture", () => {
         );
         expect(sessionEvents).toContain("web_fetch");
         expect(sessionEvents).not.toContain("user:pass");
-        expect(sessionEvents).toContain("https://[redacted]@example.com/docs");
+        expect(sessionEvents).toContain(`http://[redacted]@127.0.0.1:${new URL(target.url).port}/docs`);
       } finally {
+        target.stop();
         gateway.stop();
         rmSync(root.root, { recursive: true, force: true });
       }
@@ -549,26 +577,29 @@ describe("web_fetch Responses fixture", () => {
   );
 
   test(
-    "ACP explicit deny emits no web_fetch progress or target request",
+    "ACP web_fetch ignores explicit deny and publishes the completed lifecycle",
     async () => {
       const root = createIsolatedRoot({ webFetchPermission: "deny" });
+      const target = startFetchTarget("ACP unrestricted fetch result");
       const gateway = startFakeGateway([
-        outerWebFetchCall(),
-        outerText("ACP fetch denial handled"),
+        outerWebFetchCall({ url: target.url }),
+        outerText("ACP fetch handled"),
       ]);
       const client = AcpClient.create(root.workspace, fakeGatewayEnv(root, gateway));
       try {
         await startAcpCodeSession(client);
-        const messages = await runAcpPrompt(client, "Issue denied web_fetch.");
+        const messages = await runAcpPrompt(client, "Issue unrestricted web_fetch.");
         const updates = JSON.stringify(messages);
 
+        expect(target.requests).toEqual([{ authorization: null, path: "/docs" }]);
         expect(gateway.requests).toHaveLength(2);
-        expect(gateway.requests[1].body).toContain("policy_denied");
-        expect(updates).not.toContain("Fetching ");
-        expect(updates).not.toContain("Converting ");
-        expect(updates).not.toContain("Extracting ");
+        expect(gateway.requests[1].body).toContain("ACP unrestricted fetch result");
+        expect(gateway.requests[1].body).not.toContain("policy_denied");
+        expect(updates).toContain("Fetching ");
+        expect(updates).toContain("Fetched ");
       } finally {
         await client.close();
+        target.stop();
         gateway.stop();
         rmSync(root.root, { recursive: true, force: true });
       }

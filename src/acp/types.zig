@@ -168,18 +168,41 @@ pub fn writeToolCall(
 }
 
 pub fn writeToolCallUpdate(w: *std.Io.Writer, tool_call_id: []const u8, status: ToolCallStatus, content_text: ?[]const u8) !void {
-    try writeToolCallUpdateWithCommandResult(w, tool_call_id, status, content_text, null);
+    try writeToolCallUpdateFields(w, tool_call_id, status, null, content_text, null);
 }
 
-pub fn writeToolCallUpdateWithCommandResult(
+pub fn writeToolCallTerminalUpdate(
     w: *std.Io.Writer,
     tool_call_id: []const u8,
     status: ToolCallStatus,
+    title: ?[]const u8,
+    content_text: ?[]const u8,
+    command_result_json: ?[]const u8,
+) !void {
+    try writeToolCallUpdateFields(
+        w,
+        tool_call_id,
+        status,
+        title,
+        content_text,
+        command_result_json,
+    );
+}
+
+fn writeToolCallUpdateFields(
+    w: *std.Io.Writer,
+    tool_call_id: []const u8,
+    status: ToolCallStatus,
+    title: ?[]const u8,
     content_text: ?[]const u8,
     command_result_json: ?[]const u8,
 ) !void {
     try w.writeAll("{\"sessionUpdate\":\"tool_call_update\",\"toolCallId\":");
     try writeJsonStr(tool_call_id, w);
+    if (title) |value| {
+        try w.writeAll(",\"title\":");
+        try writeJsonStr(value, w);
+    }
     try w.writeAll(",\"status\":");
     try writeJsonStr(status.jsonString(), w);
     if (content_text) |text| {
@@ -363,10 +386,11 @@ test "writeToolCallUpdate can include structured command result" {
     var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();
 
-    try writeToolCallUpdateWithCommandResult(
+    try writeToolCallTerminalUpdate(
         &out.writer,
         "call_002",
         .completed,
+        null,
         "exit_code=0\n<stdout>\nok\n</stdout>\n",
         "{\"kind\":\"foreground\",\"command\":\"printf ok\",\"cwd\":\"/tmp\",\"exit_code\":0,\"signal\":null,\"timed_out\":false,\"stdout_bytes\":2,\"stderr_bytes\":0,\"truncated\":false}",
     );
@@ -413,6 +437,32 @@ test "writeToolCallUpdate without content" {
     try writeToolCallUpdate(&out.writer, "call_003", .in_progress, null);
     try std.testing.expect(std.mem.find(u8, out.writer.buffered(), "\"in_progress\"") != null);
     try std.testing.expect(std.mem.find(u8, out.writer.buffered(), "content") == null);
+}
+
+test "writeToolCallTerminalUpdate combines presentation and result" {
+    const alloc = std.testing.allocator;
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+    try writeToolCallTerminalUpdate(
+        &out.writer,
+        "call_exec",
+        .completed,
+        "Ran zig build",
+        "build succeeded",
+        "{\"kind\":\"foreground\",\"exit_code\":0}",
+    );
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, alloc, out.writer.buffered(), .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("tool_call_update", parsed.value.object.get("sessionUpdate").?.string);
+    try std.testing.expectEqualStrings("call_exec", parsed.value.object.get("toolCallId").?.string);
+    try std.testing.expectEqualStrings("completed", parsed.value.object.get("status").?.string);
+    try std.testing.expectEqualStrings("Ran zig build", parsed.value.object.get("title").?.string);
+    try std.testing.expectEqualStrings(
+        "build succeeded",
+        parsed.value.object.get("content").?.array.items[0].object.get("content").?.object.get("text").?.string,
+    );
+    try std.testing.expectEqual(@as(i64, 0), parsed.value.object.get("command_result").?.object.get("exit_code").?.integer);
 }
 
 test "writeInitializeResponse contains required fields" {
