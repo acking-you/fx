@@ -26,7 +26,6 @@ const tool_result_errors = @import("../../tooling/tool_result_errors.zig");
 const tooling_tool_admission = @import("../../tooling/tool_admission.zig");
 const tool_args = @import("../../tooling/tool_args.zig");
 const hooks = @import("../../hooks/hooks.zig");
-const command_contract = @import("../../execution/command_contract.zig");
 const command_environment = @import("../../execution/command_environment.zig");
 const context_contract = @import("../../workspace/context_contract.zig");
 const tool_preparation = @import("../tool_preparation.zig");
@@ -7378,47 +7377,6 @@ fn finishCommonAssistantTerminalWithExecution(
         finish_trace,
         trace_outcome,
     );
-}
-
-fn finishCommonBackgroundTerminal(
-    deps: *const AgentRuntimeDeps,
-    finalization: *TurnFinalizationGuard,
-    arena: Allocator,
-    job: QueuedPrompt,
-    current_turn_messages: []const ChatMessage,
-    summary_accumulator: *runtime_telemetry.TurnSummaryAccumulator,
-    assistant_text: []const u8,
-    background: command_contract.BackgroundCommand,
-    finish_trace: *PromptFinishTrace,
-) !void {
-    const execution_memory = try runtime_execution_memory.buildExecutionMemory(
-        arena,
-        current_turn_messages,
-    );
-    const turn: HistoryTurn = .{ .background_command = .{
-        .user = .{ .text = job.prompt, .images = job.images },
-        .assistant = @constCast(assistant_text),
-        .execution = execution_memory,
-        .log_path = @constCast(background.log_path),
-        .expect_url = background.expect_url,
-        .url = if (background.url) |url| @constCast(url) else null,
-        .background_record_id = background.background_record_id,
-    } };
-    const finished = try types.dupeFinishedPrompt(
-        std.heap.c_allocator,
-        .{
-            .turn = turn,
-            .summary = summary_accumulator.finish(),
-        },
-    );
-
-    var propagation_error: ?anyerror = null;
-    deps.propagate_history_turn(deps.ctx, turn) catch |err| {
-        propagation_error = err;
-    };
-    try finalization.finish(.completed, null, finished);
-    finish_trace.finish("background");
-    if (propagation_error) |err| return err;
 }
 
 pub fn copyLatestStopPartial(

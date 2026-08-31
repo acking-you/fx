@@ -1080,15 +1080,11 @@ pub const ExecutionMemory = struct {
     /// retain the exact steering text instead of folding it into the root
     /// prompt.
     user_inputs: []UserTurn = &.{},
-    /// Text-only steering projected by newer runtimes. The BYOK worker keeps
-    /// the authoritative user turns above so image-bearing inputs retain
-    /// their typed representation during replay.
-    steering: [][]u8 = &.{},
     turn_summary: ?TurnSummary = null,
 
     pub fn isEmpty(self: ExecutionMemory) bool {
         return self.tool_steps.len == 0 and self.files.len == 0 and
-            self.user_inputs.len == 0 and self.steering.len == 0;
+            self.user_inputs.len == 0;
     }
 };
 
@@ -2349,12 +2345,10 @@ pub fn dupeExecutionMemory(alloc: std.mem.Allocator, memory: ExecutionMemory) !E
     errdefer freeFileEvidenceSlice(alloc, files);
     const user_inputs = try dupeUserTurnSlice(alloc, memory.user_inputs);
     errdefer freeUserTurnSlice(alloc, user_inputs);
-    const steering = try dupePermissionFeedback(alloc, memory.steering);
     return .{
         .tool_steps = tool_steps,
         .files = files,
         .user_inputs = user_inputs,
-        .steering = steering,
         .turn_summary = memory.turn_summary,
     };
 }
@@ -2363,7 +2357,6 @@ pub fn freeExecutionMemory(alloc: std.mem.Allocator, memory: ExecutionMemory) vo
     freeToolExecutionSteps(alloc, memory.tool_steps);
     freeFileEvidenceSlice(alloc, memory.files);
     freeUserTurnSlice(alloc, memory.user_inputs);
-    freePermissionFeedback(alloc, memory.steering);
 }
 
 pub fn dupeUserTurnSlice(alloc: std.mem.Allocator, users: []const UserTurn) ![]UserTurn {

@@ -50,7 +50,7 @@ pub const Foreground = struct {
             return .{
                 .status = .failure,
                 .model_output = try tool_result_errors.toolExecutionFailureJson(arena, .{
-                    .tool_name = "terminal",
+                    .tool_name = "exec_command",
                     .message = "Command started, but its final process status could not be confirmed",
                     .details = &details,
                     .suggestion = "Do not retry the command unchanged because its side effects may already exist. Inspect the resulting state first.",

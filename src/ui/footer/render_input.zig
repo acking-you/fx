@@ -446,7 +446,6 @@ pub const RenderContext = struct {
     statusline_menu: StatuslineMenuProjection = .{},
     usage_menu: UsageMenuProjection = .{},
     workspace_menu: WorkspaceMenuProjection = .{},
-    upgrade_status: []const u8 = "",
     danger_status: []const u8 = "",
     danger_status_compact: []const u8 = "",
     esc_clear_armed: bool = false,

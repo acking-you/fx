@@ -4757,7 +4757,9 @@ pub fn Runtime(comptime App: type) type {
                     }
                 }
             }
-            try writePermissionFeedback(sink, execution.steering);
+            for (execution.user_inputs) |user| {
+                try sink.appendUserTurn(user, true);
+            }
         }
 
         fn writePermissionFeedback(sink: anytype, feedback: []const []const u8) !void {
