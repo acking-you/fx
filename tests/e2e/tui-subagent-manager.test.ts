@@ -190,10 +190,10 @@ function providerErrorResponse(detail: string): Response {
   ]);
 }
 
-function normalizeWorkingFrame(grid: string[]) {
+function normalizeThinkingFrame(grid: string[]) {
   return grid.map((line) =>
-    /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Working(?: \([^)]*\))*$/.test(line)
-      ? "<animated working frame>"
+    /^• (?:Thinking|Generating)(?: \([^)]*\)){1,2}$/.test(line)
+      ? "<animated thinking frame>"
       : line
   );
 }
@@ -6750,8 +6750,8 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
           (pane) => !pane.includes("Agents & processes") && pane.includes("Create the live manager fixture."),
           TIMEOUT,
         );
-        expect(normalizeWorkingFrame(await active.capturePaneGrid())).toEqual(
-          normalizeWorkingFrame(mainGridBeforeManager),
+        expect(normalizeThinkingFrame(await active.capturePaneGrid())).toEqual(
+          normalizeThinkingFrame(mainGridBeforeManager),
         );
         expect(active.cursorPosition()).toEqual(mainCursorBeforeManager);
         parentStream.releaseToolCall("manager_archive_1", "subagent", {

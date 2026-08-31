@@ -371,9 +371,20 @@ type ToolPayloadHoldState = HoldState & {
   finish?: () => void;
 };
 
+function streamingOutputTokens(scrollback: string): number | null {
+  const matches = [...scrollback.matchAll(
+    /^• Generating \(\d+(?:h\d+m\d+s|m\d+s|s)\) \(↑\d+(?:\.\d)?k? ↓(\d+(?:\.\d)?k?)\)$/gm,
+  )];
+  const value = matches.at(-1)?.[1];
+  if (!value) return null;
+  return value.endsWith("k")
+    ? Number.parseFloat(value.slice(0, -1)) * 1000
+    : Number.parseFloat(value);
+}
+
 function quietToolPayloadOutputTokens(scrollback: string): number | null {
   const matches = [...scrollback.matchAll(
-    /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Working(?: \(\d+s\))? \(↑\d+(?:\.\d)?k? ↓(\d+(?:\.\d)?k?)\)$/gm,
+    /^• Running \(\d+(?:h\d+m\d+s|m\d+s|s)\) \(↑\d+(?:\.\d)?k? ↓(\d+(?:\.\d)?k?)\)$/gm,
   )];
   const value = matches.at(-1)?.[1];
   if (!value) return null;
@@ -1014,7 +1025,7 @@ function readSubagentCommunicationRecords(home: string): string[] {
     .map((path) => readFileSync(path, "utf8"));
 }
 
-function assertWorkingFramesShowSubmittedPrompt(
+function assertThinkingFramesShowSubmittedPrompt(
   framesRoot: string,
   submittedPrompt: string,
 ) {
@@ -1022,26 +1033,26 @@ function assertWorkingFramesShowSubmittedPrompt(
   const frameNames = readdirSync(frameDir)
     .filter((name) => name.endsWith(".grid.txt"))
     .sort();
-  let workingFrameCount = 0;
+  let thinkingFrameCount = 0;
 
   for (const frameName of frameNames) {
     const frame = readFileSync(join(frameDir, frameName), "utf8");
     const rows = frame.split(/\r?\n/);
-    const workingRow = rows.findIndex((row) => row.includes("Working"));
-    if (workingRow < 0) continue;
-    workingFrameCount += 1;
+    const thinkingRow = rows.findIndex((row) => row.includes("Thinking"));
+    if (thinkingRow < 0) continue;
+    thinkingFrameCount += 1;
 
     const submittedPromptVisible = rows.some((row, rowIndex) =>
-      rowIndex < workingRow && row.includes(submittedPrompt)
+      rowIndex < thinkingRow && row.includes(submittedPrompt)
     );
     if (!submittedPromptVisible) {
       throw new Error(
-        `${frameName} shows Working before submitted prompt card:\n${frame}`,
+        `${frameName} shows Thinking before submitted prompt card:\n${frame}`,
       );
     }
   }
 
-  expect(workingFrameCount).toBeGreaterThan(0);
+  expect(thinkingFrameCount).toBeGreaterThan(0);
 }
 
 function assertFirstPostEnterOutputShowsSubmittedPrompt(
@@ -1441,7 +1452,7 @@ async function launchRouteRecoveryTui(
 
 describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
   test(
-    "visible streamed text replaces the working row and keeps the final token summary",
+    "live token counter includes submitted input, reasoning, and streamed text",
     async () => {
       const hold: TokenProgressHoldState = { started: false, cancelled: false };
       const finalSentinel = "FX_LIVE_TOKEN_COUNTER_COMPLETE";
@@ -1462,7 +1473,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       await waitForScrollback(
         session!,
         (value) =>
-          /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Working \(\d+s\) \(↑8 ↓[1-9]\d*(?:\.\d)?k?\)/.test(
+          /Thinking \(\d+s\) \(↑8 ↓[1-9]\d*(?:\.\d)?k?\)/.test(
             value,
         ),
         "reasoning token progress",
@@ -1473,24 +1484,25 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       const streamingPane = await waitForScrollback(
         session!,
         (value) =>
-          value.includes("streaming output") &&
-          !value.includes("Working") &&
+          streamingOutputTokens(value) !== null &&
           !value.includes(finalSentinel),
-        "visible assistant text while the working row is hidden",
+        "first estimated live token progress while text is paced",
       );
-      const firstVisibleLines = countOccurrences(streamingPane, "streaming output");
+      const firstOutputTokens = streamingOutputTokens(streamingPane)!;
 
       hold.sendMoreContent?.();
       const laterStreamingPane = await waitForScrollback(
         session!,
-        (value) =>
-          countOccurrences(value, "streaming output") > firstVisibleLines &&
-          !value.includes("Working") &&
-          !value.includes(finalSentinel),
-        "additional visible assistant text while pacing continues",
+        (value) => {
+          const outputTokens = streamingOutputTokens(value);
+          return outputTokens !== null &&
+            outputTokens > firstOutputTokens &&
+            !value.includes(finalSentinel);
+        },
+        "increasing estimated live token progress",
       );
-      expect(countOccurrences(laterStreamingPane, "streaming output")).toBeGreaterThan(
-        firstVisibleLines,
+      expect(streamingOutputTokens(laterStreamingPane)).toBeGreaterThan(
+        firstOutputTokens,
       );
 
       hold.finish?.();
@@ -2401,7 +2413,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       await session.waitForComposer(TIMEOUT);
       await session.sendText("Start the streamed response.");
       await waitForCondition(() => stream.started, "stream start");
-      await session.waitForText("Working", TIMEOUT);
+      await session.waitForText("Thinking", TIMEOUT);
       await session.sendLiteral(draft);
       const pane = await session.waitForText(draft, TIMEOUT);
 
@@ -2413,7 +2425,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
           .map((match) => match[1]!),
       );
 
-      expect(pane).toContain("Working");
+      expect(pane).toContain("Thinking");
       expect(draftFrames).not.toHaveLength(0);
       expect(cursorVisibility.at(-1)).toBe("h");
       expect(readFileSync(stderrPath, "utf8")).toBe("");
@@ -2469,7 +2481,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         () => heldGateway.requests.length === 1 && hold.started,
         "held idle submitted prompt stream",
       );
-      await session.waitForText("Working", TIMEOUT);
+      await session.waitForText("Thinking", TIMEOUT);
       await Bun.sleep(250);
       await session.sendKeys("C-c");
       await session.waitForText("cancelled", TIMEOUT);
@@ -2478,7 +2490,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         encoding: "utf8",
       });
       assertFirstPostEnterOutputShowsSubmittedPrompt(tapePath, submittedPrompt);
-      assertWorkingFramesShowSubmittedPrompt(framesRoot, submittedPrompt);
+      assertThinkingFramesShowSubmittedPrompt(framesRoot, submittedPrompt);
 
       expect(hold.cancelled).toBe(true);
       expect(readFileSync(stderrPath, "utf8")).toBe("");
@@ -2785,7 +2797,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         () => queuedGateway.requests.length === 1 && hold.started,
         "held active Gateway request",
       );
-      await session.waitForText("Working", TIMEOUT);
+      await session.waitForText("Thinking", TIMEOUT);
       await session.sendText(`/image ${image}`);
       await session.waitForText("attached image: queued-snapshot.png", TIMEOUT);
       await session.sendText(queuedPrompt);
@@ -2969,7 +2981,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
             visible.includes(toolHeader) &&
             visible.includes(toolMarker) &&
             visible.includes(permissionMarker) &&
-            visible.includes("Working");
+            visible.includes("Generating");
         },
         "local permissions output during held post-tool continuation",
       );
@@ -2981,7 +2993,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         (pane) =>
           pane.includes(activeBefore.trim()) &&
           pane.includes(activeAfter.trim()) &&
-          !pane.includes("Working"),
+          !pane.includes("Generating"),
         TIMEOUT,
       );
       expect(heldGateway.requests).toHaveLength(2);
@@ -2993,7 +3005,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       );
       await session.waitForText(followupResponse, TIMEOUT);
       await session.waitForPane(
-        (pane) => pane.includes(followupResponse) && !pane.includes("Working"),
+        (pane) => pane.includes(followupResponse) && !pane.includes("Generating"),
         TIMEOUT,
       );
 
@@ -3280,7 +3292,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         "hidden queue review before stream cancellation",
       );
       await session.waitForPane(
-        (pane) => pane.includes("Working"),
+        (pane) => pane.includes("Thinking"),
         TIMEOUT,
       );
       expect(hold.cancelled).toBe(false);
@@ -3613,7 +3625,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       await session.waitForPane(
         (pane) =>
           pane.includes("ACTIVE_ORIGINAL_MODEL_FINISHED") &&
-          !pane.includes("Working"),
+          !pane.includes("Thinking"),
         TIMEOUT,
       );
       await session.sendText("Use the selected model now.");
@@ -4601,7 +4613,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         () => heldGateway.requests.length === 1 && hold.started,
         "held active stream",
       );
-      await session.waitForText("Working", TIMEOUT);
+      await session.waitForText("Thinking", TIMEOUT);
 
       await session.sendKeys("C-c");
       const afterFirst = await session.waitForText("cancelled", TIMEOUT);
@@ -5030,7 +5042,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       const introIndex = scrollback.indexOf(intro);
       const firstTableIndex = scrollback.indexOf(tableMarkers[0]!);
       expect(scrollback.slice(introIndex, firstTableIndex)).not.toMatch(
-        /(?:[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Working \(|\(↑\d)/,
+        /(?:Thinking \(|\(↑\d)/,
       );
       expect(escapedScrollback).toContain(prefillMarkers[0]!);
       expect(escapedScrollback).toContain(tableMarkers.at(-1)!);
@@ -5779,7 +5791,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       expect(running).toContain(
         "● 2 tool calls · 1 read · 1 command\n├ Read seven.txt\n└ Running sleep 1; printf SECOND_GROUP_LIVE_COMMAND",
       );
-      expect(running).toMatch(/\n *[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Working \(\d+s\)/);
+      expect(running).toMatch(/\n *(?:• )?Running \(\d+s\)/);
       await session.waitForText(finalText, TIMEOUT);
       const compact = await session.capturePane();
       expect(compact).toContain(
@@ -6176,7 +6188,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
 
       releaseClassifier(fakeGatewayPermissionDecision("clear"));
       await session.waitForPane(
-        (pane) => pane.includes(finalText) && !pane.includes("Working"),
+        (pane) => pane.includes(finalText) && !pane.includes("Thinking"),
         TIMEOUT,
       );
       expect(commandGateway.requests).toHaveLength(2);
@@ -6239,7 +6251,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       const scrollback = await waitForScrollback(
         session,
         (candidate) =>
-          candidate.includes("Working") &&
+          candidate.includes("Running") &&
           !candidate.includes("● Preparing command") &&
           !candidate.includes("Using terminal") &&
           !hasBareRunningRow(candidate),
@@ -6254,7 +6266,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       expect(scrollback).not.toContain("● Preparing command");
       expect(scrollback).not.toContain("Using terminal");
       expect(scrollback).not.toContain("Used terminal");
-      expect(scrollback).toContain("Working");
+      expect(scrollback).toContain("Running");
       expect(readFileSync(stderrPath, "utf8")).toBe("");
       expect(existsSync(tapePath)).toBe(true);
       expect(existsSync(tracePath)).toBe(true);
@@ -7241,7 +7253,7 @@ describe.skipIf(!tmuxAvailable())("transcript scrollback release", () => {
       const tailIndex = scrollback.indexOf("RESP_TAIL");
       const responseRegion = scrollback.slice(introIndex, tailIndex);
       expect(responseRegion).not.toContain("Read docs/source-");
-      expect(responseRegion).not.toMatch(/(?:[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Working \(|\(↑\d)/);
+      expect(responseRegion).not.toMatch(/(?:Thinking \(|\(↑\d)/);
       expect(existsSync(tapePath)).toBe(true);
       expect(readFileSync(stderrPath, "utf8")).toBe("");
     },

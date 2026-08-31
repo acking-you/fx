@@ -472,7 +472,7 @@ async function setupScenario(
       expected = (record) =>
         hasActivityKind(record, "tool_slot") &&
         recordContains(record, "Running sleep 5") &&
-        recordContains(record, "Working");
+        recordContains(record, "Thinking");
       break;
     }
     case "thinking-final": {

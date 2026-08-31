@@ -961,7 +961,7 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
       await session.sendText("Print the deterministic slash footer transcript fixture.");
       await session.waitForText("SLASH_FOOTER_E2E_082", 30_000);
       await session.waitForPane(
-        (pane) => !pane.includes("esc interrupt") && !pane.includes("Working"),
+        (pane) => !pane.includes("esc interrupt") && !pane.includes("Thinking"),
         5_000,
       );
       await Bun.sleep(300);
@@ -3017,13 +3017,13 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
 
       await session.sendText("Keep this response active.");
       await waitForHeldSkillStream(stream);
-      await session.waitForText("Working", 10_000);
+      await session.waitForText("Generating", 10_000);
       await session.sendLiteralText("$");
       await waitForSkillsMenu(session, 4);
 
       await session.sendKeys("C-[");
       await session.waitForPane(
-        (pane) => pane.includes("Working") && !pane.includes("↑↓ Navigate"),
+        (pane) => pane.includes("Generating") && !pane.includes("↑↓ Navigate"),
         5_000,
       );
       expect(stream.cancelled).toBe(false);
@@ -3063,14 +3063,14 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
 
       await session.sendText("Keep this slash response active.");
       await waitForHeldSkillStream(stream);
-      await session.waitForText("Working", 10_000);
+      await session.waitForText("Generating", 10_000);
       await session.sendLiteralText("/he");
       await session.waitForText("Esc Close", 10_000);
 
       await session.sendKeys("Escape");
       await session.waitForPane(
         (pane) =>
-          pane.includes("Working") &&
+          pane.includes("Generating") &&
           pane.includes("/he") &&
           !pane.includes("Esc Close"),
         5_000,
@@ -3123,7 +3123,7 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
       await session.waitForComposer(10_000);
 
       await session.sendText("Request the catalog approval fixture.");
-      await session.waitForText("Working", 10_000);
+      await session.waitForText("Thinking", 10_000);
       await session.sendLiteralText("$");
       await waitForSkillsMenu(session, 4);
 

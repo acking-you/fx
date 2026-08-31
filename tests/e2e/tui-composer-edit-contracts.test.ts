@@ -703,7 +703,7 @@ tmuxTest(
       (pane) =>
         pane.includes("edit contract complete") &&
         pane.includes("┃") &&
-        !pane.includes("Working"),
+        !pane.includes("Thinking"),
       TIMEOUT,
     );
 
@@ -734,7 +734,7 @@ tmuxTest(
       (pane) =>
         pane.includes("edit contract complete") &&
         pane.includes("┃") &&
-        !pane.includes("Working"),
+        !pane.includes("Thinking"),
       TIMEOUT,
     );
 
@@ -784,7 +784,7 @@ for (
         (pane) =>
           pane.includes("edit contract complete") &&
           pane.includes("┃") &&
-          !pane.includes("Working"),
+          !pane.includes("Thinking"),
         TIMEOUT,
       );
 
@@ -819,7 +819,7 @@ tmuxTest(
       (pane) =>
         pane.includes("edit contract complete") &&
         pane.includes("┃") &&
-        !pane.includes("Working"),
+        !pane.includes("Thinking"),
       TIMEOUT,
     );
 
