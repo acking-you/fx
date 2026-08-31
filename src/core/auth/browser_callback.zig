@@ -378,13 +378,13 @@ fn read_request_stream(
 
 fn unrelated_connection_read_error(err: anyerror) bool {
     return switch (err) {
-        error.ConnectionResetByPeer,
+        error.ConnectionResetByPeer => true,
         error.SocketUnconnected,
         error.Timeout,
         // Zig 0.16's Windows AFD reader reports an incoming TCP RST as the
         // catch-all status until std maps it explicitly.
         error.Unexpected,
-        => true,
+        => builtin.os.tag == .windows,
         else => false,
     };
 }
@@ -782,6 +782,7 @@ fn expectResetPreconnectSurvives(hold_ms: u64) !void {
 }
 
 test "browser callback classifies the Windows AFD reset status as unrelated" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
     try std.testing.expect(unrelated_connection_read_error(error.Unexpected));
     try std.testing.expect(unrelated_connection_read_error(error.ConnectionResetByPeer));
     try std.testing.expect(!unrelated_connection_read_error(error.OutOfMemory));
