@@ -3296,7 +3296,7 @@ const FakeAutoClassifier = struct {
 };
 
 const test_admission_registry = tool_dispatch.Registry{ .tools = &.{
-    test_builtin_tools.list_files,
+    test_builtin_tools.glob_files,
     test_builtin_tools.exec_command,
     test_builtin_tools.write_file,
     test_builtin_tools.edit_file,

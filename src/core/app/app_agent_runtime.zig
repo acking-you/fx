@@ -1231,9 +1231,7 @@ const test_gateway_chat_url = "https://gateway.test/chat";
 const test_tools = [_]tool_dispatch.Tool{
     test_builtin_tools.web_search,
     test_builtin_tools.exec_command,
-    test_builtin_tools.memory,
     test_builtin_tools.update_plan,
-    test_builtin_tools.semantic_search,
     test_builtin_tools.skill,
     test_builtin_tools.install_skill,
     test_builtin_tools.subagent,

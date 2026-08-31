@@ -3593,8 +3593,8 @@ test "gateway_system_prompt: compact ordered sections" {
     };
 
     var previous_index: ?usize = null;
-    for (sections) |heading| {
-        const found_index = std.mem.find(u8, gateway_system_prompt, heading).?;
+    for (sections) |section| {
+        const found_index = std.mem.find(u8, gateway_system_prompt, section.heading).?;
         if (previous_index) |index| try std.testing.expect(found_index > index);
         previous_index = found_index;
     }

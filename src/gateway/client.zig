@@ -3108,7 +3108,6 @@ test "gateway setup trace distinguishes attempt limits from retries used" {
         discardConnectionSetupTestChunk,
         null,
         &cancel_flag,
-        null,
         false,
         .{
             .setup_timing = .{ .timeout_ms = 1000 },

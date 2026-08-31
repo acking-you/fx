@@ -716,11 +716,6 @@ test "registered candidates expose only authoritative canonical targets" {
         builtin_tools.write_file,
         builtin_tools.edit_file,
         builtin_tools.exec_command,
-        builtin_tools.delete_file,
-        builtin_tools.rename_file,
-        builtin_tools.copy_file,
-        builtin_tools.file_info,
-        builtin_tools.open_file,
     };
     const registry = tool_dispatch.Registry{ .tools = &tools };
 
@@ -829,7 +824,6 @@ test "ordinary applicable target freshness detects retarget and resolution failu
     const tools = [_]tool_dispatch.Tool{
         builtin_tools.read_file,
         builtin_tools.exec_command,
-        builtin_tools.file_info,
     };
     const config: Config = .{
         .tool_registry = .{ .tools = &tools },

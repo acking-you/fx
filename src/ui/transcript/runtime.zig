@@ -9523,7 +9523,7 @@ pub const TranscriptRuntime = struct {
             checkpoint,
         );
         defer entry_actions.deinit(alloc);
-        return full_transcript_screen.buildProjectionWithEntryActionsInterruptible(
+        return full_transcript_screen.buildProjectionForDepthWithEntryActionsInterruptible(
             alloc,
             self.entries.items[start_index..],
             self.tool_details.items,
@@ -9531,6 +9531,7 @@ pub const TranscriptRuntime = struct {
             self.command_output_render.styles,
             self.layout.cols,
             anchor_entry_id,
+            .full,
             full_diff_resolver,
             entry_actions.entry_actions.items,
             checkpoint,
@@ -9892,7 +9893,7 @@ pub const TranscriptRuntime = struct {
 };
 
 test "transcript runtime initializer preserves an empty compact source cache" {
-    var runtime = TranscriptRuntime.init();
+    var runtime = TranscriptRuntime{};
     defer runtime.deinit(std.testing.allocator);
 
     for (runtime.compact_transcript_source_cache.entries) |entry| {

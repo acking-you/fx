@@ -1430,7 +1430,7 @@ pub const Persistence = struct {
     /// in a static release-binary template.
     pub fn initInto(storage: *Persistence) void {
         comptime {
-            if (std.meta.fields(Persistence).len != 19) {
+            if (std.meta.fields(Persistence).len != 20) {
                 @compileError("update Persistence.initInto for the changed field set");
             }
         }
@@ -1446,6 +1446,7 @@ pub const Persistence = struct {
         storage.process_model_override = null;
         storage.session_picker = .{};
         storage.session_picker_load = .{};
+        storage.compaction_tasks = .{};
         storage.session_picker_current_cache = .{};
         storage.session_picker_all_cache = .{};
         storage.degraded_warning_emitted = false;

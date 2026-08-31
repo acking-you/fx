@@ -1455,30 +1455,24 @@ fn noopOutput(_: *anyopaque, _: ?types.ToolLifecycleId, _: command_contract.Comm
 fn noopBackgroundReady(_: *anyopaque, _: u64, _: []const u8) void {}
 
 const test_tool_registry = tool_dispatch.Registry{ .tools = &.{
-    test_builtin_tools.list_files,
     test_builtin_tools.glob_files,
     test_builtin_tools.grep_files,
     test_builtin_tools.read_file,
     test_builtin_tools.write_file,
     test_builtin_tools.edit_file,
-    test_builtin_tools.delete_file,
-    test_builtin_tools.rename_file,
-    test_builtin_tools.copy_file,
-    test_builtin_tools.create_folder,
-    test_builtin_tools.file_info,
-    test_builtin_tools.memory,
     test_builtin_tools.update_plan,
-    test_builtin_tools.semantic_search,
-    test_builtin_tools.open_file,
     test_builtin_tools.web_fetch,
     test_builtin_tools.web_search,
     test_builtin_tools.exec_command,
+    test_builtin_tools.write_stdin,
+    test_builtin_tools.capability_search,
     test_builtin_tools.skill,
     test_builtin_tools.install_skill,
     test_builtin_tools.subagent,
-    test_builtin_tools.mcp_search_tools,
     test_builtin_tools.mcp_select_tool,
+    test_builtin_tools.mcp_features,
     test_builtin_tools.ask_user_question,
+    test_builtin_tools.vision,
     test_builtin_tools.read_tool_result,
 } };
 
@@ -2744,12 +2738,10 @@ test "read-only local runtime tools are registered in built-in registry" {
         name: []const u8,
         kind: tool_specs.ExecutorKind,
     }{
-        .{ .name = "list_files", .kind = .list_files },
         .{ .name = "glob_files", .kind = .glob_files },
         .{ .name = "grep_files", .kind = .grep_files },
         .{ .name = "read_file", .kind = .read_file },
         .{ .name = "read_tool_result", .kind = .read_tool_result },
-        .{ .name = "file_info", .kind = .file_info },
     };
 
     var rt = TestRuntime{};
@@ -2774,9 +2766,9 @@ test "tool runtime validates and executes only tools from supplied registry" {
     const arena = arena_state.allocator();
 
     const call = ToolCall{
-        .id = "list",
-        .name = "list_files",
-        .arguments_json = "{}",
+        .id = "glob",
+        .name = "glob_files",
+        .arguments_json = "{\"pattern\":\"*.zig\"}",
     };
     try std.testing.expectEqual(
         tool_contracts.ToolCallValidationResult.not_registered,
@@ -2785,15 +2777,15 @@ test "tool runtime validates and executes only tools from supplied registry" {
 
     const missing = try executeToolCall(empty_rt.context(), arena, call);
     try std.testing.expectEqual(tool_contracts.ToolExecutionStatus.failure, missing.status);
-    try std.testing.expectEqualStrings("Unsupported tool: list_files", missing.model_output);
+    try std.testing.expectEqualStrings("Unsupported tool: glob_files", missing.model_output);
 
-    const list_only_registry = tool_dispatch.Registry{ .tools = &.{test_builtin_tools.list_files} };
-    var list_rt = TestRuntime{ .tool_registry = list_only_registry };
-    defer list_rt.deinit(alloc);
-    try std.testing.expectEqual(
-        tool_contracts.ToolCallValidationResult.valid,
-        try validateToolCall(list_rt.context(), arena, call),
-    );
+    const glob_only_registry = tool_dispatch.Registry{ .tools = &.{test_builtin_tools.glob_files} };
+    var glob_rt = TestRuntime{ .tool_registry = glob_only_registry };
+    defer glob_rt.deinit(alloc);
+    switch (try validateToolCall(glob_rt.context(), arena, call)) {
+        .valid => {},
+        else => return error.TestExpectedEqual,
+    }
 }
 
 fn registryOwnedWebFetchCall(
@@ -2812,23 +2804,6 @@ fn registryOwnedWebSearchCall(
     return .{ .success = try ctx.allocator.dupe(u8, "registry-owned web_search") };
 }
 
-fn registryOwnedFileInfoCall(
-    ctx: tool_dispatch.DispatchContext,
-    input: tool_dispatch.ToolInput,
-) tool_dispatch.DispatchError!tool_dispatch.ToolResult {
-    _ = input;
-    return .{ .success = try ctx.allocator.dupe(u8, "registry-owned file_info") };
-}
-
-fn registryOwnedCreateFolderCall(
-    ctx: tool_dispatch.DispatchContext,
-    input: tool_dispatch.ToolInput,
-) tool_dispatch.DispatchError!tool_dispatch.ToolResult {
-    _ = input;
-    if (ctx.subagent_provider != null) return error.InvalidToolArguments;
-    return .{ .success = try ctx.allocator.dupe(u8, "registry-owned create_folder") };
-}
-
 fn registryOwnedAskQuestionCall(
     ctx: tool_dispatch.DispatchContext,
     input: tool_dispatch.ToolInput,
@@ -2838,49 +2813,6 @@ fn registryOwnedAskQuestionCall(
         return error.InvalidToolArguments;
     }
     return .{ .success = try ctx.allocator.dupe(u8, "registry-owned ask_user_question") };
-}
-
-fn registryOwnedSemanticSearchCall(
-    ctx: tool_dispatch.DispatchContext,
-    input: tool_dispatch.ToolInput,
-) tool_dispatch.DispatchError!tool_dispatch.ToolResult {
-    _ = input;
-    return .{ .success = try ctx.allocator.dupe(u8, "registry-owned semantic_search") };
-}
-
-const RegistryOwnedLauncherInput = struct {};
-
-fn decodeRegistryOwnedLauncher(
-    ctx: tool_dispatch.DispatchContext,
-    _: []const u8,
-) tool_dispatch.DispatchError!tool_dispatch.DecodeResult {
-    const input = try ctx.allocator.create(RegistryOwnedLauncherInput);
-    input.* = .{};
-    return .{ .input = .{
-        .ptr = input,
-        .deinit_fn = deinitRegistryOwnedLauncherInput,
-    } };
-}
-
-fn deinitRegistryOwnedLauncherInput(ptr: *anyopaque, alloc: Allocator) void {
-    const input: *RegistryOwnedLauncherInput = @ptrCast(@alignCast(ptr));
-    alloc.destroy(input);
-}
-
-fn registryOwnedLauncherCall(
-    ctx: tool_dispatch.DispatchContext,
-    input: tool_dispatch.ToolInput,
-) tool_dispatch.DispatchError!tool_dispatch.ToolResult {
-    _ = input;
-    return .{ .success = try ctx.allocator.dupe(u8, "registry-owned launcher") };
-}
-
-fn registryOwnedMemoryCall(
-    ctx: tool_dispatch.DispatchContext,
-    input: tool_dispatch.ToolInput,
-) tool_dispatch.DispatchError!tool_dispatch.ToolResult {
-    _ = input;
-    return .{ .success = try ctx.allocator.dupe(u8, "registry-owned memory") };
 }
 
 fn registryOwnedSkillCall(
@@ -2897,14 +2829,6 @@ fn registryOwnedInstallSkillCall(
 ) tool_dispatch.DispatchError!tool_dispatch.ToolResult {
     _ = input;
     return .{ .success = try ctx.allocator.dupe(u8, "registry-owned install_skill") };
-}
-
-fn registryOwnedMcpSearchCall(
-    ctx: tool_dispatch.DispatchContext,
-    input: tool_dispatch.ToolInput,
-) tool_dispatch.DispatchError!tool_dispatch.ToolResult {
-    _ = input;
-    return .{ .success = try ctx.allocator.dupe(u8, "registry-owned mcp_search_tools") };
 }
 
 fn registryOwnedMcpSelectCall(
@@ -3022,73 +2946,6 @@ test "ask_user_question execution uses supplied registry entry and interactive h
     }));
 }
 
-test "file_info execution uses supplied registry entry" {
-    const alloc = std.testing.allocator;
-    var arena_state = std.heap.ArenaAllocator.init(alloc);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-
-    var registered_file_info = test_builtin_tools.file_info;
-    registered_file_info.call = registryOwnedFileInfoCall;
-    const tools = [_]tool_dispatch.Tool{registered_file_info};
-    const registry = tool_dispatch.Registry{ .tools = tools[0..] };
-    const call = ToolCall{
-        .id = "info",
-        .name = "file_info",
-        .arguments_json = "{\"path\":\".\"}",
-    };
-
-    var rt = TestRuntime{ .tool_registry = registry };
-    defer rt.deinit(alloc);
-    const direct = try executeToolCall(rt.context(), arena, call);
-    try std.testing.expectEqual(tool_contracts.ToolExecutionStatus.success, direct.status);
-    try std.testing.expectEqualStrings("registry-owned file_info", direct.model_output);
-}
-
-test "create_folder supplied registry entry has no subagent capability" {
-    const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const workspace = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
-    defer alloc.free(workspace);
-
-    var arena_state = std.heap.ArenaAllocator.init(alloc);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-
-    var registered_create_folder = test_builtin_tools.create_folder;
-    registered_create_folder.call = registryOwnedCreateFolderCall;
-    const tools = [_]tool_dispatch.Tool{registered_create_folder};
-    const registry = tool_dispatch.Registry{ .tools = tools[0..] };
-    const call = ToolCall{
-        .id = "create-folder-registry",
-        .name = "create_folder",
-        .arguments_json = "{\"path\":\"created\"}",
-    };
-
-    var rt = TestRuntime{
-        .tool_registry = registry,
-        .workspace_root = workspace,
-    };
-    defer rt.deinit(alloc);
-    const result = try executeToolCallAuthorized(rt.context(), .{
-        .call_allocator = arena,
-        .result_allocator = arena,
-        .call = call,
-        .authority = .ordinary,
-        .session_grants = &.{},
-        .advertised_dynamic_tool_names = &.{},
-        .max_tool_result_bytes = rt.max_tool_result_bytes,
-    });
-
-    try std.testing.expectEqual(tool_contracts.ToolExecutionStatus.success, result.status);
-    try std.testing.expectEqualStrings("registry-owned create_folder", result.model_output);
-    try std.testing.expectError(
-        error.FileNotFound,
-        tmp.dir.statFile(io_mod.getIo(), "created", .{}),
-    );
-}
-
 test "real tool runtime enforces refreshed live authority before filesystem effect" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
@@ -3101,9 +2958,9 @@ test "real tool runtime enforces refreshed live authority before filesystem effe
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     const call = ToolCall{
-        .id = "live-create",
-        .name = "create_folder",
-        .arguments_json = "{\"path\":\"created\"}",
+        .id = "live-write",
+        .name = "write_file",
+        .arguments_json = "{\"path\":\"created.txt\",\"content\":\"created\"}",
     };
     const denied_tools = [_][]const u8{"read_file"};
     try std.testing.expectError(
@@ -3129,10 +2986,10 @@ test "real tool runtime enforces refreshed live authority before filesystem effe
     );
     try std.testing.expectError(
         error.FileNotFound,
-        tmp.dir.statFile(io_mod.getIo(), "created", .{}),
+        tmp.dir.statFile(io_mod.getIo(), "created.txt", .{}),
     );
 
-    const allowed_tools = [_][]const u8{"create_folder"};
+    const allowed_tools = [_][]const u8{"write_file"};
     const result = try executeToolCallAuthorized(rt.context(), .{
         .call_allocator = arena,
         .result_allocator = arena,
@@ -3152,75 +3009,7 @@ test "real tool runtime enforces refreshed live authority before filesystem effe
         .max_tool_result_bytes = rt.max_tool_result_bytes,
     });
     try std.testing.expectEqual(tool_contracts.ToolExecutionStatus.success, result.status);
-    _ = try tmp.dir.statFile(io_mod.getIo(), "created", .{});
-}
-
-test "semantic_search execution uses supplied registry entry" {
-    const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const workspace = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
-    defer alloc.free(workspace);
-
-    var arena_state = std.heap.ArenaAllocator.init(alloc);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-
-    var registered_semantic_search = test_builtin_tools.semantic_search;
-    registered_semantic_search.call = registryOwnedSemanticSearchCall;
-    const tools = [_]tool_dispatch.Tool{registered_semantic_search};
-    const registry = tool_dispatch.Registry{ .tools = tools[0..] };
-    const call = ToolCall{
-        .id = "semantic-search",
-        .name = "semantic_search",
-        .arguments_json = "{\"query\":\"registry\"}",
-    };
-
-    var rt = TestRuntime{
-        .tool_registry = registry,
-        .workspace_root = workspace,
-    };
-    defer rt.deinit(alloc);
-    const result = try executeToolCall(rt.context(), arena, call);
-    try std.testing.expectEqual(tool_contracts.ToolExecutionStatus.success, result.status);
-    try std.testing.expectEqualStrings("registry-owned semantic_search", result.model_output);
-}
-
-test "launcher execution uses supplied registry entries after ordinary authorization" {
-    const alloc = std.testing.allocator;
-    var arena_state = std.heap.ArenaAllocator.init(alloc);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-
-    var registered_open_file = test_builtin_tools.open_file;
-    registered_open_file.decode = decodeRegistryOwnedLauncher;
-    registered_open_file.validate = null;
-    registered_open_file.call = registryOwnedLauncherCall;
-    const tools = [_]tool_dispatch.Tool{
-        registered_open_file,
-    };
-    const registry = tool_dispatch.Registry{ .tools = tools[0..] };
-
-    var rt = TestRuntime{ .tool_registry = registry };
-    defer rt.deinit(alloc);
-    for ([_][]const u8{"open_file"}) |name| {
-        const result = try executeToolCallAuthorized(rt.context(), .{
-            .call_allocator = arena,
-            .result_allocator = arena,
-            .call = .{
-                .id = "launcher-registry",
-                .name = name,
-                .arguments_json = "{}",
-            },
-            .authority = .ordinary,
-            .session_grants = &.{},
-            .advertised_dynamic_tool_names = &.{},
-            .max_tool_result_bytes = rt.max_tool_result_bytes,
-        });
-
-        try std.testing.expectEqual(tool_contracts.ToolExecutionStatus.success, result.status);
-        try std.testing.expectEqualStrings("registry-owned launcher", result.model_output);
-    }
+    _ = try tmp.dir.statFile(io_mod.getIo(), "created.txt", .{});
 }
 
 test "web_fetch execution uses supplied registry entry" {
@@ -3275,21 +3064,18 @@ test "web_search execution uses supplied registry entry" {
     try std.testing.expectEqual(@as(usize, 0), backend.calls);
 }
 
-test "stateful local tool execution uses supplied registry entries" {
+test "skill tool execution uses supplied registry entries" {
     const alloc = std.testing.allocator;
     var arena_state = std.heap.ArenaAllocator.init(alloc);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    var registered_memory = test_builtin_tools.memory;
-    registered_memory.call = registryOwnedMemoryCall;
     var registered_skill = test_builtin_tools.skill;
     registered_skill.call = registryOwnedSkillCall;
     var registered_install_skill = test_builtin_tools.install_skill;
     registered_install_skill.call = registryOwnedInstallSkillCall;
 
     const tools = [_]tool_dispatch.Tool{
-        registered_memory,
         registered_skill,
         registered_install_skill,
     };
@@ -3303,7 +3089,6 @@ test "stateful local tool execution uses supplied registry entries" {
         args: []const u8,
         expected: []const u8,
     }{
-        .{ .name = "memory", .args = "{\"action\":\"save\",\"fact\":\"likes registries\"}", .expected = "registry-owned memory" },
         .{ .name = "skill", .args = "{\"name\":\"workflow\"}", .expected = "registry-owned skill" },
         .{ .name = "install_skill", .args = "{\"source\":\"/tmp/skills\",\"skill\":\"workflow\"}", .expected = "registry-owned install_skill" },
     };
@@ -3319,7 +3104,7 @@ test "stateful local tool execution uses supplied registry entries" {
     }
 }
 
-test "MCP control tool execution preserves argument failures" {
+test "MCP select tool execution preserves argument failures" {
     const alloc = std.testing.allocator;
     var rt = TestRuntime{};
     defer rt.deinit(alloc);
@@ -3327,24 +3112,13 @@ test "MCP control tool execution preserves argument failures" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const cases = [_]struct {
-        name: []const u8,
-        args: []const u8,
-        expected: []const u8,
-    }{
-        .{ .name = "mcp_search_tools", .args = "{\"query\":1}", .expected = "mcp_search_tools requires a string query." },
-        .{ .name = "mcp_select_tool", .args = "{\"name\":1}", .expected = "mcp_select_tool requires an exact dynamic tool name." },
-    };
-
-    for (cases) |case| {
-        const result = try executeToolCall(rt.context(), arena, .{
-            .id = "mcp_validation",
-            .name = case.name,
-            .arguments_json = case.args,
-        });
-        try std.testing.expectEqual(tool_contracts.ToolExecutionStatus.failure, result.status);
-        try std.testing.expectEqualStrings(case.expected, result.model_output);
-    }
+    const result = try executeToolCall(rt.context(), arena, .{
+        .id = "mcp_validation",
+        .name = "mcp_select_tool",
+        .arguments_json = "{\"name\":1}",
+    });
+    try std.testing.expectEqual(tool_contracts.ToolExecutionStatus.failure, result.status);
+    try std.testing.expectEqualStrings("mcp_select_tool requires an exact dynamic tool name.", result.model_output);
 }
 
 test "MCP control tool execution uses supplied registry entries" {
@@ -3353,34 +3127,21 @@ test "MCP control tool execution uses supplied registry entries" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    var registered_search = test_builtin_tools.mcp_search_tools;
-    registered_search.call = registryOwnedMcpSearchCall;
     var registered_select = test_builtin_tools.mcp_select_tool;
     registered_select.call = registryOwnedMcpSelectCall;
-    const tools = [_]tool_dispatch.Tool{ registered_search, registered_select };
+    const tools = [_]tool_dispatch.Tool{registered_select};
     const registry = tool_dispatch.Registry{ .tools = tools[0..] };
 
     var rt = TestRuntime{ .tool_registry = registry };
     defer rt.deinit(alloc);
 
-    const cases = [_]struct {
-        name: []const u8,
-        args: []const u8,
-        expected: []const u8,
-    }{
-        .{ .name = "mcp_search_tools", .args = "{\"query\":\"read\"}", .expected = "registry-owned mcp_search_tools" },
-        .{ .name = "mcp_select_tool", .args = "{\"name\":\"mcp_fs_read\"}", .expected = "registry-owned mcp_select_tool" },
-    };
-
-    for (cases) |case| {
-        const result = try executeToolCall(rt.context(), arena, .{
-            .id = "mcp_registry",
-            .name = case.name,
-            .arguments_json = case.args,
-        });
-        try std.testing.expectEqual(tool_contracts.ToolExecutionStatus.success, result.status);
-        try std.testing.expectEqualStrings(case.expected, result.model_output);
-    }
+    const result = try executeToolCall(rt.context(), arena, .{
+        .id = "mcp_registry",
+        .name = "mcp_select_tool",
+        .arguments_json = "{\"name\":\"mcp_fs_read\"}",
+    });
+    try std.testing.expectEqual(tool_contracts.ToolExecutionStatus.success, result.status);
+    try std.testing.expectEqualStrings("registry-owned mcp_select_tool", result.model_output);
 }
 
 test "validateToolCall rejects malformed registered input without claiming unknown calls" {
@@ -4322,7 +4083,8 @@ test "file mutation lifecycle decodes each call at most once" {
         applied.status,
     );
     try std.testing.expect(applied.committed_file_handoff != null);
-    try std.testing.expect(applied.prepared_result_memory != null);
+    try std.testing.expect(applied.tool_result_memory != null);
+    try std.testing.expect(applied.tool_result_memory_prepared);
     call_arena_state.deinit();
     call_arena_live = false;
     try std.testing.expectEqualStrings(
@@ -5219,7 +4981,7 @@ const McpFixture = struct {
         if (std.mem.eql(u8, arguments_json, "{\"path\":7}")) {
             return .{ .invalid = try arena.dupe(u8, "path must be a string") };
         }
-        return .valid;
+        return .{ .valid = 1 };
     }
 
     fn callOk(_: *anyopaque, arena: Allocator, _: []const u8, _: []const u8, _: usize, _: tool_mcp_runtime.CallOptions) anyerror!?tool_mcp_runtime.CallResult {
@@ -5252,8 +5014,8 @@ const McpFixture = struct {
         return error.McpFixtureFailure;
     }
 
-    fn search(_: *anyopaque, arena: Allocator, query: *const tool_mcp_runtime.PreparedQuery, _: usize, _: types.PermissionRuleSet, _: context_limits.Values) anyerror!tool_mcp_runtime.SearchResult {
-        return .{ .model_output = try std.fmt.allocPrint(arena, "{{\"query\":\"{s}\",\"tools\":[{{\"name\":\"mcp_fs_read\",\"server\":\"fs\",\"description\":\"Read\",\"input_schema\":{{\"type\":\"object\"}},\"tags\":[\"fs\",\"read\"]}}],\"count\":1}}", .{query.raw}) };
+    fn search(_: *anyopaque, arena: Allocator, request: tool_mcp_runtime.SearchRequest, _: types.PermissionRuleSet, _: context_limits.Values, _: tool_mcp_runtime.Access) anyerror!tool_mcp_runtime.SearchResult {
+        return .{ .model_output = try std.fmt.allocPrint(arena, "{{\"query\":\"{s}\",\"tools\":[{{\"name\":\"mcp_fs_read\",\"server\":\"fs\",\"description\":\"Read\",\"input_schema\":{{\"type\":\"object\"}},\"tags\":[\"fs\",\"read\"]}}],\"count\":1}}", .{request.query.raw}) };
     }
 
     fn schema(_: *anyopaque, arena: Allocator, name: []const u8, _: types.PermissionRuleSet, _: context_limits.Values, _: tool_mcp_runtime.Access) anyerror!?tool_mcp_runtime.ToolSchemaResult {
@@ -5261,10 +5023,10 @@ const McpFixture = struct {
         return .{ .selected = .{ .model_output = try arena.dupe(u8, "{\"type\":\"function\",\"name\":\"mcp_fs_read\",\"description\":\"Read <context_limit action='literal' />\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"context_limit_rejection\":{\"type\":\"string\"}}}}") } };
     }
 
-    fn searchRecordingRules(raw_ctx: *anyopaque, arena: Allocator, query: *const tool_mcp_runtime.PreparedQuery, _: usize, permission_rules: types.PermissionRuleSet, limits: context_limits.Values, _: tool_mcp_runtime.Access) anyerror!tool_mcp_runtime.SearchResult {
+    fn searchRecordingRules(raw_ctx: *anyopaque, arena: Allocator, request: tool_mcp_runtime.SearchRequest, permission_rules: types.PermissionRuleSet, limits: context_limits.Values, access: tool_mcp_runtime.Access) anyerror!tool_mcp_runtime.SearchResult {
         const ctx: *PermissionContext = @ptrCast(@alignCast(raw_ctx));
         ctx.search_rule_count = permission_rules.rules.len;
-        return search(raw_ctx, arena, query, 0, permission_rules, limits);
+        return search(raw_ctx, arena, request, permission_rules, limits, access);
     }
 
     fn schemaRecordingRules(raw_ctx: *anyopaque, arena: Allocator, name: []const u8, permission_rules: types.PermissionRuleSet, limits: context_limits.Values, access: tool_mcp_runtime.Access) anyerror!?tool_mcp_runtime.ToolSchemaResult {
@@ -5274,7 +5036,7 @@ const McpFixture = struct {
     }
 };
 
-test "MCP control tools forward permission rules through registered execution" {
+test "capability search and MCP selection forward permission rules" {
     var permission_context = McpFixture.PermissionContext{};
     var rules = [_]types.PermissionRule{
         .{ .permission = @constCast("mcp_other"), .pattern = @constCast("*"), .action = .deny },
@@ -5293,7 +5055,7 @@ test "MCP control tools forward permission rules through registered execution" {
 
     _ = try executeToolCall(rt.context(), arena, .{
         .id = "search",
-        .name = "mcp_search_tools",
+        .name = "capability_search",
         .arguments_json = "{\"query\":\"read\"}",
     });
     _ = try executeToolCall(rt.context(), arena, .{
@@ -5309,7 +5071,7 @@ test "MCP control tools forward permission rules through registered execution" {
     permission_context = .{};
     _ = try executeToolCall(rt.context(), arena, .{
         .id = "yolo-search",
-        .name = "mcp_search_tools",
+        .name = "capability_search",
         .arguments_json = "{\"query\":\"read\"}",
     });
     _ = try executeToolCall(rt.context(), arena, .{
@@ -5554,235 +5316,6 @@ test "MCP unadvertised dynamic names do not receive permission targets" {
     const ctx = rt.context();
 
     try std.testing.expectEqual(ToolPermissionDecision.once, (try tool_admission.requestPermissionOutcome(ctx.admissionInput(), arena, .{ .id = "1", .name = "mcp_fs_write", .arguments_json = "{}" }, .auto, &.{})).decision);
-}
-
-test "external absolute non-write tracked mutations capture resolved paths" {
-    const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.createDirPath(io_mod.getIo(), "workspace");
-    try tmp.dir.createDirPath(io_mod.getIo(), "external");
-
-    const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "workspace");
-    defer alloc.free(root);
-    const external = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "external");
-    defer alloc.free(external);
-    var tracker: change_tracker.ChangeTracker = .{};
-    defer tracker.deinit(std.heap.c_allocator);
-    var allow_rules = [_]types.PermissionRule{
-        .{ .permission = @constCast("*"), .pattern = @constCast("*"), .action = .allow },
-    };
-    var rt = TestRuntime{ .workspace_root = root, .tracker = &tracker };
-    rt.permission_rules = .{ .rules = &allow_rules };
-    defer rt.deinit(alloc);
-
-    var arena_state = std.heap.ArenaAllocator.init(alloc);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-
-    try writeTestFile(tmp.dir, "external/delete.txt", "delete\n");
-    const delete_path = try std.fs.path.join(arena, &.{ external, "delete.txt" });
-    const delete_args = try std.fmt.allocPrint(arena, "{{\"path\":\"{s}\"}}", .{delete_path});
-    _ = try executeToolCall(rt.context(), arena, .{
-        .id = "external-delete",
-        .name = "delete_file",
-        .arguments_json = delete_args,
-    });
-    try std.testing.expectEqual(@as(usize, 1), tracker.stack.items.len);
-    try std.testing.expectEqual(change_tracker.OperationKind.delete, tracker.stack.items[0].kind);
-    try std.testing.expectEqualStrings(delete_path, tracker.stack.items[0].path);
-    try std.testing.expectEqualStrings("delete\n", tracker.stack.items[0].previous_content.?);
-
-    try writeTestFile(tmp.dir, "external/rename.txt", "rename\n");
-    const rename_source = try std.fs.path.join(arena, &.{ external, "rename.txt" });
-    const rename_dest = try std.fs.path.join(arena, &.{ external, "renamed.txt" });
-    const rename_args = try std.fmt.allocPrint(arena, "{{\"old_path\":\"{s}\",\"new_path\":\"{s}\"}}", .{ rename_source, rename_dest });
-    _ = try executeToolCall(rt.context(), arena, .{
-        .id = "external-rename",
-        .name = "rename_file",
-        .arguments_json = rename_args,
-    });
-    try std.testing.expectEqual(@as(usize, 2), tracker.stack.items.len);
-    try std.testing.expectEqual(change_tracker.OperationKind.rename, tracker.stack.items[1].kind);
-    try std.testing.expectEqualStrings(rename_source, tracker.stack.items[1].path);
-    try std.testing.expectEqualStrings(rename_dest, tracker.stack.items[1].new_path.?);
-
-    try writeTestFile(tmp.dir, "external/copy-source.txt", "copy\n");
-    const copy_source = try std.fs.path.join(arena, &.{ external, "copy-source.txt" });
-    const copy_dest = try std.fs.path.join(arena, &.{ external, "copy-dest.txt" });
-    const copy_args = try std.fmt.allocPrint(arena, "{{\"source\":\"{s}\",\"destination\":\"{s}\"}}", .{ copy_source, copy_dest });
-    _ = try executeToolCall(rt.context(), arena, .{
-        .id = "external-copy",
-        .name = "copy_file",
-        .arguments_json = copy_args,
-    });
-    try std.testing.expectEqual(@as(usize, 3), tracker.stack.items.len);
-    try std.testing.expectEqual(change_tracker.OperationKind.write, tracker.stack.items[2].kind);
-    try std.testing.expectEqualStrings(copy_dest, tracker.stack.items[2].path);
-}
-
-test "invalid tracked mutations do not push tracker operations" {
-    const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.createDirPath(io_mod.getIo(), "workspace");
-    const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "workspace");
-    defer alloc.free(root);
-
-    var tracker: change_tracker.ChangeTracker = .{};
-    defer tracker.deinit(std.heap.c_allocator);
-    var rt = TestRuntime{ .workspace_root = root, .tracker = &tracker };
-    defer rt.deinit(alloc);
-
-    const calls = [_]struct { name: []const u8, args: []const u8 }{
-        .{ .name = "delete_file", .args = "{}" },
-        .{ .name = "rename_file", .args = "{}" },
-        .{ .name = "copy_file", .args = "{}" },
-    };
-
-    for (calls) |call| {
-        var arena_state = std.heap.ArenaAllocator.init(alloc);
-        defer arena_state.deinit();
-        try std.testing.expectError(error.InvalidToolArguments, executeToolCall(rt.context(), arena_state.allocator(), .{
-            .id = "1",
-            .name = call.name,
-            .arguments_json = call.args,
-        }));
-        try std.testing.expectEqual(@as(usize, 0), tracker.stack.items.len);
-    }
-}
-
-test "failed tracked delete rename and copy skip tracker publication" {
-    const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.createDirPath(io_mod.getIo(), "workspace/non-empty");
-    try writeTestFile(tmp.dir, "workspace/non-empty/child.txt", "keep\n");
-    try writeTestFile(tmp.dir, "workspace/rename-source.txt", "rename\n");
-    try tmp.dir.createDirPath(io_mod.getIo(), "workspace/rename-destination");
-    try writeTestFile(tmp.dir, "workspace/rename-destination/child.txt", "keep\n");
-    try writeTestFile(tmp.dir, "workspace/copy-source.txt", "copy\n");
-    try tmp.dir.createDirPath(io_mod.getIo(), "workspace/copy-destination");
-
-    const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "workspace");
-    defer alloc.free(root);
-    var tracker: change_tracker.ChangeTracker = .{};
-    defer tracker.deinit(std.heap.c_allocator);
-    var rt = TestRuntime{ .workspace_root = root, .tracker = &tracker };
-    defer rt.deinit(alloc);
-
-    const calls = [_]struct {
-        name: []const u8,
-        args: []const u8,
-        failure_prefix: []const u8,
-    }{
-        .{
-            .name = "delete_file",
-            .args = "{\"path\":\"non-empty\"}",
-            .failure_prefix = "delete_file failed:",
-        },
-        .{
-            .name = "rename_file",
-            .args = "{\"old_path\":\"rename-source.txt\",\"new_path\":\"rename-destination\"}",
-            .failure_prefix = "rename_file failed:",
-        },
-        .{
-            .name = "copy_file",
-            .args = "{\"source\":\"copy-source.txt\",\"destination\":\"copy-destination\"}",
-            .failure_prefix = "copy_file failed:",
-        },
-    };
-
-    for (calls) |call| {
-        var arena_state = std.heap.ArenaAllocator.init(alloc);
-        defer arena_state.deinit();
-        const result = try executeToolCall(rt.context(), arena_state.allocator(), .{
-            .id = "tracked-failure",
-            .name = call.name,
-            .arguments_json = call.args,
-        });
-        try std.testing.expectEqual(tool_contracts.ToolExecutionStatus.failure, result.status);
-        try std.testing.expect(std.mem.startsWith(u8, result.model_output, call.failure_prefix));
-        try std.testing.expectEqual(@as(usize, 0), tracker.stack.items.len);
-    }
-}
-
-test "memory tool uses isolated HOME and preserves outputs" {
-    const alloc = std.testing.allocator;
-    var no_home_rt = TestRuntime{};
-    defer no_home_rt.deinit(alloc);
-    try setTestHome(null);
-    try expectToolOutput(no_home_rt.context(), "memory", "{\"action\":\"list\"}", "memory unavailable: HOME not set");
-
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.createDirPath(io_mod.getIo(), "home");
-    const home = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "home");
-    defer alloc.free(home);
-    try setTestHome(home);
-
-    var rt = TestRuntime{};
-    defer rt.deinit(alloc);
-    const ctx = rt.context();
-    try expectToolOutput(ctx, "memory", "{\"action\":\"list\"}", "No saved memories");
-
-    var rejected_arena_state = std.heap.ArenaAllocator.init(alloc);
-    defer rejected_arena_state.deinit();
-    const rejected = try executeToolCall(ctx, rejected_arena_state.allocator(), .{
-        .id = "invalid-memory-action",
-        .name = "memory",
-        .arguments_json = "{\"action\":\"replace\",\"fact\":\"new value\"}",
-    });
-    try std.testing.expectEqual(tool_contracts.ToolExecutionStatus.failure, rejected.status);
-    try std.testing.expectEqualStrings(
-        "memory field \"action\" must be one of: save, list, clear",
-        rejected.model_output,
-    );
-
-    try expectToolOutput(ctx, "memory", "{\"action\":\"save\",\"fact\":\"likes Zig\"}", "remembered");
-    try expectToolOutput(ctx, "memory", "{\"action\":\"save\",\"fact\":\"likes Zig\"}", "remembered");
-    try expectToolOutput(ctx, "memory", "{\"action\":\"list\"}", "- likes Zig\n");
-
-    const memories_path = try std.fs.path.join(alloc, &.{ home, ".fx", "memories.json" });
-    defer alloc.free(memories_path);
-    var file = try std.Io.Dir.openFileAbsolute(io_mod.getIo(), memories_path, .{});
-    const content = blk: {
-        defer file.close(io_mod.getIo());
-        break :blk try io_mod.readFileToEnd(alloc, &file, 4096);
-    };
-    defer alloc.free(content);
-    var parsed = try std.json.parseFromSlice(std.json.Value, alloc, content, .{});
-    defer parsed.deinit();
-    try std.testing.expectEqual(@as(usize, 1), parsed.value.array.items.len);
-    try std.testing.expectEqualStrings("likes Zig", parsed.value.array.items[0].string);
-
-    try expectToolOutput(ctx, "memory", "{\"action\":\"clear\"}", "memories cleared");
-    try expectToolOutput(ctx, "memory", "{\"action\":\"clear\"}", "memories cleared");
-    try expectToolOutput(ctx, "memory", "{\"action\":\"list\"}", "No saved memories");
-
-    try std.Io.Dir.createDirAbsolute(io_mod.getIo(), memories_path, .default_dir);
-    const survivor_path = try std.fs.path.join(alloc, &.{ memories_path, "must-survive.txt" });
-    defer alloc.free(survivor_path);
-    {
-        var survivor = try std.Io.Dir.createFileAbsolute(io_mod.getIo(), survivor_path, .{});
-        survivor.close(io_mod.getIo());
-    }
-
-    var failed_clear_arena_state = std.heap.ArenaAllocator.init(alloc);
-    defer failed_clear_arena_state.deinit();
-    const failed_clear = try executeToolCall(ctx, failed_clear_arena_state.allocator(), .{
-        .id = "failed-memory-clear",
-        .name = "memory",
-        .arguments_json = "{\"action\":\"clear\"}",
-    });
-    try std.testing.expectEqual(tool_contracts.ToolExecutionStatus.failure, failed_clear.status);
-    try std.testing.expectEqualStrings(
-        "memory clear failed: saved memories were not removed; ensure ~/.fx/memories.json is a removable file and retry",
-        failed_clear.model_output,
-    );
-
-    var survivor = try std.Io.Dir.openFileAbsolute(io_mod.getIo(), survivor_path, .{});
-    survivor.close(io_mod.getIo());
 }
 
 test "install_skill explicit tool installs local skill source" {

@@ -468,7 +468,6 @@ const test_tools = [_]tool_dispatch.Tool{
     test_web_search,
     test_builtin_tools.exec_command,
     test_builtin_tools.write_stdin,
-    test_builtin_tools.memory,
     test_builtin_tools.skill,
     test_builtin_tools.install_skill,
     test_builtin_tools.ask_user_question,
