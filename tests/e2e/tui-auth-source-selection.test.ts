@@ -6,6 +6,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   readdirSync,
   rmSync,
   statSync,
@@ -1120,7 +1121,7 @@ tmuxTest(
 tmuxTest(
   "provider setup imports without switching and provider command activates Codex",
   async () => {
-    home = mkdtempSync(join(tmpdir(), "fx-tui-provider-setup-"));
+    home = realpathSync(mkdtempSync(join(tmpdir(), "fx-tui-provider-setup-")));
     stderrPath = join(home, "stderr.log");
     writeFileSync(stderrPath, "");
     gateway = startFakeGateway([]);
