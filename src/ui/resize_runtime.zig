@@ -822,6 +822,43 @@ const ProbeOrderingTerminal = struct {
     }
 };
 
+test "Windows resize polling applies changed console geometry" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const next_layout: Layout = .{
+        .rows = 40,
+        .cols = 100,
+        .content_bottom = 36,
+        .divider_top_row = 37,
+        .input_row = 38,
+        .divider_bottom_row = 39,
+        .hint_row = 40,
+    };
+    var shell = TranscriptRuntime{
+        .layout = launchTestLayout(),
+        .owned_top_row = 1,
+        .has_committed_frame = true,
+    };
+    defer shell.deinit(std.testing.allocator);
+    var metrics = Metrics{};
+    var probe = cursor_probe.Parser{};
+    var resize_interlock = ResizeApprovalInterlock{};
+
+    try collectResizeFacts(
+        LiveResizeTerminal{ .layout = next_layout },
+        &shell,
+        &metrics,
+        &probe,
+        &resize_interlock,
+        4,
+        80,
+        true,
+    );
+
+    try std.testing.expectEqual(next_layout, shell.layout);
+    try std.testing.expectEqual(@as(usize, 1), metrics.debounced_resizes);
+    try std.testing.expect(shell.render_requests.hasReason(.resize));
+}
+
 test "changed live resize requests cursor position before applying geometry" {
     const alloc = std.testing.allocator;
     const next_layout: Layout = .{

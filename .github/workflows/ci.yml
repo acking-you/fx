@@ -336,6 +336,7 @@ jobs:
             --test-filter "resolver builds Windows command invocations" `
             --test-filter "Windows shell discovery prefers Git Bash installations and PATH roots" `
             --test-filter "model tool projection identifies the actual default command shell" `
+            --test-filter "Windows resize polling applies changed console geometry" `
             --test-filter "raw console setup restores captured modes after a partial failure" `
             --test-filter "platform temporary directory resolves to an existing absolute directory" `
             --test-filter "temporary image snapshots use the platform temporary directory" `
