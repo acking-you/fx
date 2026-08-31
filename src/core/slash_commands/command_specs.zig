@@ -11,6 +11,7 @@ pub const TopLevelKind = enum {
     acp,
     pr,
     issue,
+    setup,
     login,
     logout,
     status,
@@ -36,6 +37,7 @@ pub const SlashKind = enum {
     continue_recovery,
     rename_session,
     help,
+    setup,
     login,
     provider,
     logout,
@@ -267,7 +269,7 @@ const HelpRole = enum {
 };
 
 pub fn matchesTopLevel(registry: TopLevelRegistry, token: []const u8, kind: TopLevelKind) bool {
-    const spec = topLevelSpec(registry, kind);
+    const spec = topLevelSpecOrNull(registry, kind) orelse return false;
     return matchesCommandToken(token, spec.token, spec.aliases);
 }
 
@@ -1273,10 +1275,14 @@ fn renderSlashEntries(alloc: Allocator, registry: SlashRegistry, welcome_only: b
 }
 
 fn topLevelSpec(registry: TopLevelRegistry, kind: TopLevelKind) TopLevelSpec {
+    return topLevelSpecOrNull(registry, kind) orelse unreachable;
+}
+
+fn topLevelSpecOrNull(registry: TopLevelRegistry, kind: TopLevelKind) ?TopLevelSpec {
     for (registry.specs) |spec| {
         if (spec.kind == kind) return spec;
     }
-    unreachable;
+    return null;
 }
 
 fn slashSpec(registry: SlashRegistry, kind: SlashKind) SlashSpec {

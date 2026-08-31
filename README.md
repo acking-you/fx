@@ -73,6 +73,22 @@ fx login grok
 fx
 ```
 
+If Codex CLI or Grok Build is already signed in, import every compatible OAuth
+session in one step instead of logging in again:
+
+```bash
+fx setup
+```
+
+The same provider-neutral importer is available inside the TUI as `/setup` and
+through ACP. It reads Codex CLI's `auth.json` from `CODEX_HOME` or `~/.codex`
+and Grok Build's `auth.json` from `GROK_HOME` or `~/.grok`. Source files are
+read-only, existing fx provider logins are never overwritten, and each
+provider reports `imported`, `already_configured`, `not_found`, `incompatible`,
+`invalid`, or `unavailable`. TUI `/setup` activates the first available
+subscription login, preferring Codex. Use `fx setup --json` for structured
+output.
+
 `fx login codex` and `fx login grok` select that provider and a model from its authenticated catalog. Inside fx, use `/provider` to choose between BYOK Responses, Codex, and Grok, or switch directly with `/provider gateway`, `/provider codex`, or `/provider grok`. Provider credential refresh, catalog loading, and durable subscription logout run in the background, so the composer, status commands, and terminal activity remain responsive while those operations settle. `/login` is reserved for provider sign-in and credential selection. `/model` lists the active provider's fetched models. Subscription model IDs are the raw IDs returned by each authenticated catalog. Use `/logout codex` or `/logout grok` to remove that subscription session; selecting the provider again starts sign-in when needed.
 
 The OpenAI Codex route uses ChatGPT subscription access directly. The session is stored privately at `~/.fx/chatgpt-auth.json` and refreshed when needed. Its unified `web_search` tool uses the authenticated Codex search service directly. On supported Codex models, `/fast` requests OpenAI's priority service tier and consumes ChatGPT credits at the higher Fast mode rate.

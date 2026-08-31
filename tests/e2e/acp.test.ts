@@ -547,6 +547,7 @@ function acpChatGptAccessToken(
   signature = "signature",
 ): string {
   const payload = Buffer.from(JSON.stringify({
+    exp: 4_102_444_800,
     "https://api.openai.com/auth": { chatgpt_account_id: accountId },
   })).toString("base64url");
   return `header.${payload}.${signature}`;
@@ -565,6 +566,22 @@ function writeSeededAcpChatGptLogin(home: string, accessToken: string): void {
     account_id: "acct_acp_e2e",
   }) + "\n", { mode: 0o600 });
   chmodSync(authPath, 0o600);
+}
+
+function writeAcpCodexSetupSource(root: string, accessToken: string): string {
+  const codexHome = join(root, "codex-home");
+  mkdirSync(codexHome, { recursive: true, mode: 0o700 });
+  const authPath = join(codexHome, "auth.json");
+  writeFileSync(authPath, JSON.stringify({
+    auth_mode: "chatgpt",
+    tokens: {
+      access_token: accessToken,
+      refresh_token: "codex-setup-refresh",
+      account_id: "acct_acp_e2e",
+    },
+  }), { mode: 0o600 });
+  chmodSync(authPath, 0o600);
+  return codexHome;
 }
 
 function startAcpFakeChatGptLogin() {
@@ -1283,6 +1300,7 @@ describe("acp: model-independent", () => {
         expect(initialized.result._meta.fx.providerControl).toEqual({
           switch: true,
           login: true,
+          setup: true,
           configureByok: true,
           usage: true,
         });
@@ -1373,6 +1391,67 @@ describe("acp: model-independent", () => {
         await client?.close();
         codex.stop();
         gateway.stop();
+        rmSync(root.root, { recursive: true, force: true });
+      }
+    },
+    TIMEOUT,
+  );
+
+  test(
+    "ACP imports a Codex CLI login through nonblocking provider setup",
+    async () => {
+      const root = createIsolatedRoot("fx-acp-provider-setup-");
+      const codex = startAcpFakeCodex();
+      const codexHome = writeAcpCodexSetupSource(root.external, codex.accessToken);
+      const sourcePath = join(codexHome, "auth.json");
+      const sourceBefore = readFileSync(sourcePath, "utf8");
+      try {
+        client = await AcpClient.create({
+          cwd: root.workspace,
+          env: {
+            HOME: root.home,
+            CODEX_HOME: codexHome,
+            GROK_HOME: join(root.external, "missing-grok-home"),
+            OPENAI_API_KEY: undefined,
+            FX_API_KEY: undefined,
+            FX_CODEX_BASE_URL: codex.responsesUrl.replace(/\/responses$/, ""),
+            FX_E2E_OPENAI_CODEX_MODELS_URL: codex.modelsUrl,
+          },
+        });
+        await client.request("initialize", { protocolVersion: 1 }, 40);
+        const started = await client.request("fx/provider/setup/start", {}, 41) as any;
+        expect(started.result).toEqual({ state: "running" });
+
+        let status: any;
+        const deadline = Date.now() + TIMEOUT;
+        do {
+          status = await client.request("fx/provider/setup/status", {}, 42) as any;
+          if (status.result.state === "running") await Bun.sleep(10);
+        } while (status.result.state === "running" && Date.now() < deadline);
+        expect(status.result).toEqual({
+          state: "completed",
+          report: {
+            codex: { source: "codex_cli", status: "imported" },
+            grok: { source: "grok_build", status: "not_found" },
+          },
+        });
+        expect(readFileSync(sourcePath, "utf8")).toBe(sourceBefore);
+        expect(existsSync(join(root.home, ".fx", "chatgpt-auth.json"))).toBe(true);
+
+        const switched = await client.request(
+          "fx/provider/switch",
+          { provider: "codex" },
+          43,
+        ) as any;
+        expect(switched.result.provider).toBe("codex");
+        await client.request("session/new", {}, 44);
+        await client.readLine();
+        const prompted = await runPrompt(client, "Use the imported Codex login.", TIMEOUT);
+        expect(prompted.promptResult.result.stopReason).toBe("end_turn");
+        expect(codex.requests).toHaveLength(1);
+      } finally {
+        codex.stop();
+        await client?.close();
         rmSync(root.root, { recursive: true, force: true });
       }
     },

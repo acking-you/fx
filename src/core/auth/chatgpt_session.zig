@@ -43,6 +43,11 @@ pub const DeleteOutcome = enum {
     deleted_not_durable,
 };
 
+pub const SaveIfAbsentOutcome = enum {
+    saved,
+    already_configured,
+};
+
 pub const Mutation = struct {
     fx_dir: io_mod.VerifiedDir,
     lock: io_mod.TimedAdvisoryLock,
@@ -61,6 +66,20 @@ pub const Mutation = struct {
         const text = try stringify(alloc, session);
         defer secret.zeroAndFree(alloc, text);
         try io_mod.durableReplaceVerified(alloc, &self.fx_dir, auth_file_name, text);
+    }
+
+    pub fn hasAuthFile(self: *Mutation) !bool {
+        var file = self.fx_dir.dir.openFile(io_mod.getIo(), auth_file_name, .{
+            .mode = .read_only,
+            .allow_directory = false,
+            .follow_symlinks = false,
+            .resolve_beneath = true,
+        }) catch |err| switch (err) {
+            error.FileNotFound => return false,
+            else => return err,
+        };
+        file.close(io_mod.getIo());
+        return true;
     }
 
     pub fn delete(self: *Mutation) !DeleteOutcome {
@@ -134,6 +153,18 @@ pub fn saveNewSession(alloc: Allocator, session: Session) !void {
     var mutation = try beginMutation();
     defer mutation.deinit();
     try mutation.save(alloc, session);
+}
+
+/// Imports a session without replacing credentials created by fx. The check
+/// and durable write share the provider mutation lock so concurrent setup and
+/// login attempts cannot race into an overwrite.
+pub fn saveImportedSessionIfAbsent(alloc: Allocator, session: Session) !SaveIfAbsentOutcome {
+    if (comptime host_target.is_wasm) return error.ChatGptOAuthUnavailable;
+    var mutation = try beginMutation();
+    defer mutation.deinit();
+    if (try mutation.hasAuthFile()) return .already_configured;
+    try mutation.save(alloc, session);
+    return .saved;
 }
 
 pub fn beginExistingMutation() !?Mutation {

@@ -62,6 +62,55 @@ function doctorSessionDiagnosticsLimit(): number {
 
 const SEEDED_GATEWAY_TOKEN = "seeded-access-token";
 
+function setupJwt(payload: Record<string, unknown>): string {
+  return `header.${Buffer.from(JSON.stringify(payload)).toString("base64url")}.signature`;
+}
+
+function writeSetupSourceCredentials(root: string) {
+  const codexHome = join(root, "codex-home");
+  const grokHome = join(root, "grok-home");
+  mkdirSync(codexHome, { recursive: true, mode: 0o700 });
+  mkdirSync(grokHome, { recursive: true, mode: 0o700 });
+  const codexAccess = setupJwt({
+    exp: 4_102_444_800,
+    "https://api.openai.com/auth": { chatgpt_account_id: "acct_setup_e2e" },
+  });
+  const grokAccess = setupJwt({
+    exp: 4_102_444_800,
+    sub: "user_setup_e2e",
+    principal_type: "Team",
+    principal_id: "team_setup_e2e",
+  });
+  const codexPath = join(codexHome, "auth.json");
+  const grokPath = join(grokHome, "auth.json");
+  writeFileSync(codexPath, JSON.stringify({
+    auth_mode: "chatgpt",
+    tokens: {
+      access_token: codexAccess,
+      refresh_token: "codex-setup-refresh",
+      account_id: "acct_setup_e2e",
+    },
+  }), { mode: 0o600 });
+  writeFileSync(grokPath, JSON.stringify({
+    "https://auth.x.ai::b1a00492-073a-47ea-816f-4c329264a828": {
+      key: grokAccess,
+      auth_mode: "oidc",
+      create_time: "2026-01-01T00:00:00Z",
+      user_id: "team_setup_e2e",
+      refresh_token: "grok-setup-refresh",
+      expires_at: "2100-01-01T00:00:00Z",
+      oidc_issuer: "https://auth.x.ai",
+      oidc_client_id: "b1a00492-073a-47ea-816f-4c329264a828",
+      principal_type: "Team",
+      principal_id: "team_setup_e2e",
+      team_id: "team_setup_e2e",
+    },
+  }), { mode: 0o600 });
+  chmodSync(codexPath, 0o600);
+  chmodSync(grokPath, 0o600);
+  return { codexHome, grokHome, codexPath, grokPath };
+}
+
 function snapshotTree(root: string): string[] {
   const entries: string[] = [];
   const visit = (path: string, relative: string): void => {
@@ -306,6 +355,61 @@ With --prompt-permissions, JSON and quiet requests may prompt on stderr only whe
       TIMEOUT,
     );
   }
+});
+
+describe("cli: provider setup", () => {
+  test(
+    "fx setup imports Codex CLI and Grok Build without overwriting either side",
+    async () => {
+      const root = realpathSync(mkdtempSync(join(tmpdir(), "fx-e2e-provider-setup-")));
+      const home = join(root, "home");
+      mkdirSync(home, { recursive: true, mode: 0o700 });
+      const source = writeSetupSourceCredentials(root);
+      const codexSourceBefore = readFileSync(source.codexPath, "utf8");
+      const grokSourceBefore = readFileSync(source.grokPath, "utf8");
+      const env = {
+        ...NO_GATEWAY_AUTH,
+        HOME: realpathSync(home),
+        CODEX_HOME: realpathSync(source.codexHome),
+        GROK_HOME: realpathSync(source.grokHome),
+        FX_DISABLE_KEYCHAIN: "1",
+      };
+      try {
+        const first = await runFx(["setup", "--json"], { env });
+        expect(first.code).toBe(0);
+        expect(first.stderr).toBe("");
+        expect(JSON.parse(first.stdout)).toEqual({
+          codex: { source: "codex_cli", status: "imported" },
+          grok: { source: "grok_build", status: "imported" },
+        });
+
+        const codexTarget = join(home, ".fx", "chatgpt-auth.json");
+        const grokTarget = join(home, ".fx", "grok-auth.json");
+        const codexSaved = JSON.parse(readFileSync(codexTarget, "utf8"));
+        const grokSaved = JSON.parse(readFileSync(grokTarget, "utf8"));
+        expect(codexSaved.account_id).toBe("acct_setup_e2e");
+        expect(grokSaved.account_id).toBe("team_setup_e2e");
+        expect(grokSaved.principal_type).toBe("Team");
+        expect(grokSaved.principal_id).toBe("team_setup_e2e");
+        const codexTargetBefore = readFileSync(codexTarget, "utf8");
+        const grokTargetBefore = readFileSync(grokTarget, "utf8");
+
+        const second = await runFx(["setup", "--json"], { env });
+        expect(second.code).toBe(0);
+        expect(JSON.parse(second.stdout)).toEqual({
+          codex: { source: "codex_cli", status: "already_configured" },
+          grok: { source: "grok_build", status: "already_configured" },
+        });
+        expect(readFileSync(codexTarget, "utf8")).toBe(codexTargetBefore);
+        expect(readFileSync(grokTarget, "utf8")).toBe(grokTargetBefore);
+        expect(readFileSync(source.codexPath, "utf8")).toBe(codexSourceBefore);
+        expect(readFileSync(source.grokPath, "utf8")).toBe(grokSourceBefore);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+    TIMEOUT,
+  );
 });
 
 describe("cli: version", () => {

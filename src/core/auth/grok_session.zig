@@ -32,11 +32,15 @@ pub const Session = struct {
     refresh_token: []u8,
     expires_at_ms: i64,
     account_id: []u8,
+    principal_type: ?[]u8 = null,
+    principal_id: ?[]u8 = null,
 
     pub fn deinit(self: *Session, alloc: Allocator) void {
         secret.zeroAndFree(alloc, self.access_token);
         secret.zeroAndFree(alloc, self.refresh_token);
         alloc.free(self.account_id);
+        if (self.principal_type) |value| alloc.free(value);
+        if (self.principal_id) |value| alloc.free(value);
         self.* = undefined;
     }
 
@@ -49,6 +53,11 @@ pub const DeleteOutcome = enum {
     deleted,
     missing,
     deleted_not_durable,
+};
+
+pub const SaveIfAbsentOutcome = enum {
+    saved,
+    already_configured,
 };
 
 pub const Mutation = struct {
@@ -69,6 +78,20 @@ pub const Mutation = struct {
         const text = try stringify(alloc, session);
         defer secret.zeroAndFree(alloc, text);
         try io_mod.durableReplaceVerified(alloc, &self.fx_dir, auth_file_name, text);
+    }
+
+    pub fn hasAuthFile(self: *Mutation) !bool {
+        var file = self.fx_dir.dir.openFile(io_mod.getIo(), auth_file_name, .{
+            .mode = .read_only,
+            .allow_directory = false,
+            .follow_symlinks = false,
+            .resolve_beneath = true,
+        }) catch |err| switch (err) {
+            error.FileNotFound => return false,
+            else => return err,
+        };
+        file.close(io_mod.getIo());
+        return true;
     }
 
     pub fn delete(self: *Mutation) !DeleteOutcome {
@@ -144,6 +167,18 @@ pub fn saveNewSession(alloc: Allocator, session: Session) !void {
     try mutation.save(alloc, session);
 }
 
+/// Imports a session without replacing credentials created by fx. The check
+/// and durable write share the provider mutation lock so concurrent setup and
+/// login attempts cannot race into an overwrite.
+pub fn saveImportedSessionIfAbsent(alloc: Allocator, session: Session) !SaveIfAbsentOutcome {
+    if (comptime host_target.is_wasm) return error.GrokOAuthUnavailable;
+    var mutation = try beginMutation();
+    defer mutation.deinit();
+    if (try mutation.hasAuthFile()) return .already_configured;
+    try mutation.save(alloc, session);
+    return .saved;
+}
+
 pub fn beginExistingMutation() !?Mutation {
     if (comptime host_target.is_wasm) return null;
     const home = io_mod.getenv("HOME") orelse return error.HomeNotSet;
@@ -217,12 +252,19 @@ pub fn parse(alloc: Allocator, bytes: []const u8) !Session {
     const account_id = try dupeRequiredString(alloc, object, "account_id");
     errdefer alloc.free(account_id);
     if (!validAccountId(account_id)) return error.InvalidGrokAuthSession;
+    const principal_type = try dupeOptionalString(alloc, object, "principal_type");
+    errdefer if (principal_type) |value| alloc.free(value);
+    const principal_id = try dupeOptionalString(alloc, object, "principal_id");
+    errdefer if (principal_id) |value| alloc.free(value);
+    if ((principal_type == null) != (principal_id == null)) return error.InvalidGrokAuthSession;
     const expires_at_ms = try requiredInteger(object, "expires_at_ms");
     return .{
         .access_token = access_token,
         .refresh_token = refresh_token,
         .expires_at_ms = expires_at_ms,
         .account_id = account_id,
+        .principal_type = principal_type,
+        .principal_id = principal_id,
     };
 }
 
@@ -236,6 +278,15 @@ pub fn stringify(alloc: Allocator, session: Session) ![]u8 {
     try std.json.Stringify.value(session.refresh_token, .{}, &out.writer);
     try out.writer.print(",\"expires_at_ms\":{d},\"account_id\":", .{session.expires_at_ms});
     try std.json.Stringify.value(session.account_id, .{}, &out.writer);
+    if (session.principal_type) |principal_type| {
+        const principal_id = session.principal_id orelse return error.InvalidGrokAuthSession;
+        try out.writer.writeAll(",\"principal_type\":");
+        try std.json.Stringify.value(principal_type, .{}, &out.writer);
+        try out.writer.writeAll(",\"principal_id\":");
+        try std.json.Stringify.value(principal_id, .{}, &out.writer);
+    } else if (session.principal_id != null) {
+        return error.InvalidGrokAuthSession;
+    }
     try out.writer.writeAll("}\n");
     return out.toOwnedSlice();
 }
@@ -244,6 +295,13 @@ fn dupeRequiredString(alloc: Allocator, object: std.json.ObjectMap, key: []const
     const value = object.get(key) orelse return error.InvalidGrokAuthSession;
     if (value != .string or value.string.len == 0) return error.InvalidGrokAuthSession;
     return alloc.dupe(u8, value.string);
+}
+
+fn dupeOptionalString(alloc: Allocator, object: std.json.ObjectMap, key: []const u8) !?[]u8 {
+    const value = object.get(key) orelse return null;
+    if (value == .null) return null;
+    if (value != .string or value.string.len == 0) return error.InvalidGrokAuthSession;
+    return try alloc.dupe(u8, value.string);
 }
 
 fn requiredInteger(object: std.json.ObjectMap, key: []const u8) !i64 {
@@ -271,6 +329,29 @@ test "Grok auth session round trips without exposing token fields to structure" 
     try std.testing.expectEqualStrings(session.refresh_token, decoded.refresh_token);
     try std.testing.expectEqualStrings(session.account_id, decoded.account_id);
     try std.testing.expectEqual(session.expires_at_ms, decoded.expires_at_ms);
+    try std.testing.expect(decoded.principal_type == null);
+    try std.testing.expect(decoded.principal_id == null);
+}
+
+test "Grok team principal round trips for refresh" {
+    const alloc = std.testing.allocator;
+    var session = Session{
+        .access_token = try alloc.dupe(u8, "header.payload.signature"),
+        .refresh_token = try alloc.dupe(u8, "refresh"),
+        .expires_at_ms = 1234,
+        .account_id = try alloc.dupe(u8, "team_123"),
+        .principal_type = try alloc.dupe(u8, "Team"),
+        .principal_id = try alloc.dupe(u8, "team_123"),
+    };
+    defer session.deinit(alloc);
+
+    const encoded = try stringify(alloc, session);
+    defer secret.zeroAndFree(alloc, encoded);
+    var decoded = try parse(alloc, encoded);
+    defer decoded.deinit(alloc);
+
+    try std.testing.expectEqualStrings("Team", decoded.principal_type.?);
+    try std.testing.expectEqualStrings("team_123", decoded.principal_id.?);
 }
 
 test "Grok account identity is bounded and safe for HTTP headers" {

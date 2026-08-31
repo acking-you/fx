@@ -526,6 +526,7 @@ fn validateUsageRecoveryMarker(
         error.FileNotFound => return error.UsageRecoveryMarkerNotFound,
         else => return error.InvalidUsageRecoveryIndex,
     };
+    io_mod.alignOpenedFileFlags(&marker, false);
     defer marker.close(io_mod.getIo());
     const stat = try marker.stat(io_mod.getIo());
     if (stat.kind != .file or

@@ -8,6 +8,7 @@ const io_mod = @import("../shared/io.zig");
 const credentials = @import("../auth/credentials.zig");
 const auth_runtime = @import("../auth/auth_runtime.zig");
 const provider_activation = @import("../auth/provider_activation.zig");
+const provider_setup = @import("../auth/provider_setup.zig");
 const login_flow = @import("../auth/login_flow.zig");
 const provider_catalog = @import("../auth/provider_catalog.zig");
 const auth_transition = @import("../auth/auth_transition.zig");
@@ -109,6 +110,73 @@ pub fn Runtime(comptime App: type) type {
             }
             try app.auth.refreshSourceInventory(app.alloc);
             app.auth.openPickerForProvider(app.alloc, provider_runtime.provider(app));
+            app.shell.render_requests.request(.footer);
+        }
+
+        pub fn runSetupCommand(app: *App) !void {
+            if (comptime !runtime_profile.allows(App, .native_auth) or
+                !@hasField(App, "provider_setup"))
+            {
+                try app.writeDomainNotice(.{
+                    .topic = "auth",
+                    .tone = .warning,
+                    .body = "Provider credential import is unavailable in this host.",
+                }, true);
+                return;
+            }
+            if (!try app.provider_setup.start()) {
+                try app.writeDomainNotice(.{
+                    .topic = "auth",
+                    .tone = .neutral,
+                    .body = "Provider setup is already in progress.",
+                }, true);
+                return;
+            }
+            try app.writeDomainNotice(.{
+                .topic = "auth",
+                .tone = .neutral,
+                .body = "Importing reusable Codex CLI and Grok Build logins...",
+            }, true);
+            app.shell.render_requests.request(.footer);
+        }
+
+        pub fn collectProviderSetupFacts(app: *App) !void {
+            if (comptime !@hasField(App, "provider_setup")) return;
+            const outcome = app.provider_setup.takeCompletion() orelse return;
+            switch (outcome) {
+                .failed => |err| {
+                    debug_trace.logf("auth", "provider setup failed err={s}", .{@errorName(err)});
+                    try app.writeDomainNotice(.{
+                        .topic = "auth",
+                        .tone = .@"error",
+                        .body = "Provider setup failed. Existing fx and provider credentials were left unchanged.",
+                    }, true);
+                },
+                .report => |report| {
+                    try app.auth.refreshSourceInventory(app.alloc);
+                    var out: std.Io.Writer.Allocating = .init(app.alloc);
+                    defer out.deinit();
+                    try report.writeText(&out.writer);
+                    try app.writeDomainNotice(.{
+                        .topic = "auth",
+                        .tone = if (report.codex.disposition == .invalid or
+                            report.codex.disposition == .unavailable or
+                            report.grok.disposition == .invalid or
+                            report.grok.disposition == .unavailable)
+                            .warning
+                        else
+                            .neutral,
+                        .body = out.written(),
+                    }, true);
+                    if (report.availableProvider()) |provider| {
+                        const target: model_provider.ProviderId = switch (provider) {
+                            .codex => .codex,
+                            .grok => .grok,
+                        };
+                        try switchProvider(app, target, true, .manual);
+                    }
+                },
+            }
             app.shell.render_requests.request(.footer);
         }
 

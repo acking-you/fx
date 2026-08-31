@@ -372,6 +372,7 @@ pub fn Handlers(comptime App: type) type {
                 .resume_session = commandResumeSession,
                 .continue_recovery = commandContinueRecovery,
                 .show_help = commandShowHelp,
+                .setup = commandSetup,
                 .login = commandLogin,
                 .provider = commandProvider,
                 .logout = commandLogout,
@@ -663,6 +664,19 @@ pub fn Handlers(comptime App: type) type {
                     .topic = "auth",
                     .tone = .@"error",
                     .body = "login is not available in this runtime",
+                }, true);
+            }
+        }
+
+        fn commandSetup(ctx: *anyopaque) !void {
+            const app: *App = @ptrCast(@alignCast(ctx));
+            if (comptime @hasDecl(App, "runSetupCommand")) {
+                try app.runSetupCommand();
+            } else {
+                try app.writeDomainNotice(.{
+                    .topic = "auth",
+                    .tone = .@"error",
+                    .body = "provider setup is not available in this runtime",
                 }, true);
             }
         }

@@ -9,6 +9,7 @@ const app_lifecycle = @import("core/app/app_lifecycle.zig");
 const provider_runtime = @import("core/app/provider_runtime.zig");
 const provider_activation = @import("core/auth/provider_activation.zig");
 const provider_logout = @import("core/auth/provider_logout.zig");
+const provider_setup = @import("core/auth/provider_setup.zig");
 const auth_runtime = @import("core/auth/auth_runtime.zig");
 const oauth_transport = @import("core/auth/oauth_transport.zig");
 const js_host_auth = @import("core/auth/js_host_auth.zig");
@@ -493,6 +494,7 @@ const App = struct {
         return self.stream.active or self.pacer.hasPending() or
             self.worker.isProcessing() or
             self.provider_switch.isRunning() or self.provider_logout.isRunning() or
+            self.provider_setup.isRunning() or
             SessionAppRuntime.compactionActive(self);
     }
 
@@ -532,6 +534,7 @@ const App = struct {
     provider_selection: provider_runtime.Runtime = provider_runtime.Runtime.init(std.heap.c_allocator),
     provider_switch: provider_activation.Runtime = provider_activation.Runtime.init(std.heap.c_allocator),
     provider_logout: provider_logout.Runtime = provider_logout.Runtime.init(std.heap.c_allocator),
+    provider_setup: provider_setup.Runtime = provider_setup.Runtime.init(std.heap.c_allocator),
     model_cache: model_cache_runtime.Runtime = model_cache_runtime.Runtime.init(std.heap.c_allocator, builtin_gateway.models_path),
     workspace_root: []u8 = &.{},
     workspace_identity: statusline_identity.Runtime = .{},
@@ -827,6 +830,7 @@ const App = struct {
         self.unified_exec.deinit();
         self.provider_switch.deinit();
         self.provider_logout.deinit();
+        self.provider_setup.deinit();
         self.model_cache.deinit();
         InputSubmitRuntime.clearPendingSubmission(self, "shutdown");
         const resume_handoff = if (capture_resume_handoff and
@@ -937,6 +941,10 @@ const App = struct {
 
     pub fn runLoginCommand(self: *App) !void {
         try AuthAppRuntime.runLoginCommand(self);
+    }
+
+    pub fn runSetupCommand(self: *App) !void {
+        try AuthAppRuntime.runSetupCommand(self);
     }
 
     pub fn runProviderCommand(self: *App, target: []const u8) !void {
@@ -2688,6 +2696,7 @@ const App = struct {
             try AuthAppRuntime.collectSignInFacts(self);
             try AuthAppRuntime.collectProviderSwitchFacts(self);
             try AuthAppRuntime.collectProviderLogoutFacts(self);
+            try AuthAppRuntime.collectProviderSetupFacts(self);
         }
         if (comptime host_profile.native_auth) {
             try app_terminal_runtime.Runtime(App).collectFacts(self);
@@ -3317,6 +3326,7 @@ fn needsEarlyThreadedIo(args: []const [:0]const u8) bool {
     if (needsFullEntryConfig(args)) return true;
     const command = cli_surface.commandAfterGlobalLaunchArgs(args) orelse return false;
     return std.mem.eql(u8, command, "login") or
+        std.mem.eql(u8, command, "setup") or
         std.mem.eql(u8, command, "logout") or
         std.mem.eql(u8, command, "provider") or
         // Resolve a stored credential, which reads the platform key store out of process.
@@ -3336,6 +3346,7 @@ fn hasExactArg(args: []const [:0]const u8, expected: []const u8) bool {
 
 test "auth commands use early threaded io without full entry config" {
     try std.testing.expect(needsEarlyThreadedIo(&.{@as([:0]const u8, "login")}));
+    try std.testing.expect(needsEarlyThreadedIo(&.{@as([:0]const u8, "setup")}));
     try std.testing.expect(needsEarlyThreadedIo(&.{@as([:0]const u8, "logout")}));
     try std.testing.expect(needsEarlyThreadedIo(&.{@as([:0]const u8, "provider")}));
 }

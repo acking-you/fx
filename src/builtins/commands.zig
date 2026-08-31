@@ -87,6 +87,17 @@ pub const top_level_specs = [_]TopLevelSpec{
         },
     },
     .{
+        .kind = .setup,
+        .token = "setup",
+        .usage = "setup [--json]",
+        .summary = "Import reusable third-party provider logins",
+        .options = &.{json_option},
+        .details = &.{
+            "Imports supported provider credentials only when fx has no login for that provider.",
+            "Currently detects Codex CLI and Grok Build OAuth sessions without changing their source files.",
+        },
+    },
+    .{
         .kind = .login,
         .token = "login",
         .usage = "login <codex|grok>",
@@ -263,6 +274,7 @@ pub const top_level_help_groups = [_]TopLevelHelpGroup{
         .{ .kind = .replay, .usage = "replay <tape>" },
     } },
     .{ .entries = &.{
+        .{ .kind = .setup, .usage = "setup [--json]" },
         .{ .kind = .login, .usage = "login <codex|grok>" },
         .{ .kind = .logout, .usage = "logout <codex|grok>" },
         .{ .kind = .provider, .usage = "provider <gateway|codex|grok>" },
@@ -385,6 +397,7 @@ pub const slash_specs = [_]SlashSpec{
     .{ .kind = .resume_session, .command = "/resume", .help_entry = "/resume", .completion_description = "resume a saved session", .presentation_category = .session },
     .{ .kind = .continue_recovery, .command = "/continue", .help_entry = "/continue", .completion_description = "continue a paused model response", .presentation_category = .session, .requires_prompt_credential = true },
     .{ .kind = .rename_session, .command = "/rename", .help_entry = "/rename <title>", .completion_description = "rename the current session", .presentation_category = .session, .has_args = true, .accepts_payload = true },
+    .{ .kind = .setup, .command = "/setup", .help_entry = "/setup", .completion_description = "import existing provider logins", .presentation_category = .account, .show_in_welcome = true },
     .{ .kind = .login, .command = "/login", .help_entry = "/login", .completion_description = "choose a provider sign-in", .presentation_category = .account },
     .{ .kind = .provider, .command = "/provider", .help_entry = "/provider [gateway|codex|grok]", .completion_description = "show or switch the active provider", .presentation_category = .account, .has_args = true, .accepts_payload = true },
     .{ .kind = .logout, .command = "/logout", .help_entry = "/logout <codex|grok>", .completion_description = "sign out of a provider session", .presentation_category = .account, .has_args = true, .accepts_payload = true },
@@ -486,6 +499,7 @@ test "built-in slash commands register exact active order" {
         "/resume",
         "/continue",
         "/rename",
+        "/setup",
         "/login",
         "/provider",
         "/logout",

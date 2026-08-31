@@ -290,7 +290,7 @@ pub fn writeInitializeResponseWithOptions(
         try w.writeAll(",\"unifiedExec\":{\"writeStdin\":true,\"kill\":true}");
     }
     if (options.provider_control_capable) {
-        try w.writeAll(",\"providerControl\":{\"switch\":true,\"login\":true,\"configureByok\":true,\"usage\":true}");
+        try w.writeAll(",\"providerControl\":{\"switch\":true,\"login\":true,\"setup\":true,\"configureByok\":true,\"usage\":true}");
     }
     try w.writeAll("}}}");
 }

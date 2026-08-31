@@ -349,6 +349,12 @@ jobs:
             --test-filter "unified exec Windows reaps each completed stdin writer before replacement" `
             --test-filter "unified exec activates the observer before a direct write can fail" `
             --test-filter "unified exec manager cleanup terminates a still-running process group" `
+            --test-filter "Codex CLI parser validates the account bound to the access token" `
+            --test-filter "Grok Build parser" `
+            --test-filter "provider setup JSON never contains credentials" `
+            --test-filter "Grok team refresh preserves the principal binding" `
+            --test-filter "Grok team principal round trips for refresh" `
+            --test-filter "recovery markers are idempotent and clear durably" `
             --test-filter "native hosts still load project instruction files"
 
       - name: Smoke test CLI and ACP
@@ -359,15 +365,27 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or -not $help) { throw "fx help failed" }
           $status = & .\zig-out\bin\fx.exe status --json
           if ($LASTEXITCODE -ne 0 -or -not $status) { throw "fx status failed" }
+          $setup = & .\zig-out\bin\fx.exe setup --json | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or -not $setup.codex.source -or -not $setup.grok.source) {
+            throw "fx setup failed"
+          }
           $requests = @(
             '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}'
             '{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"mcpServers":[]}}'
+            '{"jsonrpc":"2.0","id":3,"method":"fx/provider/setup/start","params":{}}'
+            '{"jsonrpc":"2.0","id":4,"method":"fx/provider/setup/status","params":{}}'
           )
           $responses = @($requests | .\zig-out\bin\fx.exe acp)
-          if ($LASTEXITCODE -ne 0 -or $responses.Count -lt 2) { throw "ACP smoke test failed" }
+          if ($LASTEXITCODE -ne 0 -or $responses.Count -lt 4) { throw "ACP smoke test failed" }
           $initialize = $responses[0] | ConvertFrom-Json
           $newSession = $responses[1] | ConvertFrom-Json
-          if (-not $initialize.result.agentInfo.name -or -not $newSession.result.sessionId) {
+          $setupStart = $responses[2] | ConvertFrom-Json
+          $setupStatus = $responses[3] | ConvertFrom-Json
+          if (-not $initialize.result.agentInfo.name -or
+              -not $initialize.result._meta.fx.providerControl.setup -or
+              -not $newSession.result.sessionId -or
+              $setupStart.result.state -ne "running" -or
+              $setupStatus.result.state -notin @("running", "completed")) {
             throw "ACP returned an invalid response"
           }
 
