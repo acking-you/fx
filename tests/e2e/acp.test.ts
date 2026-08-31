@@ -584,6 +584,28 @@ function writeAcpCodexSetupSource(root: string, accessToken: string): string {
   return codexHome;
 }
 
+function writeAcpGrokSetupSource(root: string): string {
+  const grokHome = join(root, "grok-home");
+  mkdirSync(grokHome, { recursive: true, mode: 0o700 });
+  const payload = Buffer.from(JSON.stringify({ exp: 4_102_444_800 })).toString("base64url");
+  const accessToken = `header.${payload}.signature`;
+  const issuer = "https://auth.x.ai";
+  const clientId = "b1a00492-073a-47ea-816f-4c329264a828";
+  const authPath = join(grokHome, "auth.json");
+  writeFileSync(authPath, JSON.stringify({
+    [`${issuer}::${clientId}`]: {
+      key: accessToken,
+      auth_mode: "oidc",
+      user_id: "acct_grok_setup",
+      refresh_token: "grok-setup-refresh",
+      oidc_issuer: issuer,
+      oidc_client_id: clientId,
+    },
+  }), { mode: 0o600 });
+  chmodSync(authPath, 0o600);
+  return grokHome;
+}
+
 function startAcpFakeChatGptLogin() {
   const accessToken = acpChatGptAccessToken("acct_acp_login");
   const server = Bun.serve({
@@ -1452,6 +1474,66 @@ describe("acp: model-independent", () => {
       } finally {
         codex.stop();
         await client?.close();
+        rmSync(root.root, { recursive: true, force: true });
+      }
+    },
+    TIMEOUT,
+  );
+
+  test(
+    "ACP setup imports Grok and provider login auto-detection falls back to it",
+    async () => {
+      const root = createIsolatedRoot("fx-acp-grok-setup-fallback-");
+      const grok = startAcpFakeGrok();
+      const grokHome = writeAcpGrokSetupSource(root.external);
+      try {
+        client = await AcpClient.create({
+          cwd: root.workspace,
+          env: {
+            HOME: root.home,
+            CODEX_HOME: join(root.external, "missing-codex-home"),
+            GROK_HOME: grokHome,
+            OPENAI_API_KEY: undefined,
+            FX_API_KEY: undefined,
+            FX_E2E_GROK_ISSUER_URL: grok.tokenUrl.replace(/\/token$/, ""),
+            FX_E2E_GROK_TOKEN_URL: grok.tokenUrl,
+            FX_E2E_GROK_USERINFO_URL: grok.userinfoUrl,
+          },
+        });
+        await client.request("initialize", { protocolVersion: 1 }, 50);
+        const started = await client.request("fx/provider/setup/start", {}, 51) as any;
+        expect(started.result).toEqual({ state: "running" });
+
+        let status: any;
+        const deadline = Date.now() + TIMEOUT;
+        do {
+          status = await client.request("fx/provider/setup/status", {}, 52) as any;
+          if (status.result.state === "running") await Bun.sleep(10);
+        } while (status.result.state === "running" && Date.now() < deadline);
+        expect(status.result).toEqual({
+          state: "completed",
+          report: {
+            codex: { source: "codex_cli", status: "not_found" },
+            grok: { source: "grok_build", status: "imported" },
+          },
+        });
+        expect(existsSync(join(root.home, ".fx", "grok-auth.json"))).toBe(true);
+
+        const login = await client.request("fx/provider/login/start", {}, 53) as any;
+        expect(login.result).toMatchObject({
+          state: "polling",
+          provider: "Grok",
+          acceptsManualCode: true,
+        });
+        expect(login.result.authorizationUrl).toStartWith(
+          `${grok.tokenUrl.replace(/\/token$/, "")}/oauth2/authorize?`,
+        );
+        const cancelled = await client.request("fx/provider/login/cancel", {}, 54) as any;
+        expect(cancelled.result).toEqual({ cancelled: true });
+        expect(client.stderr).toBe("");
+      } finally {
+        await client?.close();
+        grok.stop();
         rmSync(root.root, { recursive: true, force: true });
       }
     },

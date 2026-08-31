@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const debug_trace = @import("../shared/debug_trace.zig");
 const io_mod = @import("../shared/io.zig");
 const socket_poll = @import("../shared/socket_poll.zig");
@@ -59,11 +60,10 @@ pub fn await(
 ) !?Accepted(Callback) {
     var accepts: usize = 0;
     while (accepts < max_accepts_per_poll) : (accepts += 1) {
-        if (!try listenerReady(listener, cancel_flag)) return null;
-        var stream = listener.accept(io_mod.getIo()) catch |err| switch (err) {
+        var stream = accept_ready(listener, cancel_flag) catch |err| switch (err) {
             error.ConnectionAborted, error.WouldBlock => continue,
             else => return err,
-        };
+        } orelse return null;
         var handed_off = false;
         defer if (!handed_off) stream.close(io_mod.getIo());
         setSocketTimeouts(stream.socket.handle);
@@ -113,6 +113,29 @@ pub fn await(
     return null;
 }
 
+fn accept_ready(
+    listener: *std.Io.net.Server,
+    cancel_flag: *std.atomic.Value(bool),
+) !?std.Io.net.Stream {
+    if (cancel_flag.load(.seq_cst)) return error.Cancelled;
+    if (comptime builtin.os.tag == .windows) {
+        const stream = try socket_poll.accept_with_timeout(io_mod.getIo(), listener, @intCast(poll_ms));
+        if (cancel_flag.load(.seq_cst)) {
+            if (stream) |accepted| accepted.close(io_mod.getIo());
+            return error.Cancelled;
+        }
+        return stream;
+    } else {
+        if (!try listenerReady(listener, cancel_flag)) return null;
+        const stream = try listener.accept(io_mod.getIo());
+        if (cancel_flag.load(.seq_cst)) {
+            stream.close(io_mod.getIo());
+            return error.Cancelled;
+        }
+        return stream;
+    }
+}
+
 const RequestKind = enum {
     callback,
     preflight,
@@ -129,6 +152,80 @@ const Request = struct {
         self.* = undefined;
     }
 };
+
+const ReadEvent = union(enum) {
+    request: anyerror!?Request,
+    timeout: anyerror!void,
+};
+
+fn read_request_connection(
+    alloc: Allocator,
+    stream: std.Io.net.Stream,
+    cancel_flag: *std.atomic.Value(bool),
+    allowed_cors_origin: ?[]const u8,
+) anyerror!?Request {
+    return read_request_stream(alloc, stream, cancel_flag, allowed_cors_origin, false);
+}
+
+fn wait_read_timeout(io: std.Io, timeout_ms: u32) anyerror!void {
+    try io.sleep(.fromMilliseconds(timeout_ms), .awake);
+}
+
+fn cancel_read(alloc: Allocator, select: *std.Io.Select(ReadEvent)) void {
+    while (select.cancel()) |event| switch (event) {
+        .request => |result| {
+            var request = result catch continue orelse continue;
+            request.deinit(alloc);
+        },
+        .timeout => {},
+    };
+}
+
+fn read_request_with_timeout(
+    alloc: Allocator,
+    stream: std.Io.net.Stream,
+    cancel_flag: *std.atomic.Value(bool),
+    allowed_cors_origin: ?[]const u8,
+) !?Request {
+    var buffer: [2]ReadEvent = undefined;
+    var select: std.Io.Select(ReadEvent) = .init(io_mod.getIo(), &buffer);
+    try select.concurrent(
+        .request,
+        read_request_connection,
+        .{ alloc, stream, cancel_flag, allowed_cors_origin },
+    );
+    select.concurrent(
+        .timeout,
+        wait_read_timeout,
+        .{ io_mod.getIo(), @as(u32, @intCast(silence_ms)) },
+    ) catch |err| {
+        cancel_read(alloc, &select);
+        return err;
+    };
+    const event = select.await() catch |err| {
+        cancel_read(alloc, &select);
+        return err;
+    };
+    var request = switch (event) {
+        .request => |result| blk: {
+            select.cancelDiscard();
+            break :blk try result;
+        },
+        .timeout => |result| blk: {
+            result catch |err| {
+                cancel_read(alloc, &select);
+                return err;
+            };
+            cancel_read(alloc, &select);
+            break :blk null;
+        },
+    };
+    if (cancel_flag.load(.seq_cst)) {
+        if (request) |*value| value.deinit(alloc);
+        return error.Cancelled;
+    }
+    return request;
+}
 
 fn listenerReady(
     listener: *std.Io.net.Server,
@@ -192,6 +289,19 @@ fn readRequest(
     cancel_flag: *std.atomic.Value(bool),
     allowed_cors_origin: ?[]const u8,
 ) !?Request {
+    if (comptime builtin.os.tag == .windows) {
+        return read_request_with_timeout(alloc, stream, cancel_flag, allowed_cors_origin);
+    }
+    return read_request_stream(alloc, stream, cancel_flag, allowed_cors_origin, true);
+}
+
+fn read_request_stream(
+    alloc: Allocator,
+    stream: std.Io.net.Stream,
+    cancel_flag: *std.atomic.Value(bool),
+    allowed_cors_origin: ?[]const u8,
+    poll_readiness: bool,
+) !?Request {
     const deadline_ms = io_mod.milliTimestamp() + silence_ms;
     var socket_buffer: [4096]u8 = undefined;
     var reader = stream.reader(io_mod.getIo(), &socket_buffer);
@@ -199,7 +309,7 @@ fn readRequest(
     var request_len: usize = 0;
     var found_terminator = false;
     while (request_len < request_bytes.len) {
-        if (reader.interface.bufferedLen() == 0 and
+        if (poll_readiness and reader.interface.bufferedLen() == 0 and
             !try requestReadable(stream.socket.handle, cancel_flag, deadline_ms))
         {
             return null;
@@ -209,9 +319,10 @@ fn readRequest(
                 null
             else
                 error.InvalidOAuthCallbackRequest,
-            error.ReadFailed => switch (reader.err orelse return error.ReadFailed) {
-                error.ConnectionResetByPeer => return null,
-                else => |read_err| return read_err,
+            error.ReadFailed => {
+                const read_err = reader.err orelse return error.ReadFailed;
+                if (unrelated_connection_read_error(read_err)) return null;
+                return read_err;
             },
         };
         request_len += 1;
@@ -262,6 +373,19 @@ fn readRequest(
         .kind = if (origin == null or origin_allowed) .callback else .unrelated,
         .target = try alloc.dupe(u8, target),
         .cors_origin = if (origin_allowed) cors_origin else null,
+    };
+}
+
+fn unrelated_connection_read_error(err: anyerror) bool {
+    return switch (err) {
+        error.ConnectionResetByPeer => true,
+        error.SocketUnconnected,
+        error.Timeout,
+        // Zig 0.16's Windows AFD reader reports an incoming TCP RST as the
+        // catch-all status until std maps it explicitly.
+        error.Unexpected,
+        => builtin.os.tag == .windows,
+        else => false,
     };
 }
 
@@ -389,6 +513,28 @@ const CallbackProbe = struct {
     }
 };
 
+const DelayedRequestProbe = struct {
+    port: u16,
+    delay_ms: u64,
+    failed: std.atomic.Value(bool) = .init(false),
+
+    fn run(self: *DelayedRequestProbe) void {
+        const io = io_mod.getIo();
+        var address = std.Io.net.IpAddress.parse("127.0.0.1", self.port) catch
+            return self.failed.store(true, .release);
+        var stream = address.connect(io, .{ .mode = .stream }) catch
+            return self.failed.store(true, .release);
+        defer stream.close(io);
+        io_mod.sleep(self.delay_ms * std.time.ns_per_ms);
+        var buffer: [512]u8 = undefined;
+        var writer = stream.writer(io, &buffer);
+        writer.interface.writeAll(
+            "GET /callback?code=granted HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+        ) catch return self.failed.store(true, .release);
+        writer.interface.flush() catch return self.failed.store(true, .release);
+    }
+};
+
 const ResetPreconnectProbe = struct {
     port: u16,
     request: []const u8,
@@ -510,6 +656,32 @@ test "browser callback outruns an idle preconnect held open" {
     try std.testing.expect(io_mod.milliTimestamp() - started_ms < 1_000);
 }
 
+test "browser callback reads request bytes arriving after accept" {
+    var listener = try bindTestListener();
+    defer listener.deinit(io_mod.getIo());
+
+    var probe = DelayedRequestProbe{
+        .port = listener.socket.address.getPort(),
+        .delay_ms = 50,
+    };
+    const thread = try std.Thread.spawn(.{}, DelayedRequestProbe.run, .{&probe});
+    defer thread.join();
+
+    var cancel_flag = std.atomic.Value(bool).init(false);
+    var accepted = (try await(
+        TestCallback,
+        parseTestCallback,
+        std.testing.allocator,
+        &listener,
+        null,
+        &cancel_flag,
+        null,
+    )) orelse return error.CallbackNeverArrived;
+    defer accepted.deinit();
+    try std.testing.expectEqualStrings("granted", accepted.callback.code);
+    try std.testing.expect(!probe.failed.load(.acquire));
+}
+
 test "browser callback cancels while an idle preconnect is open" {
     var listener = try bindTestListener();
     defer listener.deinit(io_mod.getIo());
@@ -577,6 +749,7 @@ test "browser callback survives unrelated requests before the redirect" {
 }
 
 fn expectResetPreconnectSurvives(hold_ms: u64) !void {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
     var listener = try bindTestListener();
     defer listener.deinit(io_mod.getIo());
 
@@ -590,17 +763,29 @@ fn expectResetPreconnectSurvives(hold_ms: u64) !void {
     try probe.waitUntilConnected();
 
     var cancel_flag = std.atomic.Value(bool).init(false);
-    var accepted = (try await(
-        TestCallback,
-        parseTestCallback,
-        std.testing.allocator,
-        &listener,
-        null,
-        &cancel_flag,
-        null,
-    )) orelse return error.CallbackNeverArrived;
+    var maybe_accepted: ?Accepted(TestCallback) = null;
+    const deadline_ms = io_mod.milliTimestamp() + 2_000;
+    while (maybe_accepted == null and io_mod.milliTimestamp() < deadline_ms) {
+        maybe_accepted = try await(
+            TestCallback,
+            parseTestCallback,
+            std.testing.allocator,
+            &listener,
+            null,
+            &cancel_flag,
+            null,
+        );
+    }
+    var accepted = maybe_accepted orelse return error.CallbackNeverArrived;
     defer accepted.deinit();
     try std.testing.expectEqualStrings("granted", accepted.callback.code);
+}
+
+test "browser callback classifies the Windows AFD reset status as unrelated" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    try std.testing.expect(unrelated_connection_read_error(error.Unexpected));
+    try std.testing.expect(unrelated_connection_read_error(error.ConnectionResetByPeer));
+    try std.testing.expect(!unrelated_connection_read_error(error.OutOfMemory));
 }
 
 test "browser callback survives a reset preconnect before the redirect" {

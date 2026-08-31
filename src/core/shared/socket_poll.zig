@@ -23,6 +23,68 @@ pub const PollFd = if (builtin.os.tag == .windows) extern struct {
 
 pub const PollError = error{ Interrupted, SystemResources, NetworkDown, Unexpected };
 
+const AcceptEvent = union(enum) {
+    connection: anyerror!std.Io.net.Stream,
+    timeout: anyerror!void,
+};
+
+fn accept_connection(
+    io: std.Io,
+    server: *std.Io.net.Server,
+) anyerror!std.Io.net.Stream {
+    return server.accept(io);
+}
+
+fn wait_accept_timeout(io: std.Io, timeout_ms: u32) anyerror!void {
+    try io.sleep(.fromMilliseconds(timeout_ms), .awake);
+}
+
+fn cancel_accept(io: std.Io, select: *std.Io.Select(AcceptEvent)) void {
+    while (select.cancel()) |event| switch (event) {
+        .connection => |result| {
+            const stream = result catch continue;
+            stream.close(io);
+        },
+        .timeout => {},
+    };
+}
+
+/// Windows' threaded std.Io listener is backed by AFD and cannot be polled as
+/// a plain Winsock listener. Race one asynchronous accept against a bounded
+/// timer instead. A connection that loses the timeout race is closed here so
+/// ownership never escapes the select operation.
+pub fn accept_with_timeout(
+    io: std.Io,
+    server: *std.Io.net.Server,
+    timeout_ms: u32,
+) !?std.Io.net.Stream {
+    var buffer: [2]AcceptEvent = undefined;
+    var select: std.Io.Select(AcceptEvent) = .init(io, &buffer);
+    try select.concurrent(.connection, accept_connection, .{ io, server });
+    select.concurrent(.timeout, wait_accept_timeout, .{ io, timeout_ms }) catch |err| {
+        cancel_accept(io, &select);
+        return err;
+    };
+    const event = select.await() catch |err| {
+        cancel_accept(io, &select);
+        return err;
+    };
+    return switch (event) {
+        .connection => |result| blk: {
+            select.cancelDiscard();
+            break :blk try result;
+        },
+        .timeout => |result| blk: {
+            result catch |err| {
+                cancel_accept(io, &select);
+                return err;
+            };
+            cancel_accept(io, &select);
+            break :blk null;
+        },
+    };
+}
+
 pub fn poll(fds: []PollFd, timeout_ms: i32) PollError!usize {
     if (comptime builtin.os.tag == .windows) {
         const rc = WSAPoll(fds.ptr, @intCast(fds.len), timeout_ms);
@@ -76,3 +138,39 @@ pub fn setTimeouts(socket: std.Io.net.Socket.Handle, timeout_ms: u32) !void {
 
 extern "ws2_32" fn WSAPoll(fds: [*]PollFd, count: u32, timeout_ms: i32) callconv(.winapi) i32;
 extern "ws2_32" fn setsockopt(socket: usize, level: c_int, option: c_int, value: [*]const u8, value_len: c_int) callconv(.winapi) c_int;
+
+test "Windows AFD listener accepts a connection arriving during the wait" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    var address = try std.Io.net.IpAddress.parse("127.0.0.1", 0);
+    var server = try address.listen(io, .{ .reuse_address = true });
+    defer server.deinit(io);
+
+    try std.testing.expect((try accept_with_timeout(io, &server, 10)) == null);
+
+    const ConnectState = struct {
+        io: std.Io,
+        address: std.Io.net.IpAddress,
+        failed: std.atomic.Value(bool) = .init(false),
+
+        fn run(self: *@This()) void {
+            self.io.sleep(.fromMilliseconds(20), .awake) catch {
+                self.failed.store(true, .release);
+                return;
+            };
+            var stream = self.address.connect(self.io, .{ .mode = .stream }) catch {
+                self.failed.store(true, .release);
+                return;
+            };
+            stream.close(self.io);
+        }
+    };
+    var state = ConnectState{ .io = io, .address = server.socket.address };
+    const connector = try std.Thread.spawn(.{}, ConnectState.run, .{&state});
+    defer connector.join();
+
+    var accepted = (try accept_with_timeout(io, &server, 1_000)) orelse
+        return error.TestExpectedConnection;
+    accepted.close(io);
+    try std.testing.expect(!state.failed.load(.acquire));
+}

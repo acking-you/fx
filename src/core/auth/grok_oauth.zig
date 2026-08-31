@@ -393,12 +393,22 @@ const StdinManualCodeReader = struct {
 
     fn poll(self: *StdinManualCodeReader) !?[]const u8 {
         if (self.closed) return null;
-        if (!try io_mod.stdinReady(0)) return null;
+        const ready = io_mod.stdinReady(0) catch {
+            // A Windows NUL or otherwise non-waitable redirected stdin only
+            // disables the optional manual-code fallback. Browser callback
+            // authorization must remain usable for CLI automation.
+            self.closed = true;
+            return null;
+        };
+        if (!ready) return null;
 
         var chunk: [512]u8 = undefined;
         defer @memset(&chunk, 0);
         const read_len = if (comptime builtin.os.tag == .windows)
-            try std.Io.File.stdin().readStreaming(io_mod.getIo(), &.{&chunk})
+            std.Io.File.stdin().readStreaming(io_mod.getIo(), &.{&chunk}) catch {
+                self.closed = true;
+                return null;
+            }
         else
             try std.posix.read(std.posix.STDIN_FILENO, &chunk);
         if (read_len == 0) {

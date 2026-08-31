@@ -341,6 +341,9 @@ jobs:
             --test-filter "platform temporary directory resolves to an existing absolute directory" `
             --test-filter "temporary image snapshots use the platform temporary directory" `
             --test-filter "web_fetch Windows connect control does not truncate a later deadline to one second" `
+            --test-filter "Windows AFD listener accepts a connection arriving during the wait" `
+            --test-filter "browser callback reads request bytes arriving after accept" `
+            --test-filter "browser callback classifies the Windows AFD reset status as unrelated" `
             --test-filter "browser callback survives a reset queued before accept" `
             --test-filter "unified exec returns short commands synchronously" `
             --test-filter "unified exec Windows resolver runs commands through installed Git Bash" `
