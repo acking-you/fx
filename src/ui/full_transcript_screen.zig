@@ -10,6 +10,7 @@ const result_store = @import("../core/session/result_store.zig");
 const session_child_store = @import("../core/session/session_child_store.zig");
 const diff_mod = @import("../core/output/diff.zig");
 const transcript_presentation = @import("../core/output/transcript_presentation.zig");
+const full_transcript_metadata = @import("../core/output/full_transcript_metadata.zig");
 const assistant_wrap = @import("render_engine/assistant_wrap.zig");
 const build_checkpoint = @import("render_engine/build_checkpoint.zig");
 const transcript_blocks = @import("render_engine/transcript_blocks.zig");
@@ -7035,10 +7036,40 @@ const ProjectionComposeContext = struct {
     ) !void {
         const self = fromOpaque(context);
         try self.builder.markEntry(entry_id);
+        const entry = self.entries[self.entry_index];
+        std.debug.assert(entry.id() == entry_id);
+        if (metadataKind(entry)) |kind| {
+            var header_buf: [80]u8 = undefined;
+            if (full_transcript_metadata.formatHeader(
+                &header_buf,
+                self.metadataCreatedAtMs(entry),
+                kind,
+            )) |header| {
+                try out.writer.writeAll(self.builder.styles().dim_style);
+                try out.writer.writeAll("  ");
+                try out.writer.writeAll(header);
+                try out.writer.writeAll(self.builder.styles().reset_style);
+                try out.writer.writeByte('\n');
+            }
+        }
         if (self.anchor_entry_id != null and self.anchor_entry_id.? == entry_id) {
-            _ = out;
             try self.builder.markAnchor();
         }
+    }
+
+    fn metadataCreatedAtMs(
+        self: *const ProjectionComposeContext,
+        entry: transcript_blocks.TranscriptEntry,
+    ) i64 {
+        switch (entry) {
+            .raw_bytes => |raw| if (raw.class == .tool_status) {
+                if (self.source_index.detailForEntry(entry.id())) |detail| {
+                    if (detail.created_at_ms > 0) return detail.created_at_ms;
+                }
+            },
+            else => {},
+        }
+        return entry.createdAtMs();
     }
 
     fn appendDetail(
@@ -7092,6 +7123,36 @@ const ProjectionComposeContext = struct {
         return resolver.full_for_marker(resolver.context, id);
     }
 };
+
+fn metadataKind(
+    entry: transcript_blocks.TranscriptEntry,
+) ?full_transcript_metadata.Kind {
+    return switch (entry) {
+        .user_turn => |user| if (std.mem.startsWith(
+            u8,
+            std.mem.trimStart(u8, user.turn.text, " \t\r\n"),
+            "/issue",
+        ))
+            .issue
+        else
+            .prompt,
+        .assistant_turn => .response,
+        .semantic_notice => |notice| if (notice.tone == .@"error")
+            .error_notice
+        else
+            .notice,
+        .raw_bytes => |raw| switch (raw.class) {
+            .tool_status => .tool,
+            .subagent_status => .task,
+            .turn_summary => .usage,
+            else => null,
+        },
+        .assistant_table,
+        .assistant_code_block,
+        .assistant_thematic_rule,
+        => null,
+    };
+}
 
 fn markedDiffContent(bytes: []const u8) ?[]const u8 {
     _ = diff_mod.markedDiffBlockId(bytes) orelse return null;

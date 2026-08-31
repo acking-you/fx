@@ -174,7 +174,8 @@ pub fn finishAssistantTerminalWithExecutionAndReasoning(
         std.heap.c_allocator,
         persisted_provider_output_items,
     );
-    const turn: HistoryTurn = .{ .assistant = .{
+    const completed_summary = summary.finish();
+    var turn: HistoryTurn = .{ .assistant = .{
         .user = .{ .text = job.prompt, .images = job.images },
         .assistant = @constCast(assistant_text),
         .responses_message_output_index = message_output_index,
@@ -187,11 +188,12 @@ pub fn finishAssistantTerminalWithExecutionAndReasoning(
             maybe_provider_output_items != null,
         .execution = execution,
     } };
+    types.setHistoryTurnSummary(&turn, completed_summary);
     const finished = try types.dupeFinishedPrompt(
         std.heap.c_allocator,
         .{
             .turn = turn,
-            .summary = summary.finish(),
+            .summary = completed_summary,
         },
     );
 
