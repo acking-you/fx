@@ -29,9 +29,16 @@ pub fn poll(fds: []PollFd, timeout_ms: i32) PollError!usize {
         if (rc >= 0) return @intCast(rc);
         return error.NetworkDown;
     } else {
-        // Keep the established Unix behavior, including retrying EINTR. This
-        // abstraction exists to add WSAPoll, not to replace POSIX policy.
-        return std.posix.poll(fds, timeout_ms);
+        const fds_count = std.math.cast(std.posix.nfds_t, fds.len) orelse
+            return error.SystemResources;
+        const rc = std.posix.system.poll(fds.ptr, fds_count, timeout_ms);
+        return switch (std.posix.errno(rc)) {
+            .SUCCESS => @intCast(rc),
+            .INTR => error.Interrupted,
+            .NOMEM => error.SystemResources,
+            .NETDOWN => error.NetworkDown,
+            else => error.Unexpected,
+        };
     }
 }
 

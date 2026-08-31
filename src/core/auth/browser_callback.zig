@@ -134,19 +134,27 @@ fn listenerReady(
     listener: *std.Io.net.Server,
     cancel_flag: *std.atomic.Value(bool),
 ) !bool {
-    if (cancel_flag.load(.seq_cst)) return error.Cancelled;
-    var fds = [_]socket_poll.PollFd{.{
-        .fd = listener.socket.handle,
-        .events = socket_poll.Events.in,
-        .revents = 0,
-    }};
-    const ready = try socket_poll.poll(&fds, poll_ms);
-    if (cancel_flag.load(.seq_cst)) return error.Cancelled;
-    if (ready == 0) return false;
-    if ((fds[0].revents & socket_poll.Events.in) == 0) {
-        return error.OAuthCallbackListenerFailed;
+    const deadline_ms = io_mod.milliTimestamp() + poll_ms;
+    while (true) {
+        if (cancel_flag.load(.seq_cst)) return error.Cancelled;
+        const remaining_ms = deadline_ms - io_mod.milliTimestamp();
+        if (remaining_ms <= 0) return false;
+        var fds = [_]socket_poll.PollFd{.{
+            .fd = listener.socket.handle,
+            .events = socket_poll.Events.in,
+            .revents = 0,
+        }};
+        const ready = socket_poll.poll(&fds, @intCast(remaining_ms)) catch |err| switch (err) {
+            error.Interrupted => continue,
+            else => return err,
+        };
+        if (cancel_flag.load(.seq_cst)) return error.Cancelled;
+        if (ready == 0) return false;
+        if ((fds[0].revents & socket_poll.Events.in) == 0) {
+            return error.OAuthCallbackListenerFailed;
+        }
+        return true;
     }
-    return true;
 }
 
 fn requestReadable(
@@ -166,7 +174,10 @@ fn requestReadable(
             .events = socket_poll.Events.in,
             .revents = 0,
         }};
-        const ready = try socket_poll.poll(&fds, wait_ms);
+        const ready = socket_poll.poll(&fds, wait_ms) catch |err| switch (err) {
+            error.Interrupted => continue,
+            else => return err,
+        };
         if (cancel_flag.load(.seq_cst)) return error.Cancelled;
         if (ready != 0) return true;
         if (remaining_ms <= 0) return false;
