@@ -3460,8 +3460,8 @@ test "request tool permission keeps safe defaults while local writes bypass revi
 
     try std.testing.expectEqual(ToolPermissionDecision.once, (try tool_admission.requestPermissionOutcome(rt.context().admissionInput(), arena, .{
         .id = "1",
-        .name = "list_files",
-        .arguments_json = "{}",
+        .name = "glob_files",
+        .arguments_json = "{\"pattern\":\"*.zig\"}",
     }, .ask, &.{})).decision);
 
     try std.testing.expectEqual(ToolPermissionDecision.once, (try tool_admission.requestPermissionOutcome(rt.context().admissionInput(), arena, .{
@@ -3469,82 +3469,6 @@ test "request tool permission keeps safe defaults while local writes bypass revi
         .name = "ask_user_question",
         .arguments_json = "{}",
     }, .ask, &.{})).decision);
-}
-
-test "CLI headless ordinary admission preserves multi-target deny precedence" {
-    const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.createDirPath(io_mod.getIo(), "workspace");
-    {
-        var source = try tmp.dir.createFile(io_mod.getIo(), "workspace/source.txt", .{ .truncate = true });
-        defer source.close(io_mod.getIo());
-        try source.writeStreamingAll(io_mod.getIo(), "source\n");
-    }
-    const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "workspace");
-    defer alloc.free(root);
-
-    var rt = TestRuntime{ .workspace_root = root, .interactive = false };
-    defer rt.deinit(alloc);
-    var arena_state = std.heap.ArenaAllocator.init(alloc);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-
-    const cases = [_]struct {
-        tool_name: []const u8,
-        arguments_json: []const u8,
-        source_action: types.PermissionAction,
-        destination_action: types.PermissionAction,
-    }{
-        .{
-            .tool_name = "copy_file",
-            .arguments_json = "{\"source\":\"source.txt\",\"destination\":\"destination.txt\"}",
-            .source_action = .ask,
-            .destination_action = .deny,
-        },
-        .{
-            .tool_name = "copy_file",
-            .arguments_json = "{\"source\":\"source.txt\",\"destination\":\"destination.txt\"}",
-            .source_action = .deny,
-            .destination_action = .ask,
-        },
-        .{
-            .tool_name = "rename_file",
-            .arguments_json = "{\"old_path\":\"source.txt\",\"new_path\":\"destination.txt\"}",
-            .source_action = .ask,
-            .destination_action = .deny,
-        },
-        .{
-            .tool_name = "rename_file",
-            .arguments_json = "{\"old_path\":\"source.txt\",\"new_path\":\"destination.txt\"}",
-            .source_action = .deny,
-            .destination_action = .ask,
-        },
-    };
-
-    for (cases, 0..) |case, index| {
-        var rules = [_]types.PermissionRule{
-            .{
-                .permission = @constCast(case.tool_name),
-                .pattern = @constCast("source.txt"),
-                .action = case.source_action,
-            },
-            .{
-                .permission = @constCast(case.tool_name),
-                .pattern = @constCast("destination.txt"),
-                .action = case.destination_action,
-            },
-        };
-        rt.permission_rules = .{ .rules = &rules };
-
-        const outcome = try tool_admission.requestPermissionOutcome(rt.context().admissionInput(), arena, .{
-            .id = try std.fmt.allocPrint(arena, "multi-target-{d}", .{index}),
-            .name = case.tool_name,
-            .arguments_json = case.arguments_json,
-        }, .ask, &.{});
-        try std.testing.expectEqual(ToolPermissionDecision.policy_denied, outcome.decision);
-        try std.testing.expect(outcome.execution_authority == null);
-    }
 }
 
 test "local file mutations bypass review while external mutations use exact review" {
@@ -4244,53 +4168,6 @@ test "file mutation preflight separates edit approval from equality disclosure" 
     }
 }
 
-test "request tool permission combines configured external copy target with workspace automatic review" {
-    const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.createDirPath(io_mod.getIo(), "workspace");
-    try tmp.dir.createDirPath(io_mod.getIo(), "external");
-    {
-        var source = try tmp.dir.createFile(io_mod.getIo(), "workspace/source.txt", .{ .truncate = true });
-        defer source.close(io_mod.getIo());
-        try source.writeStreamingAll(io_mod.getIo(), "source\n");
-    }
-    const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "workspace");
-    defer alloc.free(root);
-    const external = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "external");
-    defer alloc.free(external);
-    const pattern = try std.fmt.allocPrint(alloc, "{s}/**", .{external});
-    defer alloc.free(pattern);
-    var rules = [_]types.PermissionRule{
-        .{
-            .permission = @constCast("copy_file"),
-            .pattern = pattern,
-            .action = .allow,
-        },
-    };
-
-    var reviewer = TestAutoReview{};
-    var rt = TestRuntime{
-        .workspace_root = root,
-        .permission_mode = .auto,
-        .permission_rules = .{ .rules = &rules },
-        .interactive = false,
-        .auto_classifier = reviewer.classifier(),
-    };
-    defer rt.deinit(alloc);
-
-    var arena_state = std.heap.ArenaAllocator.init(alloc);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-    try std.testing.expectEqual(ToolPermissionDecision.once, (try tool_admission.requestPermissionOutcome(rt.context().admissionInput(), arena, .{
-        .id = "copy-external",
-        .name = "copy_file",
-        .arguments_json = "{\"source\":\"source.txt\",\"destination\":\"../external/copied.txt\"}",
-    }, .auto, &.{})).decision);
-    try std.testing.expectEqual(@as(usize, 1), reviewer.calls);
-    try std.testing.expect(rt.worker.pending_permission_request_shared == null);
-}
-
 test "disabled automatic reviewer returns a recoverable denial without a human prompt" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
@@ -4427,7 +4304,7 @@ test "request tool permission honors configured deny and allow rules" {
     }, .ask, &.{})).decision);
 }
 
-test "request tool permission denies semantic_search outside workspace target" {
+test "request tool permission denies grep_files outside workspace target" {
     const alloc = std.testing.allocator;
     var workspace_tmp = std.testing.tmpDir(.{});
     defer workspace_tmp.cleanup();
@@ -4453,11 +4330,11 @@ test "request tool permission denies semantic_search outside workspace target" {
     var arena_state = std.heap.ArenaAllocator.init(alloc);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const args = try std.fmt.allocPrint(arena, "{{\"query\":\"needle\",\"path\":\"{s}\"}}", .{external});
+    const args = try std.fmt.allocPrint(arena, "{{\"pattern\":\"needle\",\"path\":\"{s}\"}}", .{external});
 
     try std.testing.expectEqual(ToolPermissionDecision.policy_denied, (try tool_admission.requestPermissionOutcome(rt.context().admissionInput(), arena, .{
-        .id = "semantic",
-        .name = "semantic_search",
+        .id = "grep",
+        .name = "grep_files",
         .arguments_json = args,
     }, .auto, &.{})).decision);
 }
@@ -4702,47 +4579,6 @@ test "executeToolCall preserves explicit ignored directory grep roots" {
     try expectContains(result.model_output, "node_modules/pkg/index.js:1: needle module");
 }
 
-test "request tool permission checks copy and rename destinations" {
-    const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.createDirPath(io_mod.getIo(), "workspace/src");
-    {
-        var file = try tmp.dir.createFile(io_mod.getIo(), "workspace/src/source.txt", .{ .truncate = true });
-        defer file.close(io_mod.getIo());
-        try file.writeStreamingAll(io_mod.getIo(), "source\n");
-    }
-    const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "workspace");
-    defer alloc.free(root);
-
-    var rt = TestRuntime{ .workspace_root = root };
-    defer rt.deinit(std.testing.allocator);
-    var rules = [_]types.PermissionRule{
-        .{ .permission = @constCast("copy_file"), .pattern = @constCast("blocked/*"), .action = .deny },
-        .{ .permission = @constCast("rename_file"), .pattern = @constCast("blocked/*"), .action = .deny },
-    };
-    rt.permission_rules = .{ .rules = &rules };
-
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-
-    try std.testing.expectEqual(ToolPermissionDecision.policy_denied, (try tool_admission.requestPermissionOutcome(rt.context().admissionInput(), arena, .{
-        .id = "copy",
-        .name = "copy_file",
-        .arguments_json = "{\"source\":\"src/source.txt\",\"destination\":\"blocked/copied.txt\"}",
-    }, .auto, &.{})).decision);
-    try std.testing.expectEqual(ToolPermissionDecision.policy_denied, (try tool_admission.requestPermissionOutcome(rt.context().admissionInput(), arena, .{
-        .id = "rename",
-        .name = "rename_file",
-        .arguments_json = "{\"old_path\":\"src/source.txt\",\"new_path\":\"blocked/renamed.txt\"}",
-    }, .auto, &.{})).decision);
-
-    try std.testing.expect(!absolutePathExists(try std.fs.path.join(arena, &.{ root, "blocked/copied.txt" })));
-    try std.testing.expect(!absolutePathExists(try std.fs.path.join(arena, &.{ root, "blocked/renamed.txt" })));
-    try std.testing.expect(absolutePathExists(try std.fs.path.join(arena, &.{ root, "src/source.txt" })));
-}
-
 const PermissionThreadState = struct {
     decision: ?ToolPermissionDecision = null,
     err: ?anyerror = null,
@@ -4809,12 +4645,7 @@ fn fileGrantOfferMatchesExpectation(
 ) bool {
     const workspace_permissions = [_][]const u8{
         "edit",
-        "create_folder",
-        "open_file",
-        "rename_file",
-        "copy_file",
         "read",
-        "list",
         "glob",
         "grep",
     };
@@ -4921,7 +4752,7 @@ fn waitForPermissionPrompt(worker: *WorkerRuntime, expected: []const u8) !u64 {
 
 test "configured ask rule prompts the worker" {
     var rules = [_]types.PermissionRule{
-        .{ .permission = @constCast("list"), .pattern = @constCast("."), .action = .ask },
+        .{ .permission = @constCast("glob"), .pattern = @constCast("."), .action = .ask },
     };
     var rt = TestRuntime{
         .workspace_root = "/tmp/workspace",
@@ -4931,7 +4762,7 @@ test "configured ask rule prompts the worker" {
     defer rt.deinit(std.testing.allocator);
 
     var state = PermissionThreadState{};
-    const thread = try std.Thread.spawn(.{}, runPermissionRequest, .{ &state, rt.context(), ToolCall{ .id = "1", .name = "list_files", .arguments_json = "{}" }, PermissionMode.auto });
+    const thread = try std.Thread.spawn(.{}, runPermissionRequest, .{ &state, rt.context(), ToolCall{ .id = "1", .name = "glob_files", .arguments_json = "{\"pattern\":\"*.zig\"}" }, PermissionMode.auto });
     var thread_joined = false;
     defer if (!thread_joined) {
         rt.worker.requestShutdown();
@@ -4939,7 +4770,7 @@ test "configured ask rule prompts the worker" {
     };
 
     rt.worker.worker_processing = true;
-    const request_id = try waitForPermissionPrompt(&rt.worker, "list_files");
+    const request_id = try waitForPermissionPrompt(&rt.worker, "*.zig");
     try std.testing.expectEqual(
         worker_runtime.PermissionSubmissionResult.accepted,
         rt.worker.submitPermissionResponse(

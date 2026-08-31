@@ -4031,65 +4031,6 @@ test "permission rule display follows supplied registry metadata" {
     try std.testing.expectEqual(ToolPermissionDecision.policy_denied, outcome.decision);
 }
 
-test "automatic delete reaches reviewer and clear mints exact authority" {
-    const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.createDirPath(std.testing.io, "workspace");
-    var victim = try tmp.dir.createFile(
-        std.testing.io,
-        "workspace/victim.txt",
-        .{ .truncate = true },
-    );
-    defer victim.close(std.testing.io);
-    try victim.writeStreamingAll(std.testing.io, "keep\n");
-    const workspace = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "workspace");
-    defer alloc.free(workspace);
-    const target = try std.fs.path.join(alloc, &.{ workspace, "victim.txt" });
-    defer alloc.free(target);
-
-    var arena_state = std.heap.ArenaAllocator.init(alloc);
-    defer arena_state.deinit();
-    var worker: WorkerRuntime = .{};
-    defer worker.deinit(alloc);
-    var background: BackgroundRuntime = .{};
-    defer background.deinit(alloc);
-    var fake = FakeAutoClassifier{};
-    var input = testInputWithClassifier(
-        &worker,
-        &background,
-        permission_auto_classifier.Classifier.withOverride(
-            @ptrCast(&fake),
-            FakeAutoClassifier.classify,
-        ),
-    );
-    input.workspace_root = workspace;
-    const arguments_json = try std.fmt.allocPrint(
-        arena_state.allocator(),
-        "{{\"path\":{f}}}",
-        .{std.json.fmt(target, .{})},
-    );
-
-    const outcome = try requestPermissionOutcome(
-        input,
-        arena_state.allocator(),
-        .{
-            .id = "delete-victim",
-            .name = "delete_file",
-            .arguments_json = arguments_json,
-        },
-        .auto,
-        &.{},
-    );
-
-    try std.testing.expectEqual(@as(usize, 1), fake.calls);
-    try std.testing.expectEqual(ToolPermissionDecision.once, outcome.decision);
-    try std.testing.expectEqual(
-        command_admission.ToolExecutionAuthority.ordinary,
-        outcome.execution_authority.?,
-    );
-}
-
 test "prepared session deny blocks local file mutation without setup effects" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});

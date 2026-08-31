@@ -958,7 +958,7 @@ test "provider callbacks publish each activity phase transition once" {
     onStreamReasoningChunk(&stream_ctx, " continues");
     onStreamContentChunk(&stream_ctx, "response");
     onStreamContentChunk(&stream_ctx, " continues\n");
-    onStreamToolStart(&stream_ctx, "command_1", "terminal", null);
+    onStreamToolStart(&stream_ctx, "command_1", "exec_command", null);
 
     try std.testing.expectEqualSlices(
         types.TurnPhase,

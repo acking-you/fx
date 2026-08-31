@@ -174,18 +174,6 @@ pub fn permissionTargetForCall(
         return arena.dupe(u8, web_search_permission);
     }
 
-    if (std.mem.eql(u8, call.name, "rename_file")) {
-        const args = try tool_args.parseToolArgsObject(arena, call.arguments_json);
-        const old_path = try tool_args.requiredStringArg(args, "old_path");
-        return resolveFileToolPath(arena, workspace_root, call.name, old_path, .existing);
-    }
-
-    if (std.mem.eql(u8, call.name, "copy_file")) {
-        const args = try tool_args.parseToolArgsObject(arena, call.arguments_json);
-        const source = try tool_args.requiredStringArg(args, "source");
-        return resolveFileToolPath(arena, workspace_root, call.name, source, .existing);
-    }
-
     const args = try tool_args.parseToolArgsObject(arena, call.arguments_json);
 
     return switch (target_kind) {

@@ -1131,7 +1131,7 @@ test "cancellation returned with permission allow starts no serial or parallel e
     };
     const parallel_calls = [_]ToolCall{
         toolCall("parallel_1", "read_file", "{\"path\":\"README.md\"}"),
-        toolCall("parallel_2", "file_info", "{\"path\":\"README.md\"}"),
+        toolCall("parallel_2", "glob_files", "{\"pattern\":\"*.md\"}"),
     };
 
     for ([_][]const ToolCall{ &serial_calls, &parallel_calls }, 0..) |calls, case_index| {
@@ -1144,7 +1144,7 @@ test "cancellation returned with permission allow starts no serial or parallel e
         hooks.exec_plans = &.{.{ .result = .{ .model_output = "must not execute" } }};
         var fixture = PromptFixture{};
         hooks.cancel_on_permission = &fixture.cancel_flag;
-        if (case_index == 1) hooks.cancel_on_permission_name = "file_info";
+        if (case_index == 1) hooks.cancel_on_permission_name = "glob_files";
         var job = fixture.job();
         job.permission_mode = .auto;
 
@@ -1160,10 +1160,10 @@ test "parallel streamed cancellation closes every concrete tool action" {
     const alloc = std.testing.allocator;
     const calls = [_]ToolCall{
         toolCall("call_read", "read_file", "{\"path\":\"README.md\"}"),
-        toolCall("call_list", "list_files", "{\"path\":\".\"}"),
-        toolCall("call_info", "file_info", "{\"path\":\"README.md\"}"),
+        toolCall("call_glob", "glob_files", "{\"pattern\":\"*.md\"}"),
+        toolCall("call_grep", "grep_files", "{\"pattern\":\"fx\",\"path\":\"README.md\"}"),
     };
-    const cancellation_points = [_][]const u8{ "read_file", "list_files" };
+    const cancellation_points = [_][]const u8{ "read_file", "glob_files" };
 
     for (cancellation_points) |cancel_on_name| {
         const completions = [_]FakeCompletion{.{
@@ -2074,7 +2074,7 @@ test "same-batch retarget defers stale scoped call before permission and reloads
     defer alloc.free(link_path);
 
     const first_calls = [_]ToolCall{
-        toolCall("retarget", "terminal", "{\"action\":\"exec\",\"command\":\"true\"}"),
+        toolCall("retarget", "exec_command", "{\"cmd\":\"true\"}"),
         toolCall("stale_read", "read_file", "{\"path\":\"link/secret.txt\"}"),
         toolCall("stable_info", "read_file", "{\"path\":\"stable.txt\"}"),
     };
@@ -2092,7 +2092,7 @@ test "same-batch retarget defers stale scoped call before permission and reloads
     defer hooks.deinit();
     hooks.context_enabled = true;
     hooks.context_registry = FreshnessApplicableContext.registry;
-    hooks.swap_link_on_execute_name = "terminal";
+    hooks.swap_link_on_execute_name = "exec_command";
     hooks.swap_link_on_execute = link_path;
     hooks.swap_link_target_on_execute = new_directory;
     hooks.exec_plans = &.{
@@ -2184,7 +2184,7 @@ test "same-batch file mutation retarget stops before permission and execution" {
     defer alloc.free(new_output);
 
     const calls = [_]ToolCall{
-        toolCall("retarget", "terminal", "{\"action\":\"exec\",\"command\":\"true\"}"),
+        toolCall("retarget", "exec_command", "{\"cmd\":\"true\"}"),
         toolCall("stale_write", "write_file", "{\"path\":\"link/proof.txt\",\"content\":\"blocked\"}"),
     };
     const completions = [_]FakeCompletion{
@@ -2197,7 +2197,7 @@ test "same-batch file mutation retarget stops before permission and execution" {
     defer hooks.deinit();
     hooks.context_enabled = true;
     hooks.context_registry = EmptyApplicableContext.registry;
-    hooks.swap_link_on_execute_name = "terminal";
+    hooks.swap_link_on_execute_name = "exec_command";
     hooks.swap_link_on_execute = link_path;
     hooks.swap_link_target_on_execute = new_directory;
     hooks.exec_plans = &.{.{ .result = .{ .model_output = "retargeted" } }};
@@ -2252,7 +2252,7 @@ test "same-batch missing target defers newly resolvable scope until reissue" {
     defer alloc.free(link_path);
 
     const first_calls = [_]ToolCall{
-        toolCall("resolve_scope", "terminal", "{\"action\":\"exec\",\"command\":\"true\"}"),
+        toolCall("resolve_scope", "exec_command", "{\"cmd\":\"true\"}"),
         toolCall("initial_missing", "read_file", "{\"path\":\"link/secret.txt\"}"),
     };
     const scoped_reissue_calls = [_]ToolCall{
@@ -2269,7 +2269,7 @@ test "same-batch missing target defers newly resolvable scope until reissue" {
     defer hooks.deinit();
     hooks.context_enabled = true;
     hooks.context_registry = FreshnessApplicableContext.registry;
-    hooks.swap_link_on_execute_name = "terminal";
+    hooks.swap_link_on_execute_name = "exec_command";
     hooks.swap_link_on_execute = link_path;
     hooks.swap_link_target_on_execute = new_directory;
     hooks.exec_plans = &.{
@@ -2553,8 +2553,8 @@ test "modern context delta does not defer unrelated effectful call" {
         ),
         toolCall(
             "root_create",
-            "terminal",
-            "{\"action\":\"exec\",\"command\":\"mkdir -p root-output\"}",
+            "exec_command",
+            "{\"cmd\":\"mkdir -p root-output\"}",
         ),
     };
     const completions = [_]FakeCompletion{
@@ -3498,9 +3498,9 @@ test "processQueuedPrompt legacy auto denial retains lifecycle source" {
 
 test "exact caution is reused while the agent continues to a normal completion" {
     const alloc = std.testing.allocator;
-    const first = [_]ToolCall{toolCall("blocked-1", "run_command", "{\"command\":\"touch blocked\"}")};
-    const second = [_]ToolCall{toolCall("blocked-2", "run_command", "{\"command\":\"touch blocked\"}")};
-    const third = [_]ToolCall{toolCall("blocked-3", "run_command", "{\"command\":\"touch blocked\"}")};
+    const first = [_]ToolCall{toolCall("blocked-1", "exec_command", "{\"cmd\":\"touch blocked\"}")};
+    const second = [_]ToolCall{toolCall("blocked-2", "exec_command", "{\"cmd\":\"touch blocked\"}")};
+    const third = [_]ToolCall{toolCall("blocked-3", "exec_command", "{\"cmd\":\"touch blocked\"}")};
     const completions = [_]FakeCompletion{
         .{ .tool_calls = &first },
         .{ .tool_calls = &second },
@@ -3541,9 +3541,9 @@ test "exact caution is reused while the agent continues to a normal completion" 
 
 test "three distinct review cautions preserve an exhausted positive step cap" {
     const alloc = std.testing.allocator;
-    const first = [_]ToolCall{toolCall("blocked-1", "run_command", "{\"command\":\"touch one\"}")};
-    const second = [_]ToolCall{toolCall("blocked-2", "run_command", "{\"command\":\"touch two\"}")};
-    const third = [_]ToolCall{toolCall("blocked-3", "run_command", "{\"command\":\"touch three\"}")};
+    const first = [_]ToolCall{toolCall("blocked-1", "exec_command", "{\"cmd\":\"touch one\"}")};
+    const second = [_]ToolCall{toolCall("blocked-2", "exec_command", "{\"cmd\":\"touch two\"}")};
+    const third = [_]ToolCall{toolCall("blocked-3", "exec_command", "{\"cmd\":\"touch three\"}")};
     const completions = [_]FakeCompletion{
         .{ .tool_calls = &first },
         .{ .tool_calls = &second },
@@ -3814,11 +3814,11 @@ test "completed tool batch appends one action-oriented decision prompt to the ne
     const alloc = std.testing.allocator;
     const decision_prompt = "Continue the original task. If work remains and you can proceed, briefly tell the user what you are doing next, then perform that action with the appropriate tool. Do not end the turn with only a progress update. If the task is complete, respond with the result. If a genuine blocker prevents further action, explain the blocker and what is needed to continue.";
     const calls = [_]ToolCall{
-        toolCall("call_first", "terminal", "{\"action\":\"exec\",\"command\":\"printf first\"}"),
-        toolCall("call_second", "terminal", "{\"action\":\"exec\",\"command\":\"printf second\"}"),
+        toolCall("call_first", "exec_command", "{\"cmd\":\"printf first\"}"),
+        toolCall("call_second", "exec_command", "{\"cmd\":\"printf second\"}"),
     };
     const next_calls = [_]ToolCall{
-        toolCall("call_third", "terminal", "{\"action\":\"exec\",\"command\":\"printf third\"}"),
+        toolCall("call_third", "exec_command", "{\"cmd\":\"printf third\"}"),
     };
     const completions = [_]FakeCompletion{
         .{ .tool_calls = &calls },
@@ -3867,7 +3867,7 @@ test "post-tool provider retry retains exactly one action-oriented decision prom
     const alloc = std.testing.allocator;
     const decision_prompt = "Continue the original task. If work remains and you can proceed, briefly tell the user what you are doing next, then perform that action with the appropriate tool. Do not end the turn with only a progress update. If the task is complete, respond with the result. If a genuine blocker prevents further action, explain the blocker and what is needed to continue.";
     const calls = [_]ToolCall{
-        toolCall("call_retry", "terminal", "{\"action\":\"exec\",\"command\":\"printf retry\"}"),
+        toolCall("call_retry", "exec_command", "{\"cmd\":\"printf retry\"}"),
     };
     const completions = [_]FakeCompletion{
         .{ .tool_calls = &calls },
@@ -4194,7 +4194,7 @@ test "processQueuedPrompt caps chatty grep_files model output" {
     try expectBodyContains(&gateway, 1, "original 2054 bytes; cap is 1024 bytes");
 }
 
-test "processQueuedPrompt caps chatty terminal exec result with explicit marker" {
+test "processQueuedPrompt caps chatty Unified Exec result with explicit marker" {
     const alloc = std.testing.allocator;
     const calls = [_]ToolCall{toolCall("call_1", "exec_command", "{\"cmd\":\"printf x\"}")};
     const completions = [_]FakeCompletion{

@@ -245,12 +245,6 @@ fn resolveAction(
             .value = try formatWebSearchActionDetail(alloc, args),
         };
     }
-    if (try copyRenameLabel(alloc, call.name, args)) |value| {
-        return .{
-            .label = lifecycleLabel(presentation.action_label, presentation.completed_action_label, state, denied_label),
-            .value = value,
-        };
-    }
     const value = input.display_target orelse
         try presentationValue(alloc, presentation, args) orelse
         presentation.label_arg_default;
@@ -433,20 +427,6 @@ fn isCommandCall(
     if (std.mem.eql(u8, call.name, "run_command")) return true;
     const tool = registry.lookup(call.name) orelse return false;
     return tool.executor_kind == .exec_command;
-}
-
-fn copyRenameLabel(alloc: Allocator, tool_name: []const u8, args: std.json.ObjectMap) !?[]const u8 {
-    if (std.mem.eql(u8, tool_name, "copy_file")) {
-        const source = tool_args.optionalStringArg(args, "source") orelse return null;
-        const destination = tool_args.optionalStringArg(args, "destination") orelse return null;
-        return try std.fmt.allocPrint(alloc, "{s} -> {s}", .{ source, destination });
-    }
-    if (std.mem.eql(u8, tool_name, "rename_file")) {
-        const old_path = tool_args.optionalStringArg(args, "old_path") orelse return null;
-        const new_path = tool_args.optionalStringArg(args, "new_path") orelse return null;
-        return try std.fmt.allocPrint(alloc, "{s} -> {s}", .{ old_path, new_path });
-    }
-    return null;
 }
 
 const test_web_search = blk: {
@@ -749,8 +729,6 @@ test "tool presentation preserves plain action fallbacks" {
         .{ .call = .{ .id = "ask", .name = "ask_user_question", .arguments_json = "{}" }, .expected = "Asking " },
         .{ .call = .{ .id = "skill", .name = "skill", .arguments_json = "{\"name\":\"workflow\"}" }, .expected = "Loading skill workflow" },
         .{ .call = .{ .id = "install", .name = "install_skill", .arguments_json = "{\"source\":\"example/agent-skills\",\"skill\":\"workflow\"}" }, .expected = "Installing skill example/agent-skills" },
-        .{ .call = .{ .id = "copy", .name = "copy_file", .arguments_json = "{\"source\":\"src/a.zig\",\"destination\":\"src/b.zig\"}" }, .expected = "Copying src/a.zig -> src/b.zig" },
-        .{ .call = .{ .id = "rename", .name = "rename_file", .arguments_json = "{\"old_path\":\"src/a.zig\",\"new_path\":\"src/b.zig\"}" }, .expected = "Renaming src/a.zig -> src/b.zig" },
         .{ .call = .{ .id = "unknown", .name = "unknown_tool", .arguments_json = "{}" }, .expected = "Working: unknown_tool" },
     };
 
