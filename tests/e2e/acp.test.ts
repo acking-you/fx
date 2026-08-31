@@ -2330,6 +2330,54 @@ describe("acp: model-independent", () => {
   );
 
   test(
+    "ACP publishes update_plan as a native plan session update",
+    async () => {
+      const root = createShortIsolatedRoot("fx-acp-update-plan-");
+      const gateway = startFakeGateway([
+        fakeGatewayToolCall("acp_plan_1", "update_plan", {
+          explanation: "Keep the root request visible.",
+          plan: [
+            { step: "Inspect the source", status: "in_progress" },
+            { step: "Run the focused test", status: "pending" },
+            { step: "Report the verified result", status: "completed" },
+          ],
+        }),
+        finalText("ACP plan update complete"),
+      ]);
+      try {
+        client = await AcpClient.create({
+          cwd: root.workspace,
+          env: fakeGatewayEnv(root, gateway),
+        });
+        await startCodeSession(client);
+        const result = await runPrompt(client, "Track this multi-step request.", TIMEOUT);
+
+        expect(result.promptResult.result.stopReason).toBe("end_turn");
+        const planUpdates = result.messages
+          .filter((message: any) =>
+            message.method === "session/update" &&
+            message.params?.update?.sessionUpdate === "plan",
+          )
+          .map((message: any) => message.params.update);
+        expect(planUpdates).toHaveLength(1);
+        expect(planUpdates[0].entries).toEqual([
+          { content: "Inspect the source", priority: "medium", status: "in_progress" },
+          { content: "Run the focused test", priority: "medium", status: "pending" },
+          { content: "Report the verified result", priority: "medium", status: "completed" },
+        ]);
+        expect(planUpdates[0]._meta.fx.explanation).toBe("Keep the root request visible.");
+        expect(gateway.requests).toHaveLength(2);
+        expect(client.stderr).toBe("");
+      } finally {
+        await client?.close();
+        gateway.stop();
+        rmSync(root.root, { recursive: true, force: true });
+      }
+    },
+    TIMEOUT,
+  );
+
+  test(
     "ACP streams exec_command through the unified native backend",
     async () => {
       const root = createShortIsolatedRoot("fx-acp-terminal-");

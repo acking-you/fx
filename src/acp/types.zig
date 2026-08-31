@@ -2,6 +2,7 @@ const std = @import("std");
 const build_options = @import("build_options");
 const jsonrpc = @import("jsonrpc.zig");
 const core_types = @import("../core/shared/types.zig");
+const tool_dispatch = @import("../core/tooling/tool_dispatch.zig");
 
 const Allocator = std.mem.Allocator;
 const writeJsonStr = jsonrpc.writeJsonStr;
@@ -142,6 +143,31 @@ pub fn writeUserMessageChunk(w: *std.Io.Writer, text: []const u8) !void {
     try w.writeAll("{\"sessionUpdate\":\"user_message_chunk\",\"content\":{\"type\":\"text\",\"text\":");
     try writeJsonStr(text, w);
     try w.writeAll("}}");
+}
+
+/// Publishes the complete replacement plan using ACP's native plan update.
+/// Clients replace their current checklist when this notification arrives.
+pub fn writePlanUpdate(
+    w: *std.Io.Writer,
+    explanation: ?[]const u8,
+    plan: []const tool_dispatch.PlanStep,
+) !void {
+    try w.writeAll("{\"sessionUpdate\":\"plan\",\"entries\":[");
+    for (plan, 0..) |item, index| {
+        if (index > 0) try w.writeByte(',');
+        try w.writeAll("{\"content\":");
+        try writeJsonStr(item.step, w);
+        try w.writeAll(",\"priority\":\"medium\",\"status\":");
+        try writeJsonStr(@tagName(item.status), w);
+        try w.writeByte('}');
+    }
+    try w.writeByte(']');
+    if (explanation) |text| {
+        try w.writeAll(",\"_meta\":{\"fx\":{\"explanation\":");
+        try writeJsonStr(text, w);
+        try w.writeAll("}}");
+    }
+    try w.writeByte('}');
 }
 
 pub fn writeToolCall(
@@ -285,7 +311,7 @@ pub fn writeInitializeResponseWithOptions(
     try w.writeAll("\"authMethods\":[],");
     try w.writeAll("\"_meta\":{\"fx\":{");
     try w.writeAll("\"turnSteer\":true,\"turnStatus\":true,");
-    try w.writeAll("\"backgroundTerminals\":true,\"processStatusCommand\":\"/ps\",\"toolModes\":{\"bashFirst\":true}");
+    try w.writeAll("\"backgroundTerminals\":true,\"processStatusCommand\":\"/ps\",\"toolModes\":{\"bashFirst\":true},\"planUpdates\":true");
     if (options.unified_exec_capable) {
         try w.writeAll(",\"unifiedExec\":{\"writeStdin\":true,\"kill\":true}");
     }
@@ -323,6 +349,21 @@ test "writeAgentThoughtChunk produces valid json" {
     try writeAgentThoughtChunk(&out.writer, "plan the change");
     const expected = "{\"sessionUpdate\":\"agent_thought_chunk\",\"content\":{\"type\":\"text\",\"text\":\"plan the change\"}}";
     try std.testing.expectEqualStrings(expected, out.writer.buffered());
+}
+
+test "writePlanUpdate produces a native ACP checklist update" {
+    const alloc = std.testing.allocator;
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+    const steps = [_]tool_dispatch.PlanStep{
+        .{ .step = @constCast("inspect"), .status = .in_progress },
+        .{ .step = @constCast("verify"), .status = .completed },
+    };
+    try writePlanUpdate(&out.writer, "keep the root request visible", &steps);
+    try std.testing.expectEqualStrings(
+        "{\"sessionUpdate\":\"plan\",\"entries\":[{\"content\":\"inspect\",\"priority\":\"medium\",\"status\":\"in_progress\"},{\"content\":\"verify\",\"priority\":\"medium\",\"status\":\"completed\"}],\"_meta\":{\"fx\":{\"explanation\":\"keep the root request visible\"}}}",
+        out.writer.buffered(),
+    );
 }
 
 test "writeToolCall produces valid json" {
@@ -493,6 +534,7 @@ test "writeInitializeResponse contains required fields" {
     try std.testing.expect(fx_meta.get("turnSteer").?.bool);
     try std.testing.expect(fx_meta.get("turnStatus").?.bool);
     try std.testing.expect(fx_meta.get("backgroundTerminals").?.bool);
+    try std.testing.expect(fx_meta.get("planUpdates").?.bool);
     try std.testing.expectEqualStrings("/ps", fx_meta.get("processStatusCommand").?.string);
     try std.testing.expect(fx_meta.get("toolModes").?.object.get("bashFirst").?.bool);
     const unified_exec = fx_meta.get("unifiedExec").?.object;

@@ -79,6 +79,23 @@ const interaction_section =
     \\
 ;
 
+const task_completion_section =
+    \\# Task completion
+    \\
+    \\- You have access to an update_plan tool which tracks steps and progress and renders them to the user. Use it for complex, ambiguous, or multi-phase work to show that you understood the request and to keep the whole approach visible.
+    \\- Plans are not padding for simple work. Keep the checklist concise, meaningful, logically ordered, and easy to verify; do not treat a plan update as a substitute for doing the work or verifying the result.
+    \\- Treat the complete original user request as the task contract. Later steering or follow-up input refines the active turn; it does not replace the original goal unless the user explicitly says so.
+    \\- To create a plan, call update_plan with short one-sentence steps (no more than 5-7 words each) and a status for every step: pending, in_progress, or completed.
+    \\- Maintain statuses in the tool: exactly one item in_progress at a time while work remains; mark steps completed as they finish, and do not jump a pending step directly to completed. Mark the next step in_progress before starting it.
+    \\- Before starting the next meaningful step, mark the prior step completed and the next step in_progress. You may mark multiple finished items in one update when they were completed in the same pass.
+    \\- If the scope changes, split, merge, reorder, or replace the checklist with an explanation of why. Do not let the plan go stale while coding.
+    \\- If all steps are complete, call update_plan again with every step completed.
+    \\- After an update_plan call, do not repeat the full checklist in prose; briefly summarize what changed and highlight the next meaningful step or important context.
+    \\- After every tool result, reassess the checklist, remaining requirements, blockers, and verification state. Continue until the original request is handled or a concrete blocker requires the user.
+    \\- Do not end a turn merely because the latest tool call or follow-up is complete. End only after the complete request is satisfied and the relevant result has been verified.
+    \\
+;
+
 const safety_section =
     \\# Safety
     \\
@@ -106,6 +123,7 @@ pub const gateway_system_prompt =
     workspace_section ++
     source_routing_section ++
     interaction_section ++
+    task_completion_section ++
     safety_section ++
     tools_and_verification_section;
 
@@ -3569,6 +3587,7 @@ test "gateway_system_prompt: compact ordered sections" {
         .{ .heading = "# Workspace behavior", .text = workspace_section },
         .{ .heading = "# Source routing", .text = source_routing_section },
         .{ .heading = "# Interaction", .text = interaction_section },
+        .{ .heading = "# Task completion", .text = task_completion_section },
         .{ .heading = "# Safety", .text = safety_section },
         .{ .heading = "# Tools and verification", .text = tools_and_verification_section },
     };
@@ -3603,6 +3622,17 @@ test "gateway_system_prompt: evidence-led scoped execution" {
     try expectDefaultPromptContains("diagnose the latest result before retrying");
     try expectDefaultPromptContains("distinguish definitions, imports, tests, and real callers");
     try expectDefaultPromptContains("Persist until the task is handled");
+}
+
+test "gateway_system_prompt: original request and checklist continuity" {
+    try expectDefaultPromptContains("complete original user request as the task contract");
+    try expectDefaultPromptContains("Later steering or follow-up input refines the active turn");
+    try expectDefaultPromptContains("Use it for complex, ambiguous, or multi-phase work");
+    try expectDefaultPromptContains("To create a plan, call update_plan");
+    try expectDefaultPromptContains("no more than 5-7 words each");
+    try expectDefaultPromptContains("mark the prior step completed and the next step in_progress");
+    try expectDefaultPromptContains("do not repeat the full checklist in prose");
+    try expectDefaultPromptContains("Do not end a turn merely because the latest tool call or follow-up is complete");
 }
 
 test "gateway_system_prompt: source routing" {

@@ -99,6 +99,18 @@ pub const SelectedDynamicToolSinkFn = *const fn (
 ) error{OutOfMemory}!void;
 
 pub const ContextNoticeSinkFn = *const fn (?*anyopaque, []const u8) error{OutOfMemory}!void;
+pub const PlanStepStatus = enum { pending, in_progress, completed };
+
+pub const PlanStep = struct {
+    step: []u8,
+    status: PlanStepStatus,
+};
+
+pub const PlanUpdateSinkFn = *const fn (
+    ?*anyopaque,
+    ?[]const u8,
+    []const PlanStep,
+) error{OutOfMemory}!void;
 
 /// Erased, owned typed input decoded by a concrete tool.
 pub const ToolInput = struct {
@@ -234,6 +246,8 @@ pub const DispatchContext = struct {
     on_selected_dynamic_tool: ?SelectedDynamicToolSinkFn = null,
     context_notice_ctx: ?*anyopaque = null,
     on_context_notice: ?ContextNoticeSinkFn = null,
+    plan_update_ctx: ?*anyopaque = null,
+    on_plan_update: ?PlanUpdateSinkFn = null,
     inner_usage_sink: ?*?core_types.ToolUsage = null,
     web_search_completion_sink: ?*?core_types.WebSearchCompletion = null,
     web_fetch_completion_sink: ?*?core_types.WebFetchCompletion = null,
@@ -348,6 +362,7 @@ pub const ExecutorKind = enum {
     create_folder,
     file_info,
     memory,
+    update_plan,
     semantic_search,
     open_file,
     web_fetch,
@@ -848,6 +863,15 @@ pub fn reportSelectedDynamicTool(
 pub fn reportContextNotice(ctx: DispatchContext, notice: []const u8) error{OutOfMemory}!void {
     const sink = ctx.on_context_notice orelse return;
     try sink(ctx.context_notice_ctx, notice);
+}
+
+pub fn reportPlanUpdate(
+    ctx: DispatchContext,
+    explanation: ?[]const u8,
+    plan: []const PlanStep,
+) error{OutOfMemory}!void {
+    const sink = ctx.on_plan_update orelse return;
+    try sink(ctx.plan_update_ctx, explanation, plan);
 }
 
 pub fn localToolAvailabilityFailure(

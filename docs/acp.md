@@ -26,6 +26,7 @@ The initialize response advertises fx-specific capabilities under `_meta.fx`:
       "turnStatus": true,
       "backgroundTerminals": true,
       "processStatusCommand": "/ps",
+      "planUpdates": true,
       "unifiedExec": {"writeStdin": true, "kill": true},
       "providerControl": {"switch": true, "login": true, "setup": true, "configureByok": true, "usage": true}
     }
@@ -241,6 +242,40 @@ accepted by `fx/turn/steer`, which remains text-only.
 ```
 
 A second standard `session/prompt` request is still treated as a new turn and is rejected while another prompt is active. Use `fx/turn/steer` for same-turn input.
+
+## Plan visualization
+
+When the model calls the normal `update_plan` tool, native ACP clients receive
+the same complete checklist through a standard `session/update` notification.
+The update is a replacement snapshot: clients should replace their current
+plan with every notification rather than append individual entries.
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "session/update",
+  "params": {
+    "sessionId": "SESSION_ID",
+    "update": {
+      "sessionUpdate": "plan",
+      "entries": [
+        {"content": "Inspect the source", "priority": "medium", "status": "in_progress"},
+        {"content": "Run the focused test", "priority": "medium", "status": "pending"},
+        {"content": "Report the verified result", "priority": "medium", "status": "completed"}
+      ],
+      "_meta": {"fx": {"explanation": "Keep the root request visible."}}
+    }
+  }
+}
+```
+
+Each entry has `content`, `priority`, and `status`. Status values are
+`pending`, `in_progress`, and `completed`; at most one entry is in progress.
+The optional `explanation` is carried in `_meta.fx.explanation` so standard ACP
+clients can render the checklist without depending on an fx-specific field.
+The TUI renders the same snapshot as `Updated Plan` with `□` and `✔` markers.
+Plan updates do not enter or exit Plan mode: fx has no Plan mode, and the
+`update_plan` tool remains available during ordinary turns.
 
 ## Inspect running processes with `/ps`
 

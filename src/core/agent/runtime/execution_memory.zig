@@ -147,6 +147,12 @@ pub fn buildInterruptedExecutionMemory(
         i = user_tail_end;
     }
 
+    for (current_turn_messages) |entry| {
+        if (entry.role == .user and entry.is_turn_input) {
+            filtered.appendAssumeCapacity(entry);
+        }
+    }
+
     return buildExecutionMemory(alloc, filtered.items);
 }
 
@@ -193,6 +199,7 @@ test "interrupted execution memory retains marked feedback through mixed user ta
         .{ .role = .user, .content = "first command feedback marker", .tool_call_id = calls[0].id, .permission_feedback = true },
         .{ .role = .user, .content = "custom hint", .permission_feedback = false },
         .{ .role = .user, .content = "second command feedback marker", .tool_call_id = calls[1].id, .permission_feedback = true },
+        .{ .role = .user, .content = "continue the interrupted request", .is_turn_input = true },
     };
 
     const memory = try buildInterruptedExecutionMemory(alloc, &messages, calls[2]);
@@ -203,6 +210,8 @@ test "interrupted execution memory retains marked feedback through mixed user ta
     try std.testing.expectEqualStrings("first command feedback marker", results[0].permission_feedback[0]);
     try std.testing.expectEqual(@as(usize, 1), results[1].permission_feedback.len);
     try std.testing.expectEqualStrings("second command feedback marker", results[1].permission_feedback[0]);
+    try std.testing.expectEqual(@as(usize, 1), memory.user_inputs.len);
+    try std.testing.expectEqualStrings("continue the interrupted request", memory.user_inputs[0].text);
 }
 
 fn hasToolResultForCall(

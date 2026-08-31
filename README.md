@@ -226,7 +226,10 @@ stream-aware output updates, and the final command result. They can also interac
 directly through `fx/unifiedExec/writeStdin` and `fx/unifiedExec/kill`; those
 control requests remain responsive while a model-side output poll is waiting,
 and ACP output observation does not consume the model-facing output stream.
-See the ACP guide for the session and process ID contract. Vision-capable models
+ACP clients also receive native `session/update` plan snapshots for the normal
+`update_plan` tool, including complete step status replacement and an optional
+explanation. See the [ACP guide](docs/acp.md#plan-visualization) for the exact
+wire shape and session/process ID contract. Vision-capable models
 accept standard ACP base64 image prompt blocks and persist verified image
 snapshots.
 

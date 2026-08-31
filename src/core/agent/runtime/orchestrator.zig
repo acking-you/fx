@@ -2397,7 +2397,6 @@ fn takePendingSteer(
 fn appendPendingSteer(
     arena: Allocator,
     within_turn_suffix: *std.ArrayList(ChatMessage),
-    active_job: *QueuedPrompt,
     steer: QueuedPrompt,
 ) !void {
     const prompt = try arena.dupe(u8, steer.prompt);
@@ -2406,31 +2405,8 @@ fn appendPendingSteer(
         .role = .user,
         .content = prompt,
         .images = images,
+        .is_turn_input = true,
     });
-
-    active_job.prompt = try std.fmt.allocPrint(
-        arena,
-        "{s}\n\n[Follow-up while you were working]\n{s}",
-        .{ active_job.prompt, steer.prompt },
-    );
-    if (steer.images.len > 0) {
-        const merged_images = try arena.alloc(
-            types.ImageAttachment,
-            active_job.images.len + steer.images.len,
-        );
-        std.mem.copyForwards(
-            types.ImageAttachment,
-            merged_images[0..active_job.images.len],
-            active_job.images,
-        );
-        const copied = try types.dupeImageAttachmentSlice(arena, steer.images);
-        std.mem.copyForwards(
-            types.ImageAttachment,
-            merged_images[active_job.images.len..],
-            copied,
-        );
-        active_job.images = merged_images;
-    }
 }
 
 fn drainPendingSteers(
@@ -2438,7 +2414,6 @@ fn drainPendingSteers(
     arena: Allocator,
     turn_id: u64,
     within_turn_suffix: *std.ArrayList(ChatMessage),
-    active_job: *QueuedPrompt,
     first: ?QueuedPrompt,
 ) !usize {
     var count: usize = 0;
@@ -2447,7 +2422,7 @@ fn drainPendingSteers(
         const steer = pending orelse (try takePendingSteer(deps, turn_id, false) orelse break);
         pending = null;
         defer worker_runtime.freeQueuedPrompt(std.heap.c_allocator, steer);
-        try appendPendingSteer(arena, within_turn_suffix, active_job, steer);
+        try appendPendingSteer(arena, within_turn_suffix, steer);
         count += 1;
     }
     if (count > 0) {
@@ -2468,7 +2443,7 @@ test "pending steer becomes next-step user input and durable follow-up context" 
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    var active = QueuedPrompt{
+    const active = QueuedPrompt{
         .prompt = @constCast("initial request"),
         .images = @constCast(&.{}),
         .model = @constCast("model"),
@@ -2489,7 +2464,7 @@ test "pending steer becomes next-step user input and durable follow-up context" 
     var suffix: std.ArrayList(ChatMessage) = .empty;
     defer suffix.deinit(arena);
 
-    try appendPendingSteer(arena, &suffix, &active, steer);
+    try appendPendingSteer(arena, &suffix, steer);
 
     try std.testing.expectEqual(@as(usize, 1), suffix.items.len);
     try std.testing.expectEqual(types.ChatRole.user, suffix.items[0].role);
@@ -2497,10 +2472,7 @@ test "pending steer becomes next-step user input and durable follow-up context" 
         "also run the focused test",
         suffix.items[0].content.?,
     );
-    try std.testing.expectEqualStrings(
-        "initial request\n\n[Follow-up while you were working]\nalso run the focused test",
-        active.prompt,
-    );
+    try std.testing.expectEqualStrings("initial request", active.prompt);
 }
 
 fn processQueuedPromptLoop(
@@ -2525,7 +2497,7 @@ fn processQueuedPromptLoop(
     current_user_message: ChatMessage,
     stop_state: *CommonStopState,
 ) !void {
-    var job = initial_job;
+    const job = initial_job;
     var stable_prefix = stable_prefix_ptr.*;
     defer stable_prefix_ptr.* = stable_prefix;
     const history_messages = history_messages_ptr.*;
@@ -2691,7 +2663,6 @@ fn processQueuedPromptLoop(
             arena,
             turn_id,
             &within_turn_suffix,
-            &job,
             null,
         );
         _ = overlay_arena_state.reset(.retain_capacity);
@@ -4540,7 +4511,6 @@ fn processQueuedPromptLoop(
                     arena,
                     turn_id,
                     &within_turn_suffix,
-                    &job,
                     first_steer,
                 );
                 silent_tool_steps = 0;

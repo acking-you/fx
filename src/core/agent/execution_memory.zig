@@ -84,6 +84,18 @@ pub fn buildNormalMessageExecutionMemory(
     return buildNormalExecutionMemory(MessageAdapter, alloc, messages);
 }
 
+test "active-turn user inputs are retained as durable execution memory" {
+    const alloc = std.testing.allocator;
+    const messages = [_]types.ChatMessage{
+        .{ .role = .assistant, .content = "partial" },
+        .{ .role = .user, .content = "continue the original task", .is_turn_input = true },
+    };
+    const memory = try buildNormalChatExecutionMemory(alloc, &messages);
+    defer types.freeExecutionMemory(alloc, memory);
+    try std.testing.expectEqual(@as(usize, 1), memory.user_inputs.len);
+    try std.testing.expectEqualStrings("continue the original task", memory.user_inputs[0].text);
+}
+
 pub fn dupeCompletedRedactedToolCalls(
     alloc: Allocator,
     calls: []const ToolCall,
@@ -346,6 +358,14 @@ const ChatMessageAdapter = struct {
         return value.role == .user;
     }
 
+    fn isTurnInput(value: Message) bool {
+        return value.is_turn_input;
+    }
+
+    fn images(value: Message) []const types.ImageAttachment {
+        return value.images;
+    }
+
     fn isPermissionFeedback(value: Message) bool {
         return value.role == .user and value.permission_feedback;
     }
@@ -416,6 +436,14 @@ const MessageAdapter = struct {
 
     fn isUser(value: Message) bool {
         return value.role == .user;
+    }
+
+    fn isTurnInput(_: Message) bool {
+        return false;
+    }
+
+    fn images(_: Message) []const types.ImageAttachment {
+        return &.{};
     }
 
     fn isPermissionFeedback(value: Message) bool {
@@ -493,6 +521,26 @@ fn buildNormalExecutionMemory(
             freeTransientFileEvidence(alloc, file);
         }
         files.deinit(alloc);
+    }
+    var user_inputs: std.ArrayList(types.UserTurn) = .empty;
+    errdefer {
+        for (user_inputs.items) |user| types.freeUserTurn(alloc, user);
+        user_inputs.deinit(alloc);
+    }
+
+    for (messages) |msg| {
+        if (!Adapter.isUser(msg) or !Adapter.isTurnInput(msg)) continue;
+        const text = Adapter.content(msg) orelse "";
+        const copied_text = try alloc.dupe(u8, text);
+        const images = types.dupeImageAttachmentSlice(alloc, Adapter.images(msg)) catch |err| {
+            alloc.free(copied_text);
+            return err;
+        };
+        user_inputs.append(alloc, .{ .text = copied_text, .images = images }) catch |err| {
+            alloc.free(copied_text);
+            types.freeImageAttachmentSlice(alloc, images);
+            return err;
+        };
     }
 
     var i: usize = 0;
@@ -630,12 +678,17 @@ fn buildNormalExecutionMemory(
         i = j;
     }
 
+    const owned_tool_steps = try tool_steps.toOwnedSlice(alloc);
+    errdefer types.freeToolExecutionSteps(alloc, owned_tool_steps);
     const owned_files = try files.toOwnedSlice(alloc);
     errdefer types.freeFileEvidenceSlice(alloc, owned_files);
+    const owned_user_inputs = try user_inputs.toOwnedSlice(alloc);
+    errdefer types.freeUserTurnSlice(alloc, owned_user_inputs);
     markStaleFileEvidence(owned_files);
     return .{
-        .tool_steps = try tool_steps.toOwnedSlice(alloc),
+        .tool_steps = owned_tool_steps,
         .files = owned_files,
+        .user_inputs = owned_user_inputs,
     };
 }
 

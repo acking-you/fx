@@ -749,7 +749,7 @@ describe("gateway stream lifecycle", () => {
       expect(serializedToolNames(oracleRequest)).toEqual(
         AUTO_RESPONSES_WITHOUT_DURABLE_TOOLS_SERIALIZED_TOOL_NAMES,
       );
-      expect(request.tools).toHaveLength(25);
+      expect(request.tools).toHaveLength(26);
       expect(findUnavailableCapabilityReferences(oracleRequest)).toEqual([]);
       expect(request.instructions).toContain("# Identity and context");
       expect(toolByName(oracleRequest, "exec_command")?.description).toContain(
@@ -814,6 +814,47 @@ describe("gateway stream lifecycle", () => {
         "memory clear failed: saved memories were not removed; ensure ~/.fx/memories.json is a removable file and retry",
       );
       expect(readFileSync(survivorPath, "utf8")).toBe("still present\n");
+    } finally {
+      gateway.stop();
+      rmSync(root.root, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test("update_plan is a normal durable control tool", async () => {
+    const root = createFixtureRoot("update-plan");
+    const tracePath = join(root.root, "trace.log");
+    const responses = [
+      fakeGatewayToolCall("plan_1", "update_plan", {
+        explanation: "Keep the complete request in view.",
+        plan: [
+          { step: "Inspect the source", status: "in_progress" },
+          { step: "Verify the result", status: "pending" },
+        ],
+      }),
+      fakeGatewayFinalText("Plan completed."),
+    ];
+    const gateway = startGateway(() =>
+      responses.shift() ?? new Response("unexpected request", { status: 500 }),
+    );
+
+    try {
+      const result = await runFx(
+        ["ask", "--yolo", "--json", "--no-save", "Keep the complete request in view."],
+        {
+          cwd: root.workspace,
+          env: fixtureEnv(root, gateway, tracePath),
+          timeoutMs: 15_000,
+        },
+      );
+      const json = parseAskJson(result.stdout);
+      expect(result.code).toBe(0);
+      expect(json.exit_code).toBe(0);
+      expect(json.output).toContain("Plan completed.");
+      expect(json.tool_calls).toContainEqual({ name: "update_plan", status: "success" });
+      expect(gateway.requestCount()).toBe(2);
+      expect(gateway.requests[1]!.body).toContain("update_plan");
+      expect(gateway.requests[1]!.body).toContain("Inspect the source");
+      expect(gateway.requests[1]!.body).toContain("Keep the complete request in view.");
     } finally {
       gateway.stop();
       rmSync(root.root, { recursive: true, force: true });
@@ -4675,70 +4716,74 @@ describe("gateway stream lifecycle", () => {
     }
   });
 
-  test("CLI continuation prints one complete response after checkpointed partial output", async () => {
-    const root = createFixtureRoot("partial-pause-continue");
-    const tracePath = join(root.root, "trace.log");
-    const partialText = "CLI partial output before EOF.";
-    const finalText = "CLI recovery completed.";
-    const responses = [
-      sse(
-        `data: ${JSON.stringify({
-          type: "response.output_text.delta",
-          item_id: "answer",
-          output_index: 0,
-          content_index: 0,
-          delta: partialText,
-        })}\n\n`,
-      ),
-      ...Array.from({ length: 9 }, () => unavailableResponse("0")),
-      fakeGatewayFinalText(`${partialText}${finalText}`),
-    ];
-    const gateway = startGateway(() =>
-      responses.shift() ?? new Response("unexpected request", { status: 500 })
-    );
-    try {
-      const first = await runFx(
-        ["ask", "--json", "--auto", "Recover this CLI response."],
-        {
-          cwd: root.workspace,
-          env: fixtureEnv(root, gateway, tracePath),
-          timeoutMs: 15_000,
-        },
+  test(
+    "CLI continuation prints one complete response after checkpointed partial output",
+    async () => {
+      const root = createFixtureRoot("partial-pause-continue");
+      const tracePath = join(root.root, "trace.log");
+      const partialText = "CLI partial output before EOF.";
+      const finalText = "CLI recovery completed.";
+      const responses = [
+        sse(
+          `data: ${JSON.stringify({
+            type: "response.output_text.delta",
+            item_id: "answer",
+            output_index: 0,
+            content_index: 0,
+            delta: partialText,
+          })}\n\n`,
+        ),
+        ...Array.from({ length: 9 }, () => unavailableResponse("0")),
+        fakeGatewayFinalText(`${partialText}${finalText}`),
+      ];
+      const gateway = startGateway(() =>
+        responses.shift() ?? new Response("unexpected request", { status: 500 })
       );
-      const paused = parseAskJson(first.stdout);
-      expect(first.code).toBe(1);
-      expect(paused.output).toBe(partialText);
-      expect(paused.recovery?.state).toBe("paused");
-      expect(gateway.requestCount()).toBe(10);
+      try {
+        const first = await runFx(
+          ["ask", "--json", "--auto", "Recover this CLI response."],
+          {
+            cwd: root.workspace,
+            env: fixtureEnv(root, gateway, tracePath),
+            timeoutMs: 15_000,
+          },
+        );
+        const paused = parseAskJson(first.stdout);
+        expect(first.code).toBe(1);
+        expect(paused.output).toBe(partialText);
+        expect(paused.recovery?.state).toBe("paused");
+        expect(gateway.requestCount()).toBe(10);
 
-      const resumed = await runFx(
-        [
-          "ask",
-          "--json",
-          "--auto",
-          "--resume-id",
-          paused.session_id,
-          "--continue-recovery",
-        ],
-        {
-          cwd: root.workspace,
-          env: fixtureEnv(root, gateway, tracePath),
-          timeoutMs: 15_000,
-        },
-      );
-      const recovered = parseAskJson(resumed.stdout);
-      expect(resumed.code).toBe(0);
-      expect(recovered.output).toBe(`${partialText}${finalText}`);
-      expect(recovered.recovery?.state).toBe("recovered");
-      expect(recovered.recovery?.message).not.toContain(
-        "provider temporarily unavailable",
-      );
-      expect(gateway.requestCount()).toBe(11);
-    } finally {
-      gateway.stop();
-      rmSync(root.root, { recursive: true, force: true });
-    }
-  });
+        const resumed = await runFx(
+          [
+            "ask",
+            "--json",
+            "--auto",
+            "--resume-id",
+            paused.session_id,
+            "--continue-recovery",
+          ],
+          {
+            cwd: root.workspace,
+            env: fixtureEnv(root, gateway, tracePath),
+            timeoutMs: 15_000,
+          },
+        );
+        const recovered = parseAskJson(resumed.stdout);
+        expect(resumed.code).toBe(0);
+        expect(recovered.output).toBe(`${partialText}${finalText}`);
+        expect(recovered.recovery?.state).toBe("recovered");
+        expect(recovered.recovery?.message).not.toContain(
+          "provider temporarily unavailable",
+        );
+        expect(gateway.requestCount()).toBe(11);
+      } finally {
+        gateway.stop();
+        rmSync(root.root, { recursive: true, force: true });
+      }
+    },
+    { timeout: 15_000 },
+  );
 
   test("content filter does not retry or offer route recovery", async () => {
     const root = createFixtureRoot("content-filter-terminal");

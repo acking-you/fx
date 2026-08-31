@@ -1491,7 +1491,16 @@ fn writeExecutionMemory(writer: *std.Io.Writer, execution: session.ExecutionMemo
         if (i > 0) try writer.writeByte(',');
         try writeFileEvidence(writer, file);
     }
-    try writer.writeAll("]}");
+    try writer.writeByte(']');
+    if (execution.user_inputs.len > 0) {
+        try writer.writeAll(",\"user_inputs\":[");
+        for (execution.user_inputs, 0..) |user, i| {
+            if (i > 0) try writer.writeByte(',');
+            try writeUserTurn(writer, user);
+        }
+        try writer.writeByte(']');
+    }
+    try writer.writeByte('}');
 }
 
 fn writeToolCall(writer: *std.Io.Writer, tool_call: session.ToolCall) !void {
@@ -1778,7 +1787,12 @@ fn imageAttachmentObject(value: std.json.Value) !std.json.ObjectMap {
 }
 
 fn parseExecutionMemory(alloc: Allocator, value: std.json.Value) !session.ExecutionMemory {
-    const object = try exactObject(value, &.{ "schema_version", "tool_steps", "files" });
+    const raw_object = try requireObject(value);
+    const has_user_inputs = raw_object.get("user_inputs") != null;
+    const object = if (has_user_inputs)
+        try exactObject(value, &.{ "schema_version", "tool_steps", "files", "user_inputs" })
+    else
+        try exactObject(value, &.{ "schema_version", "tool_steps", "files" });
     const schema_version = try requireU64(object, "schema_version");
     if (schema_version != 1 and schema_version != 2 and schema_version != 3 and
         schema_version != 4 and schema_version != 5 and schema_version != 6 and
@@ -1793,13 +1807,51 @@ fn parseExecutionMemory(alloc: Allocator, value: std.json.Value) !session.Execut
     );
     errdefer session.freeExecutionMemory(alloc, .{ .tool_steps = tool_steps });
     const files = try parseFiles(alloc, object.get("files") orelse return error.InvalidSessionFormat);
-    var execution: session.ExecutionMemory = .{ .tool_steps = tool_steps, .files = files };
+    errdefer types.freeFileEvidenceSlice(alloc, files);
+    const user_inputs: []session.UserTurn = if (has_user_inputs)
+        try parseUserTurnArray(alloc, object.get("user_inputs") orelse return error.InvalidSessionFormat)
+    else
+        @constCast(&.{});
+    var execution: session.ExecutionMemory = .{ .tool_steps = tool_steps, .files = files, .user_inputs = user_inputs };
     execution_retention.boundFilePresentationBodies(
         alloc,
         &execution,
         execution_retention.durable_file_body_policy,
     );
     return execution;
+}
+
+fn parseUserTurnArray(alloc: Allocator, value: std.json.Value) ![]session.UserTurn {
+    if (value != .array) return error.InvalidSessionFormat;
+    if (value.array.items.len == 0) return &.{};
+    const users = try alloc.alloc(session.UserTurn, value.array.items.len);
+    var parsed_count: usize = 0;
+    errdefer {
+        for (users[0..parsed_count]) |user| session.freeUserTurn(alloc, user);
+        alloc.free(users);
+    }
+    for (value.array.items, 0..) |item, i| {
+        users[i] = try parseUserTurn(alloc, item);
+        parsed_count += 1;
+    }
+    return users;
+}
+
+test "execution memory round-trips active-turn user inputs" {
+    const alloc = std.testing.allocator;
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+    var user_inputs = [_]session.UserTurn{.{ .text = @constCast("continue the original request") }};
+    const input = session.ExecutionMemory{
+        .user_inputs = user_inputs[0..],
+    };
+    try writeExecutionMemory(&out.writer, input);
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, out.written(), .{});
+    defer parsed.deinit();
+    const decoded = try parseExecutionMemory(alloc, parsed.value);
+    defer session.freeExecutionMemory(alloc, decoded);
+    try std.testing.expectEqual(@as(usize, 1), decoded.user_inputs.len);
+    try std.testing.expectEqualStrings("continue the original request", decoded.user_inputs[0].text);
 }
 
 fn parseToolSteps(
