@@ -25,6 +25,13 @@ const ToolCall = types.ToolCall;
 const Config = runtime_config.Config;
 const ToolExecutionStatus = runtime_tool_contracts.ToolExecutionStatus;
 
+const steering_open = "<user_steering>\n";
+const steering_close = "\n</user_steering>";
+
+pub fn steeringMessage(alloc: Allocator, text: []const u8) ![]u8 {
+    return std.fmt.allocPrint(alloc, steering_open ++ "{s}" ++ steering_close, .{text});
+}
+
 pub fn persistedStatusForCurrentFxLocalResult(
     status: ToolExecutionStatus,
     output: []const u8,
@@ -1023,6 +1030,23 @@ test "large result storage redacts secret-bearing output before preview and disk
     defer alloc.free(stored);
     try std.testing.expect(std.mem.find(u8, stored, "super-secret-value") == null);
     try std.testing.expect(std.mem.find(u8, stored, "api_key=[redacted]") != null);
+}
+
+test "execution memory persists consumed steering without protocol wrappers" {
+    const alloc = std.testing.allocator;
+    const messages = [_]ChatMessage{
+        .{ .role = .user, .content = "ordinary user context" },
+        .{ .role = .user, .content = "<user_steering>\nfocus on rendering\n</user_steering>" },
+        .{ .role = .assistant, .content = "continuing" },
+        .{ .role = .user, .content = "<user_steering>\nrun the focused test\n</user_steering>" },
+    };
+
+    const execution = try buildExecutionMemory(alloc, &messages);
+    defer types.freeExecutionMemory(alloc, execution);
+
+    try std.testing.expectEqual(@as(usize, 2), execution.steering.len);
+    try std.testing.expectEqualStrings("focus on rendering", execution.steering[0]);
+    try std.testing.expectEqualStrings("run the focused test", execution.steering[1]);
 }
 
 test "transcript does not mark native web_search as provider resource placeholder" {

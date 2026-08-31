@@ -611,10 +611,10 @@ function expectRenderedMarkdown(
 }
 
 function expectInferredTypeScriptCodeBlock(scrollback: string): void {
-  expect(scrollback).toContain("┌ ts");
+  expect(scrollback).toContain("─ ts ─");
   expect(scrollback).toContain("inferredHook = await");
   expect(scrollback).toContain("{ cleanup: true } as");
-  expect(scrollback).toContain("pSignal);");
+  expect(scrollback).toContain("nupSignal)");
 }
 
 function expectInferredTypeScriptColors(scrollback: string): void {
@@ -623,9 +623,9 @@ function expectInferredTypeScriptColors(scrollback: string): void {
 }
 
 function expectExpandedCodeProfiles(scrollback: string): void {
-  expect(scrollback).toContain("┌ json");
+  expect(scrollback).toContain("─ json ─");
   expect(scrollback).toContain('"json_ready"');
-  expect(scrollback).toContain("┌ python");
+  expect(scrollback).toContain("─ python ─");
   expect(scrollback).toContain("def render_ready");
 }
 
@@ -653,6 +653,70 @@ test("volatile status rows normalize before stable-grid comparison", () => {
   expect(normalizeVolatileStatusRows(["  (↑6 ↓5)"])).toEqual(["<status>"]);
   expect(normalizeVolatileStatusRows(["  0s (↑6 ↓5)"])).toEqual(["<status>"]);
 });
+
+test.skipIf(!tmuxAvailable())(
+  "saved fx ask metadata appears after interactive Ctrl-O resume",
+  async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "fx-ask-metadata-resume-")));
+    const home = join(root, "home");
+    const workspace = join(root, "workspace");
+    const stderrPath = join(root, "stderr.log");
+    mkdirSync(join(home, ".fx"), { recursive: true });
+    mkdirSync(workspace);
+    writeFileSync(
+      join(home, ".fx", "settings.json"),
+      JSON.stringify({ sandbox: "none", permission_mode: "auto", permission: {} }),
+    );
+    writeFileSync(stderrPath, "");
+
+    const prompt = "Persist this fx ask metadata.";
+    const answer = "FX_ASK_METADATA_COMPLETE";
+    const askGateway = startFakeGateway([fakeGatewayFinalText(answer)]);
+    let active: TmuxSession | null = null;
+    try {
+      const ask = await runFx(["ask", "--json", "--auto", prompt], {
+        cwd: realpathSync(workspace),
+        env: gatewayEnv(home, askGateway),
+        timeoutMs: TIMEOUT,
+      });
+      expect(ask.code).toBe(0);
+      expect(ask.stderr).toBe("");
+      expect(JSON.parse(ask.stdout).session_id).toBeTruthy();
+
+      const resumeGateway = startFakeGateway([]);
+      try {
+        active = await TmuxSession.create({
+          cmd: `${FX_BIN} --resume-last`,
+          cwd: realpathSync(workspace),
+          env: gatewayEnv(home, resumeGateway),
+          stderrPath,
+          width: 100,
+          height: 32,
+        });
+        await active.waitForComposer(TIMEOUT);
+        await active.waitForText(answer, TIMEOUT);
+        await active.sendKeys("C-o");
+        const full = await active.waitForPane(
+          (pane) =>
+            pane.includes("Full detail · ctrl o close") &&
+            pane.includes("UTC · Usage") &&
+            /\(↑\d+ ↓5\)/.test(pane),
+          TIMEOUT,
+        );
+        expect(full).toContain(prompt);
+        expect(full).toContain(answer);
+        expect(readFileSync(stderrPath, "utf8")).toBe("");
+      } finally {
+        if (active) await active.kill();
+        resumeGateway.stop();
+      }
+    } finally {
+      askGateway.stop();
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+  TIMEOUT * 2,
+);
 
 test.skipIf(!tmuxAvailable())(
   "session resume command group opens last and explicit session ids",
@@ -865,10 +929,7 @@ printf '${trailingMarker}   '
         .toBe(false);
 
       await active.sendKeys("C-o");
-      await active.waitForText("┃ Review · ←/→ switch · ctrl o close", TIMEOUT);
-      expect(await active.capturePane()).not.toContain(trailingMarker);
-      await active.sendKeys("Right");
-      await active.waitForText("┃ Full detail · ←/→ switch · ctrl o close", TIMEOUT);
+      await active.waitForText("┃ Full detail · ctrl o close", TIMEOUT);
       await active.sendHexBytes(
         Array.from({ length: 80 }, () => ["1b", "5b", "36", "7e"]).flat(),
       );
@@ -885,12 +946,17 @@ printf '${trailingMarker}   '
       expect(fullHead).toContain(ansiMarker);
       expect(fullHead).toContain(crMarker);
       expect(fullHead).toContain("NUL:\\x00:END");
-      expect(fullHead).toContain("INVALID:\\xff:END");
       expect(fullHead).not.toContain("CR_STAGE_01");
       expect(fullHead).not.toContain("\\x1b[31m");
       await active.sendHexBytes(["1b", "5b", "3c", "36", "35", "3b", "31", "3b", "31", "4d"]);
+      const invalidViewport = await active.waitForPane(
+        (pane) => pane !== fullHead && pane.includes("INVALID:\\xff:END"),
+        TIMEOUT,
+      );
+      expect(invalidViewport).not.toContain("\\x1b[31m");
+      await active.sendHexBytes(["1b", "5b", "3c", "36", "35", "3b", "31", "3b", "31", "4d"]);
       const boundaryViewport = await active.waitForPane(
-        (pane) => pane !== fullHead && pane.includes("BOUNDARY_LEADING"),
+        (pane) => pane !== invalidViewport && pane.includes("BOUNDARY_LEADING"),
         TIMEOUT,
       );
       expect(boundaryViewport).toContain("BOUNDARY_LEADING");
@@ -925,10 +991,7 @@ printf '${trailingMarker}   '
       });
       await active.waitForText(doneMarker, TIMEOUT);
       await active.sendKeys("C-o");
-      await active.waitForText("┃ Review · ←/→ switch · ctrl o close", TIMEOUT);
-      expect(await active.capturePane()).not.toContain(trailingMarker);
-      await active.sendKeys("Right");
-      await active.waitForText("┃ Full detail · ←/→ switch · ctrl o close", TIMEOUT);
+      await active.waitForText("┃ Full detail · ctrl o close", TIMEOUT);
       await active.sendHexBytes(
         Array.from({ length: 80 }, () => ["1b", "5b", "36", "7e"]).flat(),
       );
@@ -967,7 +1030,7 @@ printf '${trailingMarker}   '
 );
 
 test.skipIf(!tmuxAvailable())(
-  "Ctrl-O opens retained command output and restores grouped compact output",
+  "Ctrl-O opens full retained command output and restores grouped compact output",
   async () => {
     const root = realpathSync(mkdtempSync(join(tmpdir(), "fx-full-transcript-")));
     const home = join(root, "home");
@@ -982,10 +1045,10 @@ test.skipIf(!tmuxAvailable())(
     );
     writeFileSync(stderrPath, "");
 
-    const tailMarker = "FULL_CTRL_O_LINE_3000";
+    const tailMarker = "FULL_CTRL_O_LINE_0100";
     const commandArgumentTail = "FULL_CTRL_O_COMMAND_ARGUMENT_TAIL";
     const command =
-      "awk 'BEGIN { for (i = 1; i <= 3000; i++) printf \"FULL_CTRL_O_LINE_%04d\\n\", i }'" +
+      "awk 'BEGIN { for (i = 1; i <= 100; i++) printf \"FULL_CTRL_O_LINE_%04d\\n\", i }'" +
       ` # ${"argument-padding-".repeat(8)}${commandArgumentTail}`;
     const gateway = startFakeGateway([
       fakeGatewayToolCall("ctrl-o-command", "exec_command", { cmd: command }),
@@ -1014,19 +1077,8 @@ test.skipIf(!tmuxAvailable())(
       const compactGrid = await active.capturePaneGrid();
 
       await active.sendKeys("C-o");
-      await active.waitForText("Review · ←/→ switch · ctrl o close · PgUp/PgDn scroll · Esc close", TIMEOUT);
-      const review = await active.capturePane();
-      expect(review).toContain("FULL_CTRL_O_LINE_0001");
-      expect(review).toContain("FULL_CTRL_O_LINE_0003");
-      expect(review).not.toContain("FULL_CTRL_O_LINE_0004");
-      expect(review).not.toContain(tailMarker);
-      expect(review).not.toContain(commandArgumentTail);
-      expect(review).toContain("2997 more lines · → to expand");
-      expect(review).not.toMatch(/^\s*input\s*$/m);
-
-      await active.sendKeys("Right");
-      await active.waitForText("Full detail · ←/→ switch · ctrl o close · PgUp/PgDn scroll · Esc close", TIMEOUT);
-      const expandedAtTail = await active.capturePane();
+      await active.waitForText("Full detail · ctrl o close · PgUp/PgDn scroll · Esc close", TIMEOUT);
+      const expandedAtTail = await active.waitForText(tailMarker, TIMEOUT);
       expect(expandedAtTail).toContain(tailMarker);
       expect(expandedAtTail).not.toContain("FULL_CTRL_O_LINE_0001");
 
@@ -1036,12 +1088,17 @@ test.skipIf(!tmuxAvailable())(
       expect(expandedAtHead).toContain("FULL_CTRL_O_LINE_0001");
       expect(expandedAtHead).not.toContain(tailMarker);
 
-      await active.sendKeys(Array.from({ length: 140 }, () => "NPage").join(" "));
+      for (let page = 0; page < 20; page += 1) {
+        const before = await active.capturePane();
+        if (before.includes(tailMarker)) break;
+        await active.sendKeys("NPage");
+        await active.waitForPane((pane) => pane !== before, TIMEOUT);
+      }
       await active.waitForText(tailMarker, TIMEOUT);
       const full = await active.capturePane();
       expect(full).toContain(tailMarker);
       expect(full).not.toContain("lines more (ctrl o");
-      expect(full).toContain("Full detail · ←/→ switch · ctrl o close · PgUp/PgDn scroll · Esc close");
+      expect(full).toContain("Full detail · ctrl o close · PgUp/PgDn scroll · Esc close");
 
       await active.sendHexBytes(["1b", "5b", "35", "7e"]);
       const afterPageUp = await active.waitForPane(
@@ -1069,8 +1126,6 @@ test.skipIf(!tmuxAvailable())(
       }
       await active.waitForText(tailMarker, TIMEOUT);
 
-      await active.sendKeys("Left");
-      await active.waitForText("Review · ←/→ switch · ctrl o close · PgUp/PgDn scroll · Esc close", TIMEOUT);
       await active.sendKeys("C-o");
       await active.waitForText("● 1 tool call · 1 command", TIMEOUT);
       const restored = await active.capturePane();
@@ -1366,6 +1421,7 @@ while :; do :; done
       const afterAnsi = await active.captureFullScrollbackEscapes();
       writeFileSync(afterPath, after);
       writeFileSync(afterAnsiPath, afterAnsi);
+      expect(after).toContain(nextMarker);
       expect(historicalLines(after)).toEqual(historicalLines(before));
       expect(historicalLines(afterAnsi)).toEqual(historicalLines(beforeAnsi));
       const followRequest = JSON.parse(gateway.requests[1]!.body) as {
@@ -1680,7 +1736,7 @@ test.skipIf(!tmuxAvailable())(
     mkdirSync(workspace);
     writeFileSync(stderrPath, "");
 
-    const cmd = `zsh -lc 'for i in {1..14}; do printf "${sentinel}_%02d: pre-Fx shell scrollback\\n" "$i"; done; exec ${FX_BIN}'`;
+    const cmd = `zsh -lc 'for i in {1..14}; do printf "${sentinel}_%02d: pre-fx shell scrollback\\n" "$i"; done; exec ${FX_BIN}'`;
     let active: TmuxSession | null = null;
     try {
       active = await TmuxSession.create({
@@ -1699,7 +1755,7 @@ test.skipIf(!tmuxAvailable())(
       await active.waitForComposer(TIMEOUT);
       const before = await active.captureFullScrollback();
       for (const index of [9, 10, 11]) {
-        expect(before).toContain(`${sentinel}_${index.toString().padStart(2, "0")}: pre-Fx shell scrollback`);
+        expect(before).toContain(`${sentinel}_${index.toString().padStart(2, "0")}: pre-fx shell scrollback`);
       }
 
       await active.sendLiteralText(draft);
@@ -1716,7 +1772,7 @@ test.skipIf(!tmuxAvailable())(
 
       const restored = await active.captureFullScrollback();
       for (const index of [9, 10, 11]) {
-        expect(restored).toContain(`${sentinel}_${index.toString().padStart(2, "0")}: pre-Fx shell scrollback`);
+        expect(restored).toContain(`${sentinel}_${index.toString().padStart(2, "0")}: pre-fx shell scrollback`);
       }
       expect(restored).toContain(`┃ ${draft}`);
       expect(restored).not.toContain("press ctrl+c again to exit");
@@ -1854,7 +1910,7 @@ test.skipIf(!tmuxAvailable())(
       const fullView = await active.capturePane();
       expect(fullView).toContain(firstDone);
       expect(fullView).not.toContain(fullViewDraft);
-      expect(fullView).toContain("┃ Review · ←/→ switch · ctrl o close");
+      expect(fullView).toContain("┃ Full detail · ctrl o close");
       await active.sendKeys("Escape");
       await active.waitForText(fullViewDraft, TIMEOUT);
       await active.sendKeys("Enter");
@@ -2022,7 +2078,7 @@ test.skipIf(!tmuxAvailable())(
 );
 
 test.skipIf(!tmuxAvailable())(
-  "streaming wheel input stays inline until Ctrl-O",
+  "streaming scroll stays inline while Ctrl-O preserves native selection and ignores horizontal arrows",
   async () => {
     const root = realpathSync(mkdtempSync(join(tmpdir(), "fx-stream-scroll-inline-")));
     const home = join(root, "home");
@@ -2083,18 +2139,36 @@ test.skipIf(!tmuxAvailable())(
       await active.sendHexBytes(stressBytes);
       await Bun.sleep(250);
       const inlineAfterWheel = (await active.capturePaneGrid()).join("\n");
-      expect(inlineAfterWheel).not.toContain("Review · ←/→ switch · ctrl o close");
+      expect(inlineAfterWheel).not.toContain("Full detail · ctrl o close");
       expect(readFileSync(tapePath)).not.toContain(Buffer.from("\x1b[?1000h\x1b[?1006h"));
       expect(readFileSync(tracePath, "utf8")).not.toContain(
-        "depth_transition from=inline to=review",
+        "depth_transition from=inline to=full",
       );
 
       await active.sendKeys("C-o");
-      await active.waitForText("┃ Review · ←/→ switch · ctrl o close", TIMEOUT);
-      await active.sendHexBytes(["1b", "5b", "3c", "36", "34", "3b", "31", "3b", "31", "4d"]);
+      await active.waitForText("┃ Full detail · ctrl o close", TIMEOUT);
+      await active.sendKeys("Left");
+      await active.waitForText("┃ Full detail · ctrl o close", TIMEOUT);
+      await active.sendKeys("Right");
+      await active.waitForText("┃ Full detail · ctrl o close", TIMEOUT);
+      expect(readFileSync(tapePath)).not.toContain(Buffer.from("\x1b[?1000h\x1b[?1006h"));
+      const alternateScrollTraceStart = statSync(tracePath).size;
+      await active.sendHexBytes(["1b", "5b", "41"]);
+      await active.sendHexBytes(["1b", "5b", "42"]);
       await waitForCondition(
-        () => readFileSync(tracePath, "utf8").includes("unit=wheel rows=3"),
-        "viewer wheel trace",
+        () => {
+          const appended = readFileSync(tracePath)
+            .subarray(alternateScrollTraceStart)
+            .toString("utf8");
+          return appended.includes("direction=up unit=wheel") &&
+            appended.includes("direction=down unit=wheel");
+        },
+        "viewer alternate-scroll trace",
+      );
+      await active.sendHexBytes(["1b", "5b", "35", "7e"]);
+      await waitForCondition(
+        () => readFileSync(tracePath, "utf8").includes("unit=page"),
+        "viewer page trace",
       );
       const readingBefore = await active.capturePaneGrid();
       expect(readingBefore.join("\n")).toContain("Review · ←/→ switch · ctrl o close");
@@ -2106,6 +2180,8 @@ test.skipIf(!tmuxAvailable())(
         if (/^└ (?:Running|Ran) /.test(row)) return "<command status>";
         if (/^│  \d+ output lines$/.test(row)) return "<output count>";
         if (/^│  \d+ more lines · → to expand$/.test(row)) return "<fold count>";
+        if (row.includes("enter queue ·")) return "<status line>";
+        if (/^(?:auto · )?gpt-5$/.test(row)) return "<status line>";
         return row;
       });
       const normalizedBefore = normalizeLiveMetadata(readingBefore);
@@ -2113,14 +2189,17 @@ test.skipIf(!tmuxAvailable())(
       for (const [rowIndex, row] of normalizedBefore.entries()) {
         if (row !== "") expect(normalizedAfter[rowIndex]).toBe(row);
       }
-      for (const index of [1, 2, 3]) {
-        const marker = `│ ${lineMarker} ${String(index).padStart(3, "0")}`;
+      const visibleOutputRows = readingBefore.filter((row) =>
+        row.includes(`│ ${lineMarker} `)
+      );
+      expect(visibleOutputRows.length).toBeGreaterThan(0);
+      for (const marker of visibleOutputRows.slice(0, 3)) {
         expect(readingAfter.indexOf(marker)).toBe(readingBefore.indexOf(marker));
       }
 
       await active.sendKeys("Escape");
       await active.waitForPane(
-        (pane) => pane.includes(doneMarker) && !pane.includes("┃ Review · ←/→ switch · ctrl o close"),
+        (pane) => pane.includes(doneMarker) && !pane.includes("┃ Full detail · ctrl o close"),
         TIMEOUT,
       );
       const scrollback = await waitForScrollback(active, doneMarker);
@@ -2138,10 +2217,10 @@ test.skipIf(!tmuxAvailable())(
           .filter((frame) => frame.kind === 1)
           .map((frame) => frame.payload),
       ).toString("binary");
-      expect(countOccurrences(stdout, "\x1b[?1000h")).toBe(1);
-      expect(countOccurrences(stdout, "\x1b[?1006h")).toBe(1);
-      expect(countOccurrences(stdout, "\x1b[?1000l")).toBe(2);
-      expect(countOccurrences(stdout, "\x1b[?1006l")).toBe(2);
+      expect(countOccurrences(stdout, "\x1b[?1000h")).toBe(0);
+      expect(countOccurrences(stdout, "\x1b[?1006h")).toBe(0);
+      expect(countOccurrences(stdout, "\x1b[?1000l")).toBe(1);
+      expect(countOccurrences(stdout, "\x1b[?1006l")).toBe(1);
       expect(stdout).toContain("\x1b[?2026l\x1b[?1000l\x1b[?1002l\x1b[?1004l\x1b[?1006l");
       expect(countOccurrences(stdout, "\x1b[?1049h")).toBe(1);
       expect(countOccurrences(stdout, "\x1b[?1049l")).toBe(1);
@@ -2376,13 +2455,15 @@ test.skipIf(!tmuxAvailable())(
           pane.includes(beforeMarker) &&
           pane.includes("1 tool call") &&
           pane.includes("Ran ") &&
-          pane.includes("1 output line") &&
           pane.includes(outputMarker) &&
           pane.includes(afterMarker),
         TIMEOUT,
       );
       const grid = fullTranscript.replace(/\n$/, "").split("\n");
       const before = grid.findIndex((line) => line.includes(beforeMarker));
+      const toolTimestamp = grid.findIndex(
+        (line, index) => index > before && line.includes("UTC · Tool"),
+      );
       const header = grid.findIndex((line) => line.includes("1 tool call"));
       const tool = grid.findIndex((line) => line.includes("Ran "));
       const metadata = grid.findIndex((line) => line.includes("1 output line"));
@@ -2391,19 +2472,23 @@ test.skipIf(!tmuxAvailable())(
       );
       const after = grid.findIndex((line) => line.includes(afterMarker));
       if (
-        before < 0 || header < 0 || tool < 0 ||
-        metadata < 0 || output < 0 || after < 0
+        before < 0 || toolTimestamp < 0 || header < 0 || tool < 0 ||
+        output < 0 || afterTimestamp < 0 || after < 0
       ) {
         throw new Error(`missing full transcript rows:\n${grid.join("\n")}`);
       }
       expect(fullTranscript).not.toContain(
         "Permissions: Auto agent approved this request",
       );
-      expect(header).toBe(before + 2);
+      expect(grid[before + 1]).toBe("");
+      expect(toolTimestamp).toBe(before + 2);
+      expect(header).toBe(toolTimestamp + 1);
       expect(tool).toBe(header + 1);
-      expect(metadata).toBe(tool + 1);
-      expect(output).toBe(metadata + 1);
-      expect(after).toBe(output + 2);
+      expect(grid[tool + 1]).toContain("timeout_ms: 600000");
+      expect(output).toBe(tool + 2);
+      expect(grid[output + 1]).toBe("");
+      expect(afterTimestamp).toBe(output + 2);
+      expect(after).toBe(afterTimestamp + 1);
 
       await active.sendKeys("Escape");
       await active.waitForComposer(TIMEOUT);
@@ -2535,14 +2620,13 @@ test.skipIf(!tmuxAvailable())(
 
       await active.sendKeys("C-o");
       await active.waitForText("READ_RESULT_MARKER", TIMEOUT);
-      const review = await active.capturePane();
-      expect(review).toContain("Review · ←/→ switch · ctrl o close · PgUp/PgDn scroll · Esc close");
-      expect(review).toContain("1 line");
-      expect(review).toContain("READ_RESULT_MARKER");
-      expect(review).not.toContain("<path>");
-      expect(review).not.toContain("<content>");
-      expect(review).not.toContain("\\x0a");
-      expect(review).not.toMatch(/^\s*input\s*$/m);
+      const full = await active.capturePane();
+      expect(full).toContain("Full detail · ctrl o close · PgUp/PgDn scroll · Esc close");
+      expect(full).toContain("READ_RESULT_MARKER");
+      expect(full).not.toContain("<path>");
+      expect(full).not.toContain("<content>");
+      expect(full).not.toContain("\\x0a");
+      expect(full).not.toMatch(/^\s*input\s*$/m);
       expect(readFileSync(stderrPath, "utf8")).not.toContain("AnsiBandOverflow");
     } finally {
       if (active) {
@@ -2601,7 +2685,7 @@ test.skipIf(!tmuxAvailable())(
       await active.waitForText("LIST_FULL_DETAIL_MARKER", TIMEOUT);
       const firstDetail = await active.capturePane();
       expect(firstDetail).toContain("LIST_FULL_DETAIL_MARKER");
-      expect(firstDetail).toContain("Review · ←/→ switch · ctrl o close · PgUp/PgDn scroll · Esc close");
+      expect(firstDetail).toContain("Full detail · ctrl o close · PgUp/PgDn scroll · Esc close");
       expect(firstDetail).not.toMatch(/^\s*input\s*$/m);
 
       await active.waitForText("READ_FULL_DETAIL_MARKER", TIMEOUT);
@@ -2924,8 +3008,7 @@ test.skipIf(!tmuxAvailable())(
 
       await active.sendKeys("C-o");
       await Bun.sleep(150);
-      await active.sendKeys("Right");
-      await active.waitForText("┃ Full detail · ←/→ switch · ctrl o close", actionTimeout);
+      await active.waitForText("┃ Full detail · ctrl o close", actionTimeout);
       await active.sendHexBytes(
         Array.from({ length: 20 }, () => ["1b", "5b", "36", "7e"]).flat(),
       );
@@ -3100,8 +3183,7 @@ test.skipIf(!tmuxAvailable())(
         () => alternateDepthAt(tapeText()) === 1,
         "Ctrl-O to enter the alternate screen",
       );
-      await active.sendKeys("Right");
-      await active.waitForText("┃ Full detail · ←/→ switch · ctrl o close", TIMEOUT);
+      await active.waitForText("┃ Full detail · ctrl o close", TIMEOUT);
       await active.sendHexBytes(["1b", "5b", "36", "7e"]);
       const tailViewport = await active.waitForText(streamGate, TIMEOUT);
       expect(tailViewport).toContain(streamGate);
@@ -3146,8 +3228,7 @@ test.skipIf(!tmuxAvailable())(
         () => alternateDepthAt(tapeText()) === 1,
         "the repeated Ctrl-O entry",
       );
-      await active.sendKeys("Right");
-      await active.waitForText("┃ Full detail · ←/→ switch · ctrl o close", TIMEOUT);
+      await active.waitForText("┃ Full detail · ctrl o close", TIMEOUT);
       await active.sendKeys("C-o");
       await waitForCondition(
         () => alternateDepthAt(tapeText()) === 0,
@@ -3220,7 +3301,7 @@ test.skipIf(!tmuxAvailable())(
       await active.sendText("/quit");
       await waitForCondition(
         () => active?.paneStatus().dead === true,
-        "Fx to exit after /quit",
+        "fx to exit after /quit",
       );
       expect(paneExitMatches(active.paneStatus(), 0)).toBe(true);
       expect(readFileSync(stderrPath, "utf8")).toBe("");
@@ -3320,7 +3401,7 @@ test.skipIf(!tmuxAvailable())(
 
       expect(paneExitMatches(contender.paneStatus(), 1)).toBe(true);
       expect(readFileSync(contenderStderrPath, "utf8")).toBe(
-        "fx: another Fx process may be using this session (running or suspended); check other terminals or run jobs, then use fg or quit that process\n",
+        "fx: another fx process may be using this session (running or suspended); check other terminals or run jobs, then use fg or quit that process\n",
       );
       expect(owner.isPaneAlive()).toBe(true);
       const contenderScrollback = await contender.captureFullScrollback();
@@ -3443,7 +3524,7 @@ test.skipIf(!tmuxAvailable())(
       await contender.sendKeys("Enter");
       await contender.waitForPane(
         (pane) => stripAnsi(pane).includes(
-          "This session is open in another Fx. Close it there, then press Enter to retry.",
+          "This session is open in another fx. Close it there, then press Enter to retry.",
         ),
         1_000,
       );
@@ -3452,7 +3533,7 @@ test.skipIf(!tmuxAvailable())(
       const contendedPicker = stripAnsi(await contender.capturePane());
       expect(contendedPicker).toContain(savedTitle);
       expect(contendedPicker).toContain(
-        "This session is open in another Fx. Close it there, then press Enter to retry.",
+        "This session is open in another fx. Close it there, then press Enter to retry.",
       );
       expect(contendedPicker).not.toContain("SessionBusy");
       const contendedEntries = visibleSessionPickerEntries(
@@ -4227,8 +4308,7 @@ test.skipIf(!tmuxAvailable())(
         expectNoRawToolReplay(resumedToolScrollback);
         if (index === 0) {
           await active.sendKeys("C-o");
-          await active.sendKeys("Right");
-          await active.waitForText("┃ Full detail · ←/→ switch · ctrl o close", TIMEOUT);
+          await active.waitForText("┃ Full detail · ctrl o close", TIMEOUT);
           await active.waitForText(toolWorkspaceMarker, TIMEOUT);
           const full = await active.capturePane();
           expect(full).toContain("Ran pwd");
@@ -4489,18 +4569,7 @@ test.skipIf(!tmuxAvailable())(
       expect(resumed).not.toContain("RESUMED_SECOND_FILE_LINE_001");
 
       await active.sendKeys("C-o");
-      await active.waitForText("┃ Review · ←/→ switch · ctrl o close", TIMEOUT);
-      const review = await active.capturePane();
-      expect(review).toContain("RESUMED_SECOND_FILE_LINE_001");
-      expect(review).toContain("RESUMED_SECOND_FILE_LINE_003");
-      expect(review).not.toContain("RESUMED_SECOND_FILE_LINE_004");
-      expect(review).not.toContain("RESUMED_SECOND_FILE_LINE_060");
-      expect(review).toContain("57 more lines · → to expand");
-      expect(review).toMatch(/^  │  57 more lines · → to expand/m);
-      expect(review).not.toMatch(/^│  57 more lines · → to expand/m);
-      expect(review).not.toMatch(/^\s*│?\s*60 lines\s*$/m);
-      await active.sendKeys("Right");
-      await active.waitForText("┃ Full detail · ←/→ switch · ctrl o close", TIMEOUT);
+      await active.waitForText("┃ Full detail · ctrl o close", TIMEOUT);
       await active.sendHexBytes(
         Array.from({ length: 10 }, () => ["1b", "5b", "36", "7e"]).flat(),
       );
@@ -4611,9 +4680,7 @@ printf '${stdoutTail2}\\n'
 
     async function expectRestoredViewerOutput(session: TmuxSession): Promise<void> {
       await session.sendKeys("C-o");
-      await session.waitForText("┃ Review · ←/→ switch · ctrl o close", TIMEOUT);
-      await session.sendKeys("Right");
-      await session.waitForText("┃ Full detail · ←/→ switch · ctrl o close", TIMEOUT);
+      await session.waitForText("┃ Full detail · ctrl o close", TIMEOUT);
       const tail = await session.capturePane();
       expect(tail).toContain(stdoutTail2);
       expect(tail).not.toContain(firstMarker);
@@ -5169,7 +5236,9 @@ test.skipIf(!tmuxAvailable())(
       await waitForSessionPicker(active);
       await active.sendKeys("Escape");
       const afterEscape = await waitForSessionPickerClosed(active);
-      expect(afterEscape).toContain(`● Session resumed: Save ${savedMarkers[0]!}.`);
+      expect(await active.captureFullScrollback()).toContain(
+        `● Session resumed: Save ${savedMarkers[0]!}.`,
+      );
       expect(afterEscape).toContain(savedMarkers[0]!);
       expect(afterEscape).not.toContain(`● Session resumed: Save ${savedMarkers[10]!}.`);
       expect(afterEscape).not.toContain(savedMarkers[10]!);

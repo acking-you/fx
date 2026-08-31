@@ -456,10 +456,10 @@ pub fn Runtime(comptime App: type) type {
             return app.callMcpTool(arena, name, arguments_json, max_tool_result_bytes, options);
         }
 
-        fn searchMcpTools(raw_ctx: *anyopaque, arena: Allocator, query: *const tool_mcp_runtime.PreparedQuery, limit: usize, permission_rules: types.PermissionRuleSet, _: @import("../config/context_limits.zig").Values, access: tool_mcp_runtime.Access) anyerror!tool_mcp_runtime.SearchResult {
+        fn searchMcpTools(raw_ctx: *anyopaque, arena: Allocator, request: tool_mcp_runtime.SearchRequest, permission_rules: types.PermissionRuleSet, _: @import("../config/context_limits.zig").Values, access: tool_mcp_runtime.Access) anyerror!tool_mcp_runtime.SearchResult {
             const app: *App = @ptrCast(@alignCast(raw_ctx));
             if (comptime @hasDecl(App, "searchMcpTools")) {
-                return app.searchMcpTools(arena, query, limit, permission_rules, access);
+                return app.searchMcpTools(arena, request, permission_rules, access);
             }
             return .{ .model_output = try arena.dupe(u8, "{\"tools\":[],\"count\":0}") };
         }
@@ -854,12 +854,12 @@ pub fn Runtime(comptime App: type) type {
                     if (should_emit) {
                         const body = try types.renderContextNoticeBody(app.alloc, notice);
                         defer app.alloc.free(body);
-                        try app.writeDomainNotice(.{
+                        app.writeDomainNotice(.{
                             .topic = "context",
                             .tone = .warning,
                             .body = body,
                             .visibility = .full_only,
-                        }, true);
+                        }, true) catch return error.WriteFailed;
                     }
                 }
             }
@@ -903,8 +903,9 @@ pub fn Runtime(comptime App: type) type {
                 try appendClaimedContextNotice(app, &preflight_context_notices.writer, notice);
             }
 
-            var bounded_skills = try app.skills.buildBoundedSystemPromptSection(
+            var bounded_skills = try app.skills.buildRoutedSystemPromptSection(
                 std.heap.c_allocator,
+                job.prompt,
                 if (comptime @hasField(App, "context_limits")) app.context_limits else .{},
             );
             defer bounded_skills.deinit(std.heap.c_allocator);
@@ -1025,8 +1026,9 @@ pub fn Runtime(comptime App: type) type {
             ) catch
                 return error.OutOfMemory;
             defer child_projection.deinit(alloc);
-            var bounded_skills = app.skills.buildBoundedSystemPromptSection(
+            var bounded_skills = app.skills.buildRoutedSystemPromptSection(
                 alloc,
+                message.content,
                 if (comptime @hasField(App, "context_limits")) app.context_limits else .{},
             ) catch return error.OutOfMemory;
             defer bounded_skills.deinit(alloc);
@@ -1248,10 +1250,10 @@ const custom_label_tool = tool_dispatch.Tool{
     .completed_action_label = "Custom ran",
     .label_arg_kind = .name,
     .label_arg_default = "custom fallback",
-    .decode = test_builtin_tools.memory.decode,
-    .call = test_builtin_tools.memory.call,
-    .reads_only_fn = test_builtin_tools.memory.reads_only_fn,
-    .irreversible_fn = test_builtin_tools.memory.irreversible_fn,
+    .decode = test_builtin_tools.read_file.decode,
+    .call = test_builtin_tools.read_file.call,
+    .reads_only_fn = test_builtin_tools.read_file.reads_only_fn,
+    .irreversible_fn = test_builtin_tools.read_file.irreversible_fn,
 };
 const custom_registry_tools = [_]tool_dispatch.Tool{custom_label_tool};
 const custom_tool_registry = tool_dispatch.Registry{ .tools = custom_registry_tools[0..] };
@@ -1897,7 +1899,7 @@ test "app agent runtime formats active completed denied and MCP tool actions" {
 
     const malformed_registered: ToolCall = .{
         .id = "malformed_registered",
-        .name = "memory",
+        .name = "grep_files",
         .arguments_json = "{",
     };
     const malformed_completed = try app.describeToolActionCompleted(arena, malformed_registered);
@@ -1918,6 +1920,14 @@ test "app agent runtime formats active completed denied and MCP tool actions" {
     };
     const malformed_unknown_completed = try app.describeToolActionCompleted(arena, malformed_unknown);
     try std.testing.expect(std.mem.find(u8, malformed_unknown_completed, "mcp_unknown") != null);
+
+    const historical_memory: ToolCall = .{
+        .id = "historical_memory",
+        .name = "memory",
+        .arguments_json = "{\"action\":\"list\"}",
+    };
+    const historical_memory_completed = try app.describeToolActionCompleted(arena, historical_memory);
+    try std.testing.expect(std.mem.find(u8, historical_memory_completed, "memory") != null);
 
     const mcp_call: ToolCall = .{ .id = "mcp", .name = "mcp_lookup", .arguments_json = "{}" };
     const mcp_action = try app.describeToolActionCompleted(arena, mcp_call);
@@ -2121,6 +2131,21 @@ test "tool labels preserve skill name value" {
     const completed = try app.describeToolActionCompleted(arena, skill_call);
     try std.testing.expect(std.mem.find(u8, completed, "Loaded skill") != null);
     try std.testing.expect(std.mem.find(u8, completed, "workflow") != null);
+
+    const resource_call: ToolCall = .{
+        .id = "skill_resource",
+        .name = "skill",
+        .arguments_json = "{\"name\":\"workflow\",\"resource\":\"references/contract-design.md\"}",
+    };
+    const resource_active = try app.describeToolAction(arena, resource_call);
+    try std.testing.expect(std.mem.find(u8, resource_active, "Reading skill resource") != null);
+    try std.testing.expect(std.mem.find(u8, resource_active, "references/contract-design.md") != null);
+    try std.testing.expect(std.mem.find(u8, resource_active, "Loading skill workflow") == null);
+
+    const resource_completed = try app.describeToolActionCompleted(arena, resource_call);
+    try std.testing.expect(std.mem.find(u8, resource_completed, "Read skill resource") != null);
+    try std.testing.expect(std.mem.find(u8, resource_completed, "references/contract-design.md") != null);
+    try std.testing.expect(std.mem.find(u8, resource_completed, "Loaded skill workflow") == null);
 
     const install_call: ToolCall = .{
         .id = "install_skill",

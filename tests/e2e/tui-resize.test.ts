@@ -575,7 +575,7 @@ async function waitForLiveScrollbackText(
     const status = s.paneStatus();
     if (status.dead) {
       throw new Error(
-        `Fx exited with status ${status.status} while waiting for ${JSON.stringify(needle)}.\nScrollback:\n${last}`,
+        `fx exited with status ${status.status} while waiting for ${JSON.stringify(needle)}.\nScrollback:\n${last}`,
       );
     }
     last = await s.captureFullScrollback();
@@ -805,6 +805,26 @@ async function waitForTraceCount(
     `Timed out waiting for ${minimumCount} copies of ${JSON.stringify(text)}.\nTrace:\n${
       existsSync(tracePath) ? readFileSync(tracePath, "utf8") : ""
     }`,
+  );
+}
+
+async function waitForTapeOutputCount(
+  tapePath: string,
+  text: string,
+  minimumCount: number,
+  timeoutMs = 30_000,
+): Promise<number> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const output = Buffer.concat(
+      stdoutFrames(tapePath).map((frame) => frame.payload),
+    ).toString();
+    const count = countOccurrences(output, text);
+    if (count >= minimumCount) return count;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(
+    `Timed out waiting for ${minimumCount} copies of ${JSON.stringify(text)} in the tape.`,
   );
 }
 
@@ -2149,7 +2169,7 @@ describe.skipIf(SKIP)("tui: resize", () => {
         roots.push(await runLargeSkillResizeAttempt(attempt));
       }
       if (KEEP_LARGE_SKILL_ARTIFACTS) {
-        console.log(`Fx resize artifacts:\n${roots.join("\n")}`);
+        console.log(`fx resize artifacts:\n${roots.join("\n")}`);
         console.log(
           `Cleanup: rm -rf ${roots.map(quoteShellPath).join(" ")}`,
         );
@@ -2169,7 +2189,7 @@ describe.skipIf(SKIP)("tui: resize", () => {
       results.push(await runRapidSkillResizeAttempt(125, 1));
       if (KEEP_LARGE_SKILL_ARTIFACTS) {
         console.log(
-          `Fx rapid resize artifacts:\n${results.map(({ root }) => root).join("\n")}`,
+          `fx rapid resize artifacts:\n${results.map(({ root }) => root).join("\n")}`,
         );
       }
     },
@@ -2309,7 +2329,7 @@ describe.skipIf(SKIP)("tui: resize", () => {
         )}\n`,
       );
       if (KEEP_LARGE_SKILL_ARTIFACTS) {
-        console.log(`Fx gated stream resize artifact:\n${root}`);
+        console.log(`fx gated stream resize artifact:\n${root}`);
       }
     },
     60_000,
@@ -2456,7 +2476,7 @@ describe.skipIf(SKIP)("tui: resize", () => {
         )}\n`,
       );
       if (KEEP_LARGE_SKILL_ARTIFACTS) {
-        console.log(`Fx open picker resize artifact:\n${root}`);
+        console.log(`fx open picker resize artifact:\n${root}`);
       }
     },
     60_000,
@@ -2567,11 +2587,11 @@ describe.skipIf(SKIP)("tui: resize", () => {
       label: "cost",
       width: 120,
       height: 36,
-      surfaceMarker: "Usage · 30 days",
+      surfaceMarker: "[30 days]",
       editedInput: "x",
       async openSurface(active) {
         await active.sendText("/cost");
-        await active.waitForText("Usage · 30 days", TIMEOUT);
+        await active.waitForText("[30 days]", TIMEOUT);
         await active.resizeWindow(60, 12, 500);
       },
     },
@@ -2594,11 +2614,11 @@ describe.skipIf(SKIP)("tui: resize", () => {
       label: "workspace",
       width: 120,
       height: 36,
-      surfaceMarker: "Workspace:",
+      surfaceMarker: "Workspace",
       editedInput: "x",
       async openSurface(active) {
         await active.sendText("/workspace");
-        await active.waitForText("Workspace:", TIMEOUT);
+        await active.waitForText("Workspace", TIMEOUT);
         await active.resizeWindow(60, 12, 500);
       },
     },
@@ -2686,7 +2706,7 @@ describe.skipIf(SKIP)("tui: resize", () => {
       );
       session = fixture.active;
       await session.sendText("/workspace");
-      await session.waitForText("Workspace:", TIMEOUT);
+      await session.waitForText("Workspace", TIMEOUT);
       await session.sendKeys("Enter");
       await session.waitForPane(
         (pane) =>
@@ -2817,7 +2837,7 @@ describe.skipIf(SKIP)("tui: resize", () => {
       expect(existsSync(tapePath)).toBe(true);
       expect(readFileSync(tapePath).byteLength).toBeGreaterThan(0);
       if (KEEP_LARGE_SKILL_ARTIFACTS) {
-        console.log(`Fx wide-user resize artifact:\n${root}`);
+        console.log(`fx wide-user resize artifact:\n${root}`);
       }
     },
     TIMEOUT,
@@ -3975,7 +3995,7 @@ describe.skipIf(SKIP)("tui: resize", () => {
       const initialInputRows = (await session.capturePaneGrid()).filter(isInputRow);
       expect(initialInputRows).toEqual(["┃"]);
       await session.sendText("Record a theme reset transcript marker.");
-      await session.waitForText("THEME_RESET_FIRST_RESPONSE", TIMEOUT);
+      await session.waitForText(inlineTailMarker, TIMEOUT);
 
       const resetCountBefore = countOccurrences(
         Buffer.concat(stdoutFrames(tapePath).map((frame) => frame.payload)).toString(),
@@ -4031,6 +4051,7 @@ describe.skipIf(SKIP)("tui: resize", () => {
         ...responseFence,
       ]);
       await waitForTraceText(tracePath, "theme_update_settled light=true rgb=terminal");
+      await waitForTapeOutputCount(tapePath, "\x1b[3J", resetCountBefore + 1);
 
       const replayed = await session.waitForText(inlineTailMarker, TIMEOUT);
       expect(replayed).not.toContain("?997");
@@ -4080,10 +4101,7 @@ describe.skipIf(SKIP)("tui: resize", () => {
       ]);
       await waitForTraceText(tracePath, "theme_update_settled light=false rgb=terminal");
       expect(
-        countOccurrences(
-          Buffer.concat(stdoutFrames(tapePath).map((frame) => frame.payload)).toString(),
-          "\x1b[3J",
-        ),
+        await waitForTapeOutputCount(tapePath, "\x1b[3J", resetCountBefore + 2),
       ).toBe(resetCountBefore + 2);
 
       await session.sendText("Confirm input survives the theme reset.");

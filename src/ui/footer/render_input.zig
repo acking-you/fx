@@ -4,6 +4,10 @@ const approval_prompt = @import("../../core/permissions/approval_prompt.zig");
 const auth_runtime = @import("../../core/auth/auth_runtime.zig");
 const activity_status = @import("../../core/output/activity_status.zig");
 const model_cache_runtime = @import("../../core/app/model_cache_runtime.zig");
+const app_mcp_runtime = @import("../../core/app/app_mcp_runtime.zig");
+const mcp_health = @import("../../core/mcp/health.zig");
+const mcp_menu_state = @import("../../core/mcp/menu_state.zig");
+const mcp_runtime = @import("../../core/mcp/mcp_runtime.zig");
 const picker_state = @import("../../core/input/picker_state.zig");
 const session_catalog = @import("../../core/session/session_catalog.zig");
 const session_store = @import("../../core/session/session_store.zig");
@@ -64,6 +68,120 @@ pub const ModelMenuProjection = struct {
         return model_cache_runtime.modelMenuItemAt(self.items, self.providerFilter(), self.query, display_index);
     }
 };
+
+pub const McpMenuProjection = struct {
+    state: mcp_menu_state.State = .{},
+    servers: []const mcp_health.ServerSnapshot = &.{},
+    tools: []const []const u8 = &.{},
+    resources: []const mcp_runtime.ResourceSummary = &.{},
+    resource_templates: []const mcp_runtime.ResourceSummary = &.{},
+    prompts: []const mcp_runtime.PromptSummary = &.{},
+    configuration_issue_count: usize = 0,
+    preview: ?[]const u8 = null,
+    feedback: ?[]const u8 = null,
+    add_name: []const u8 = "",
+    add_target: []const u8 = "",
+    add_arguments: []const u8 = "",
+    add_draft: []const u8 = "",
+    arguments: []const app_mcp_runtime.MenuArgumentField = &.{},
+    argument_draft: []const u8 = "",
+
+    pub fn itemCount(self: McpMenuProjection) usize {
+        return switch (self.state.section) {
+            .servers => self.servers.len,
+            .tools => countMatchingTools(self.tools, self.state.queryText()),
+            .resources => countMatchingResources(
+                self.resources,
+                self.resource_templates,
+                self.state.queryText(),
+            ),
+            .prompts => countMatchingPrompts(self.prompts, self.state.queryText()),
+        };
+    }
+
+    pub fn selectedServer(self: McpMenuProjection) ?*const mcp_health.ServerSnapshot {
+        if (self.state.selected_server_index >= self.servers.len) return null;
+        return &self.servers[self.state.selected_server_index];
+    }
+
+    pub fn resourceAt(self: McpMenuProjection, index: usize) ?*const mcp_runtime.ResourceSummary {
+        var matched: usize = 0;
+        const query = self.state.queryText();
+        for (self.resources) |*item| {
+            if (!resourceMatches(item.*, query)) continue;
+            if (matched == index) return item;
+            matched += 1;
+        }
+        for (self.resource_templates) |*item| {
+            if (!resourceMatches(item.*, query)) continue;
+            if (matched == index) return item;
+            matched += 1;
+        }
+        return null;
+    }
+
+    pub fn toolAt(self: McpMenuProjection, index: usize) ?[]const u8 {
+        var matched: usize = 0;
+        const query = self.state.queryText();
+        for (self.tools) |item| {
+            if (!matches(item, query)) continue;
+            if (matched == index) return item;
+            matched += 1;
+        }
+        return null;
+    }
+
+    pub fn promptAt(self: McpMenuProjection, index: usize) ?*const mcp_runtime.PromptSummary {
+        var matched: usize = 0;
+        const query = self.state.queryText();
+        for (self.prompts) |*item| {
+            if (!promptMatches(item.*, query)) continue;
+            if (matched == index) return item;
+            matched += 1;
+        }
+        return null;
+    }
+};
+
+fn matches(text: []const u8, query: []const u8) bool {
+    return mcp_menu_state.textMatchesQuery(text, query);
+}
+
+fn countMatchingTools(items: []const []const u8, query: []const u8) usize {
+    var count: usize = 0;
+    for (items) |item| count += @intFromBool(matches(item, query));
+    return count;
+}
+
+fn resourceMatches(item: mcp_runtime.ResourceSummary, query: []const u8) bool {
+    return matches(item.uri, query) or
+        matches(item.name, query) or
+        (item.title != null and matches(item.title.?, query)) or
+        (item.description != null and matches(item.description.?, query));
+}
+
+fn countMatchingResources(
+    resources: []const mcp_runtime.ResourceSummary,
+    templates: []const mcp_runtime.ResourceSummary,
+    query: []const u8,
+) usize {
+    var count: usize = 0;
+    for (resources) |item| count += @intFromBool(resourceMatches(item, query));
+    for (templates) |item| count += @intFromBool(resourceMatches(item, query));
+    return count;
+}
+
+fn promptMatches(item: mcp_runtime.PromptSummary, query: []const u8) bool {
+    return matches(item.name, query) or
+        (item.title != null and matches(item.title.?, query)) or
+        (item.description != null and matches(item.description.?, query));
+}
+
+fn countMatchingPrompts(items: []const mcp_runtime.PromptSummary, query: []const u8) usize {
+    var count: usize = 0;
+    for (items) |item| count += @intFromBool(promptMatches(item, query));
+    return count;
+}
 
 pub const SessionMenuProjection = struct {
     active: bool = false,
@@ -292,6 +410,7 @@ pub const RenderContext = struct {
     fast_mode: bool = false,
     model_supports_fast: bool = false,
     effort: types.ReasoningEffort = .auto,
+    model_supports_effort: bool = false,
     ctrl_c_pending: bool = false,
     shimmer_pos: i16 = -render_request.animation_padding,
     now_ms: i64 = 0,
@@ -319,6 +438,7 @@ pub const RenderContext = struct {
         .include_skip = false,
     },
     skills_menu: SkillsMenuProjection = .{},
+    mcp_menu: McpMenuProjection = .{},
     help_menu: HelpMenuProjection = .{},
     settings_menu: SettingsMenuProjection = .{},
     model_menu: ModelMenuProjection = .{},
@@ -326,6 +446,7 @@ pub const RenderContext = struct {
     statusline_menu: StatuslineMenuProjection = .{},
     usage_menu: UsageMenuProjection = .{},
     workspace_menu: WorkspaceMenuProjection = .{},
+    upgrade_status: []const u8 = "",
     danger_status: []const u8 = "",
     danger_status_compact: []const u8 = "",
     esc_clear_armed: bool = false,
@@ -491,16 +612,16 @@ pub fn frameOwnedActivityProjection(
 ) ActivityProjection {
     if (approval != null or ctx.question != null) return .none;
     switch (ctx.activity) {
-        .tool_slot => return thinkingActivityProjection(buf, shell, ctx),
+        .tool_slot => {},
         .turn_thinking => |thinking| {
             if (thinking.tone != .thinking) return ctx.activity;
-            return thinkingActivityProjection(buf, shell, ctx);
         },
-        .none => return thinkingActivityProjection(buf, shell, ctx),
+        .none => {},
     }
+    return turnActivityProjection(buf, shell, ctx);
 }
 
-fn thinkingActivityProjection(
+fn turnActivityProjection(
     buf: []u8,
     shell: *TranscriptRuntime,
     ctx: RenderContext,
@@ -818,6 +939,8 @@ test "current frame-owned activity leaves the focused tool in the transcript" {
     const ctx: RenderContext = .{
         .stream = .{
             .active = true,
+            .phase = .running,
+            .turn_started_ms = 1_000,
             .command_count = 1,
             .last_activity_kind = .command,
             .token_progress = .{
@@ -841,6 +964,7 @@ test "current frame-owned activity leaves the focused tool in the transcript" {
             .active = true,
             .kind = .command,
         } },
+        .now_ms = 13_000,
         .input = &input,
     };
 
@@ -856,6 +980,7 @@ test "current frame-owned activity leaves the focused tool in the transcript" {
 
     var streaming_buf: [256]u8 = undefined;
     var streaming_ctx = ctx;
+    streaming_ctx.stream.phase = .generating;
     streaming_ctx.writing_response = true;
     switch (frameOwnedActivityProjection(&streaming_buf, &shell, streaming_ctx, null)) {
         .none => {},
@@ -964,6 +1089,8 @@ test "frame-owned activity shows live streaming token progress" {
     const ctx: RenderContext = .{
         .stream = .{
             .active = true,
+            .phase = .generating,
+            .turn_started_ms = 1_000,
             .token_progress = .{
                 .input_tokens = 50_000,
                 .output_tokens = 1_250,
@@ -981,6 +1108,7 @@ test "frame-owned activity shows live streaming token progress" {
         .selected_subagent_label = null,
         .selected_subagent_status = null,
         .activity = .none,
+        .now_ms = 13_000,
         .input = &input,
     };
 
@@ -990,21 +1118,20 @@ test "frame-owned activity shows live streaming token progress" {
         .turn_thinking, .tool_slot => return error.TestUnexpectedResult,
     }
 
-    // Pacer caught up mid-response and is waiting on the next chunk: the quiet
-    // row holds for the whole response instead of flipping inside every gap.
+    // Pacer caught up mid-response and is waiting on the next chunk: the
+    // Generating phase holds instead of flipping inside every gap.
     var drained_ctx = ctx;
     drained_ctx.writing_response = false;
-    drained_ctx.stream.assistant_text_started = true;
     var drained_buf: [256]u8 = undefined;
     switch (frameOwnedActivityProjection(&drained_buf, &shell, drained_ctx, null)) {
         .none => {},
         .turn_thinking, .tool_slot => return error.TestUnexpectedResult,
     }
 
-    // The model moved on to a tool payload that prints nothing: the marker
-    // comes back with the turn clock so the row does not read as finished.
+    // The model moved on to a tool payload that prints nothing: only the phase
+    // word changes while the marker, turn clock, and token totals remain.
     var composing_ctx = drained_ctx;
-    composing_ctx.stream.composing_tool_payload = true;
+    composing_ctx.stream.phase = .running;
     composing_ctx.stream.turn_started_ms = 1_000;
     composing_ctx.now_ms = 13_000;
     var stalled_buf: [256]u8 = undefined;

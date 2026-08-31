@@ -137,9 +137,9 @@ fn streamCompletion(
     alloc: Allocator,
     request: stream_provider.ModelRequest,
 ) !stream_provider.Result {
-    if (request.cancel_flag.load(.seq_cst)) return error.Cancelled;
+    if (request.cancel_flag.load(.seq_cst)) return stream_provider.failResult(error.Cancelled);
     if (request.credential.source != .chatgpt_subscription) {
-        return error.CodexSubscriptionCredentialRequired;
+        return stream_provider.failResult(error.CodexSubscriptionCredentialRequired);
     }
     try validateModel(request.model);
     var binding = try buildBoundProviderIdentity(alloc, request);

@@ -6848,7 +6848,7 @@ fn processQueuedPromptLoop(
                 }
                 continue;
             }
-            if (execution.prepared_result_memory != null or
+            if (execution.tool_result_memory_prepared or
                 execution.deferred_tool_completion != null)
             {
                 return error.InvalidPreparedToolExecutionResult;
@@ -6865,8 +6865,6 @@ fn processQueuedPromptLoop(
             runtime_parallel_execution.reportInnerToolUsage(deps, tool_call.name, execution);
             if (execution.diff_entry) |payload| {
                 try deps.push_diff_block(deps.ctx, payload);
-            } else if (execution.display_output) |display| {
-                try deps.push_text(deps.ctx, .{ .operational = display });
             }
             var replay_handed_off = execution.command_replay_capture == null;
             defer if (!replay_handed_off) {
@@ -6981,37 +6979,21 @@ fn processQueuedPromptLoop(
                 else
                     "";
                 stop_state.terminal_materializing = true;
-                if (execution.background_command) |background| {
-                    try finishCommonBackgroundTerminal(
-                        deps,
-                        finalization,
-                        arena,
-                        job,
-                        within_turn_suffix.items,
-                        &summary_accumulator,
-                        assistant_text,
-                        background,
-                        &finish_trace,
-                    );
-                    debug_trace.eventf("tool", "after_tool_execution", step_ctx, "call_id={s} name={s} result_kind=background model_output_bytes={d}", .{ tool_call.id, tool_call.name, safe_tool_output.len });
-                    debug_trace.eventf("tool", "execution_result", step_ctx, "call_id={s} name={s} result_kind=background model_output_bytes={d}", .{ tool_call.id, tool_call.name, safe_tool_output.len });
-                } else {
-                    try finishCommonAssistantTerminal(
-                        deps,
-                        finalization,
-                        arena,
-                        job,
-                        within_turn_suffix.items,
-                        &summary_accumulator,
-                        assistant_text,
-                        .completed,
-                        null,
-                        &finish_trace,
-                        "tool",
-                    );
-                    debug_trace.eventf("tool", "after_tool_execution", step_ctx, "call_id={s} name={s} result_kind=finish_turn model_output_bytes={d}", .{ tool_call.id, tool_call.name, safe_tool_output.len });
-                    debug_trace.eventf("tool", "execution_result", step_ctx, "call_id={s} name={s} result_kind=finish_turn model_output_bytes={d}", .{ tool_call.id, tool_call.name, safe_tool_output.len });
-                }
+                try finishCommonAssistantTerminal(
+                    deps,
+                    finalization,
+                    arena,
+                    job,
+                    within_turn_suffix.items,
+                    &summary_accumulator,
+                    assistant_text,
+                    .completed,
+                    null,
+                    &finish_trace,
+                    "tool",
+                );
+                debug_trace.eventf("tool", "after_tool_execution", step_ctx, "call_id={s} name={s} result_kind=finish_turn model_output_bytes={d}", .{ tool_call.id, tool_call.name, safe_tool_output.len });
+                debug_trace.eventf("tool", "execution_result", step_ctx, "call_id={s} name={s} result_kind=finish_turn model_output_bytes={d}", .{ tool_call.id, tool_call.name, safe_tool_output.len });
                 return;
             }
 

@@ -30,12 +30,13 @@ pub const top_level_specs = [_]TopLevelSpec{
     .{
         .kind = .ask,
         .token = "ask",
-        .usage = "ask [--auto|--yolo] [--image PATH] [--json] [--quiet] [--prompt-permissions] [--no-save] [--no-color] [--resume <last|id>|--resume-id <id>] [--continue-recovery] [--] <prompt>",
+        .usage = "ask [--auto|--yolo] [--image PATH] [--system TEXT] [--json] [--quiet] [--prompt-permissions] [--no-save] [--no-color] [--resume <last|id>|--resume-id <id>] [--continue-recovery] [--] <prompt>",
         .summary = "Run one noninteractive request",
         .options = &.{
             .{ .flag = "--auto", .description = "Automatically review unresolved permission requests" },
             .{ .flag = "--yolo", .description = "Disable fx permission checks" },
             .{ .flag = "--image PATH", .description = "Attach an image file; repeat for multiple images" },
+            .{ .flag = "--system TEXT", .description = "Replace the built-in system prompt for this request" },
             json_option,
             .{ .flag = "--quiet", .description = "Suppress assistant output" },
             .{ .flag = "--prompt-permissions", .description = "Prompt for Y/N permission approval when stdin is a TTY" },
@@ -50,6 +51,7 @@ pub const top_level_specs = [_]TopLevelSpec{
             "The prompt may be passed as arguments or piped on stdin when no prompt args are given.",
             "TTY stdout uses the Minimal transcript presentation; redirected stdout emits raw assistant Markdown.",
             "Operational progress and diagnostics are written to stderr. JSON `output` keeps accumulated assistant Markdown; `final_output` contains only the completed final response, or an empty string when absent.",
+            "--system replaces only the built-in base prompt for this request; tool, skill, project, and runtime context still apply.",
             "With --prompt-permissions, JSON and quiet requests may prompt on stderr only when stdin is a TTY.",
         },
     },
@@ -133,6 +135,27 @@ pub const top_level_specs = [_]TopLevelSpec{
         },
     },
     .{
+        .kind = .mcp,
+        .token = "mcp",
+        .usage = "mcp <command> ...",
+        .summary = "Manage MCP servers without opening the interactive shell",
+        .details = &.{
+            "Commands:",
+            "  fx mcp add NAME COMMAND [ARGS...]",
+            "  fx mcp add --transport http NAME URL",
+            "  fx mcp auth NAME",
+            "  fx mcp list [--connect]",
+            "  fx mcp logout NAME",
+            "  fx mcp path",
+            "  fx mcp remove NAME",
+            "  fx mcp trust approve|reject NAME",
+            "  fx mcp trust approve-all|reset",
+            "",
+            "By default, list reads configuration without opening MCP transports.",
+            "Use --connect to connect and discover servers before rendering health.",
+        },
+    },
+    .{
         .kind = .models,
         .token = "models",
         .usage = "models [--json]",
@@ -169,7 +192,7 @@ pub const top_level_specs = [_]TopLevelSpec{
     .{
         .kind = .session,
         .token = "session",
-        .usage = "session <last|id>|--id <id> [--json] | session resume [last|<id>] [--record] | session resume --id <id> [--record] | session migrate <id>|--id <id> [--allow-large] [--json] | session recover <id>|--id <id> [--json]",
+        .usage = "session <last|id>|--id <id> [--json] | session resume [last|<id>] | session resume --id <id> | session migrate <id>|--id <id> [--allow-large] [--json] | session recover <id>|--id <id> [--json]",
         .summary = "Inspect, resume, migrate, or recover saved sessions",
         .options = &.{
             .{ .flag = "last", .description = "Inspect the current workspace session" },
@@ -198,14 +221,13 @@ pub const top_level_specs = [_]TopLevelSpec{
         .token = "resume",
         .aliases = &.{ "--resume", "--resume-last", "--continue", "-c", "-r" },
         .hidden_from_top_level_help = true,
-        .usage = "session resume [last|<id>] [--record] | session resume --id <id> [--record] | --resume [last|<id>] [--record] | resume [last|<id>] [--record] | resume --id <id> [--record] | --resume-last | --continue | -c | -r | --resume-<id>",
+        .usage = "session resume [last|<id>] | session resume --id <id> | --resume [last|<id>] | resume [last|<id>] | resume --id <id> | --resume-last | --continue | -c | -r | --resume-<id>",
         .summary = "Continue a saved interactive session",
         .options = &.{
             .{ .flag = "-r", .description = "Choose the session to resume from a picker" },
             .{ .flag = "last", .description = "Resume the most recent session" },
             .{ .flag = "<id>", .description = "Resume a session by id" },
             .{ .flag = "--id <id>", .description = "Resume a session by exact id" },
-            .{ .flag = "--record", .description = "Capture visible terminal content while running" },
         },
     },
     .{
@@ -228,6 +250,7 @@ pub const top_level_specs = [_]TopLevelSpec{
         .token = "replay",
         .usage = "replay <tape> [--frames] [--json] [--golden <path>] [--frames-dir <path>]",
         .summary = "Replay a recorded terminal session",
+        .hidden_from_top_level_help = true,
         .options = &.{
             .{ .flag = "--frames", .description = "Render each captured frame" },
             .{ .flag = "--golden <path>", .description = "Write the final rendered grid to a file" },
@@ -271,7 +294,6 @@ pub const top_level_help_groups = [_]TopLevelHelpGroup{
         .{ .usage = "session resume [last|id]", .summary = "Resume the latest workspace session or a session by id" },
         .{ .usage = "session migrate <id>", .summary = "Migrate a saved session to the current format" },
         .{ .usage = "session recover <id>", .summary = "Copy a recoverable corrupt session" },
-        .{ .kind = .replay, .usage = "replay <tape>" },
     } },
     .{ .entries = &.{
         .{ .kind = .setup, .usage = "setup [--json]" },
@@ -283,6 +305,7 @@ pub const top_level_help_groups = [_]TopLevelHelpGroup{
     .{ .entries = &.{
         .{ .kind = .status, .usage = "status" },
         .{ .kind = .doctor, .usage = "doctor" },
+        .{ .kind = .mcp, .usage = "mcp <command> ..." },
         .{ .kind = .models, .usage = "models" },
         .{ .kind = .permissions, .usage = "permissions" },
         .{ .kind = .workspace, .usage = "workspace" },
@@ -292,10 +315,6 @@ pub const top_level_help_groups = [_]TopLevelHelpGroup{
 };
 
 pub const top_level_flags = [_]TopLevelFlag{
-    .{
-        .usage = "--record",
-        .description = "Record terminal output",
-    },
     .{
         .usage = "--context-limit <spec>",
         .description = "Set name=bytes|off; repeatable",
@@ -416,7 +435,7 @@ pub const slash_specs = [_]SlashSpec{
     .{ .kind = .permissions, .command = "/permissions", .help_entry = "/permissions [ask|auto|yolo|reset]", .completion_description = "choose what fx is allowed to do", .presentation_category = .security, .show_in_welcome = true, .has_args = true, .accepts_payload = true },
     .{ .kind = .allowlist, .command = "/allowlist", .help_entry = "/allowlist [view [effective|local|user]|[local|user] add|remove|reset ...]", .completion_description = "manage trusted commands, tools, and URLs", .presentation_category = .security, .show_in_welcome = true, .has_args = true, .accepts_payload = true },
     .{ .kind = .undo, .command = "/undo", .help_entry = "/undo", .completion_description = "undo the latest tracked file operation", .presentation_category = .session },
-    .{ .kind = .mcp, .command = "/mcp", .help_entry = "/mcp [list|resource|prompt|add|remove|path|reload|auth|logout]", .completion_description = "manage local and remote MCP servers, resources, and prompts", .presentation_category = .extensions, .has_args = true, .accepts_payload = true },
+    .{ .kind = .mcp, .command = "/mcp", .help_entry = "/mcp [list|resource|prompt|add|remove|path|reload|auth|logout|trust]", .completion_description = "manage local and remote MCP servers, resources, prompts, and project trust", .presentation_category = .extensions, .has_args = true, .accepts_payload = true },
     .{ .kind = .skills, .command = "/skills", .help_entry = "/skills [list|add|install|show|create|remove|path] [name|url|path] ($ opens skill search)", .completion_description = "browse and manage skills", .presentation_category = .extensions, .has_args = true, .accepts_payload = true },
     .{ .kind = .copy, .command = "/copy", .help_entry = "/copy", .completion_description = "copy the last assistant response", .presentation_category = .session },
     .{ .kind = .trace, .command = "/trace", .help_entry = "/trace", .completion_description = "copy a private diagnostic trace", .presentation_category = .product },

@@ -70,6 +70,12 @@ The sound-bearing `notifications.test.ts` suite is explicitly excluded. The cred
 
 Each training scenario must create a new nonempty raw profile. The driver merges that batch into the accumulator atomically, deletes only the successfully merged raw files, and stops before profile use on any missing scenario, timeout, warning, merge failure, or cleanup failure.
 
+Tmux-backed E2E scenarios receive one bounded file-level retry, matching Full
+CI. Before that retry, the driver removes the failed scenario HOME, isolated
+tmux directory, debug trace, and every raw profile created by the failed
+attempt. A second failure remains terminal. Direct commands and non-tmux E2E
+scenarios are never retried.
+
 Candidate behavior qualification records each scenario's debug trace under `candidate-behavior/traces/` without restricting its trace scopes. A failed tmux case therefore preserves its internal startup subtype and cleanup evidence instead of retaining only the public protocol error, while tests that select their own trace path or scopes keep their intended behavior.
 
 ## Qualification policy

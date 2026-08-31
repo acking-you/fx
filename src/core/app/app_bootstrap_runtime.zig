@@ -81,7 +81,6 @@ pub fn Runtime(comptime App: type) type {
             default_model: []const u8,
             default_agent_step_limit: usize,
             resize_handler: app_lifecycle.ResizeHandler,
-            record_requested: bool,
             capability_providers: CapabilityProviders,
         ) !void {
             try bootstrapWithDeps(
@@ -90,7 +89,6 @@ pub fn Runtime(comptime App: type) type {
                 default_model,
                 default_agent_step_limit,
                 resize_handler,
-                record_requested,
                 defaultDeps(capability_providers),
             );
         }
@@ -180,7 +178,6 @@ pub fn Runtime(comptime App: type) type {
             default_model: []const u8,
             default_agent_step_limit: usize,
             resize_handler: app_lifecycle.ResizeHandler,
-            record_requested: bool,
             deps: BootstrapDeps(App),
         ) !void {
             errdefer app.deinit();
@@ -201,7 +198,6 @@ pub fn Runtime(comptime App: type) type {
                     host.unavailable_secret_store,
                 .resize_handler = resize_handler,
                 .fx_version = App.app_version,
-                .record_requested = record_requested,
             });
             defer startup.deinit(app.alloc);
 
@@ -315,7 +311,11 @@ pub fn Runtime(comptime App: type) type {
                 deps.stage_requested_resume_view(app)
             else
                 app_session_runtime.ResumeViewStage.none;
-            const profile_mcp = try deps.load_mcp_runtime(app.alloc, .{ .form = true, .url = true });
+            const profile_mcp = try deps.load_mcp_runtime(
+                app.alloc,
+                app.workspace_root,
+                .{ .form = true, .url = true },
+            );
             if (comptime @hasDecl(App, "installInitialMcpRuntime")) {
                 app.installInitialMcpRuntime(profile_mcp);
             } else {
@@ -348,6 +348,9 @@ pub fn Runtime(comptime App: type) type {
                     },
                 );
                 try app.writeTranscriptClassified(welcome_message, true, .welcome);
+                if (comptime @hasDecl(App, "presentProjectMcpPrompt")) {
+                    try app.presentProjectMcpPrompt();
+                }
             }
             if (app.skills.diagnostics.len > 0) {
                 var notice_writer: std.Io.Writer.Allocating = .init(app.alloc);
@@ -372,13 +375,14 @@ pub fn Runtime(comptime App: type) type {
                 const recording_body = try std.fmt.allocPrint(
                     app.alloc,
                     "visual terminal capture: {s}\nvisible terminal content, including typed prompt text, is recorded",
-                    .{recording.active},
+                    .{recording.active.path},
                 );
                 defer app.alloc.free(recording_body);
                 try app.writeDomainNotice(.{
                     .topic = "recording",
                     .tone = .warning,
                     .body = recording_body,
+                    .visibility = if (recording.active.show_inline_notice) .compact_and_full else .full_only,
                 }, true);
             }
             {
@@ -717,7 +721,7 @@ fn publishStagedResumeViewForTest(_: *TestApp, entry_id: u32) !void {
     active_capture.?.recordEvent("resume_view_publish");
 }
 
-fn loadMcpRuntimeForTest(_: Allocator, _: @import("../mcp/elicitation.zig").Capabilities) !?*mcp_runtime.McpRuntime {
+fn loadMcpRuntimeForTest(_: Allocator, _: []const u8, _: @import("../mcp/elicitation.zig").Capabilities) !?*mcp_runtime.McpRuntime {
     active_capture.?.recordEvent("load_mcp");
     return null;
 }
@@ -824,7 +828,6 @@ fn runBootstrapForTest(app: *TestApp, capture: *TestCapture) !void {
         "default-model",
         24,
         resizeHandlerForTest,
-        false,
         testDeps(),
     );
 }

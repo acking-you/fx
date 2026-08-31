@@ -403,7 +403,7 @@ A Full CI result is valid only when it belongs to the exact current commit and a
 
 ## Reproducing Render Bugs
 
-fx's rendering is inline by default and deliberately emits a small ANSI subset. Five owner classes are the narrow exceptions, and each takes the alternate buffer exclusively through `AlternateScreenOwner` in `src/ui/shell_runtime.zig`: interactive permission review, the full-transcript screen, catalog menus, the ctrl+x subagent manager, and a hosted child-terminal takeover. The terminal-session owner is entered only by an explicit manager handoff after the host grants the human write lease; it renders the shared terminal-engine grid without permanent Fx chrome and releases that lease on detach. Only one class may own the buffer at a time, and each must leave it and restore the main grid, composer, cursor, paste, mouse, focus, and keyboard modes when it closes. Transcript rendering, question prompts, and command-output expansion remain inline. Three tools exist for reproducing and regression-proofing render bugs:
+fx's rendering is inline by default and deliberately emits a small ANSI subset. Five owner classes are the narrow exceptions, and each takes the alternate buffer exclusively through `AlternateScreenOwner` in `src/ui/shell_runtime.zig`: interactive permission review, the full-transcript screen, catalog menus, the ctrl+x subagent manager, and a hosted child-terminal takeover. The terminal-session owner is entered only by an explicit manager handoff after the host grants the human write lease; it renders the shared terminal-engine grid without permanent fx chrome and releases that lease on detach. Only one class may own the buffer at a time, and each must leave it and restore the main grid, composer, cursor, paste, mouse, focus, and keyboard modes when it closes. Transcript rendering, question prompts, and command-output expansion remain inline. Three tools exist for reproducing and regression-proofing render bugs:
 
 ### tmux (live TTY repros)
 
@@ -413,16 +413,23 @@ Best for resize and SIGWINCH interactions. The helper in `tests/e2e/tmux-helpers
 cd tests/e2e && bun test tui-resize.test.ts
 ```
 
-### FX\_RECORD + fx replay (capture-and-replay)
+### Debug terminal recording and replay
 
-Run fx with `FX_RECORD=<path>` to dump every byte fx writes, every resize, and every Ctrl+C into a framed binary tape. Replay the tape through the built-in virtual terminal:
+Set `FX_DEBUG_RECORD=1` to create an automatic private tape under
+`~/.fx/recordings/`. Set `FX_DEBUG_RECORD_SILENT_BANNER=1` as well when the
+developer-only recording notice must stay out of the inline transcript during
+a screen share. The notice remains available in the Ctrl+O full transcript.
+Use `FX_RECORD=<path>` when a test or investigation needs an exact destination.
+Recording dumps every byte fx writes and every resize into a framed binary tape.
+Replay the tape through the built-in virtual terminal:
 
 ```bash
-FX_RECORD=/tmp/bug.fxtape fx        # user reproduces the glitch
-fx replay /tmp/bug.fxtape           # print the final cell grid
-fx replay /tmp/bug.fxtape --frames  # scrub through every intermediate frame
-fx replay /tmp/bug.fxtape --json    # structured frame metadata + grid
-fx replay /tmp/bug.fxtape --golden out.txt   # write grid to a file
+FX_DEBUG_RECORD=1 ./zig-out/bin/fx
+FX_RECORD=/tmp/bug.fxtape ./zig-out/bin/fx
+./zig-out/bin/fx replay /tmp/bug.fxtape
+./zig-out/bin/fx replay /tmp/bug.fxtape --frames
+./zig-out/bin/fx replay /tmp/bug.fxtape --json
+./zig-out/bin/fx replay /tmp/bug.fxtape --golden out.txt
 ```
 
 The tape is deterministic — any reviewer can replay it without a TTY, and a golden file can be checked in as a regression test.
@@ -456,7 +463,7 @@ Current raw wall-clock contract:
 * Non-Linux local runs: informational raw means
 
 The Linux CI runner is the authoritative product budget. Local macOS process
-and dynamic-loader floors vary enough to exceed 2ms independently of Fx, so
+and dynamic-loader floors vary enough to exceed 2ms independently of fx, so
 local runs report raw means without assigning a substitute product budget. The
 process baseline is diagnostic only and is never subtracted.
 

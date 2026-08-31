@@ -54,7 +54,7 @@ function parseFxJson(result: { stdout: string; stderr: string; code: number | nu
   return JSON.parse(result.stdout.trim()) as FxJson;
 }
 
-function toolResultText(body: string, toolCallId: string): string {
+function executionDeniedReason(body: string, toolCallId: string): string {
   const request = JSON.parse(body) as {
     input?: Array<Record<string, unknown>>;
   };
@@ -200,7 +200,7 @@ describe("generic permission typed errors", () => {
         expect(gateway.requests).toHaveLength(2);
 
         const toolResult = JSON.parse(
-          toolResultText(gateway.requests[1]!.body, toolCallId),
+          executionDeniedReason(gateway.requests[1]!.body, toolCallId),
         ) as { error: PermissionEcho };
         const echo = toolResult.error;
         expect(echo.type).toBe("tool_permission_denied");

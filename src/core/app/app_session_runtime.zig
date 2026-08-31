@@ -1426,6 +1426,36 @@ pub const Persistence = struct {
     resume_handoff_intent: ResumeHandoffIntent = .none,
     pending_live_session_policy: ?BackgroundSessionPolicy = null,
 
+    /// Fieldwise initialization avoids retaining undefined optional payloads
+    /// in a static release-binary template.
+    pub fn initInto(storage: *Persistence) void {
+        comptime {
+            if (std.meta.fields(Persistence).len != 19) {
+                @compileError("update Persistence.initInto for the changed field set");
+            }
+        }
+        storage.* = undefined;
+        storage.write_mutex = .init;
+        storage.store = null;
+        storage.writable = null;
+        storage.subagent_host = null;
+        storage.workspace_preferences = null;
+        storage.session_preferences = null;
+        storage.js_host_store = .{};
+        storage.js_host_session = null;
+        storage.process_model_override = null;
+        storage.session_picker = .{};
+        storage.session_picker_load = .{};
+        storage.session_picker_current_cache = .{};
+        storage.session_picker_all_cache = .{};
+        storage.degraded_warning_emitted = false;
+        storage.pending_cancelled_command = null;
+        storage.image_snapshot_temp_dir = null;
+        storage.resume_view_admission = null;
+        storage.resume_handoff_intent = .none;
+        storage.pending_live_session_policy = null;
+    }
+
     pub fn deinit(self: *Persistence, alloc: Allocator) void {
         if (self.pending_live_session_policy) |policy| {
             debug_trace.logf(
@@ -1452,9 +1482,24 @@ pub const Persistence = struct {
         self.compaction_tasks.deinit();
         self.session_picker_current_cache.deinit();
         self.session_picker_all_cache.deinit();
-        self.* = .{};
+        self.* = undefined;
     }
 };
+
+test "persistence in-place initialization preserves empty ownership" {
+    var persistence: Persistence = undefined;
+    Persistence.initInto(&persistence);
+    defer persistence.deinit(std.testing.allocator);
+
+    try std.testing.expect(persistence.store == null);
+    try std.testing.expect(persistence.writable == null);
+    try std.testing.expect(persistence.subagent_host == null);
+    try std.testing.expect(!persistence.session_picker.active);
+    try std.testing.expect(persistence.session_picker_load.task == null);
+    try std.testing.expect(!persistence.session_picker_current_cache.ready);
+    try std.testing.expect(!persistence.session_picker_all_cache.ready);
+    try std.testing.expect(persistence.resume_handoff_intent == .none);
+}
 
 pub fn Runtime(comptime App: type) type {
     return struct {
@@ -2131,7 +2176,7 @@ pub fn Runtime(comptime App: type) type {
             log_options: session_log.Options,
         ) !session_store.LoadedWritableSession {
             const store = app.session_persistence.store orelse
-                return error.SessionStoreUnavailable;
+                return session_log.failLoadedWritableSession(error.SessionStoreUnavailable);
             return subagent_resume_admission.resumeForExternalPrompt(
                 store,
                 app.alloc,
@@ -2666,9 +2711,13 @@ pub fn Runtime(comptime App: type) type {
             app: *App,
             finished: types.FinishedPrompt,
         ) !void {
+            var turn = finished.turn;
+            if (finished.summary) |summary| {
+                types.setHistoryTurnSummary(&turn, summary);
+            }
             _ = try appendHistoryTurnWithPendingPresentation(
                 app,
-                finished.turn,
+                turn,
                 .strict,
                 finished.snapshot_file_ownership,
             );
@@ -4108,6 +4157,20 @@ pub fn Runtime(comptime App: type) type {
                     try self.app.writeDomainNotice(notice, true);
                 }
 
+                fn setCreatedAtMs(_: *Self, _: i64) void {}
+
+                fn materializeCommandReplay(_: *const Self) bool {
+                    return true;
+                }
+
+                fn appendTurnSummary(self: *Self, summary: types.TurnSummary) !void {
+                    if (comptime @hasField(SinkApp, "shell")) {
+                        if (comptime @hasDecl(@TypeOf(self.app.shell), "appendTurnSummaryEntry")) {
+                            _ = try self.app.shell.appendTurnSummaryEntry(self.app.alloc, summary);
+                        }
+                    }
+                }
+
                 fn appendUserTurn(self: *Self, user: types.UserTurn, has_prior_turns: bool) !void {
                     try self.app.writeUserPromptCardWithSpacing(user, has_prior_turns);
                 }
@@ -4268,6 +4331,18 @@ pub fn Runtime(comptime App: type) type {
 
                 fn appendNotice(self: *Self, notice: types.SemanticNotice) !void {
                     _ = try self.projection.appendNotice(notice);
+                }
+
+                fn setCreatedAtMs(self: *Self, created_at_ms: i64) void {
+                    self.projection.setCreatedAtMs(created_at_ms);
+                }
+
+                fn materializeCommandReplay(_: *const Self) bool {
+                    return false;
+                }
+
+                fn appendTurnSummary(self: *Self, summary: types.TurnSummary) !void {
+                    try self.projection.appendTurnSummary(summary);
                 }
 
                 fn appendUserTurn(self: *Self, user: types.UserTurn, _: bool) !void {
@@ -4535,6 +4610,9 @@ pub fn Runtime(comptime App: type) type {
                         });
                     },
                     .assistant => |entry| {
+                        if (entry.execution.turn_summary) |summary| {
+                            sink.setCreatedAtMs(summary.started_at_ms);
+                        }
                         try sink.appendUserTurn(entry.user, has_prior_turns.*);
                         has_prior_turns.* = true;
                         try writeExecutionHistoryToSink(app, sink, entry.execution);
@@ -4542,14 +4620,26 @@ pub fn Runtime(comptime App: type) type {
                         if (entry.assistant.len > 0) {
                             try writeAssistantHistoryMarkdownToSink(app, sink, entry.assistant);
                         }
+                        if (entry.execution.turn_summary) |summary| {
+                            try sink.appendTurnSummary(summary);
+                        }
                     },
                     .background_command => |entry| {
+                        if (entry.execution.turn_summary) |summary| {
+                            sink.setCreatedAtMs(summary.started_at_ms);
+                        }
                         try sink.appendUserTurn(entry.user, has_prior_turns.*);
                         has_prior_turns.* = true;
 
                         try writeExecutionHistoryToSink(app, sink, entry.execution);
+                        if (entry.execution.turn_summary) |summary| {
+                            sink.setCreatedAtMs(summary.completed_at_ms);
+                        }
                         if (entry.assistant) |assistant| {
                             if (assistant.len > 0) try writeAssistantHistoryMarkdownToSink(app, sink, assistant);
+                        }
+                        if (entry.execution.turn_summary) |summary| {
+                            try sink.appendTurnSummary(summary);
                         }
                         const text = try formatBackgroundReplayContext(app, entry);
                         defer app.alloc.free(text);
@@ -4560,9 +4650,15 @@ pub fn Runtime(comptime App: type) type {
                         });
                     },
                     .interrupted => |entry| {
+                        if (entry.execution.turn_summary) |summary| {
+                            sink.setCreatedAtMs(summary.started_at_ms);
+                        }
                         try sink.appendUserTurn(entry.user, has_prior_turns.*);
                         has_prior_turns.* = true;
                         try writeExecutionHistoryToSink(app, sink, entry.execution);
+                        if (entry.execution.turn_summary) |summary| {
+                            sink.setCreatedAtMs(summary.completed_at_ms);
+                        }
                         if (entry.assistant) |assistant| {
                             if (assistant.len > 0) try writeAssistantHistoryMarkdownToSink(app, sink, assistant);
                         }
@@ -4570,6 +4666,9 @@ pub fn Runtime(comptime App: type) type {
                             try writeCancelledCommandPresentation(app, sink, entry.tool_call.?, presentation);
                         }
                         try sink.appendNotice(session_runtime.interruptedTurnNotice(entry));
+                        if (entry.execution.turn_summary) |summary| {
+                            try sink.appendTurnSummary(summary);
+                        }
                     },
                 }
             }
@@ -4658,6 +4757,7 @@ pub fn Runtime(comptime App: type) type {
                     }
                 }
             }
+            try writePermissionFeedback(sink, execution.steering);
         }
 
         fn writePermissionFeedback(sink: anytype, feedback: []const []const u8) !void {
@@ -4789,6 +4889,10 @@ pub fn Runtime(comptime App: type) type {
                 action,
             );
             if (!is_command or deferred or permission_denial_reason != null) {
+                try sink.attachHistoricalToolDetail(entry_id, call, result);
+                return;
+            }
+            if (!sink.materializeCommandReplay()) {
                 try sink.attachHistoricalToolDetail(entry_id, call, result);
                 return;
             }
@@ -9553,10 +9657,25 @@ test "appendFinishedPrompt transfers snapshot ownership after history acceptance
             .user = .{ .text = @constCast("inspect") },
             .assistant = @constCast("done"),
         } },
+        .summary = .{
+            .started_at_ms = 100,
+            .completed_at_ms = 250,
+            .turn_duration_ms = 150,
+            .token_progress = .{ .input_tokens = 2, .output_tokens = 3 },
+        },
         .snapshot_file_ownership = probe.handle(),
     });
 
     try std.testing.expectEqual(@as(usize, 1), app.session.historyLen());
+    try std.testing.expectEqual(
+        @as(?types.TurnSummary, .{
+            .started_at_ms = 100,
+            .completed_at_ms = 250,
+            .turn_duration_ms = 150,
+            .token_progress = .{ .input_tokens = 2, .output_tokens = 3 },
+        }),
+        types.historyTurnSummary(app.session.history.items[0]),
+    );
     try std.testing.expectEqual(@as(usize, 1), probe.transfers);
 }
 

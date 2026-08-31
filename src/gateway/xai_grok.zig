@@ -134,25 +134,27 @@ fn streamCompletion(
     alloc: Allocator,
     request: stream_provider.ModelRequest,
 ) !stream_provider.Result {
-    if (request.cancel_flag.load(.seq_cst)) return error.Cancelled;
+    if (request.cancel_flag.load(.seq_cst)) return stream_provider.failResult(error.Cancelled);
     if (request.credential.source != .grok_subscription) {
-        return error.GrokSubscriptionCredentialRequired;
+        return stream_provider.failResult(error.GrokSubscriptionCredentialRequired);
     }
     const account_id = request.credential.account_id orelse
-        return error.GrokSubscriptionAccountRequired;
-    if (!grok_session.validAccountId(account_id)) return error.InvalidGrokSubscriptionAccount;
+        return stream_provider.failResult(error.GrokSubscriptionAccountRequired);
+    if (!grok_session.validAccountId(account_id)) {
+        return stream_provider.failResult(error.InvalidGrokSubscriptionAccount);
+    }
     try validateModel(request.model);
     const payload = try buildRequest(alloc, request.data());
     defer alloc.free(payload);
     var result = streamPrepared(alloc, request, payload) catch |err| {
-        if (request.cancel_flag.load(.seq_cst)) return error.Cancelled;
-        if (requestDeadlineExpired(request)) return error.Timeout;
+        if (request.cancel_flag.load(.seq_cst)) return stream_provider.failResult(error.Cancelled);
+        if (requestDeadlineExpired(request)) return stream_provider.failResult(error.Timeout);
         request.attempt_evidence.network_failure = gateway_client.networkFailureEvidence(err, request.delivery.load());
         return err;
     };
     if (requestDeadlineExpired(request)) {
         result.deinit(alloc);
-        return error.Timeout;
+        return stream_provider.failResult(error.Timeout);
     }
     return result;
 }
@@ -204,7 +206,7 @@ pub fn streamPrepared(
     request: stream_provider.ModelRequest,
     payload: []const u8,
 ) !stream_provider.Result {
-    if (request.cancel_flag.load(.seq_cst)) return error.Cancelled;
+    if (request.cancel_flag.load(.seq_cst)) return stream_provider.failResult(error.Cancelled);
     const account_id = request.credential.account_id.?;
     const auth_header = try std.fmt.allocPrint(alloc, "Bearer {s}", .{request.credential.secret});
     defer secret.zeroAndFree(alloc, auth_header);

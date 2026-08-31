@@ -63,6 +63,7 @@ pub fn buildWorkingLabel(
 }
 
 pub const thinking_blink_half_period_ms: i64 = 500;
+pub const activity_blink_half_period_ms = thinking_blink_half_period_ms;
 
 /// The instant the Working clock reads. While fx waits on user input the
 /// clock is frozen at the moment the wait began, so time spent on an approval
@@ -84,6 +85,10 @@ pub fn thinkingBlinkVisible(stream: StreamState, now_ms: i64) ?bool {
     if (stream.waiting_since_ms > 0) return true;
     const half_periods = @divTrunc(now_ms - stream.turn_started_ms, thinking_blink_half_period_ms);
     return @mod(half_periods, 2) == 0;
+}
+
+pub fn activityBlinkVisible(stream: StreamState, now_ms: i64) ?bool {
+    return thinkingBlinkVisible(stream, now_ms);
 }
 
 fn appendWorkingElapsedSuffix(writer: *std.Io.Writer, stream: StreamState, now_ms: i64) !void {

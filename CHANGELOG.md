@@ -1,6 +1,6 @@
 # fx
 
-## 0.0.6
+## 0.0.7
 
 <!-- release:start -->
 
@@ -84,8 +84,6 @@
 - **Sensitive command output**: Command output flagged as sensitive is not saved with the session, including secrets split across output chunks or oversized lines.
 - **OAuth callback validation**: OAuth authorization denials and successes apply only when the callback state matches the active sign-in attempt, and Grok browser callbacks accept only the expected xAI origin.
 - **MCP issuer validation**: MCP sign-in stops before exchanging a token or saving credentials when the authorization response comes from a different issuer than the server advertised.
-
-<!-- release:end -->
 
 ## 0.0.5
 

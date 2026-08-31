@@ -2,12 +2,6 @@ name: macOS arm64 PGSO candidate
 
 on:
   workflow_call:
-    inputs:
-      package_release:
-        description: Package the eligible candidate as the stable macOS arm64 artifact
-        required: false
-        type: boolean
-        default: false
   workflow_dispatch:
 
 concurrency:

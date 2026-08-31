@@ -1308,7 +1308,7 @@ pub fn formatToolStatusWithStats(
 }
 
 const test_tools = [_]tool_dispatch.Tool{
-    test_builtin_tools.list_files,
+    test_builtin_tools.glob_files,
     test_builtin_tools.read_file,
     test_builtin_tools.write_file,
     test_builtin_tools.edit_file,
@@ -1317,7 +1317,7 @@ const test_tools = [_]tool_dispatch.Tool{
 };
 const test_tool_registry = tool_dispatch.Registry{ .tools = test_tools[0..] };
 const custom_activity_tool = blk: {
-    var tool = test_builtin_tools.memory;
+    var tool = test_builtin_tools.read_file;
     tool.name = "custom_activity";
     tool.action_label = "Custom activity";
     tool.activity_kind = .open;
@@ -1495,41 +1495,6 @@ test "tool lifecycle uses activity metadata from the supplied registry" {
     try std.testing.expectEqual(types.ToolActivityKind.open, capture.events.items[0].authoritative_started.activity_kind);
 }
 
-test "memory list authoritative lifecycle is classified as a read" {
-    const alloc = std.testing.allocator;
-    var arena_state = std.heap.ArenaAllocator.init(alloc);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-    var capture = ProvisionalStatusTestCapture{
-        .alloc = alloc,
-        .tool_registry = .{ .tools = &.{test_builtin_tools.memory} },
-    };
-    defer capture.deinit();
-    const hooks = capture.hooks();
-
-    try std.testing.expect(try startToolVisibleLifecycle(
-        &hooks,
-        arena,
-        1,
-        null,
-        .{
-            .id = "memory_list",
-            .name = "memory",
-            .arguments_json = "{\"action\":\"list\"}",
-        },
-        null,
-        &.{},
-    ));
-
-    switch (capture.events.items[0]) {
-        .authoritative_started => |event| try std.testing.expectEqual(
-            types.ToolActivityKind.read,
-            event.activity_kind,
-        ),
-        else => return error.TestExpectedEqual,
-    }
-}
-
 test "presentation grouping spans silent tool steps and splits on visible prose" {
     const first = presentationGroupForStep(null, 7, 11);
     try std.testing.expectEqual(
@@ -1604,7 +1569,7 @@ test "provisional lifecycle formats labeled and unlabeled eligible tools" {
     defer statuses.deinit(alloc);
 
     try statuses.publish(&hooks, alloc, 7, "read_1", "read_file", activityKind(hooks.tool_registry, "read_file"), eligibleActionLabel("read_file"), "src/main.zig");
-    try statuses.publish(&hooks, alloc, 7, "list_1", "list_files", activityKind(hooks.tool_registry, "list_files"), eligibleActionLabel("list_files"), null);
+    try statuses.publish(&hooks, alloc, 7, "list_1", "glob_files", activityKind(hooks.tool_registry, "glob_files"), eligibleActionLabel("glob_files"), null);
 
     try std.testing.expectEqual(@as(usize, 4), capture.events.items.len);
     switch (capture.events.items[0]) {
@@ -1628,7 +1593,7 @@ test "provisional lifecycle formats labeled and unlabeled eligible tools" {
         else => return error.TestExpectedEqual,
     }
     switch (capture.events.items[3]) {
-        .progress => |event| try std.testing.expectEqualStrings("● Listing\x1b[0m", event.text),
+        .progress => |event| try std.testing.expectEqualStrings("● Matching\x1b[0m", event.text),
         else => return error.TestExpectedEqual,
     }
 }

@@ -3019,7 +3019,7 @@ fn appendFocusedVerificationContext(tracker: ?*change_tracker.ChangeTracker, are
     var wrote_evals = false;
     var wrote_test_paths: usize = 0;
     for (current_tracker.stack.items) |op| {
-        const path = op.new_path orelse op.path;
+        const path = op.path;
         if (!wrote_zig and std.mem.endsWith(u8, path, ".zig")) {
             try note.writer.writeAll("- touched_area=zig: run focused Zig tests/build checks for the changed module before broader verification.\n");
             wrote_zig = true;
@@ -3593,9 +3593,8 @@ test "gateway_system_prompt: compact ordered sections" {
     };
 
     var previous_index: ?usize = null;
-    for (sections) |section| {
-        try expectDefaultPromptContains(section.text);
-        const found_index = std.mem.find(u8, gateway_system_prompt, section.heading).?;
+    for (sections) |heading| {
+        const found_index = std.mem.find(u8, gateway_system_prompt, heading).?;
         if (previous_index) |index| try std.testing.expect(found_index > index);
         previous_index = found_index;
     }
@@ -3614,7 +3613,8 @@ test "gateway_system_prompt: local workspace authority" {
 test "gateway_system_prompt: evidence-led scoped execution" {
     try expectDefaultPromptContains("gather local evidence before answering");
     try expectDefaultPromptContains("make at least one safe local inspection before the final answer");
-    try expectDefaultPromptContains("Start with direct file, search, or local git inspection when those capabilities are available.");
+    try expectDefaultPromptContains("Before generic inspection, load any available skill whose name and description clearly match the user's task.");
+    try expectDefaultPromptContains("When no skill clearly matches, start with direct file, search, or local git inspection.");
     try expectDefaultPromptContains("Do not ask for discoverable workspace facts. Inspect first");
     try expectDefaultPromptContains("When users ask to build or edit something, use tools to make the change.");
     try expectDefaultPromptContains("stay inside the requested scope");

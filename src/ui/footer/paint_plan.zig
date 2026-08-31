@@ -23,6 +23,7 @@ const model_menu_presentation = @import("model_menu_presentation.zig");
 const skills_menu_presentation = @import("skills_menu_presentation.zig");
 const help_menu_presentation = @import("help_menu_presentation.zig");
 const settings_menu_presentation = @import("settings_menu_presentation.zig");
+const mcp_menu_presentation = @import("mcp_menu_presentation.zig");
 const resume_menu_presentation = @import("resume_menu_presentation.zig");
 const question_ui = @import("question_ui.zig");
 const render_input = @import("render_input.zig");
@@ -97,6 +98,7 @@ pub const FooterPlannerInput = struct {
     picker_failed: bool = false,
     slash_completion_count: usize = 0,
     slash_menu_layout: ?picker_presentation.SlashMenuLayout = null,
+    prepared_slash_menu: ?*const picker_presentation.PreparedSlashMenu = null,
     picker_start_col: u16 = 1,
     transcript_state: ?FooterTranscriptState = null,
 };
@@ -603,6 +605,7 @@ fn pushQueuedPromptBannerRows(
                 width,
                 false,
                 ctx.queued_cancel_all_available,
+                ctx.steering_count > 0,
             );
             try pushFooterBandRow(alloc, frame, plan, plan.footer.banner +| painted, &hint);
             painted +|= 1;
@@ -726,6 +729,7 @@ fn pushQueuedPromptBannerRows(
             width,
             empty_draft,
             ctx.queued_cancel_all_available,
+            ctx.steering_count > 0,
         );
         try pushFooterBandRow(alloc, frame, plan, hint_row, &hint);
     }
@@ -849,6 +853,18 @@ pub fn composeFooterFrame(
                 );
                 try pushFooterBandRow(alloc, &frame, plan, rows.picker_start + menu_row_index, &menu_row);
             }
+        } else if (input.picker_kind == .mcp and ctx.mcp_menu.state.active) {
+            var menu_row_index: u16 = 0;
+            while (menu_row_index < input.picker_rows) : (menu_row_index += 1) {
+                var menu_row = try mcp_menu_presentation.composeMcpMenuRow(
+                    alloc,
+                    ctx.mcp_menu,
+                    menu_row_index,
+                    shell.layout.cols,
+                    input.picker_rows,
+                );
+                try pushFooterBandRow(alloc, &frame, plan, rows.picker_start + menu_row_index, &menu_row);
+            }
         } else if (input.picker_kind == .help and ctx.help_menu.active) {
             var menu_row_index: u16 = 0;
             while (menu_row_index < input.picker_rows) : (menu_row_index += 1) {
@@ -922,7 +938,10 @@ pub fn composeFooterFrame(
             }
         } else if (input.picker_kind == .slash) {
             const slash_prefix = input_presentation.slashInputPrefix(ctx.slash_registry, ctx.input.edit_state.input.items);
-            const count = picker_presentation.mixedSlashCompletionCount(ctx.slash_registry, slash_prefix, ctx.skills_menu.items);
+            const count = if (input.prepared_slash_menu) |prepared|
+                prepared.resultCount()
+            else
+                picker_presentation.mixedSlashCompletionCount(ctx.slash_registry, slash_prefix, ctx.skills_menu.items);
             if (count > 0) {
                 if (input.slash_menu_layout) |layout| {
                     var row = rows.picker_start;
@@ -936,26 +955,44 @@ pub fn composeFooterFrame(
                         row += 1;
                     }
 
-                    const column_widths = picker_presentation.mixedSlashMenuColumnWidths(
-                        ctx.slash_registry,
-                        slash_prefix,
-                        ctx.skills_menu.items,
-                        layout.window,
-                        ctx.input.slash_menu_categories,
-                    );
-                    var match_idx = layout.window.start;
-                    while (match_idx < layout.window.end) : (match_idx += 1) {
-                        var slash_row = try picker_presentation.composeSlashMenuOptionRow(
-                            alloc,
+                    const column_widths = if (input.prepared_slash_menu) |prepared|
+                        picker_presentation.preparedSlashMenuColumnWidths(
+                            prepared,
+                            layout.window,
+                            ctx.input.slash_menu_categories,
+                        )
+                    else
+                        picker_presentation.mixedSlashMenuColumnWidths(
                             ctx.slash_registry,
                             slash_prefix,
                             ctx.skills_menu.items,
-                            match_idx,
-                            match_idx == layout.selected,
-                            column_widths,
-                            shell.layout.cols,
+                            layout.window,
                             ctx.input.slash_menu_categories,
                         );
+                    var match_idx = layout.window.start;
+                    while (match_idx < layout.window.end) : (match_idx += 1) {
+                        var slash_row = if (input.prepared_slash_menu) |prepared|
+                            try picker_presentation.composePreparedSlashMenuOptionRow(
+                                alloc,
+                                prepared,
+                                match_idx,
+                                match_idx == layout.selected,
+                                column_widths,
+                                shell.layout.cols,
+                                ctx.input.slash_menu_categories,
+                            )
+                        else
+                            try picker_presentation.composeSlashMenuOptionRow(
+                                alloc,
+                                ctx.slash_registry,
+                                slash_prefix,
+                                ctx.skills_menu.items,
+                                match_idx,
+                                match_idx == layout.selected,
+                                column_widths,
+                                shell.layout.cols,
+                                ctx.input.slash_menu_categories,
+                            );
                         try pushFooterBandRow(alloc, &frame, plan, row, &slash_row);
                         row += 1;
                     }
@@ -1017,20 +1054,18 @@ pub fn composeFooterFrame(
             shell.layout.cols,
         )
     else if (compact_command_menu) |menu|
-        switch (menu) {
-            .statusline => try input_presentation.composeHintRow(
-                alloc,
-                false,
-                input.active_label,
-                ctx,
-                shell.layout.cols,
-            ),
-            else => try input_presentation.composeCompactCommandMenuHintRow(alloc, shell.layout.cols, menu),
-        }
+        try input_presentation.composeCompactCommandMenuHintRow(alloc, shell.layout.cols, menu)
     else if (input.show_picker and input.picker_kind == .skills)
         try input_presentation.composeSkillsMenuHintRow(alloc, shell.layout.cols, ctx.ctrl_c_pending)
     else if (input.show_picker and input.picker_kind == .settings)
         try input_presentation.composeSettingsMenuHintRow(alloc, shell.layout.cols, ctx.ctrl_c_pending)
+    else if (input.show_picker and input.picker_kind == .mcp)
+        try input_presentation.composeMcpMenuHintRow(
+            alloc,
+            shell.layout.cols,
+            ctx.ctrl_c_pending,
+            ctx.mcp_menu.state,
+        )
     else if (input.show_picker and input.picker_kind == .help)
         try input_presentation.composeHelpMenuHintRow(alloc, shell.layout.cols, ctx.ctrl_c_pending)
     else if (input.show_picker and input.picker_kind == .sessions)
@@ -1071,8 +1106,7 @@ fn composeTranscriptViewerFooterFrame(
     errdefer frame.deinit(alloc);
     const width = shell.layout.cols;
     const navigation = switch (input.ctx.transcript_depth) {
-        .review => "Review · ←/→ switch · ctrl o close · PgUp/PgDn scroll · Esc close",
-        .full => "Full detail · ←/→ switch · ctrl o close · PgUp/PgDn scroll · Esc close",
+        .full => "Full detail · ctrl o close · PgUp/PgDn scroll · Esc close",
         .inline_mode => unreachable,
     };
 
@@ -1363,7 +1397,7 @@ test "transcript viewer footer keeps navigation blank row and aligns main status
     };
     defer shell.deinit(alloc);
     var ctx = testContext(&input);
-    ctx.transcript_depth = .review;
+    ctx.transcript_depth = .full;
     const planner_input: FooterPlannerInput = .{
         .active_label = null,
         .ctx = ctx,
@@ -1382,7 +1416,7 @@ test "transcript viewer footer keeps navigation blank row and aligns main status
         &frame,
         frame_plan.paint.footer.top_divider,
         shell.layout.cols,
-        "┃ Review · ←/→ switch · ctrl o close · PgUp/PgDn scroll · Esc close",
+        "┃ Full detail · ctrl o close · PgUp/PgDn scroll · Esc close",
     );
     try expectFrameRowTextTrimmed(
         &frame,
@@ -1416,7 +1450,7 @@ test "transcript viewer footer keeps navigation blank row and aligns main status
         &full_frame,
         full_plan.paint.footer.top_divider,
         shell.layout.cols,
-        "┃ Full detail · ←/→ switch · ctrl o close · PgUp/PgDn scroll · Esc close",
+        "┃ Full detail · ctrl o close · PgUp/PgDn scroll · Esc close",
     );
 }
 

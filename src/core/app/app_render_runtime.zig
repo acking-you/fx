@@ -26,7 +26,6 @@ const subagent_domain = @import("../subagent/domain.zig");
 const subagent_projection = @import("../subagent/ui_projection.zig");
 const file_index = @import("../workspace/file_index.zig");
 const statusline_identity = @import("../workspace/statusline_identity.zig");
-const provider_usage = @import("../session/provider_usage.zig");
 const activity_runtime = @import("../output/activity_runtime.zig");
 const transcript_presentation = @import("../output/transcript_presentation.zig");
 const event_loop = @import("../../ui/event_loop.zig");
@@ -42,8 +41,8 @@ const ui_input = @import("../../ui/input/runtime.zig");
 const input_visual_layout = @import("../../ui/input/visual_layout.zig");
 const registered_entities = @import("../input/registered_entities.zig");
 const approval_screen = @import("../../ui/approval_screen.zig");
-const skills_screen = @import("../../ui/skills_screen.zig");
 const full_transcript_screen = @import("../../ui/full_transcript_screen.zig");
+const session_child_store = @import("../session/session_child_store.zig");
 const render_engine = @import("../../ui/render_engine.zig");
 const build_checkpoint = @import("../../ui/render_engine/build_checkpoint.zig");
 const shell_runtime = @import("../../ui/shell_runtime.zig");
@@ -510,7 +509,6 @@ pub fn Runtime(comptime App: type) type {
             return .{
                 .system_notice_label_style = ui_render.system_notice_label_style,
                 .system_notice_text_style = ui_render.system_notice_text_style,
-                .reasoning_summary_style = ui_render.reasoning_summary_style,
                 .reset_style = ui_render.reset_style,
                 .dim_style = ui_render.dim_style,
                 .red_style = ui_render.red_style,
@@ -531,58 +529,13 @@ pub fn Runtime(comptime App: type) type {
         var file_completions_buf: [input_completion_runtime.file_picker_completion_cap]file_index.SearchResult = undefined;
         var file_match_spans_buf: [input_completion_runtime.file_picker_completion_cap * file_index.max_path_len]file_index.MatchSpan = undefined;
         var file_path_storage_buf: [input_completion_runtime.file_picker_path_storage_cap]u8 = undefined;
-
-        fn refreshQueuedPromptPreview(app: *App, queue_count: usize) void {
-            if (comptime !@hasField(App, "queued_prompt_preview") or
-                !@hasField(App, "queued_prompt_preview_count") or
-                !@hasField(App, "worker") or
-                !@hasDecl(@TypeOf(app.worker), "snapshotQueuedPromptDrafts")) return;
-            if (queue_count == app.queued_prompt_preview_count) return;
-
-            if (queue_count == 0) {
-                app.queued_prompt_preview.clearRetainingCapacity();
-                app.queued_prompt_preview_count = 0;
-                return;
-            }
-
-            const drafts = app.worker.snapshotQueuedPromptDrafts(app.alloc) catch |err| {
-                debug_trace.logf("render", "queued_preview_snapshot_failed err={s}", .{@errorName(err)});
-                return;
-            };
-            defer worker_runtime.freeQueuedPromptDrafts(app.alloc, drafts);
-            if (drafts.len == 0) return;
-
-            var safe_preview = text_utils.encodeTerminalSafe(
-                app.alloc,
-                drafts[0].reviewInput(),
-                1024,
-            ) catch |err| {
-                debug_trace.logf("render", "queued_preview_encode_failed err={s}", .{@errorName(err)});
-                return;
-            };
-            defer safe_preview.deinit(app.alloc);
-            app.queued_prompt_preview.clearRetainingCapacity();
-            app.queued_prompt_preview.appendSlice(app.alloc, safe_preview.bytes) catch |err| {
-                debug_trace.logf("render", "queued_preview_copy_failed err={s}", .{@errorName(err)});
-                return;
-            };
-            app.queued_prompt_preview_count = queue_count;
-        }
-
-        fn queuedPromptPreview(app: *const App) []const u8 {
-            if (comptime @hasField(App, "queued_prompt_preview")) {
-                return app.queued_prompt_preview.items;
-            }
-            return "";
-        }
-
         noinline fn footerContext(
             app: *App,
+            _: *[64]u8,
             shimmer_pos: i16,
             queued_cards: *const QueuedCardProjection,
         ) render_input.RenderContext {
             const queue_preview = app.worker.queuePreview();
-            refreshQueuedPromptPreview(app, queue_preview.count);
 
             const model_query = app.input_runtime.picker.activeModelPickerQuery(&app.input_runtime.edit_state);
             const pending_model = if (app.input_runtime.picker.hasPendingModelPickerSelection()) app.input_runtime.picker.model_picker_pending_model.items else null;
@@ -653,7 +606,7 @@ pub fn Runtime(comptime App: type) type {
             else if (active_capabilities_pending or model_capabilities.reasoningEffortSupported(visible_capabilities, app.effort))
                 app.effort
             else
-                app.effort;
+                .auto;
             const visible_fast_mode = if (pending_model != null and model_supports_fast)
                 pendingPickerFastMode(model_query, app.input_runtime.picker.model_picker_fast_index)
             else
@@ -667,8 +620,6 @@ pub fn Runtime(comptime App: type) type {
                     false;
             const settings_snapshot = app_commands.settingsCatalogSnapshot(app);
             const now_ms = io_mod.milliTimestamp();
-            const compacting_context = app_session_runtime.Runtime(App)
-                .compactionActive(app);
             var visible_stream = app.stream;
             if (!visible_stream.active) {
                 if (app.pacer.completedAssistantPresentationTokenProgress()) |progress| {
@@ -681,27 +632,18 @@ pub fn Runtime(comptime App: type) type {
                 .stream = visible_stream,
                 .completed_assistant_presentation_tail = app.pacer.hasCompletedAssistantPresentationTail(),
                 .writing_response = app.pacer.hasPending(),
-                .compacting_context = compacting_context,
                 .has_api_key = app.auth.credentialSource() != null,
                 .model = visible_model,
                 .pending_images = app.pending_images.items,
-                // Remote compaction runs off-thread. Keep the composer live so
-                // input can be queued for the next turn while its activity row
-                // remains visible.
-                .composer_visible = true,
                 .permission_mode = if (comptime @hasField(App, "permission_engine"))
                     app.permission_engine.mode
                 else
                     .ask,
                 .queued_count = if (queued_cards.cards.len > 0) queued_cards.cards.len else queue_preview.count,
-                .steering_count = if (queued_cards.cards.len > 0 or queue_preview.paused)
-                    0
+                .steering_count = if (comptime @hasField(@TypeOf(queue_preview), "steering_count"))
+                    queue_preview.steering_count
                 else
-                    queue_preview.steering_count,
-                .queued_prompt_preview = if (queued_cards.cards.len == 0)
-                    queuedPromptPreview(app)
-                else
-                    "",
+                    0,
                 .queued_paused = if (comptime @hasField(@TypeOf(queue_preview), "paused"))
                     queue_preview.paused
                 else
@@ -727,6 +669,7 @@ pub fn Runtime(comptime App: type) type {
                 .fast_mode = visible_fast_mode,
                 .model_supports_fast = model_supports_fast,
                 .effort = visible_effort,
+                .model_supports_effort = model_supports_effort,
                 .ctrl_c_pending = app.input_runtime.gestures.ctrlCExitArmed(),
                 .shimmer_pos = shimmer_pos,
                 .now_ms = now_ms,
@@ -760,6 +703,26 @@ pub fn Runtime(comptime App: type) type {
                     render_input.skillsMenuProjection(&app.skills)
                 else
                     .{},
+                .mcp_menu = if (comptime @hasField(App, "mcp")) blk: {
+                    const view = app.mcp.menuView();
+                    break :blk .{
+                        .state = view.state,
+                        .servers = if (view.health) |health| health.servers else &.{},
+                        .tools = view.tools,
+                        .resources = if (view.resources) |catalog| catalog.resources.items else &.{},
+                        .resource_templates = if (view.resources) |catalog| catalog.templates.items else &.{},
+                        .prompts = if (view.prompts) |catalog| catalog.items else &.{},
+                        .configuration_issue_count = if (view.health) |health| health.configuration_issues.len else 0,
+                        .preview = view.preview,
+                        .feedback = view.feedback,
+                        .add_name = view.add_form.name.items,
+                        .add_target = view.add_form.target.items,
+                        .add_arguments = view.add_form.arguments.items,
+                        .add_draft = app.input_runtime.edit_state.input.items,
+                        .arguments = view.argument_fields,
+                        .argument_draft = app.input_runtime.edit_state.input.items,
+                    };
+                } else .{},
                 .help_menu = render_input.helpMenuProjection(
                     &app.input_runtime.help_menu,
                     app.slashRegistry(),
@@ -808,6 +771,7 @@ pub fn Runtime(comptime App: type) type {
                     )
                 else
                     .{},
+                .upgrade_status = "",
                 .danger_status = if (yolo_warning_active)
                     app_permission_runtime.yolo_warning_text
                 else
@@ -1195,7 +1159,7 @@ pub fn Runtime(comptime App: type) type {
                 .question_requested,
                 .open_model_picker,
                 .turn_token_update,
-                .tool_payload_started,
+                .turn_phase_update,
                 // Product-state compaction is installed by the UI worker-event
                 // drain and must never be replayed as transcript presentation.
                 .compaction,
@@ -1316,6 +1280,7 @@ pub fn Runtime(comptime App: type) type {
             ctx.fast_mode = false;
             ctx.model_supports_fast = capabilities.supports_fast_mode;
             ctx.effort = chat.configuration.effort orelse .auto;
+            ctx.model_supports_effort = capabilities.reasoning_efforts.len > 0;
             ctx.ctrl_c_pending = view.editor.gestures.ctrlCExitArmed();
             ctx.model_query_active = false;
             ctx.model_completions = &.{};
@@ -1323,17 +1288,22 @@ pub fn Runtime(comptime App: type) type {
             ctx.file_completions = &.{};
             ctx.inline_completion_suffix = "";
             ctx.auth_picker.active = false;
-            ctx.skills_menu = .{};
+            ctx.skills_menu = if (comptime @hasField(App, "skills"))
+                render_input.skillsMenuProjection(&app.skills)
+            else
+                .{};
+            ctx.mcp_menu = .{};
             ctx.help_menu = .{};
-            ctx.settings_menu = .{};
+            ctx.settings_menu.active = false;
             ctx.model_menu = if (comptime @hasField(App, "model_cache"))
                 render_input.modelMenuProjection(&app.model_cache)
             else
                 .{};
             ctx.session_menu = .{};
-            ctx.statusline_menu = .{};
+            ctx.statusline_menu.active = false;
             ctx.usage_menu = .{};
             ctx.workspace_menu = .{};
+            ctx.upgrade_status = "";
             ctx.danger_status = "";
             ctx.danger_status_compact = "";
             ctx.esc_clear_armed = view.editor.gestures.escapeClearArmed();
@@ -1437,29 +1407,8 @@ pub fn Runtime(comptime App: type) type {
                 items.git_branch = identity.git_branch;
             }
             if (app.statusline_context) {
-                const output_tokens: u64 = if (comptime @hasField(App, "total_output_tokens"))
-                    app.total_output_tokens
-                else
-                    0;
-                items.context_used = app.total_input_tokens +| output_tokens;
-                items.context_total = model_capabilities.effectiveContextWindowTokens(
-                    model_capabilities.resolveForApp(App, app, visible_model),
-                );
-            }
-            const usage_output_tokens: u64 = if (comptime @hasField(App, "total_output_tokens"))
-                app.total_output_tokens
-            else
-                0;
-            if (app.total_input_tokens > 0 or usage_output_tokens > 0) {
-                items.usage = provider_usage.Summary.fromCounters(
-                    provider_runtime.provider(app),
-                    app.auth.credentialSource(),
-                    app.auth.accountId(),
-                    app.total_input_tokens,
-                    usage_output_tokens,
-                    0,
-                    items.context_total,
-                );
+                items.context_used = app.total_input_tokens;
+                items.context_total = model_capabilities.resolveForApp(App, app, visible_model).context_window;
             }
             if (comptime @hasField(App, "statusline_session")) {
                 if (app.statusline_session) {
@@ -1856,7 +1805,7 @@ pub fn Runtime(comptime App: type) type {
                 else
                     false;
                 if (surface_changed) {
-                    if (!modelMenuActive(app)) {
+                    if (!modelMenuActive(app) and !skillsMenuActive(app)) {
                         presentation_shell.invalidateTranscriptAnchor(
                             "subagent child surface activated",
                         );
@@ -1865,6 +1814,7 @@ pub fn Runtime(comptime App: type) type {
                 }
             }
             const render_requests = activeRenderRequests(app);
+            var upgrade_status_buf: [64]u8 = undefined;
             var queued_cards = try buildQueuedCardProjection(App, app);
             defer queued_cards.deinit(app.alloc);
             var child_display_name: ?text_utils.EncodedText = if (child_view) |view|
@@ -1883,6 +1833,7 @@ pub fn Runtime(comptime App: type) type {
                 render_requests.visibleAnimationPhase();
             const main_footer_ctx = footerContext(
                 app,
+                &upgrade_status_buf,
                 shimmer_pos,
                 &queued_cards,
             );
@@ -1901,9 +1852,6 @@ pub fn Runtime(comptime App: type) type {
                 )
             else
                 main_footer_ctx;
-            if (child_view != null and skillsMenuActive(app)) {
-                return renderChildSkillsScreen(app, footer_ctx);
-            }
             const render_reconciliation = if (child_view != null)
                 InlineRenderReconciliation{ .alternate_screen_owns_rendering = true }
             else switch (try reconcileBeforeFrameRender(app, render_input.queuedBannerRows(footer_ctx))) {
@@ -1936,6 +1884,13 @@ pub fn Runtime(comptime App: type) type {
             defer if (owned_transcript_source) |*source| source.deinit(app.alloc);
             var transcript_source: ?*transcript_runtime.TranscriptPreparationSource = null;
             var full_transcript_projection: ?*full_transcript_screen.Projection = null;
+            var full_transcript_capability: ?*session_child_store.SessionChildCapability = if (comptime @hasDecl(
+                App,
+                "fullTranscriptSidecarCapability",
+            ))
+                app.fullTranscriptSidecarCapability()
+            else
+                null;
             var transcript_transition: ?transcript_runtime.TranscriptTransition = null;
             defer if (transcript_transition) |*transition| transition.deinit(app.alloc);
             var footer_measurement: ?surface_frame.SurfaceFooterMeasurement = null;
@@ -1966,11 +1921,15 @@ pub fn Runtime(comptime App: type) type {
                             app.fullTranscriptDiffResolver()
                         else
                             null;
-                    full_transcript_projection = try presentation_shell.cachedFullTranscriptProjectionInterruptible(
+                    full_transcript_projection = try presentation_shell.preparedFullTranscriptPageProjectionInterruptible(
                         app.alloc,
                         full_diff_resolver,
+                        full_transcript_capability,
                         checkpoint,
                     );
+                    if (presentation_shell.preparedFullTranscriptPageCapability()) |capability| {
+                        full_transcript_capability = capability;
+                    }
                 }
                 footer_measurement = try surface_frame.measureSurfaceFooter(
                     app.alloc,
@@ -2224,15 +2183,11 @@ pub fn Runtime(comptime App: type) type {
                 if (full_transcript_projection) |projection| {
                     const area = footer_frame.paint.transcript_band;
                     if (!area.isEmpty()) {
-                        const capability = if (comptime @hasDecl(App, "fullTranscriptSidecarCapability"))
-                            app.fullTranscriptSidecarCapability()
-                        else
-                            null;
                         const staged = try presentation_shell.prepareFullTranscriptSurfacePaintInterruptible(
                             app.alloc,
                             &app.metrics,
                             projection,
-                            capability,
+                            full_transcript_capability,
                             .{ .top = area.top, .bottom = area.bottom },
                             checkpoint,
                         );
@@ -2582,46 +2537,6 @@ pub fn Runtime(comptime App: type) type {
             if (screen.needs_full_file_projection) {
                 app.shell.render_requests.request(.modal);
             }
-            return .{
-                .shadow_state = .committed,
-                .animation_visible = false,
-            };
-        }
-
-        fn renderChildSkillsScreen(
-            app: *App,
-            ctx: render_input.RenderContext,
-        ) !FrameAttemptResult {
-            if (comptime !@hasField(App, "terminal") or !@hasField(App, "skills")) {
-                return error.MissingSkillsScreenRuntime;
-            }
-            if (app.shell.shadow_vt) |grid| {
-                if (grid.cols != app.shell.layout.cols or grid.rows != app.shell.layout.rows) {
-                    try grid.resize(app.shell.layout.cols, app.shell.layout.rows);
-                }
-            }
-
-            var screen = try skills_screen.paint(app.alloc, .{
-                .rows = app.shell.layout.rows,
-                .cols = app.shell.layout.cols,
-                .skills = render_input.skillsMenuProjection(&app.skills),
-                .composer = .{
-                    .input = ctx.input.edit_state.input.items,
-                    .cursor = ctx.input.edit_state.cursor,
-                    .images = &.{},
-                    .pasted_blocks = ctx.input.entities.pasted_blocks.items,
-                    .image_tokens = ctx.input.entities.image_tokens.items,
-                    .skill_tokens = ctx.input.entities.skill_tokens.items,
-                },
-                .ctrl_c_pending = ctx.ctrl_c_pending,
-                .clear_display = true,
-            });
-            defer screen.deinit(app.alloc);
-            try app_lifecycle.writeLifecycleTerminalBytes(
-                &app.shell,
-                &app.metrics,
-                screen.bytes,
-            );
             return .{
                 .shadow_state = .committed,
                 .animation_visible = false,
@@ -3956,7 +3871,7 @@ test "core.app_render_runtime connects minimal focused tools to the transcript b
         .activity_projection = .{ .tool_slot = .{
             .entry_id = 9,
             .fallback_label = "Running zig build",
-            .thinking_label = "⠋ Working",
+            .thinking_label = "Thinking",
             .active = true,
             .kind = .command,
         } },
@@ -4605,6 +4520,12 @@ const CoordinatorTestWorker = struct {
     }
 };
 
+const CoordinatorTestUpgrader = struct {
+    fn statusLabel(_: *@This(), _: []u8) []const u8 {
+        return "";
+    }
+};
+
 const CoordinatorTestPacer = struct {
     pending: bool = false,
     completed_token_progress: ?types.TurnTokenProgress = null,
@@ -4695,6 +4616,7 @@ const CoordinatorTestApp = struct {
     gateway_metadata_model: ?[]const u8 = null,
     gateway_metadata: model_capabilities.GatewayMetadata = .{},
     permission_state: app_permission_runtime.State = .{},
+    upgrader: CoordinatorTestUpgrader = .{},
     terminal_client: CoordinatorTestTerminalClient = .{},
 
     pub fn slashRegistry(_: *const CoordinatorTestApp) command_specs.SlashRegistry {
@@ -4824,9 +4746,11 @@ test "core.app_render_runtime keeps final token progress during paced response t
     };
     defer app.deinit();
 
+    var upgrade_status_buf: [64]u8 = undefined;
     const queued_cards: QueuedCardProjection = .{};
     const ctx = Runtime(CoordinatorTestApp).footerContext(
         &app,
+        &upgrade_status_buf,
         0,
         &queued_cards,
     );
@@ -4859,9 +4783,11 @@ test "core.app_render_runtime keeps configured controls visible while model capa
     defer app.deinit();
     try app.selected_model.appendSlice(alloc, "anthropic/claude-opus-4.8");
 
+    var upgrade_status_buf: [64]u8 = undefined;
     const queued_cards: QueuedCardProjection = .{};
     const ctx = Runtime(CoordinatorTestApp).footerContext(
         &app,
+        &upgrade_status_buf,
         0,
         &queued_cards,
     );
@@ -4878,6 +4804,7 @@ test "core.app_render_runtime keeps configured controls visible while model capa
         ctx.fast_mode,
         ctx.model_supports_fast,
         ctx.effort,
+        ctx.model_supports_effort,
         ctx.statusline,
         80,
         &hint_buf,
@@ -4905,9 +4832,11 @@ test "core.app_render_runtime projects only the visible inline completion suffix
     app.skills.items = @constCast(&skills);
     try app.input_runtime.textReplacementState().replace(alloc, "explain $man");
 
+    var upgrade_status_buf: [64]u8 = undefined;
     const queued_cards: QueuedCardProjection = .{};
     const ctx = Runtime(CoordinatorTestApp).footerContext(
         &app,
+        &upgrade_status_buf,
         0,
         &queued_cards,
     );
@@ -4927,9 +4856,11 @@ test "core.app_render_runtime projects an inline slash completion suffix after t
     app.shell.layout.cols = 80;
     try app.input_runtime.textReplacementState().replace(alloc, "explain /he");
 
+    var upgrade_status_buf: [64]u8 = undefined;
     const queued_cards: QueuedCardProjection = .{};
     const ctx = Runtime(CoordinatorTestApp).footerContext(
         &app,
+        &upgrade_status_buf,
         0,
         &queued_cards,
     );
@@ -4968,11 +4899,12 @@ test "core.app_render_runtime projects Opus 4.8 one million token context to foo
         false,
         true,
         .auto,
+        true,
         statusline,
         100,
         &buf,
     );
-    try std.testing.expectEqualStrings("ask · opus 4.8 · Usage: 43k · Context: 43k/1000k 4%", line);
+    try std.testing.expectEqualStrings("ask · opus 4.8 · Context: 43k/1000k 4%", line);
 }
 
 test "core.app_render_runtime uses Gateway context window from resolved capabilities" {
@@ -5868,7 +5800,7 @@ test "core.app_render_runtime width-changed queued editor keeps mention navigati
     try std.testing.expect(!app.terminal.catalogMenuScreenActive());
 }
 
-test "core.app_render_runtime active BYOK account picker stays on the inline transcript surface" {
+test "core.app_render_runtime active setup hub stays on the inline transcript surface" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -5903,10 +5835,9 @@ test "core.app_render_runtime active BYOK account picker stays on the inline tra
     try Runtime(CoordinatorTestApp).flushRequestedFrame(&app);
 
     try std.testing.expect(!app.terminal.catalogMenuScreenActive());
-    try std.testing.expect(try coordinatorGridContains(app.shell.shadow_vt.?.*, "Accounts"));
-    try std.testing.expect(try coordinatorGridContains(app.shell.shadow_vt.?.*, "Sign in with Codex"));
-    try std.testing.expect(try coordinatorGridContains(app.shell.shadow_vt.?.*, "Sign in with Grok"));
-    try std.testing.expect(try coordinatorGridContains(app.shell.shadow_vt.?.*, "Switch credential"));
+    try std.testing.expect(try coordinatorGridContains(app.shell.shadow_vt.?.*, "Setup"));
+    try std.testing.expect(try coordinatorGridContains(app.shell.shadow_vt.?.*, "Connections"));
+    try std.testing.expect(try coordinatorGridContains(app.shell.shadow_vt.?.*, "Credential source"));
     try std.testing.expect(try coordinatorGridContains(app.shell.shadow_vt.?.*, "Enter Open"));
     try std.testing.expect(!(try coordinatorGridContains(app.shell.shadow_vt.?.*, "test-model")));
     try std.testing.expect(try coordinatorGridContains(app.shell.shadow_vt.?.*, "setup transcript stays behind"));
@@ -6344,7 +6275,7 @@ test "core.app_render_runtime generic approval exits the full transcript screen 
 
     try std.testing.expect(try app.approval_prompt.syncRequest(alloc, .{
         .id = 42,
-        .label = "exec_command sh -c 'printf approval'",
+        .label = "terminal.exec sh -c 'printf approval'",
     }));
     app.shell.render_requests.request(.modal);
     try Runtime(CoordinatorTestApp).flushRequestedFrame(&app);
@@ -6635,6 +6566,60 @@ test "core.app_render_runtime lifecycle rewrite recovers normal buffer after fil
         state_after_rewrite,
     );
     try std.testing.expect(try coordinatorGridContains(app.shell.shadow_vt.?.*, "stream completed"));
+}
+
+test "core.app_render_runtime full transcript opens with a bounded loading frame" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var file = try tmp.dir.createFile(
+        std.testing.io,
+        "full-transcript-loading-frame.log",
+        .{ .read = true },
+    );
+    defer file.close(io_mod.getIo());
+
+    var app = CoordinatorTestApp{
+        .alloc = alloc,
+        .shell = .{
+            .stdout_file = file,
+            .layout = .{
+                .rows = 24,
+                .cols = 96,
+                .content_bottom = 20,
+                .divider_top_row = 21,
+                .input_row = 22,
+                .divider_bottom_row = 23,
+                .hint_row = 24,
+            },
+            .owned_top_row = 1,
+            .viewport_top_row = 1,
+        },
+    };
+    defer app.deinit();
+    try app.selected_model.appendSlice(alloc, "test-model");
+    try app.shell.initBacking(alloc);
+    try app.shell.enableShadowVt(alloc);
+    try app.shell.writeTranscript(
+        alloc,
+        &app.metrics,
+        ("historical transcript row\n" ** 512) ++ "FULL_ASYNC_SENTINEL\n",
+        true,
+    );
+    app.shell.render_requests.request(.first_frame);
+    try Runtime(CoordinatorTestApp).flushRequestedFrame(&app);
+
+    try app_lifecycle.openFullTranscript(app.alloc, &app.terminal, &app.shell, &app.metrics);
+    try Runtime(CoordinatorTestApp).flushRequestedFrame(&app);
+
+    try std.testing.expect(try coordinatorGridContains(
+        app.shell.shadow_vt.?.*,
+        "Preparing full detail",
+    ));
+    try std.testing.expect(!try coordinatorGridContains(
+        app.shell.shadow_vt.?.*,
+        "FULL_ASYNC_SENTINEL",
+    ));
 }
 
 test "core.app_render_runtime changed resized full transcript close preserves primary history without full replay" {
@@ -7001,7 +6986,7 @@ const ChildApprovalReconcileApp = struct {
     }
 };
 
-test "child approval arrival closes review and full transcript depths before rendering" {
+test "child approval arrival closes full transcript depth before rendering" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -7013,42 +6998,32 @@ test "child approval arrival closes review and full transcript depths before ren
     defer debug_trace.resetForTest();
     try debug_trace.configureForTestWithScopes(alloc, trace_path, "full_transcript");
 
-    inline for (.{
-        transcript_presentation.Depth.review,
-        transcript_presentation.Depth.full,
-    }) |depth| {
-        var app = ChildApprovalReconcileApp{
-            .alloc = alloc,
-            .subagents = .{ .depth = depth },
-        };
-        defer app.deinit();
-        try std.testing.expect(try app.approval_prompt.syncRequest(alloc, .{
-            .id = 91,
-            .label = "exec_command npm test",
-        }));
+    var app = ChildApprovalReconcileApp{
+        .alloc = alloc,
+        .subagents = .{ .depth = .full },
+    };
+    defer app.deinit();
+    try std.testing.expect(try app.approval_prompt.syncRequest(alloc, .{
+        .id = 91,
+        .label = "terminal.exec npm test",
+    }));
 
-        try std.testing.expect(try Runtime(ChildApprovalReconcileApp)
-            .reconcileChildTranscriptForPresentedApproval(
-            &app,
-            "selected-child",
-        ));
+    try std.testing.expect(try Runtime(ChildApprovalReconcileApp)
+        .reconcileChildTranscriptForPresentedApproval(
+        &app,
+        "selected-child",
+    ));
 
-        try std.testing.expectEqual(
-            transcript_presentation.Depth.inline_mode,
-            app.subagents.depth,
-        );
-        try std.testing.expectEqual(@as(usize, 1), app.subagents.close_calls);
-    }
+    try std.testing.expectEqual(
+        transcript_presentation.Depth.inline_mode,
+        app.subagents.depth,
+    );
+    try std.testing.expectEqual(@as(usize, 1), app.subagents.close_calls);
 
     var trace_file = try std.Io.Dir.openFileAbsolute(std.testing.io, trace_path, .{});
     defer trace_file.close(std.testing.io);
     const trace = try io_mod.readFileToEnd(alloc, &trace_file, 4096);
     defer alloc.free(trace);
-    try std.testing.expect(std.mem.find(
-        u8,
-        trace,
-        "depth_transition from=review to=inline route=child trigger=approval_handoff",
-    ) != null);
     try std.testing.expect(std.mem.find(
         u8,
         trace,

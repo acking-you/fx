@@ -18,6 +18,8 @@ const command_specs = @import("../slash_commands/command_specs.zig");
 const context_contract = @import("../workspace/context_contract.zig");
 const mode_registry = @import("../modes/mode_registry.zig");
 const mcp_contract = @import("../mcp/mcp_contract.zig");
+const mcp_command_provider = @import("../mcp/command_provider.zig");
+const mcp_health = @import("../mcp/health.zig");
 const mcp_runtime = @import("../mcp/mcp_runtime.zig");
 const tool_set_contract = @import("../tooling/tool_set.zig");
 const test_builtin_gateway = if (builtin.is_test)
@@ -60,7 +62,13 @@ pub const Config = struct {
     mode_registry: mode_registry.Registry,
     tool_set: tool_set_contract.ToolSet,
     inspect_mcp_profile_config: mcp_contract.InspectProfileConfigFn,
+    inspect_mcp_local_config: mcp_health.InspectLocalConfigFn =
+        mcp_health.inspectLocalConfigUnavailable,
     load_mcp_runtime: mcp_runtime.LoadRuntimeFn,
+    add_mcp_profile_server: mcp_command_provider.AddProfileServerFn =
+        mcp_command_provider.addProfileServerUnavailable,
+    remove_mcp_profile_server: mcp_command_provider.RemoveProfileServerFn =
+        mcp_command_provider.removeProfileServerUnavailable,
     acp_runner: acp_runner.Runner,
 };
 
@@ -120,10 +128,6 @@ fn runWithDeps(comptime App: type, alloc: Allocator, args: []const [:0]const u8,
 }
 
 pub fn runBeforeInteractive(alloc: Allocator, args: []const [:0]const u8, cfg: Config) !BeforeInteractiveResult {
-    _ = cli_surface.recordRequested(args) catch {
-        writeStderr(.{}, cli_surface.record_modifier_usage);
-        return .{ .exit = 1 };
-    };
     const run_result = cli_surface.runIfRequested(alloc, args, cliSurfaceConfig(cfg)) catch |err| switch (err) {
         error.UnknownCliCommand => return .{ .exit = 1 },
         else => {
@@ -145,10 +149,6 @@ pub fn runNoConfigBeforeInteractive(
 }
 
 fn runBeforeInteractiveWithDeps(alloc: Allocator, args: []const [:0]const u8, cfg: Config, deps: RunDeps) !BeforeInteractiveResult {
-    _ = cli_surface.recordRequested(args) catch {
-        writeStderr(deps, cli_surface.record_modifier_usage);
-        return .{ .exit = 1 };
-    };
     const run_result = deps.run_if_requested(deps.cli_ctx, alloc, args, cliSurfaceConfig(cfg)) catch |err| switch (err) {
         error.UnknownCliCommand => return .{ .exit = 1 },
         else => {
@@ -221,7 +221,7 @@ fn runInteractiveWithDeps(comptime App: type, comptime cooperative: bool, alloc:
                 return .{ .exit = 1 };
             },
             error.SessionBusy => {
-                writeStderr(deps, "fx: another Fx process may be using this session (running or suspended); check other terminals or run jobs, then use fg or quit that process\n");
+                writeStderr(deps, "fx: another fx process may be using this session (running or suspended); check other terminals or run jobs, then use fg or quit that process\n");
                 return .{ .exit = 1 };
             },
             error.SessionLockUnsupported => {
@@ -338,7 +338,10 @@ fn cliSurfaceConfig(cfg: Config) cli_surface.Config {
         .mode_registry = cfg.mode_registry,
         .tool_set = cfg.tool_set,
         .inspect_mcp_profile_config = cfg.inspect_mcp_profile_config,
+        .inspect_mcp_local_config = cfg.inspect_mcp_local_config,
         .load_mcp_runtime = cfg.load_mcp_runtime,
+        .add_mcp_profile_server = cfg.add_mcp_profile_server,
+        .remove_mcp_profile_server = cfg.remove_mcp_profile_server,
         .acp_runner = cfg.acp_runner,
     };
 }
@@ -414,7 +417,7 @@ const test_entry_context_registry = context_contract.Registry{ .default_provider
     .append_transient_fn = appendNoopTransientContextForTest,
 } };
 
-fn noMcpRuntimeForTest(_: Allocator, _: @import("../mcp/elicitation.zig").Capabilities) !?*mcp_runtime.McpRuntime {
+fn noMcpRuntimeForTest(_: Allocator, _: []const u8, _: @import("../mcp/elicitation.zig").Capabilities) !?*mcp_runtime.McpRuntime {
     return null;
 }
 
@@ -987,7 +990,7 @@ test "app entry maps unavailable session state to one expected startup failure" 
     }{
         .{
             .init_error = error.SessionBusy,
-            .message = "fx: another Fx process may be using this session (running or suspended); check other terminals or run jobs, then use fg or quit that process\n",
+            .message = "fx: another fx process may be using this session (running or suspended); check other terminals or run jobs, then use fg or quit that process\n",
         },
         .{
             .init_error = error.SessionLockUnsupported,

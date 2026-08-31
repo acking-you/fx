@@ -2,9 +2,6 @@ export const CANONICAL_BUILTIN_NAMES = [
   "read_file",
   "glob_files",
   "grep_files",
-  "list_files",
-  "file_info",
-  "semantic_search",
   "edit_file",
   "write_file",
   "delete_file",
@@ -22,7 +19,6 @@ export const CANONICAL_BUILTIN_NAMES = [
   "memory",
   "update_plan",
   "ask_user_question",
-  "open_file",
   "web_fetch",
   "web_search",
   "read_tool_result",
@@ -33,7 +29,6 @@ export const READ_ONLY_SERIALIZED_TOOL_NAMES = [
   "read_file",
   "glob_files",
   "grep_files",
-  "list_files",
 ] as const;
 
 export const VERIFY_SERIALIZED_TOOL_NAMES = [
@@ -65,12 +60,6 @@ export const AMBIGUOUS_CAPABILITY_CLAUSES = {
     "Read an installed skill",
     "load an already-installed skill",
     "skill changes, subagents, and user questions may require approval",
-    "memory, skill, or ask-user work",
-  ],
-  memory: [
-    "Use memory to save durable user preferences",
-    "Save, list, or clear durable user preferences",
-    "memory, skill, or ask-user work",
   ],
 } as const;
 

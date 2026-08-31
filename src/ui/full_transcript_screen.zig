@@ -4398,6 +4398,28 @@ fn buildProjectionWithDiffResolver(
     };
 }
 
+pub fn buildProjectionWithResolver(
+    alloc: Allocator,
+    entries: []const transcript_blocks.TranscriptEntry,
+    details: []const ToolDetailRecord,
+    command_blocks: []const command_output_runtime.CommandOutputBlock,
+    styles: transcript_blocks.Styles,
+    cols: u16,
+    anchor_entry_id: ?u32,
+    full_diff_resolver: ?FullDiffResolver,
+) !Projection {
+    return buildProjectionWithDiffResolver(
+        alloc,
+        entries,
+        details,
+        command_blocks,
+        styles,
+        cols,
+        anchor_entry_id,
+        full_diff_resolver,
+    );
+}
+
 fn buildProjectionForDepthWithDiffResolverInterruptible(
     alloc: Allocator,
     entries: []const transcript_blocks.TranscriptEntry,

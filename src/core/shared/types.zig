@@ -334,8 +334,22 @@ pub const ToolLifecycleEvent = union(enum) {
     turn_finished: TurnFinished,
 };
 
+pub const TurnPhase = enum {
+    thinking,
+    generating,
+    running,
+};
+
+pub const TurnPhaseUpdate = struct {
+    turn_id: u64,
+    step_id: u64,
+    phase: TurnPhase,
+};
+
 pub const StreamState = struct {
     active: bool = false,
+    phase: TurnPhase = .thinking,
+    phase_step_id: u64 = 0,
     chunks: usize = 0,
     read_count: usize = 0,
     list_count: usize = 0,
@@ -1066,9 +1080,15 @@ pub const ExecutionMemory = struct {
     /// retain the exact steering text instead of folding it into the root
     /// prompt.
     user_inputs: []UserTurn = &.{},
+    /// Text-only steering projected by newer runtimes. The BYOK worker keeps
+    /// the authoritative user turns above so image-bearing inputs retain
+    /// their typed representation during replay.
+    steering: [][]u8 = &.{},
+    turn_summary: ?TurnSummary = null,
 
     pub fn isEmpty(self: ExecutionMemory) bool {
-        return self.tool_steps.len == 0 and self.files.len == 0 and self.user_inputs.len == 0;
+        return self.tool_steps.len == 0 and self.files.len == 0 and
+            self.user_inputs.len == 0 and self.steering.len == 0;
     }
 };
 
@@ -1185,6 +1205,8 @@ pub const ToolUsage = struct {
 };
 
 pub const TurnSummary = struct {
+    started_at_ms: i64 = 0,
+    completed_at_ms: i64 = 0,
     thinking_duration_ms: u64 = 0,
     turn_duration_ms: u64 = 0,
     token_progress: TurnTokenProgress = .{},
@@ -1790,6 +1812,24 @@ pub const HistoryTurn = union(enum) {
     interrupted: InterruptedHistoryTurn,
 };
 
+pub fn setHistoryTurnSummary(turn: *HistoryTurn, summary: TurnSummary) void {
+    switch (turn.*) {
+        .assistant => |*entry| entry.execution.turn_summary = summary,
+        .background_command => |*entry| entry.execution.turn_summary = summary,
+        .interrupted => |*entry| entry.execution.turn_summary = summary,
+        .compacted_summary => {},
+    }
+}
+
+pub fn historyTurnSummary(turn: HistoryTurn) ?TurnSummary {
+    return switch (turn) {
+        .assistant => |entry| entry.execution.turn_summary,
+        .background_command => |entry| entry.execution.turn_summary,
+        .interrupted => |entry| entry.execution.turn_summary,
+        .compacted_summary => null,
+    };
+}
+
 pub const FinishedPromptProjection = enum {
     history_default,
     assistant_text,
@@ -2308,10 +2348,14 @@ pub fn dupeExecutionMemory(alloc: std.mem.Allocator, memory: ExecutionMemory) !E
     const files = try dupeFileEvidenceSlice(alloc, memory.files);
     errdefer freeFileEvidenceSlice(alloc, files);
     const user_inputs = try dupeUserTurnSlice(alloc, memory.user_inputs);
+    errdefer freeUserTurnSlice(alloc, user_inputs);
+    const steering = try dupePermissionFeedback(alloc, memory.steering);
     return .{
         .tool_steps = tool_steps,
         .files = files,
         .user_inputs = user_inputs,
+        .steering = steering,
+        .turn_summary = memory.turn_summary,
     };
 }
 
@@ -2319,6 +2363,7 @@ pub fn freeExecutionMemory(alloc: std.mem.Allocator, memory: ExecutionMemory) vo
     freeToolExecutionSteps(alloc, memory.tool_steps);
     freeFileEvidenceSlice(alloc, memory.files);
     freeUserTurnSlice(alloc, memory.user_inputs);
+    freePermissionFeedback(alloc, memory.steering);
 }
 
 pub fn dupeUserTurnSlice(alloc: std.mem.Allocator, users: []const UserTurn) ![]UserTurn {

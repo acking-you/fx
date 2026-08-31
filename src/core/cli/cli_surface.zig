@@ -41,6 +41,8 @@ else
 const context_contract = @import("../workspace/context_contract.zig");
 const mode_registry = @import("../modes/mode_registry.zig");
 const mcp_contract = @import("../mcp/mcp_contract.zig");
+const mcp_command_provider = @import("../mcp/command_provider.zig");
+const mcp_health = @import("../mcp/health.zig");
 const mcp_runtime = @import("../mcp/mcp_runtime.zig");
 const tool_set_contract = @import("../tooling/tool_set.zig");
 const workspace_access = @import("../workspace/workspace_access.zig");
@@ -187,7 +189,13 @@ pub const Config = struct {
     mode_registry: mode_registry.Registry,
     tool_set: tool_set_contract.ToolSet,
     inspect_mcp_profile_config: mcp_contract.InspectProfileConfigFn,
+    inspect_mcp_local_config: mcp_health.InspectLocalConfigFn =
+        mcp_health.inspectLocalConfigUnavailable,
     load_mcp_runtime: mcp_runtime.LoadRuntimeFn,
+    add_mcp_profile_server: mcp_command_provider.AddProfileServerFn =
+        mcp_command_provider.addProfileServerUnavailable,
+    remove_mcp_profile_server: mcp_command_provider.RemoveProfileServerFn =
+        mcp_command_provider.removeProfileServerUnavailable,
     acp_runner: acp_runner.Runner,
 };
 
@@ -1724,8 +1732,12 @@ fn statusSnapshotFromStartup(
         .session_permission_grants = 0,
         .agent_step_limit = startup.agent_step_limit,
         .mcp_config_error = switch (mcp_config_diagnostic) {
-            .clear => null,
+            .clear, .warning => null,
             .failed => |err| @errorName(err),
+        },
+        .mcp_config_warning = switch (mcp_config_diagnostic) {
+            .warning => |warning| warning,
+            .clear, .failed => null,
         },
     };
 }

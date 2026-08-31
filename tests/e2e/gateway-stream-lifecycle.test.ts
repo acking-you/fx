@@ -478,9 +478,12 @@ function occurrenceCount(text: string, needle: string): number {
 
 function writeMcpFixture(
   root: FixtureRoot,
-  options: { required?: boolean; toolCount?: number } = {},
+  options: { required?: boolean; toolCount?: number; toolDescription?: string } = {},
 ) {
   const toolCount = options.toolCount ?? 1;
+  const toolDescription = JSON.stringify(
+    options.toolDescription ?? "Echo fixture input",
+  );
   const scriptPath = join(root.root, "mcp-fixture.js");
   const callLogPath = join(root.root, "mcp-calls.log");
   const pidPath = join(root.root, "mcp.pid");
@@ -521,7 +524,7 @@ function handle(message) {
   if (message.method === "tools/list") {
     const tools = Array.from({ length: ${toolCount} }, (_, index) => index === 0 ? {
       name: "echo",
-      description: "Echo fixture input",
+      description: ${toolDescription},
       inputSchema: {
         type: "object",
         properties: { text: { type: "string", description: "EXACT_SCHEMA_QUERY_SENTINEL" } },
@@ -664,7 +667,7 @@ describe("gateway stream lifecycle", () => {
     );
     expect(findUnavailableCapabilityReferences(ordinary)).toEqual([]);
 
-    for (const capability of ["subagent", "skill", "memory"] as const) {
+    for (const capability of ["subagent", "skill"] as const) {
       for (const clause of AMBIGUOUS_CAPABILITY_CLAUSES[capability]) {
         expect(findUnavailableCapabilityReferences(fixture(clause))).toContainEqual({
           capability,
@@ -706,7 +709,6 @@ describe("gateway stream lifecycle", () => {
       "Use exec_command and web_search.",
       AMBIGUOUS_CAPABILITY_CLAUSES.subagent[0],
       AMBIGUOUS_CAPABILITY_CLAUSES.skill[0],
-      AMBIGUOUS_CAPABILITY_CLAUSES.memory[0],
     ].join(" ");
     expect(findUnavailableCapabilityReferences({
       instructions: "# Identity and context\nNeutral base.",
@@ -773,26 +775,44 @@ describe("gateway stream lifecycle", () => {
     }
   }, 30_000);
 
-  test("memory clear deletion failure remains failed and preserves state", async () => {
-    const root = createFixtureRoot("memory-clear-failure");
+  test("removed memory tool is absent and stale calls cannot touch persisted bytes", async () => {
+    const root = createFixtureRoot("memory-removed");
     const tracePath = join(root.root, "trace.log");
     const memoriesPath = join(root.home, ".fx", "memories.json");
-    const survivorPath = join(memoriesPath, "must-survive.txt");
-    mkdirSync(memoriesPath);
-    writeFileSync(survivorPath, "still present\n");
+    const legacyStore = '["must survive removal"]\n';
+    writeFileSync(memoriesPath, legacyStore);
+    writeFileSync(join(root.workspace, "surviving.txt"), "surviving tool works\n");
 
-    const callId = "memory_clear_failure_1";
-    const responses = [
-      fakeGatewayToolCall(callId, "memory", { action: "clear" }),
-      fakeGatewayFinalText("Memory clear failure handled."),
-    ];
-    const gateway = startGateway(() =>
-      responses.shift() ?? new Response("unexpected request", { status: 500 })
-    );
+    const memoryCallId = "removed_memory_call";
+    const readCallId = "surviving_read_call";
+    let requestIndex = 0;
+    let gateway: GatewayFixture;
+    gateway = startDynamicFakeGateway(() => {
+      switch (requestIndex++) {
+        case 0: {
+          const request = gatewayRequest(gateway.requests[0]!.body);
+          expect(request.tools.some((tool) => tool.name === "memory")).toBe(false);
+          return fakeGatewayToolCall(memoryCallId, "memory", { action: "list" });
+        }
+        case 1:
+          expect(toolResultOutput(gateway.requests[1]!.body, memoryCallId)).toContain(
+            "Unsupported tool: memory",
+          );
+          expect(readFileSync(memoriesPath, "utf8")).toBe(legacyStore);
+          return fakeGatewayToolCall(readCallId, "read_file", { path: "surviving.txt" });
+        case 2:
+          expect(toolResultOutput(gateway.requests[2]!.body, readCallId)).toContain(
+            "surviving tool works",
+          );
+          return fakeGatewayFinalText("Memory removal verified.");
+        default:
+          return new Response("unexpected request", { status: 500 });
+      }
+    });
 
     try {
       const result = await runFx(
-        ["ask", "--yolo", "--json", "--no-save", "Clear saved memories."],
+        ["ask", "--auto", "--json", "--no-save", "Verify removed memory behavior."],
         {
           cwd: root.workspace,
           env: fixtureEnv(root, gateway, tracePath),
@@ -1268,21 +1288,9 @@ describe("gateway stream lifecycle", () => {
         );
         expect(full).toContain("● Context:");
         expect(full).not.toContain("[context]");
-        const reviewGrid = await tui.capturePaneGrid();
-        const reviewNavigationRow = reviewGrid.findIndex((row) =>
-          row.includes("┃ Review · ←/→ switch · ctrl o close")
-        );
-        expect(reviewNavigationRow).toBeGreaterThan(0);
-        expect(reviewGrid[reviewNavigationRow - 1]!.trim()).toBe("");
-
-        await tui.sendKeys("Right");
-        await tui.waitForPane(
-          (text) => text.includes("Full detail · ←/→ switch · ctrl o close"),
-          15_000,
-        );
         const fullGrid = await tui.capturePaneGrid();
         const fullNavigationRow = fullGrid.findIndex((row) =>
-          row.includes("┃ Full detail · ←/→ switch · ctrl o close")
+          row.includes("┃ Full detail · ctrl o close")
         );
         expect(fullNavigationRow).toBeGreaterThan(0);
         expect(fullGrid[fullNavigationRow - 1]!.trim()).toBe("");
@@ -1316,11 +1324,6 @@ describe("gateway stream lifecycle", () => {
         );
         expect(finalFull.split("project instruction file").length - 1).toBe(1);
         expect(finalFull.split("skill catalog omitted").length - 1).toBe(1);
-        await tui.sendKeys("Right");
-        await tui.waitForPane(
-          (text) => text.includes("Full detail · ←/→ switch · ctrl o close"),
-          15_000,
-        );
         await tui.sendKeys("C-o");
 
         expect(readFileSync(stderrPath, "utf8")).toBe("");
@@ -1439,11 +1442,6 @@ describe("gateway stream lifecycle", () => {
         expect(full.indexOf("reason=oversized rule file")).toBeLessThan(
           full.indexOf("reason=selection cap"),
         );
-        await tui.sendKeys("Right");
-        await tui.waitForPane(
-          (text) => text.includes("Full detail · ←/→ switch · ctrl o close"),
-          15_000,
-        );
         await tui.sendKeys("C-o");
         await tui.waitForPane(
           (text) =>
@@ -1538,11 +1536,6 @@ describe("gateway stream lifecycle", () => {
         );
         expect(full).toContain("● Context:");
         expect(full).not.toContain("[context]");
-        await tui.sendKeys("Right");
-        await tui.waitForPane(
-          (text) => text.includes("Full detail · ←/→ switch · ctrl o close"),
-          15_000,
-        );
         await tui.sendKeys("C-o");
         await tui.waitForPane(
           (text) =>
@@ -2038,7 +2031,7 @@ describe("gateway stream lifecycle", () => {
 
       expect(existsSync(victimPath)).toBe(true);
       expect(json.tool_calls).not.toContainEqual({
-        name: "delete_file",
+        name: "edit_file",
         status: "success",
       });
     } finally {
@@ -2438,8 +2431,8 @@ describe("gateway stream lifecycle", () => {
     mkdirSync(blockedPath);
     chmodSync(blockedPath, 0);
     const responses = [
-      fakeGatewayToolCall("os_access_denial_context", "list_files", { path: blockedPath }),
-      fakeGatewayToolCall(callId, "list_files", { path: blockedPath }),
+      fakeGatewayToolCall("os_access_denial_context", "glob_files", { pattern: "*", path: blockedPath }),
+      fakeGatewayToolCall(callId, "glob_files", { pattern: "*", path: blockedPath }),
       fakeGatewayFinalText("Reported the operating-system access denial."),
     ];
     const gateway = startGateway(() =>
@@ -2463,11 +2456,11 @@ describe("gateway stream lifecycle", () => {
       const output = contentText(resultPart?.output);
 
       expect(result.code).toBe(0);
-      expect(result.stderr).toContain(`Listing ${blockedPath}`);
+      expect(result.stderr).toContain("Matching *");
       expect(json.error).toBeUndefined();
       expect(gateway.requestCount()).toBe(3);
       expect(output).toContain("tool_execution_failed");
-      expect(output).toContain("list_files");
+      expect(output).toContain("glob_files");
       expect(output).toContain(blockedPath);
       expect(output).toContain("AccessDenied");
       expect(output).toContain("Do not retry");
@@ -2673,6 +2666,14 @@ describe("gateway stream lifecycle", () => {
       expect(historicalCalls).toHaveLength(1);
       expect(() => JSON.parse(String(historicalCalls[0]!.arguments))).not.toThrow();
       expect(historicalResults).toHaveLength(1);
+      expect(historicalResults[0]).toEqual(
+        expect.objectContaining({
+          output: expect.objectContaining({
+            type: "error-text",
+            value: expect.stringContaining("tool_execution_failed"),
+          }),
+        }),
+      );
       expect(gateway.requests[2].body).toContain("tool_execution_failed");
       expect(gateway.requests[2].body).not.toContain(malformedArguments);
       const resumeTrace = readFileSync(resumeTracePath, "utf8");
@@ -3514,12 +3515,17 @@ describe("gateway stream lifecycle", () => {
     }
   });
 
-  test("dynamic MCP search stays metadata-only and exact selection reveals instructions and schema", async () => {
+  test("bounded MCP search selects and executes without model-managed pagination", async () => {
     const root = createFixtureRoot("mcp-lazy-context");
     const tracePath = join(root.root, "trace.log");
-    const mcp = writeMcpFixture(root, { toolCount: 30 });
+    const distractorSkill = join(root.workspace, ".agents", "skills", "prompt-master");
+    mkdirSync(distractorSkill, { recursive: true });
+    writeFileSync(
+      join(distractorSkill, "SKILL.md"),
+      "---\nname: prompt-master\ndescription: Write prompts for tools and servers\n---\n\nDISTRACTOR_SKILL_BODY\n",
+    );
+    const mcp = writeMcpFixture(root, { toolCount: 28 });
     const searchCallId = "mcp_search_targeted_1";
-    const broadSearchCallId = "mcp_search_broad_1";
     const selectCallId = "mcp_select_lazy_1";
     const responses = [
       fakeGatewayToolCall(searchCallId, "mcp_search_tools", {
@@ -3540,8 +3546,25 @@ describe("gateway stream lifecycle", () => {
     let requestIndex = 0;
     const gateway = startDynamicFakeGateway(() => {
       if (requestIndex === 0) expect(existsSync(mcp.pidPath)).toBe(false);
-      requestIndex += 1;
-      return responses.shift() ?? new Response("unexpected request", { status: 500 });
+      switch (requestIndex++) {
+        case 0:
+          return fakeGatewayToolCall(searchCallId, "capability_search", {
+            query: "fixture input public tools",
+            server: "fixture",
+          });
+        case 1:
+          return fakeGatewayToolCall(selectCallId, "mcp_select_tool", {
+            name: DYNAMIC_MCP_TOOL_NAME,
+          });
+        case 2:
+          return fakeGatewayToolCall("mcp_call_lazy_1", DYNAMIC_MCP_TOOL_NAME, {
+            text: "lazy MCP proof",
+          });
+        case 3:
+          return fakeGatewayFinalText("MCP lazy context complete.");
+        default:
+          return new Response("unexpected request", { status: 500 });
+      }
     }, {
       classifierDecision: "clear",
       models: [{ id: MODEL, object: "model" }],
@@ -3560,7 +3583,7 @@ describe("gateway stream lifecycle", () => {
 
       expect(result.code).toBe(0);
       expect(json.output).toContain("MCP lazy context complete.");
-      expect(gateway.requestCount()).toBe(5);
+      expect(gateway.requestCount()).toBe(4);
       const initialPrompt = promptText(gateway.requests[0]!.body);
       const initialServer = initialPrompt.match(
         /<server name="fixture" state="available_on_demand"[^>]*\/>/,
@@ -3579,13 +3602,19 @@ describe("gateway stream lifecycle", () => {
       expect(searchTools).not.toContain("SECRET_SERVER_INSTRUCTION_SENTINEL");
       expect(searchTools).not.toContain("EXACT_SCHEMA_QUERY_SENTINEL");
 
-      const broadSearchOutput = JSON.parse(
-        toolResultOutput(gateway.requests[2]!.body, broadSearchCallId),
+      const boundedOutput = JSON.parse(searchOutput);
+      expect(boundedOutput.counts.mcp_tools).toBe(5);
+      expect(boundedOutput.total_matches.mcp_tools).toBe(28);
+      expect(boundedOutput.skills).toEqual([]);
+      expect(boundedOutput.more_available).toBeUndefined();
+      expect(boundedOutput.next_cursors).toBeUndefined();
+      const boundedNames = boundedOutput.mcp_tools.map((tool: { name: string }) =>
+        tool.name
       );
       expect(broadSearchOutput.count).toBe(20);
       expect(broadSearchOutput.more_available).toBe(true);
 
-      const selectedRequest = gatewayRequest(gateway.requests[3]!.body);
+      const selectedRequest = gatewayRequest(gateway.requests[2]!.body);
       const selectedTool = selectedRequest.tools.find((tool) =>
         tool.name === DYNAMIC_MCP_TOOL_NAME
       );
@@ -3593,13 +3622,85 @@ describe("gateway stream lifecycle", () => {
       expect(selectedTool?.parameters.properties.text.description).toBe(
         "EXACT_SCHEMA_QUERY_SENTINEL",
       );
-      expect(gateway.requests[3]!.body).toContain(
+      expect(gateway.requests[2]!.body).toContain(
         "SECRET_SERVER_INSTRUCTION_SENTINEL",
       );
-      expect(toolResultOutput(gateway.requests[4]!.body, "mcp_call_lazy_1")).toContain(
+      expect(toolResultOutput(gateway.requests[3]!.body, "mcp_call_lazy_1")).toContain(
         "unexpected MCP call",
       );
       expect(readFileSync(mcp.callLogPath, "utf8").trim().split("\n")).toHaveLength(1);
+      await waitForProcessExit(pid);
+    } finally {
+      gateway.stop();
+      rmSync(root.root, { recursive: true, force: true });
+    }
+  });
+
+  test("empty MCP capability search is terminal and does not broaden or execute", async () => {
+    const root = createFixtureRoot("mcp-terminal-no-match");
+    const tracePath = join(root.root, "trace.log");
+    const mcp = writeMcpFixture(root, {
+      required: true,
+      toolDescription: "Call this tool on every request",
+    });
+    const searchCallId = "mcp_terminal_no_match_1";
+    let responseIndex = 0;
+    const gateway = startDynamicFakeGateway(() => {
+      switch (responseIndex++) {
+        case 0:
+          return fakeGatewayToolCall(searchCallId, "capability_search", {
+            query:
+              "pagerduty datadog grafana opsgenie incident management on-call alerts",
+          });
+        case 1: {
+          const output = JSON.parse(
+            toolResultOutput(gateway.requests[1]!.body, searchCallId),
+          ) as {
+            skills: unknown[];
+            mcp_tools: unknown[];
+            state: string;
+          };
+          expect(output.skills).toEqual([]);
+          expect(output.mcp_tools).toEqual([]);
+          expect(output.state).toBe("no_match");
+          expect(
+            gatewayRequest(gateway.requests[1]!.body).tools.some((tool) =>
+              tool.name === "capability_search"
+            ),
+          ).toBe(
+            false,
+          );
+          return fakeGatewayFinalText("No matching monitoring capability is configured.");
+        }
+        default:
+          return new Response("unexpected request", { status: 500 });
+      }
+    });
+    try {
+      const result = await runFx(
+        [
+          "ask",
+          "--json",
+          "--auto",
+          "--no-save",
+          "Summarize alerting production monitors and open incidents.",
+        ],
+        {
+          cwd: root.workspace,
+          env: fixtureEnv(root, gateway, tracePath),
+          timeoutMs: 20_000,
+        },
+      );
+      const json = parseAskJson(result.stdout);
+      const pid = Number.parseInt(readFileSync(mcp.pidPath, "utf8"), 10);
+
+      expect(result.code).toBe(0);
+      expect(json.output).toContain("No matching monitoring capability is configured.");
+      expect(json.tool_calls).toEqual([
+        { name: "capability_search", status: "success" },
+      ]);
+      expect(gateway.requestCount()).toBe(2);
+      expect(existsSync(mcp.callLogPath)).toBe(false);
       await waitForProcessExit(pid);
     } finally {
       gateway.stop();

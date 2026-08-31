@@ -212,8 +212,8 @@ async function waitForStatuslineMenu(
     const pane = latest.join("\n");
     if (
       pane.includes("Status line") &&
-      !pane.includes("↑↓ Navigate") &&
-      !pane.includes("←→ Change") &&
+      pane.includes("↑↓ Navigate") &&
+      pane.includes("←→ Change") &&
       (expectedSelection === undefined || pane.includes(expectedSelection))
     ) return latest;
     await Bun.sleep(100);
@@ -227,7 +227,11 @@ async function waitForUsageMenu(session: TmuxSession): Promise<string[]> {
   while (Date.now() < deadline) {
     latest = await session.capturePaneGrid();
     const pane = latest.join("\n");
-    if (pane.includes("Usage · 30 days") && pane.includes("Esc Close")) return latest;
+    if (
+      pane.includes("[30 days]") &&
+      pane.includes("Esc Close") &&
+      !pane.includes("Loading usage")
+    ) return latest;
     await Bun.sleep(100);
   }
   throw new Error(`Timed out waiting for usage menu.\nPane:\n${latest.join("\n")}`);
@@ -239,7 +243,7 @@ async function waitForWorkspaceMenu(session: TmuxSession): Promise<string[]> {
   while (Date.now() < deadline) {
     latest = await session.capturePaneGrid();
     const pane = latest.join("\n");
-    if (pane.includes("Workspace:") && pane.includes("Enter Use")) return latest;
+    if (pane.includes("Workspace") && pane.includes("Enter Use")) return latest;
     await Bun.sleep(100);
   }
   throw new Error(`Timed out waiting for workspace menu.\nPane:\n${latest.join("\n")}`);
@@ -1028,12 +1032,12 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
       expect(
         visibleTranscriptTailRow(afterResponse),
         `resumed baseline grid:\n${afterResponse.join("\n")}`,
-      ).toBe(71);
+      ).toBe(69);
       expect(closedComposerRow).toBe(73);
       await session.sendLiteralText("/");
       await session.waitForText("Type to filter", 5_000);
       const afterSlash = await capture("after-slash");
-      expect(visibleTranscriptTailRow(afterSlash)).toBe(62);
+      expect(visibleTranscriptTailRow(afterSlash)).toBe(60);
       expect(composerRow(afterSlash)).toBe(64);
       await session.sendLiteralText("m");
       await session.waitForText("/model", 5_000);
@@ -1053,7 +1057,7 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
         5_000,
       );
       const afterDismiss = await capture("after-dismiss");
-      expect(visibleTranscriptTailRow(afterDismiss)).toBe(62);
+      expect(visibleTranscriptTailRow(afterDismiss)).toBe(60);
       expect(composerRow(afterDismiss)).toBe(64);
       expect(footerStatusRow(afterDismiss)).toBe(66);
       await session.sendLiteralText("x");
@@ -1064,7 +1068,7 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
         5_000,
       );
       const afterDismissEdit = await capture("after-dismiss-edit");
-      expect(visibleTranscriptTailRow(afterDismissEdit)).toBe(62);
+      expect(visibleTranscriptTailRow(afterDismissEdit)).toBe(60);
       expect(composerRow(afterDismissEdit)).toBe(64);
       expect(footerStatusRow(afterDismissEdit)).toBe(66);
 
@@ -1218,13 +1222,13 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
 
       await session.sendKeys("Down");
       await session.waitForText(
-        "manage local and remote MCP servers, resources, and prompts",
+        "manage local and remote MCP servers, resources, prompts, and project trust",
         5_000,
       );
       const scrolledGrid = await session.capturePaneGrid();
       const mcpRow = scrolledGrid.find((line) =>
         line.includes("/mcp") &&
-        line.includes("manage local and remote MCP servers, resources, and prompts")
+        line.includes("manage local and remote MCP servers, resources, prompts, and project trust")
       );
       expect(mcpRow).toBeDefined();
       expect(mcpRow!.indexOf("Extensions")).toBe(metadataColumn);
@@ -1288,7 +1292,7 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
       expect(modelRow).toContain("choose what model and reasoning effort to use");
       expect(modelRow).not.toContain("Model");
       expect(mcpRow).toContain(
-        "manage local and remote MCP servers, resources, and prompts",
+        "manage local and remote MCP servers, resources, prompts, and project trust",
       );
       expect(mcpRow).not.toContain("Extensions");
 
@@ -1756,8 +1760,8 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
       expect(pane).toContain("off  on");
       expect(pane).not.toContain("❯");
       expect(pane).not.toContain("Choose what appears");
-      expect(pane).not.toContain("↑↓ Navigate");
-      expect(pane).not.toContain("←→ Change");
+      expect(pane).toContain("↑↓ Navigate");
+      expect(pane).toContain("←→ Change");
 
       await session.sendKeys("Right");
       grid = await waitForStatuslineMenu(session, "off  on");
@@ -1837,7 +1841,7 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
       await session.sendText("/usage");
       grid = await waitForUsageMenu(session);
       pane = grid.join("\n");
-      expect(pane).toContain("Usage · 30 days");
+      expect(pane).toContain("[30 days]");
 
       await session.sendKeys("Escape");
       await session.waitForComposer(5_000);
@@ -1886,8 +1890,8 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
       await session.sendText("/usage");
       const pane = (await waitForUsageMenu(session)).join("\n");
       expect(pane).not.toContain("Usage unavailable");
-      expect(pane).toContain("Known totals may be incomplete.");
-      expect(pane).toMatch(/Total tokens +0/);
+      expect(pane).toContain("Partial data · some usage may be missing");
+      expect(pane).toMatch(/0 tokens/);
 
       await session.sendKeys("Escape");
       await session.waitForComposer(5_000);
@@ -1899,7 +1903,7 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
   );
 
   test(
-    "usage dashboard refresh discovers usage created after startup",
+    "usage dashboard reopen discovers usage created after its initial snapshot",
     async () => {
       const root = realpathSync(mkdtempSync(join(tmpdir(), "fx-usage-late-")));
       workDirs.push(root);
@@ -1920,6 +1924,8 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
       await session.waitForComposer(10_000);
       await session.sendText("/usage");
       await session.waitForText("Tracking has not started", TIMEOUT);
+      await session.sendKeys("Escape");
+      await session.waitForComposer(5_000);
 
       const fxDir = join(home, ".fx");
       const now = Date.now();
@@ -1951,8 +1957,8 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
       );
       writeFileSync(join(fxDir, "usage.lock"), "", { mode: 0o600 });
 
-      await session.sendLiteral("R");
-      const pane = await session.waitForText(/Total tokens +12/, TIMEOUT);
+      await session.sendText("/usage");
+      const pane = await session.waitForText(/12 tokens/, TIMEOUT);
       expect(pane).toContain("provider/a");
 
       await session.sendKeys("Escape");
@@ -2026,7 +2032,7 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
       writeFileSync(join(fxDir, "usage.lock"), "", { mode: 0o600 });
 
       await session.sendLiteral("R");
-      const pane = await session.waitForText(/Total tokens +12/, TIMEOUT);
+      const pane = await session.waitForText(/12 tokens/, TIMEOUT);
       expect(pane).not.toContain("Usage unavailable");
 
       await session.sendKeys("Escape");
@@ -2068,17 +2074,17 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
         "Usage unavailable · press R to retry",
         TIMEOUT,
       );
-      expect(pane).toContain("Usage · 30 days");
+      expect(pane).toContain("[30 days]");
 
       await session.sendKeys("Left");
-      pane = await session.waitForText("Usage · 7 days", TIMEOUT);
+      pane = await session.waitForText("[7 days]", TIMEOUT);
       expect(pane).toContain("Usage unavailable · press R to retry");
       await session.sendKeys("Left");
-      pane = await session.waitForText("Usage · 24 hours", TIMEOUT);
+      pane = await session.waitForText("[24 hours]", TIMEOUT);
       expect(pane).toContain("Usage unavailable · press R to retry");
       await session.sendKeys("Left");
-      pane = await session.waitForText("Usage · Session", TIMEOUT);
-      expect(pane).toMatch(/Total tokens +0/);
+      pane = await session.waitForText("[Session]", TIMEOUT);
+      expect(pane).toMatch(/0 tokens/);
       expect(pane).toContain("Session activity");
 
       await session.sendKeys("Escape");
@@ -2178,34 +2184,34 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
       });
       await session.waitForComposer(10_000);
       await session.sendText("/usage");
-      let pane = await session.waitForText(/Total tokens +137/, TIMEOUT);
-      expect(pane).toContain("Usage · 30 days");
+      let pane = await session.waitForText(/137 tokens/, TIMEOUT);
+      expect(pane).toContain("[30 days]");
 
-      await session.sendKeys("Left");
-      pane = await session.waitForText("Usage · 7 days", TIMEOUT);
-      expect(pane).toMatch(/Total tokens +132/);
-      await session.sendKeys("Left");
-      pane = await session.waitForText("Usage · 24 hours", TIMEOUT);
-      expect(pane).toMatch(/Total tokens +120/);
-      await session.sendKeys("Left");
-      pane = await session.waitForText("Usage · Session", TIMEOUT);
-      expect(pane).toMatch(/Total tokens +0/);
+      await session.sendKeys("Tab");
+      pane = await session.waitForText("[7 days]", TIMEOUT);
+      expect(pane).toMatch(/132 tokens/);
+      await session.sendKeys("Tab");
+      pane = await session.waitForText("[24 hours]", TIMEOUT);
+      expect(pane).toMatch(/120 tokens/);
+      await session.sendKeys("Tab");
+      pane = await session.waitForText("[Session]", TIMEOUT);
+      expect(pane).toMatch(/0 tokens/);
       expect(pane).toContain("Session activity");
+      await session.sendKeys("BTab");
+      await session.waitForText("[24 hours]", TIMEOUT);
       await session.sendKeys("Right");
-      await session.waitForText("Usage · 24 hours", TIMEOUT);
-      await session.sendKeys("Right");
-      await session.waitForText("Usage · 7 days", TIMEOUT);
+      await session.waitForText("[7 days]", TIMEOUT);
 
       await session.sendKeys("Down");
       pane = await session.waitForText(/❯ provider\/b/, TIMEOUT);
       await session.sendKeys("Enter");
-      pane = await session.waitForText(/In 10 · Out 2/, TIMEOUT);
+      pane = await session.waitForText(/Input 10 · Output 2/, TIMEOUT);
       expect(pane).toContain("Requests 1");
       await session.resizeWindow(72, 16);
-      pane = await session.waitForText(/In 10 · Out 2/, TIMEOUT);
+      pane = await session.waitForText(/Input 10 · Output 2/, TIMEOUT);
       expect(pane).toMatch(/❯ provider\/b/);
       await session.resizeWindow(120, 36);
-      pane = await session.waitForText(/In 10 · Out 2/, TIMEOUT);
+      pane = await session.waitForText(/Input 10 · Output 2/, TIMEOUT);
       expect(pane).toMatch(/❯ provider\/b/);
 
       appendFileSync(
@@ -2222,16 +2228,16 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
         ) + "\n",
       );
       await session.sendLiteral("R");
-      pane = await session.waitForText(/Total tokens +137/, TIMEOUT);
+      pane = await session.waitForText(/137 tokens/, TIMEOUT);
       expect(pane).toMatch(/❯ provider\/b/);
 
       appendFileSync(usagePath, "{\"broken\":true}\n");
       await session.sendLiteral("R");
       pane = await session.waitForText(
-        "Refresh failed · showing the previous snapshot",
+        "Refresh failed · showing previous data",
         TIMEOUT,
       );
-      expect(pane).toMatch(/Total tokens +137/);
+      expect(pane).toMatch(/137 tokens/);
 
       await session.sendKeys("Escape");
       await session.waitForComposer(5_000);
@@ -3334,8 +3340,6 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
       expect((await session.capturePane()).replace(/\s+/g, " ")).toMatch(
         new RegExp(`see "${tracePathPattern}" for details`),
       );
-      await session.sendKeys("Right");
-      await session.waitForText("Full detail · ←/→ switch · ctrl o close", 5_000);
       await session.sendKeys("C-o");
       await session.waitForComposer(5_000);
       const startupDiagnosticCount = fileMarkerCount(

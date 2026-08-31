@@ -329,9 +329,6 @@ pub fn formatPermissionLabel(alloc: Allocator, registry: tool_dispatch.Registry,
             .{ call.name, spec.label_arg_default },
         );
     }
-    if (try copyRenameLabel(scratch, call.name, args)) |value| {
-        return std.fmt.allocPrint(alloc, "{s} {s}", .{ call.name, value });
-    }
     const value = tool_dispatch.toolLabelValue(spec.*, args) orelse return try alloc.dupe(u8, call.name);
 
     if (spec.label_arg_kind == .command or spec.label_arg_kind == .cmd) {
@@ -468,8 +465,6 @@ const test_tools = [_]tool_dispatch.Tool{
     test_builtin_tools.read_file,
     test_builtin_tools.write_file,
     test_builtin_tools.edit_file,
-    test_builtin_tools.rename_file,
-    test_builtin_tools.copy_file,
     test_web_search,
     test_builtin_tools.exec_command,
     test_builtin_tools.write_stdin,
@@ -480,7 +475,7 @@ const test_tools = [_]tool_dispatch.Tool{
 };
 const test_tool_registry = tool_dispatch.Registry{ .tools = test_tools[0..] };
 const custom_presentation_tool = blk: {
-    var tool = test_builtin_tools.memory;
+    var tool = test_builtin_tools.read_file;
     tool.name = "custom_presentation";
     tool.action_label = "Inspecting";
     tool.label_arg_kind = .name;
@@ -753,7 +748,6 @@ test "tool presentation preserves plain action fallbacks" {
         .{ .call = .{ .id = "read", .name = "read_file", .arguments_json = "{\"path\":\"src/main.zig\"}" }, .expected = "Reading src/main.zig" },
         .{ .call = .{ .id = "command", .name = "run_command", .arguments_json = "{\"command\":\"zig build\"}" }, .expected = "Running zig build" },
         .{ .call = .{ .id = "ask", .name = "ask_user_question", .arguments_json = "{}" }, .expected = "Asking " },
-        .{ .call = .{ .id = "memory", .name = "memory", .arguments_json = "{\"action\":\"save\"}" }, .expected = "Remembering save" },
         .{ .call = .{ .id = "skill", .name = "skill", .arguments_json = "{\"name\":\"workflow\"}" }, .expected = "Loading skill workflow" },
         .{ .call = .{ .id = "install", .name = "install_skill", .arguments_json = "{\"source\":\"example/agent-skills\",\"skill\":\"workflow\"}" }, .expected = "Installing skill example/agent-skills" },
         .{ .call = .{ .id = "copy", .name = "copy_file", .arguments_json = "{\"source\":\"src/a.zig\",\"destination\":\"src/b.zig\"}" }, .expected = "Copying src/a.zig -> src/b.zig" },
@@ -839,17 +833,6 @@ test "tool presentation frees all formatted output with a normal allocator" {
     defer alloc.free(provider_search);
     try std.testing.expectEqualStrings("Working: provider_search", provider_search);
 
-    const copy = try formatPlainAction(alloc, .{
-        .tool_registry = test_tool_registry,
-        .call = .{
-            .id = "copy",
-            .name = "copy_file",
-            .arguments_json = "{\"source\":\"src/a.zig\",\"destination\":\"src/b.zig\"}",
-        },
-    });
-    defer alloc.free(copy);
-    try std.testing.expectEqualStrings("Copying src/a.zig -> src/b.zig", copy);
-
     const command = try formatPermissionLabel(alloc, test_tool_registry, .{
         .id = "command",
         .name = "run_command",
@@ -857,14 +840,6 @@ test "tool presentation frees all formatted output with a normal allocator" {
     });
     defer alloc.free(command);
     try expectContains(command, "risk: command may discard version-control state");
-
-    const fallback = try formatPermissionLabel(alloc, test_tool_registry, .{
-        .id = "malformed",
-        .name = "memory",
-        .arguments_json = "{",
-    });
-    defer alloc.free(fallback);
-    try std.testing.expectEqualStrings("memory", fallback);
 
     var parsed = try std.json.parseFromSlice(std.json.Value, alloc, "{\"query\":\"current Zig release\",\"blocked_domains\":[\"spam.example\"]}", .{});
     defer parsed.deinit();

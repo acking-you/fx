@@ -916,7 +916,7 @@ fn appendBuiltinTool(
 
 fn isBashFirstHiddenTool(tool: tool_dispatch.Tool) bool {
     return switch (tool.executor_kind) {
-        .list_files, .glob_files, .grep_files, .semantic_search => true,
+        .glob_files, .grep_files => true,
         else => false,
     };
 }
