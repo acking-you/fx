@@ -646,15 +646,11 @@ pub fn Runtime(comptime App: type) type {
             presenter: activity_runtime.LifecyclePresenter,
             buf: []u8,
         ) ?[]const u8 {
-            // Existence guard only: the rendered footer owns the actual
-            // spinner label, but this keeps animation scheduling alive while
-            // a background activity has no transcript row of its own.
+            // Existence guard only: pass no clock so the label skips the counter.
             if (!app.stream.active and app.pacer.hasCompletedAssistantPresentationTail()) {
-                return activity_status.buildWorkingLabel(buf, .{ .active = true }, 0, "Working");
+                return activity_status.buildTurnLabel(buf, .{ .active = true }, 0);
             }
-            if (app.stream.last_activity_kind == null) {
-                return activity_status.buildWorkingLabel(buf, app.stream, 0, "Working");
-            }
+            if (activity_status.buildTurnLabel(buf, app.stream, 0)) |label| return label;
             if (app.stream.last_activity_kind == .ask) return ui_render.ask_activity_label;
             switch (presenter.snapshot().activity) {
                 .tool_slot => |slot| return slot.fallback_label,

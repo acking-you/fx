@@ -133,14 +133,13 @@ const TRACE_SCOPES =
 const QUIESCENCE_INTERVAL_MS = 300;
 const ACTIVE_TOOL_RESIZE_CAPTURE_TIMEOUT_MS = 30_000;
 
-function normalizeWorkingStatusForStability(pane: string): string {
+function normalizeTurnStatusForStability(pane: string): string {
   return pane
     .split(/\r?\n/)
-    .map((line) =>
-      /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Working(?: \([^)]*\))*$/.test(line)
-        ? "⠋ Working"
-        : line,
-    )
+    .map((line) => {
+      const match = line.match(/^\s*[•▲]?\s*(Thinking|Generating|Running)(?: \([^)]*\))*$/);
+      return match ? `• ${match[1]}` : line;
+    })
     .join("\n");
 }
 
@@ -2116,7 +2115,7 @@ class RenderLabTmux {
   }
 
   async waitForStableVisibleState() {
-    return waitForStableProbe(() => normalizeWorkingStatusForStability(this.capturePane()));
+    return waitForStableProbe(() => normalizeTurnStatusForStability(this.capturePane()));
   }
 
   captureFrame(index: number, event: string, binarySha256: string, traceLogPath: string): RenderLabFrame {
