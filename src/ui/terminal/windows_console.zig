@@ -35,13 +35,18 @@ pub const State = struct {
 
     pub fn enableRaw(self: *State) !void {
         if (!self.captured) try self.capture();
+        return self.enableRawWith(.{ .set_mode = nativeSetConsoleMode });
+    }
+
+    fn enableRawWith(self: *State, api: ModeApi) !void {
         const input_mode = (self.original_input_mode &
             ~(enable_processed_input | enable_line_input | enable_echo_input)) |
             enable_virtual_terminal_input;
         const output_mode = self.original_output_mode |
             enable_processed_output | enable_virtual_terminal_processing;
-        if (SetConsoleMode(self.input_handle, input_mode) == .FALSE or
-            SetConsoleMode(self.output_handle, output_mode) == .FALSE)
+        errdefer self.restoreModesWith(api);
+        if (api.set_mode(api.ctx, self.input_handle, input_mode) == .FALSE or
+            api.set_mode(api.ctx, self.output_handle, output_mode) == .FALSE)
         {
             return error.UnableToConfigureTerminal;
         }
@@ -51,12 +56,56 @@ pub const State = struct {
 
     pub fn restore(self: *State) void {
         if (!self.captured) return;
-        _ = SetConsoleMode(self.input_handle, self.original_input_mode);
-        _ = SetConsoleMode(self.output_handle, self.original_output_mode);
+        self.restoreModesWith(.{ .set_mode = nativeSetConsoleMode });
         if (self.original_input_cp != 0) _ = SetConsoleCP(self.original_input_cp);
         if (self.original_output_cp != 0) _ = SetConsoleOutputCP(self.original_output_cp);
     }
+
+    fn restoreModesWith(self: *State, api: ModeApi) void {
+        _ = api.set_mode(api.ctx, self.input_handle, self.original_input_mode);
+        _ = api.set_mode(api.ctx, self.output_handle, self.original_output_mode);
+    }
 };
+
+const ModeApi = struct {
+    ctx: ?*anyopaque = null,
+    set_mode: *const fn (?*anyopaque, windows.HANDLE, windows.DWORD) windows.BOOL,
+};
+
+fn nativeSetConsoleMode(_: ?*anyopaque, handle: windows.HANDLE, mode: windows.DWORD) windows.BOOL {
+    return SetConsoleMode(handle, mode);
+}
+
+test "raw console setup restores captured modes after a partial failure" {
+    const Trace = struct {
+        modes: [4]windows.DWORD = undefined,
+        len: usize = 0,
+
+        fn setMode(ctx: ?*anyopaque, _: windows.HANDLE, mode: windows.DWORD) windows.BOOL {
+            const self: *@This() = @ptrCast(@alignCast(ctx.?));
+            self.modes[self.len] = mode;
+            self.len += 1;
+            return if (self.len == 2) .FALSE else .TRUE;
+        }
+    };
+
+    var trace: Trace = .{};
+    var state: State = .{
+        .input_handle = @ptrFromInt(1),
+        .output_handle = @ptrFromInt(2),
+        .original_input_mode = enable_processed_input | enable_line_input | enable_echo_input,
+        .original_output_mode = enable_processed_output,
+        .captured = true,
+    };
+
+    try std.testing.expectError(error.UnableToConfigureTerminal, state.enableRawWith(.{
+        .ctx = &trace,
+        .set_mode = Trace.setMode,
+    }));
+    try std.testing.expectEqual(@as(usize, 4), trace.len);
+    try std.testing.expectEqual(state.original_input_mode, trace.modes[2]);
+    try std.testing.expectEqual(state.original_output_mode, trace.modes[3]);
+}
 
 pub fn ensureInteractive() !void {
     if (!try std.Io.File.stdin().isTty(io_mod.getIo()) or

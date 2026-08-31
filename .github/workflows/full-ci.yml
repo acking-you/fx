@@ -44,11 +44,20 @@ jobs:
         run: |
           zig build test -Doptimize=ReleaseSafe -- `
             --test-filter "resolver builds Windows command invocations" `
+            --test-filter "Windows shell discovery prefers Git Bash installations and PATH roots" `
+            --test-filter "model tool projection identifies the actual default command shell" `
+            --test-filter "raw console setup restores captured modes after a partial failure" `
+            --test-filter "platform temporary directory resolves to an existing absolute directory" `
+            --test-filter "temporary image snapshots use the platform temporary directory" `
+            --test-filter "web_fetch Windows connect control does not truncate a later deadline to one second" `
             --test-filter "browser callback survives a reset queued before accept" `
             --test-filter "unified exec returns short commands synchronously" `
+            --test-filter "unified exec Windows resolver runs commands through installed Git Bash" `
             --test-filter "unified exec keeps long process addressable and polls output" `
             --test-filter "unified exec writes interactive input without blocking the caller" `
+            --test-filter "unified exec Windows reaps each completed stdin writer before replacement" `
             --test-filter "unified exec activates the observer before a direct write can fail" `
+            --test-filter "unified exec manager cleanup terminates a still-running process group" `
             --test-filter "native hosts still load project instruction files"
 
       - name: Smoke test CLI and ACP

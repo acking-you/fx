@@ -167,7 +167,7 @@ fn loadResolvedImageAttachment(
 }
 
 pub fn createTempSnapshotDir(alloc: std.mem.Allocator) ![]u8 {
-    const temp_root = try io_mod.realpathAlloc(alloc, "/tmp");
+    const temp_root = try io_mod.tempDirAlloc(alloc);
     defer alloc.free(temp_root);
     for (0..16) |_| {
         var suffix: u64 = undefined;
@@ -2908,6 +2908,20 @@ fn testSha256Hex(bytes: []const u8) [snapshot_digest_hex_len]u8 {
     var digest: [Sha256.digest_length]u8 = undefined;
     Sha256.hash(bytes, &digest, .{});
     return std.fmt.bytesToHex(digest, .lower);
+}
+
+test "temporary image snapshots use the platform temporary directory" {
+    const alloc = std.testing.allocator;
+    const temp_root = try io_mod.tempDirAlloc(alloc);
+    defer alloc.free(temp_root);
+    const snapshot_dir = try createTempSnapshotDir(alloc);
+    defer alloc.free(snapshot_dir);
+    defer cleanupSnapshotDir(snapshot_dir);
+
+    try std.testing.expectEqualStrings(
+        temp_root,
+        std.fs.path.dirname(snapshot_dir) orelse return error.TestExpectedEqual,
+    );
 }
 
 test "snapshot directory handle syncs after create and after reopen" {

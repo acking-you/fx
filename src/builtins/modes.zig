@@ -51,7 +51,11 @@ test "ask and code mode projections omit unavailable provider tools" {
         defer projection.deinit(std.testing.allocator);
 
         try std.testing.expect(!tool_projection.containsName(projection.advertised_names, "web_search"));
-        try std.testing.expectEqualStrings("", projection.custom_guidance);
+        try std.testing.expect(std.mem.find(
+            u8,
+            projection.custom_guidance,
+            "default shell for exec_command",
+        ) != null);
     }
 }
 

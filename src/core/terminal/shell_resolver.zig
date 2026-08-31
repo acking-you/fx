@@ -15,9 +15,9 @@ pub const ResolveError = error{
 pub const Profile = command_environment.Profile;
 pub const Environment = command_environment.Environment;
 
-const ShellKind = enum { bash, zsh, cmd, powershell };
+pub const CommandSyntax = enum { bash, zsh, cmd, powershell };
 
-fn shellKind(path: []const u8) ?ShellKind {
+fn shellKind(path: []const u8) ?CommandSyntax {
     const basename = std.fs.path.basename(path);
     if (std.ascii.eqlIgnoreCase(basename, "bash") or std.ascii.eqlIgnoreCase(basename, "bash.exe")) return .bash;
     if (std.ascii.eqlIgnoreCase(basename, "zsh") or std.ascii.eqlIgnoreCase(basename, "zsh.exe")) return .zsh;
@@ -29,9 +29,106 @@ fn shellKind(path: []const u8) ?ShellKind {
     return null;
 }
 
+pub fn commandSyntax(path: []const u8) ?CommandSyntax {
+    return shellKind(path);
+}
+
 fn fallbackLoginShell() []const u8 {
     if (builtin.os.tag == .windows) return "C:\\Windows\\System32\\cmd.exe";
     return if (builtin.os.tag == .macos) "/bin/zsh" else "/bin/bash";
+}
+
+const WindowsGitBashEnvironment = struct {
+    program_files: ?[]const u8 = null,
+    program_w6432: ?[]const u8 = null,
+    program_files_x86: ?[]const u8 = null,
+    local_app_data: ?[]const u8 = null,
+    path: ?[]const u8 = null,
+
+    fn fromProcess() WindowsGitBashEnvironment {
+        return .{
+            .program_files = io_mod.getenv("ProgramFiles"),
+            .program_w6432 = io_mod.getenv("ProgramW6432"),
+            .program_files_x86 = io_mod.getenv("ProgramFiles(x86)"),
+            .local_app_data = io_mod.getenv("LOCALAPPDATA"),
+            .path = io_mod.getenv("PATH"),
+        };
+    }
+};
+
+const PathProbe = struct {
+    context: ?*anyopaque = null,
+    exists_fn: *const fn (?*anyopaque, []const u8) bool,
+
+    fn exists(self: PathProbe, path: []const u8) bool {
+        return self.exists_fn(self.context, path);
+    }
+};
+
+fn nativePathExists(_: ?*anyopaque, path: []const u8) bool {
+    if (!std.fs.path.isAbsolute(path)) return false;
+    var file = std.Io.Dir.openFileAbsolute(io_mod.getIo(), path, .{}) catch return false;
+    file.close(io_mod.getIo());
+    return true;
+}
+
+fn candidateInto(
+    buffer: []u8,
+    root: []const u8,
+    suffix: []const u8,
+    probe: PathProbe,
+) ?[]const u8 {
+    const trimmed_root = std.mem.trimEnd(u8, root, "\\/");
+    if (trimmed_root.len == 0) return null;
+    const candidate = std.fmt.bufPrint(buffer, "{s}\\{s}", .{
+        trimmed_root,
+        suffix,
+    }) catch return null;
+    return if (probe.exists(candidate)) candidate else null;
+}
+
+fn windowsGitBashIntoWith(
+    buffer: []u8,
+    environment_value: WindowsGitBashEnvironment,
+    probe: PathProbe,
+) ?[]const u8 {
+    const roots = [_]struct { value: ?[]const u8, suffix: []const u8 }{
+        .{ .value = environment_value.program_files, .suffix = "Git\\bin\\bash.exe" },
+        .{ .value = environment_value.program_w6432, .suffix = "Git\\bin\\bash.exe" },
+        .{ .value = environment_value.program_files_x86, .suffix = "Git\\bin\\bash.exe" },
+        .{ .value = environment_value.local_app_data, .suffix = "Programs\\Git\\bin\\bash.exe" },
+    };
+    for (roots) |root| {
+        if (root.value) |value| {
+            if (candidateInto(buffer, value, root.suffix, probe)) |path| return path;
+        }
+    }
+
+    const raw_path = environment_value.path orelse return null;
+    var entries = std.mem.splitScalar(u8, raw_path, ';');
+    var scratch: [4096]u8 = undefined;
+    while (entries.next()) |raw_entry| {
+        const unquoted = std.mem.trim(u8, raw_entry, " \t\"");
+        const entry = std.mem.trimEnd(u8, unquoted, "\\/");
+        if (entry.len == 0 or !std.fs.path.isAbsolute(entry)) continue;
+        const basename = std.fs.path.basename(entry);
+        const parent = std.fs.path.dirname(entry) orelse continue;
+        if (std.ascii.eqlIgnoreCase(basename, "cmd")) {
+            if (candidateInto(&scratch, entry, "git.exe", probe) == null) continue;
+            if (candidateInto(buffer, parent, "bin\\bash.exe", probe)) |path| return path;
+        } else if (std.ascii.eqlIgnoreCase(basename, "bin")) {
+            if (candidateInto(&scratch, parent, "cmd\\git.exe", probe) == null) continue;
+            if (candidateInto(buffer, entry, "bash.exe", probe)) |path| return path;
+        }
+    }
+    return null;
+}
+
+fn windowsGitBashInto(buffer: []u8) ?[]const u8 {
+    if (comptime builtin.os.tag != .windows) return null;
+    return windowsGitBashIntoWith(buffer, .fromProcess(), .{
+        .exists_fn = nativePathExists,
+    });
 }
 
 /// Returns whether a shell path can be launched with the supported
@@ -142,6 +239,7 @@ pub fn resolve(
 
 pub fn configuredLoginShellInto(buffer: []u8) ?[]const u8 {
     if (comptime builtin.os.tag == .windows) {
+        if (windowsGitBashInto(buffer)) |git_bash| return git_bash;
         const configured = io_mod.getenv("COMSPEC") orelse return null;
         if (configured.len == 0 or configured.len > buffer.len) return null;
         @memcpy(buffer[0..configured.len], configured);
@@ -232,7 +330,7 @@ pub fn capturedInvocation(
         },
         .user => |path| {
             var invocation = try resolve(path, .user_login);
-            if (std.mem.eql(u8, std.fs.path.basename(path), "bash")) {
+            if (shellKind(path) == .bash) {
                 removeInteractiveFlag(&invocation);
                 invocation.append("-O");
                 invocation.append("expand_aliases");
@@ -448,6 +546,48 @@ test "resolver rejects missing relative and unsupported shells" {
     );
 }
 
+test "Windows shell discovery prefers Git Bash installations and PATH roots" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const FakeProbe = struct {
+        existing: []const []const u8,
+
+        fn exists(context: ?*anyopaque, path: []const u8) bool {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            for (self.existing) |candidate| {
+                if (std.ascii.eqlIgnoreCase(candidate, path)) return true;
+            }
+            return false;
+        }
+    };
+
+    var standard_probe = FakeProbe{ .existing = &.{
+        "D:\\Apps\\Git\\bin\\bash.exe",
+        "E:\\Local\\Programs\\Git\\bin\\bash.exe",
+    } };
+    var buffer: [4096]u8 = undefined;
+    const standard = windowsGitBashIntoWith(&buffer, .{
+        .program_files = "D:\\Apps",
+        .local_app_data = "E:\\Local",
+    }, .{
+        .context = &standard_probe,
+        .exists_fn = FakeProbe.exists,
+    }) orelse return error.TestExpectedEqual;
+    try std.testing.expectEqualStrings("D:\\Apps\\Git\\bin\\bash.exe", standard);
+
+    var path_probe = FakeProbe{ .existing = &.{
+        "F:\\Portable\\Git\\cmd\\git.exe",
+        "F:\\Portable\\Git\\bin\\bash.exe",
+    } };
+    const from_path = windowsGitBashIntoWith(&buffer, .{
+        .path = "\"F:\\Portable\\Git\\cmd\";C:\\Windows\\System32",
+    }, .{
+        .context = &path_probe,
+        .exists_fn = FakeProbe.exists,
+    }) orelse return error.TestExpectedEqual;
+    try std.testing.expectEqualStrings("F:\\Portable\\Git\\bin\\bash.exe", from_path);
+}
+
 test "resolver builds Windows command invocations" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -478,6 +618,35 @@ test "resolver builds Windows command invocations" {
             "Write-Output ready",
         },
         powershell.argv(),
+    );
+
+    const git_bash = try commandInvocation(
+        "C:\\Program Files\\Git\\bin\\bash.exe",
+        false,
+        "printf ready",
+    );
+    try std.testing.expectEqualSlices(
+        []const u8,
+        &.{ "C:\\Program Files\\Git\\bin\\bash.exe", "-c", "printf ready", "fx-exec" },
+        git_bash.argv(),
+    );
+
+    const captured_git_bash = try capturedInvocation(
+        std.testing.allocator,
+        .{ .user = "C:\\Program Files\\Git\\bin\\bash.exe" },
+        "printf ready",
+    );
+    try std.testing.expectEqualSlices(
+        []const u8,
+        &.{
+            "C:\\Program Files\\Git\\bin\\bash.exe",
+            "--login",
+            "-O",
+            "expand_aliases",
+            "-c",
+            "printf ready",
+        },
+        captured_git_bash.argv(),
     );
 }
 

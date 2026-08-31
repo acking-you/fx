@@ -429,6 +429,35 @@ pub fn getenv(key: []const u8) ?[]const u8 {
     return null;
 }
 
+/// Returns the canonical platform temporary directory. The caller owns the
+/// returned path. Windows uses the OS resolver so callers do not need to
+/// duplicate TEMP/TMP/USERPROFILE precedence or assume that `/tmp` exists.
+pub fn tempDirAlloc(alloc: std.mem.Allocator) ![]u8 {
+    if (comptime builtin.os.tag == .windows) {
+        var wide: [std.os.windows.PATH_MAX_WIDE]u16 = undefined;
+        const len = GetTempPathW(wide.len, &wide);
+        if (len == 0 or len >= wide.len) return error.TemporaryDirectoryUnavailable;
+        const path = try std.unicode.wtf16LeToWtf8Alloc(alloc, wide[0..len]);
+        defer alloc.free(path);
+        return realpathAlloc(alloc, path);
+    }
+    return realpathAlloc(alloc, getenv("TMPDIR") orelse "/tmp");
+}
+
+test "platform temporary directory resolves to an existing absolute directory" {
+    const path = try tempDirAlloc(std.testing.allocator);
+    defer std.testing.allocator.free(path);
+
+    try std.testing.expect(std.fs.path.isAbsolute(path));
+    var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, path, .{});
+    dir.close(std.testing.io);
+}
+
+extern "kernel32" fn GetTempPathW(
+    buffer_len: std.os.windows.DWORD,
+    buffer: [*]u16,
+) callconv(.winapi) std.os.windows.DWORD;
+
 fn getenvInstalled(key: []const u8) ?[]const u8 {
     if (global_environ_block) |block| return getenvFromBlock(block, key);
     if (global_raw_environ) |raw| return getenvFromLibc(key) orelse getenvFromRaw(raw, key);

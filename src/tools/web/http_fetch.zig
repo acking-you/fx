@@ -1228,15 +1228,11 @@ fn readChunkedTrailers(reader: *BodyReader, alloc: Allocator) !void {
 fn connectPinned(address: IpAddress, options: FetchOptions) !posix.fd_t {
     try checkControl(options);
     if (comptime builtin.os.tag == .windows) {
-        const timeout_ms = try pollTimeoutMs(options);
-        const stream = try address.connect(io_mod.getIo(), .{
-            .mode = .stream,
-            .timeout = .{ .duration = .{
-                .clock = .awake,
-                .raw = .fromMilliseconds(@intCast(timeout_ms)),
-            } },
+        var operation = WindowsConnectOperation{ .address = address };
+        return connectWindowsControlled(options, .{
+            .ctx = @ptrCast(&operation),
+            .run_fn = WindowsConnectOperation.run,
         });
-        return stream.socket.handle;
     }
     const family: posix.sa_family_t = switch (address) {
         .ip4 => posix.AF.INET,
@@ -1259,6 +1255,123 @@ fn connectPinned(address: IpAddress, options: FetchOptions) !posix.fd_t {
             return fd;
         },
         else => |err| return classifyConnectErrno(err),
+    };
+}
+
+const ControlledConnect = struct {
+    ctx: *anyopaque,
+    run_fn: *const fn (*anyopaque) anyerror!posix.fd_t,
+};
+
+fn runControlledConnect(operation: ControlledConnect) anyerror!posix.fd_t {
+    return operation.run_fn(operation.ctx);
+}
+
+const WindowsConnectOperation = struct {
+    address: IpAddress,
+
+    fn run(raw: *anyopaque) anyerror!posix.fd_t {
+        const self: *WindowsConnectOperation = @ptrCast(@alignCast(raw));
+        const stream = try self.address.connect(io_mod.getIo(), .{ .mode = .stream });
+        return stream.socket.handle;
+    }
+};
+
+const ConnectControlEvent = union(enum) {
+    connection: anyerror!posix.fd_t,
+    cancelled: anyerror!void,
+    deadline: anyerror!void,
+};
+
+fn connectWindowsControlled(options: FetchOptions, operation: ControlledConnect) !posix.fd_t {
+    if (options.cancel_flag == null and options.deadline == null)
+        return operation.run_fn(operation.ctx);
+
+    const zio = io_mod.getIo();
+    var control_done: std.Io.Event = .unset;
+    var select_buffer: [3]ConnectControlEvent = undefined;
+    var select: std.Io.Select(ConnectControlEvent) = .init(zio, &select_buffer);
+
+    try select.concurrent(.connection, runControlledConnect, .{operation});
+    if (options.cancel_flag) |cancel_flag| {
+        select.concurrent(.cancelled, waitForConnectCancellationOrDone, .{ cancel_flag, &control_done }) catch |err| {
+            control_done.set(zio);
+            cancelConnectControl(&select);
+            return err;
+        };
+    }
+    if (options.deadline) |deadline| {
+        select.concurrent(.deadline, waitForConnectDeadlineOrDone, .{ deadline, &control_done }) catch |err| {
+            control_done.set(zio);
+            cancelConnectControl(&select);
+            return err;
+        };
+    }
+
+    const event = select.await() catch |err| {
+        control_done.set(zio);
+        cancelConnectControl(&select);
+        return err;
+    };
+    control_done.set(zio);
+    return switch (event) {
+        .connection => |connection| result: {
+            cancelConnectControl(&select);
+            const fd = try connection;
+            checkControl(options) catch |err| {
+                closeFd(fd);
+                return err;
+            };
+            break :result fd;
+        },
+        .cancelled => |cancelled| result: {
+            try cancelled;
+            cancelConnectControl(&select);
+            break :result error.Canceled;
+        },
+        .deadline => |deadline| result: {
+            try deadline;
+            cancelConnectControl(&select);
+            if (options.cancel_flag) |flag| if (flag.load(.seq_cst))
+                break :result error.Canceled;
+            break :result error.Timeout;
+        },
+    };
+}
+
+fn cancelConnectControl(select: *std.Io.Select(ConnectControlEvent)) void {
+    while (select.cancel()) |item| switch (item) {
+        .connection => |connection| {
+            const fd = connection catch continue;
+            closeFd(fd);
+        },
+        .cancelled, .deadline => {},
+    };
+}
+
+fn waitForConnectCancellationOrDone(
+    cancel_flag: *std.atomic.Value(bool),
+    control_done: *std.Io.Event,
+) anyerror!void {
+    while (!cancel_flag.load(.seq_cst)) {
+        control_done.waitTimeout(io_mod.getIo(), .{
+            .duration = .{ .clock = .awake, .raw = .fromMilliseconds(5) },
+        }) catch |err| switch (err) {
+            error.Timeout => continue,
+            else => return err,
+        };
+        return;
+    }
+}
+
+fn waitForConnectDeadlineOrDone(deadline: Deadline, control_done: *std.Io.Event) anyerror!void {
+    const timestamp: std.Io.Clock.Timestamp = .{
+        .clock = .awake,
+        .raw = std.Io.Timestamp.fromNanoseconds(@as(i96, deadline.deadline_ms) * std.time.ns_per_ms),
+    };
+    control_done.waitTimeout(io_mod.getIo(), .{ .deadline = timestamp }) catch |err| switch (err) {
+        error.Timeout => return,
+        else => return err,
     };
 }
 
@@ -3294,6 +3407,28 @@ test "web_fetch deadline helpers fail before io when expired or canceled" {
     try std.testing.expectError(error.Canceled, pollTimeoutMs(.{
         .cancel_flag = &cancel_flag,
     }));
+}
+
+test "web_fetch Windows connect control does not truncate a later deadline to one second" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const DelayedConnect = struct {
+        fn run(_: *anyopaque) anyerror!posix.fd_t {
+            io_mod.sleep(1_100 * std.time.ns_per_ms);
+            return error.TestConnectFinished;
+        }
+    };
+    var context: u8 = 0;
+    const started_ms = monotonicMillis();
+    try std.testing.expectError(error.TestConnectFinished, connectWindowsControlled(.{
+        .deadline = .{ .deadline_ms = started_ms + 3_000 },
+    }, .{
+        .ctx = @ptrCast(&context),
+        .run_fn = DelayedConnect.run,
+    }));
+    const elapsed_ms = monotonicMillis() - started_ms;
+    try std.testing.expect(elapsed_ms >= 1_000);
+    try std.testing.expect(elapsed_ms < 2_500);
 }
 
 test "web_fetch wrapper failures preserve the most specific matching cause" {
