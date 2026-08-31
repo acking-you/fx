@@ -118,17 +118,22 @@ fn accept_ready(
     cancel_flag: *std.atomic.Value(bool),
 ) !?std.Io.net.Stream {
     if (cancel_flag.load(.seq_cst)) return error.Cancelled;
-    const stream = if (comptime builtin.os.tag == .windows)
-        try socket_poll.accept_with_timeout(io_mod.getIo(), listener, @intCast(poll_ms))
-    else blk: {
+    if (comptime builtin.os.tag == .windows) {
+        const stream = try socket_poll.accept_with_timeout(io_mod.getIo(), listener, @intCast(poll_ms));
+        if (cancel_flag.load(.seq_cst)) {
+            if (stream) |accepted| accepted.close(io_mod.getIo());
+            return error.Cancelled;
+        }
+        return stream;
+    } else {
         if (!try listenerReady(listener, cancel_flag)) return null;
-        break :blk try listener.accept(io_mod.getIo());
-    };
-    if (cancel_flag.load(.seq_cst)) {
-        if (stream) |accepted| accepted.close(io_mod.getIo());
-        return error.Cancelled;
+        const stream = try listener.accept(io_mod.getIo());
+        if (cancel_flag.load(.seq_cst)) {
+            stream.close(io_mod.getIo());
+            return error.Cancelled;
+        }
+        return stream;
     }
-    return stream;
 }
 
 const RequestKind = enum {
