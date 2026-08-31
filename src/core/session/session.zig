@@ -2994,6 +2994,13 @@ fn appendExecutionMemoryMessages(
         errdefer alloc.free(text);
         try messages.append(alloc, message.Message.userOwned(text));
     }
+    for (execution.user_inputs) |user| {
+        try messages.append(alloc, .{
+            .role = .user,
+            .content = .{ .text = user.text },
+            .images = user.images,
+        });
+    }
 }
 
 pub fn appendExecutionMemoryChatMessages(
@@ -3050,6 +3057,9 @@ fn appendExecutionMemoryChatMessagesWithPolicy(
         const text = try formatExecutionFileContext(alloc, execution.files);
         errdefer alloc.free(text);
         try messages.append(alloc, .{ .role = .user, .content = text });
+    }
+    for (execution.user_inputs) |user| {
+        try messages.append(alloc, .{ .role = .user, .content = user.text, .images = user.images, .is_turn_input = true });
     }
 }
 
@@ -3277,6 +3287,9 @@ pub fn formatExecutionReplayContext(
         const files = try formatExecutionFileContext(alloc, execution.files);
         defer alloc.free(files);
         out.writer.print("\n\n{s}", .{files}) catch return error.OutOfMemory;
+    }
+    for (execution.user_inputs) |user| {
+        out.writer.print("\n\nUser follow-up:\n{s}", .{user.text}) catch return error.OutOfMemory;
     }
 
     return out.toOwnedSlice() catch return error.OutOfMemory;
@@ -3647,6 +3660,11 @@ fn appendBudgetEvidenceForTurn(arena: Allocator, lines: *std.ArrayList([]const u
         added += 1;
         if (added >= remaining) return added;
     }
+    for (execution.user_inputs) |user| {
+        try lines.append(arena, try std.fmt.allocPrint(arena, "- user follow-up: {s}", .{user.text}));
+        added += 1;
+        if (added >= remaining) return added;
+    }
     return added;
 }
 
@@ -3725,6 +3743,9 @@ fn estimateExecutionTokens(execution: core_types.ExecutionMemory) usize {
     }
     for (execution.files) |file| {
         total += estimateTextTokens(file.path) + estimateTextTokens(file.tool_name);
+    }
+    for (execution.user_inputs) |user| {
+        total += estimateTextTokens(user.text);
     }
     return total;
 }

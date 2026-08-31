@@ -138,7 +138,7 @@ pub fn Runtime(comptime App: type) type {
             gateway_chat_url: []const u8,
             admission: subagent_domain.AdmissionSnapshot,
         ) tool_runtime.Context {
-            return toolContextWithAuthority(
+            var context = toolContextWithAuthority(
                 app,
                 ignored_list_entries,
                 max_list_entries,
@@ -154,6 +154,9 @@ pub fn Runtime(comptime App: type) type {
                     .rules = admission.rules,
                 },
             );
+            context.plan_update_ctx = null;
+            context.on_plan_update = null;
+            return context;
         }
 
         fn toolContextWithAuthority(
@@ -261,6 +264,8 @@ pub fn Runtime(comptime App: type) type {
                 .skills_dir = app.skills.dir,
                 .context_limits = if (comptime @hasField(App, "context_limits")) app.context_limits else .{},
                 .context_enabled = if (comptime @hasField(App, "context_enabled")) app.context_enabled else true,
+                .plan_update_ctx = @ptrCast(app),
+                .on_plan_update = planUpdate,
                 .context_registry = app.contextRegistry(),
                 .output_chunk_ctx = @ptrCast(app),
                 .on_output_chunk = app_callbacks.Bindings(App).onCommandOutputChunk,
@@ -1097,6 +1102,15 @@ pub fn Runtime(comptime App: type) type {
             try writer.writeAll(body);
         }
 
+        fn planUpdate(raw_ctx: ?*anyopaque, body: []const u8) error{OutOfMemory}!void {
+            const app: *App = @ptrCast(@alignCast(raw_ctx orelse return));
+            try app_worker_runtime.Runtime(App).pushSemanticNotice(app, .{
+                .topic = "plan",
+                .tone = .neutral,
+                .body = body,
+            });
+        }
+
         fn buildQueuedPromptConfig(
             app: *App,
             job: worker_runtime.QueuedPrompt,
@@ -1199,6 +1213,7 @@ const test_tools = [_]tool_dispatch.Tool{
     test_builtin_tools.web_search,
     test_builtin_tools.exec_command,
     test_builtin_tools.memory,
+    test_builtin_tools.update_plan,
     test_builtin_tools.semantic_search,
     test_builtin_tools.skill,
     test_builtin_tools.install_skill,

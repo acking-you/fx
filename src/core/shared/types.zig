@@ -1061,9 +1061,14 @@ pub const FileEvidence = struct {
 pub const ExecutionMemory = struct {
     tool_steps: []ToolExecutionStep = &.{},
     files: []FileEvidence = &.{},
+    /// Ordinary user inputs admitted while the same model turn was running.
+    /// They are kept separately from permission feedback so resumed turns
+    /// retain the exact steering text instead of folding it into the root
+    /// prompt.
+    user_inputs: []UserTurn = &.{},
 
     pub fn isEmpty(self: ExecutionMemory) bool {
-        return self.tool_steps.len == 0 and self.files.len == 0;
+        return self.tool_steps.len == 0 and self.files.len == 0 and self.user_inputs.len == 0;
     }
 };
 
@@ -1135,6 +1140,9 @@ pub const ChatMessage = struct {
     /// Present only on a synthetic compacted-history message. Non-Responses
     /// providers ignore this view and consume the ordinary summary content.
     responses_compaction: ?ResponsesCompactionView = null,
+    /// Marks a user message injected into an active turn. This is runtime
+    /// metadata and is persisted through ExecutionMemory.user_inputs.
+    is_turn_input: bool = false,
 };
 
 pub const Usage = struct {
@@ -2298,15 +2306,39 @@ pub fn dupeExecutionMemory(alloc: std.mem.Allocator, memory: ExecutionMemory) !E
     const tool_steps = try dupeToolExecutionSteps(alloc, memory.tool_steps);
     errdefer freeToolExecutionSteps(alloc, tool_steps);
     const files = try dupeFileEvidenceSlice(alloc, memory.files);
+    errdefer freeFileEvidenceSlice(alloc, files);
+    const user_inputs = try dupeUserTurnSlice(alloc, memory.user_inputs);
     return .{
         .tool_steps = tool_steps,
         .files = files,
+        .user_inputs = user_inputs,
     };
 }
 
 pub fn freeExecutionMemory(alloc: std.mem.Allocator, memory: ExecutionMemory) void {
     freeToolExecutionSteps(alloc, memory.tool_steps);
     freeFileEvidenceSlice(alloc, memory.files);
+    freeUserTurnSlice(alloc, memory.user_inputs);
+}
+
+pub fn dupeUserTurnSlice(alloc: std.mem.Allocator, users: []const UserTurn) ![]UserTurn {
+    if (users.len == 0) return &.{};
+    const copy = try alloc.alloc(UserTurn, users.len);
+    var copied: usize = 0;
+    errdefer {
+        for (copy[0..copied]) |user| freeUserTurn(alloc, user);
+        alloc.free(copy);
+    }
+    for (users, 0..) |user, index| {
+        copy[index] = try dupeUserTurn(alloc, user);
+        copied += 1;
+    }
+    return copy;
+}
+
+pub fn freeUserTurnSlice(alloc: std.mem.Allocator, users: []UserTurn) void {
+    for (users) |user| freeUserTurn(alloc, user);
+    if (users.len > 0) alloc.free(users);
 }
 
 pub fn dupeResponsesReasoningItems(

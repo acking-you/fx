@@ -1511,6 +1511,42 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
   );
 
   test(
+    "update_plan renders the live checklist and keeps the turn running",
+    async () => {
+      const finalText = "Checklist-backed turn completed.";
+      const { queuedGateway, stderrPath } = await launchRouteRecoveryTui(
+        "fx-tui-update-plan-",
+        [
+          fakeGatewayToolCall("plan_1", "update_plan", {
+            explanation: "Keeping the original request in view.",
+            plan: [
+              { step: "Inspect the source", status: "in_progress" },
+              { step: "Run the focused test", status: "pending" },
+            ],
+          }),
+          fakeGatewayFinalText(finalText),
+        ],
+      );
+
+      await session!.sendText("Inspect the source and run the focused test.");
+      const planned = await session!.waitForText(
+        "Updated Plan",
+        TIMEOUT,
+      );
+      expect(planned).toContain("□ Inspect the source");
+      expect(planned).toContain("□ Run the focused test");
+
+      await session!.waitForText(finalText, TIMEOUT);
+      const scrollback = await session!.captureFullScrollback();
+      expect(queuedGateway.requests).toHaveLength(2);
+      expect(scrollback).toContain(finalText);
+      expect(scrollback).toContain("Updated Plan");
+      expect(readFileSync(stderrPath, "utf8")).toBe("");
+    },
+    TIMEOUT * 2,
+  );
+
+  test(
     "streamed write payload keeps the activity row live",
     async () => {
       const hold: ToolPayloadHoldState = { started: false, cancelled: false };

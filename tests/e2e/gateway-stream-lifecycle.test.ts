@@ -749,7 +749,7 @@ describe("gateway stream lifecycle", () => {
       expect(serializedToolNames(oracleRequest)).toEqual(
         AUTO_RESPONSES_WITHOUT_DURABLE_TOOLS_SERIALIZED_TOOL_NAMES,
       );
-      expect(request.tools).toHaveLength(25);
+      expect(request.tools).toHaveLength(26);
       expect(findUnavailableCapabilityReferences(oracleRequest)).toEqual([]);
       expect(request.instructions).toContain("# Identity and context");
       expect(toolByName(oracleRequest, "exec_command")?.description).toContain(
@@ -814,6 +814,47 @@ describe("gateway stream lifecycle", () => {
         "memory clear failed: saved memories were not removed; ensure ~/.fx/memories.json is a removable file and retry",
       );
       expect(readFileSync(survivorPath, "utf8")).toBe("still present\n");
+    } finally {
+      gateway.stop();
+      rmSync(root.root, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test("update_plan is a normal durable control tool", async () => {
+    const root = createFixtureRoot("update-plan");
+    const tracePath = join(root.root, "trace.log");
+    const responses = [
+      fakeGatewayToolCall("plan_1", "update_plan", {
+        explanation: "Keep the complete request in view.",
+        plan: [
+          { step: "Inspect the source", status: "in_progress" },
+          { step: "Verify the result", status: "pending" },
+        ],
+      }),
+      fakeGatewayFinalText("Plan completed."),
+    ];
+    const gateway = startGateway(() =>
+      responses.shift() ?? new Response("unexpected request", { status: 500 }),
+    );
+
+    try {
+      const result = await runFx(
+        ["ask", "--yolo", "--json", "--no-save", "Keep the complete request in view."],
+        {
+          cwd: root.workspace,
+          env: fixtureEnv(root, gateway, tracePath),
+          timeoutMs: 15_000,
+        },
+      );
+      const json = parseAskJson(result.stdout);
+      expect(result.code).toBe(0);
+      expect(json.exit_code).toBe(0);
+      expect(json.output).toContain("Plan completed.");
+      expect(json.tool_calls).toContainEqual({ name: "update_plan", status: "success" });
+      expect(gateway.requestCount()).toBe(2);
+      expect(gateway.requests[1]!.body).toContain("update_plan");
+      expect(gateway.requests[1]!.body).toContain("Inspect the source");
+      expect(gateway.requests[1]!.body).toContain("Keep the complete request in view.");
     } finally {
       gateway.stop();
       rmSync(root.root, { recursive: true, force: true });

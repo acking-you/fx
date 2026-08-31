@@ -20,6 +20,7 @@ export const CANONICAL_BUILTIN_NAMES = [
   "mcp_select_tool",
   "mcp_features",
   "memory",
+  "update_plan",
   "ask_user_question",
   "open_file",
   "web_fetch",

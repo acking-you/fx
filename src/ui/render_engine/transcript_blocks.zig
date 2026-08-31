@@ -1495,7 +1495,19 @@ pub fn renderSemanticNotice(
     if (std.ascii.eqlIgnoreCase(notice.topic, "thinking")) {
         return renderReasoningSummary(alloc, notice.body, styles, cols);
     }
+    if (std.ascii.eqlIgnoreCase(notice.topic, "plan")) {
+        return renderPlanNotice(alloc, notice, styles, cols);
+    }
 
+    return renderSemanticNoticeGeneric(alloc, notice, styles, cols);
+}
+
+fn renderSemanticNoticeGeneric(
+    alloc: Allocator,
+    notice: types.SemanticNotice,
+    styles: Styles,
+    cols: u16,
+) ![]u8 {
     var logical: std.ArrayList(u8) = .empty;
     defer logical.deinit(alloc);
     try logical.appendSlice(alloc, "● ");
@@ -1538,6 +1550,50 @@ pub fn renderSemanticNotice(
         cursor = line.next;
     }
     return out.toOwnedSlice(alloc);
+}
+
+fn renderPlanNotice(
+    alloc: Allocator,
+    notice: types.SemanticNotice,
+    styles: Styles,
+    cols: u16,
+) ![]u8 {
+    var formatted: std.Io.Writer.Allocating = .init(alloc);
+    defer formatted.deinit();
+    try formatted.writer.writeAll("Updated Plan");
+
+    var has_step = false;
+    var line_start: usize = 0;
+    while (line_start <= notice.body.len) {
+        const line_end = std.mem.findScalarPos(u8, notice.body, line_start, '\n') orelse notice.body.len;
+        const line = std.mem.trim(u8, notice.body[line_start..line_end], " \t\r");
+        if (line.len > 0) {
+            try formatted.writer.writeAll("\n└ ");
+            if (std.mem.startsWith(u8, line, "[x] ")) {
+                has_step = true;
+                try formatted.writer.print("✔ {s}", .{line[4..]});
+            } else if (std.mem.startsWith(u8, line, "[>] ") or
+                std.mem.startsWith(u8, line, "[ ] "))
+            {
+                has_step = true;
+                try formatted.writer.print("□ {s}", .{line[4..]});
+            } else {
+                try formatted.writer.writeAll(line);
+            }
+        }
+        if (line_end == notice.body.len) break;
+        line_start = line_end + 1;
+    }
+    if (!has_step) try formatted.writer.writeAll("\n└ (no steps provided)");
+
+    const body = try formatted.toOwnedSlice();
+    defer alloc.free(body);
+    return renderSemanticNoticeGeneric(alloc, .{
+        .topic = "",
+        .tone = notice.tone,
+        .body = body,
+        .visibility = notice.visibility,
+    }, styles, cols);
 }
 
 const TranscriptPresentation = enum {
@@ -2805,6 +2861,21 @@ test "thinking notice renders a dim italic bullet summary" {
         rendered,
     );
     try std.testing.expect(std.mem.find(u8, rendered, "Thinking:") == null);
+}
+
+test "plan notice renders a Codex-style checklist" {
+    const alloc = std.testing.allocator;
+    const rendered = try renderSemanticNotice(alloc, .{
+        .topic = "plan",
+        .tone = .neutral,
+        .body = "Keep the original request in view.\n[>] Inspect the source\n[ ] Verify the result\n[x] Preserve the context",
+    }, .{}, 120);
+    defer alloc.free(rendered);
+
+    try std.testing.expectEqualStrings(
+        "● Updated Plan\n  └ Keep the original request in view.\n  └ □ Inspect the source\n  └ □ Verify the result\n  └ ✔ Preserve the context",
+        rendered,
+    );
 }
 
 test "semantic notice keeps an OSC 8 target hidden and clickable" {

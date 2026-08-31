@@ -166,6 +166,8 @@ pub const Context = struct {
     context_limits: context_limits.Values = .{},
     context_registry: context_contract.Registry,
     context_enabled: bool = true,
+    plan_update_ctx: ?*anyopaque = null,
+    on_plan_update: ?tool_dispatch.PlanUpdateSinkFn = null,
     output_chunk_lifecycle_id: ?types.ToolLifecycleId = null,
     output_chunk_ctx: *anyopaque,
     on_output_chunk: command_contract.CommandOutputCallback,
@@ -642,6 +644,8 @@ fn executeRegisteredTool(
     dispatch_ctx.mcp_execution_error_sink = &mcp_execution_error;
     attachSelectedDynamicToolSink(&dispatch_ctx, &selected_dynamic_tool_sink);
     attachContextNoticeSink(&dispatch_ctx, &context_notice_sink);
+    dispatch_ctx.plan_update_ctx = ctx.plan_update_ctx;
+    dispatch_ctx.on_plan_update = ctx.on_plan_update;
     const dispatched = try tool_dispatch.dispatchAuthorizedToolCall(
         dispatch_ctx,
         registry,
@@ -1442,6 +1446,7 @@ const test_tool_registry = tool_dispatch.Registry{ .tools = &.{
     test_builtin_tools.create_folder,
     test_builtin_tools.file_info,
     test_builtin_tools.memory,
+    test_builtin_tools.update_plan,
     test_builtin_tools.semantic_search,
     test_builtin_tools.open_file,
     test_builtin_tools.web_fetch,

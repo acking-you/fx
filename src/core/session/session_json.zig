@@ -135,7 +135,7 @@ fn writeHistoryTurnJson(writer: *std.Io.Writer, turn: session.HistoryTurn) !void
                     if (entry.responses_output_sequence_complete) "true" else "false",
                 });
             }
-            if (entry.execution.tool_steps.len > 0 or entry.execution.files.len > 0) {
+            if (!entry.execution.isEmpty()) {
                 try writer.writeAll(",\"execution\":");
                 try writeExecutionMemoryJson(writer, entry.execution);
             }
@@ -282,7 +282,16 @@ pub fn writeExecutionMemoryJson(writer: *std.Io.Writer, execution: session.Execu
         if (i > 0) try writer.writeByte(',');
         try writeFileEvidenceJson(writer, file);
     }
-    try writer.writeAll("]}");
+    try writer.writeByte(']');
+    if (execution.user_inputs.len > 0) {
+        try writer.writeAll(",\"user_inputs\":[");
+        for (execution.user_inputs, 0..) |user, i| {
+            if (i > 0) try writer.writeByte(',');
+            try writeUserTurnJson(writer, user);
+        }
+        try writer.writeByte(']');
+    }
+    try writer.writeByte('}');
 }
 
 fn writePersistedToolResultJson(writer: *std.Io.Writer, result: session.PersistedToolResult) !void {
@@ -954,13 +963,34 @@ fn parseOptionalExecutionMemory(alloc: Allocator, maybe_value: ?std.json.Value) 
     );
     errdefer session.freeExecutionMemory(alloc, .{ .tool_steps = tool_steps });
     const files = try parseFileEvidenceSlice(alloc, object.get("files"));
-    var execution: session.ExecutionMemory = .{ .tool_steps = tool_steps, .files = files };
+    errdefer types.freeFileEvidenceSlice(alloc, files);
+    const user_inputs = try parseUserTurnSlice(alloc, object.get("user_inputs"));
+    errdefer session.freeUserTurnSlice(alloc, user_inputs);
+    var execution: session.ExecutionMemory = .{ .tool_steps = tool_steps, .files = files, .user_inputs = user_inputs };
     execution_retention.boundFilePresentationBodies(
         alloc,
         &execution,
         execution_retention.durable_file_body_policy,
     );
     return execution;
+}
+
+fn parseUserTurnSlice(alloc: Allocator, maybe_value: ?std.json.Value) ![]session.UserTurn {
+    const value = maybe_value orelse return &.{};
+    if (value != .array) return error.InvalidSessionFormat;
+    if (value.array.items.len == 0) return &.{};
+
+    const users = try alloc.alloc(session.UserTurn, value.array.items.len);
+    var parsed_count: usize = 0;
+    errdefer {
+        for (users[0..parsed_count]) |user| session.freeUserTurn(alloc, user);
+        alloc.free(users);
+    }
+    for (value.array.items, 0..) |item, i| {
+        users[i] = try parseUserTurn(alloc, item);
+        parsed_count += 1;
+    }
+    return users;
 }
 
 fn parseToolExecutionSteps(
@@ -2142,6 +2172,9 @@ test "session JSON round-trips assistant execution memory" {
         .model_view_covers_full_file = true,
         .stale = false,
     }};
+    var user_inputs = [_]session.UserTurn{.{
+        .text = @constCast("continue the original request"),
+    }};
     const history = [_]session.HistoryTurn{.{ .assistant = .{
         .user = .{ .text = @constCast("what is main") },
         .assistant = @constCast("main wires the app"),
@@ -2150,7 +2183,11 @@ test "session JSON round-trips assistant execution memory" {
         .reasoning_items = &terminal_reasoning_items,
         .responses_provider_output_items = &terminal_output_items,
         .responses_output_sequence_complete = true,
-        .execution = .{ .tool_steps = steps[0..], .files = files[0..] },
+        .execution = .{
+            .tool_steps = steps[0..],
+            .files = files[0..],
+            .user_inputs = user_inputs[0..],
+        },
     } }};
 
     const json = try renderSessionJson(alloc, "exec-json", 1, 2, session.ConversationLanguage.literal("en"), "/tmp/workspace", &history, .{});
@@ -2158,6 +2195,7 @@ test "session JSON round-trips assistant execution memory" {
     try std.testing.expect(std.mem.find(u8, json, "\"execution\"") != null);
     try std.testing.expect(std.mem.find(u8, json, "\"tool_steps\"") != null);
     try std.testing.expect(std.mem.find(u8, json, "\"files\"") != null);
+    try std.testing.expect(std.mem.find(u8, json, "\"user_inputs\"") != null);
     try std.testing.expect(std.mem.find(u8, json, "\"schema_version\":5") != null);
     try std.testing.expect(std.mem.find(u8, json, "\"id\":\"rs_terminal_1\"") != null);
     try std.testing.expect(std.mem.find(u8, json, "\"id\":\"rs_step_2\"") != null);
@@ -2197,6 +2235,45 @@ test "session JSON round-trips assistant execution memory" {
     try std.testing.expectEqual(@as(usize, 1), execution.files.len);
     try std.testing.expectEqual(.read, execution.files[0].action);
     try std.testing.expect(execution.files[0].model_view_covers_full_file);
+    try std.testing.expectEqual(@as(usize, 1), execution.user_inputs.len);
+    try std.testing.expectEqualStrings(
+        "continue the original request",
+        execution.user_inputs[0].text,
+    );
+}
+
+test "session JSON persists execution memory containing only active-turn inputs" {
+    const alloc = std.testing.allocator;
+    var user_inputs = [_]session.UserTurn{.{
+        .text = @constCast("keep the original goal in view"),
+    }};
+    const history = [_]session.HistoryTurn{.{ .assistant = .{
+        .user = .{ .text = @constCast("original request") },
+        .assistant = @constCast("continuing"),
+        .execution = .{ .user_inputs = user_inputs[0..] },
+    } }};
+
+    const json = try renderSessionJson(
+        alloc,
+        "exec-json-input-only",
+        1,
+        2,
+        session.ConversationLanguage.literal("en"),
+        "/tmp/workspace",
+        &history,
+        .{},
+    );
+    defer alloc.free(json);
+    try std.testing.expect(std.mem.find(u8, json, "\"execution\"") != null);
+    try std.testing.expect(std.mem.find(u8, json, "\"user_inputs\"") != null);
+
+    var loaded = try parseStoredSession(TestStoredSession, alloc, json);
+    defer loaded.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 1), loaded.history[0].assistant.execution.user_inputs.len);
+    try std.testing.expectEqualStrings(
+        "keep the original goal in view",
+        loaded.history[0].assistant.execution.user_inputs[0].text,
+    );
 }
 
 const legacy_execution_memory_fixture =
