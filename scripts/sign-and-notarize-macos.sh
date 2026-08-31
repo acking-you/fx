@@ -70,7 +70,9 @@ fi
 
 if ! signing_identities="$(
     "${security_bin}" find-identity -v -p codesigning "${signing_keychain}"
-)"
+)"; then
+    fail_stage "signing identity lookup"
+fi
 signing_identity="$({
     printf '%s\n' "${signing_identities}" \
         | /usr/bin/awk '/^[[:space:]]*[0-9]+\)[[:space:]]+[0-9A-Fa-f]+[[:space:]]+"/ { print $2 }'

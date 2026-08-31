@@ -538,57 +538,30 @@ class MacosSigningWorkflowTests(unittest.TestCase):
 
         self.assertIn("build-macos-x86_64:", release)
         self.assertIn("runs-on: macos-15-intel", release)
-        self.assertEqual(1, release.count("environment: apple-signing"))
-        self.assertIn("scripts/sign-macos-release.sh zig-out/bin/fx", release)
-        self.assertIn("sign-stable-release:", pgso)
-        self.assertIn("needs: aggregate", pgso)
-        self.assertEqual(1, pgso.count("environment: apple-signing"))
-        self.assertIn(
-            "scripts/sign-macos-release.sh "
-            '"$RUNNER_TEMP/fx-pgso-aggregate/candidate/fx"',
-            release,
+        self.assertIn("build-macos-arm64:", release)
+        self.assertIn("runs-on: macos-15", release)
+        self.assertIn("build-windows-x86_64:", release)
+        self.assertIn("runs-on: windows-2025", release)
+        self.assertEqual(2, release.count("environment: apple-signing"))
+        self.assertEqual(
+            2,
+            release.count("scripts/sign-macos-release.sh zig-out/bin/fx"),
         )
-        arm64_caller = release.split("  build-macos-arm64:\n", 1)[1].split(
-            "\n  sign-macos-arm64:\n", 1
-        )[0]
-        self.assertNotIn("secrets:", arm64_caller)
-        self.assertNotIn("package_release", arm64_caller)
-        sign_release = release.split("  sign-macos-arm64:\n", 1)[1].split(
-            "\n  release:\n", 1
-        )[0]
-        self.assertIn("needs: [check-version, build-macos-arm64]", sign_release)
-        self.assertIn("environment: apple-signing", sign_release)
         self.assertIn(
-            "needs: [check-version, build-linux, build-macos-x86_64, sign-macos-arm64]",
+            "needs: [check-version, build-linux, build-macos-x86_64, "
+            "build-macos-arm64, build-windows-x86_64]",
             release,
         )
         workflow_call = pgso.split("  workflow_dispatch:\n", 1)[0]
-        aggregate = pgso.split("  aggregate:\n", 1)[1].split(
-            "\n  sign-macos-arm64:\n", 1
-        )[0]
-        self.assertIn(
-            "actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
-            sign_release,
-        )
-        self.assertIn(
-            "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
-            sign_release,
-        )
-        self.assertIn(
-            "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
-            sign_release,
-        )
-        report_position = sign_release.index("python3 -m scripts.pgso report")
-        signing_position = sign_release.index("scripts/sign-macos-release.sh")
-        package_position = sign_release.index("tar -czf")
-        self.assertLess(report_position, signing_position)
-        self.assertLess(signing_position, package_position)
+        self.assertNotIn("environment: apple-signing", pgso)
+        self.assertNotIn("sign-stable-release:", pgso)
+        self.assertNotIn("package_release", workflow_call)
+        self.assertNotIn("sign-macos-release.sh", pgso)
         for secret_name in SECRET_NAMES:
             secret_reference = f"${{{{ secrets.{secret_name} }}}}"
             self.assertIn(secret_reference, release)
-            self.assertIn(secret_reference, sign_release)
             self.assertNotIn(secret_name, workflow_call)
-            self.assertNotIn(secret_name, aggregate)
+            self.assertNotIn(secret_name, pgso)
         for workflow_path in (REPO_ROOT / ".github" / "workflows").glob("*.yml"):
             if workflow_path in (RELEASE_WORKFLOW_PATH, PGSO_WORKFLOW_PATH):
                 continue
