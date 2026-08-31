@@ -99,7 +99,18 @@ pub const SelectedDynamicToolSinkFn = *const fn (
 ) error{OutOfMemory}!void;
 
 pub const ContextNoticeSinkFn = *const fn (?*anyopaque, []const u8) error{OutOfMemory}!void;
-pub const PlanUpdateSinkFn = *const fn (?*anyopaque, []const u8) error{OutOfMemory}!void;
+pub const PlanStepStatus = enum { pending, in_progress, completed };
+
+pub const PlanStep = struct {
+    step: []u8,
+    status: PlanStepStatus,
+};
+
+pub const PlanUpdateSinkFn = *const fn (
+    ?*anyopaque,
+    ?[]const u8,
+    []const PlanStep,
+) error{OutOfMemory}!void;
 
 /// Erased, owned typed input decoded by a concrete tool.
 pub const ToolInput = struct {
@@ -854,9 +865,13 @@ pub fn reportContextNotice(ctx: DispatchContext, notice: []const u8) error{OutOf
     try sink(ctx.context_notice_ctx, notice);
 }
 
-pub fn reportPlanUpdate(ctx: DispatchContext, body: []const u8) error{OutOfMemory}!void {
+pub fn reportPlanUpdate(
+    ctx: DispatchContext,
+    explanation: ?[]const u8,
+    plan: []const PlanStep,
+) error{OutOfMemory}!void {
     const sink = ctx.on_plan_update orelse return;
-    try sink(ctx.plan_update_ctx, body);
+    try sink(ctx.plan_update_ctx, explanation, plan);
 }
 
 pub fn localToolAvailabilityFailure(

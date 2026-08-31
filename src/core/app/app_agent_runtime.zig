@@ -1102,12 +1102,29 @@ pub fn Runtime(comptime App: type) type {
             try writer.writeAll(body);
         }
 
-        fn planUpdate(raw_ctx: ?*anyopaque, body: []const u8) error{OutOfMemory}!void {
+        fn planUpdate(
+            raw_ctx: ?*anyopaque,
+            explanation: ?[]const u8,
+            plan: []const tool_dispatch.PlanStep,
+        ) error{OutOfMemory}!void {
             const app: *App = @ptrCast(@alignCast(raw_ctx orelse return));
+            var body: std.Io.Writer.Allocating = .init(std.heap.c_allocator);
+            defer body.deinit();
+            if (explanation) |text| {
+                if (text.len > 0) body.writer.print("{s}\n", .{text}) catch return error.OutOfMemory;
+            }
+            for (plan) |item| {
+                const marker = switch (item.status) {
+                    .pending => "[ ]",
+                    .in_progress => "[>]",
+                    .completed => "[x]",
+                };
+                body.writer.print("{s} {s}\n", .{ marker, item.step }) catch return error.OutOfMemory;
+            }
             try app_worker_runtime.Runtime(App).pushSemanticNotice(app, .{
                 .topic = "plan",
                 .tone = .neutral,
-                .body = body,
+                .body = body.writer.buffered(),
             });
         }
 

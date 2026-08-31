@@ -7,12 +7,8 @@ const max_plan_items: usize = 128;
 const max_step_bytes: usize = 4096;
 const max_explanation_bytes: usize = 4096;
 
-pub const StepStatus = enum { pending, in_progress, completed };
-
-pub const PlanItem = struct {
-    step: []u8,
-    status: StepStatus,
-};
+pub const StepStatus = tool_dispatch.PlanStepStatus;
+pub const PlanItem = tool_dispatch.PlanStep;
 
 pub const Input = struct {
     explanation: ?[]u8 = null,
@@ -122,12 +118,7 @@ pub fn validate(ctx: tool_dispatch.DispatchContext, erased: tool_dispatch.ToolIn
 pub fn call(ctx: tool_dispatch.DispatchContext, erased: tool_dispatch.ToolInput) tool_dispatch.DispatchError!tool_dispatch.ToolResult {
     const input = erased.as(Input);
     if (ctx.on_plan_update) |sink| {
-        const body = formatPlan(ctx.allocator, input.*) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return .{ .failure = try ctx.allocator.dupe(u8, "update_plan could not render the plan") },
-        };
-        defer ctx.allocator.free(body);
-        try sink(ctx.plan_update_ctx, body);
+        try sink(ctx.plan_update_ctx, input.explanation, input.plan);
     }
     return .{ .success = try ctx.allocator.dupe(u8, "Plan updated") };
 }
@@ -222,10 +213,25 @@ const PlanCapture = struct {
     }
 };
 
-fn capturePlan(raw_ctx: ?*anyopaque, body: []const u8) error{OutOfMemory}!void {
+fn capturePlan(
+    raw_ctx: ?*anyopaque,
+    explanation: ?[]const u8,
+    plan: []const tool_dispatch.PlanStep,
+) error{OutOfMemory}!void {
     const capture: *PlanCapture = @ptrCast(@alignCast(raw_ctx orelse return));
+    var rendered: std.Io.Writer.Allocating = .init(capture.alloc);
+    defer rendered.deinit();
+    if (explanation) |text| rendered.writer.print("{s}\n", .{text}) catch return error.OutOfMemory;
+    for (plan) |item| {
+        const marker = switch (item.status) {
+            .pending => "[ ]",
+            .in_progress => "[>]",
+            .completed => "[x]",
+        };
+        rendered.writer.print("{s} {s}\n", .{ marker, item.step }) catch return error.OutOfMemory;
+    }
     if (capture.body.len > 0) capture.alloc.free(capture.body);
-    capture.body = try capture.alloc.dupe(u8, body);
+    capture.body = try capture.alloc.dupe(u8, rendered.written());
 }
 
 test "update_plan publishes a worker-facing snapshot and Codex result" {

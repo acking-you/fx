@@ -602,6 +602,8 @@ const AcpContext = struct {
             .context_limits = self.state.context_limits,
             .context_enabled = self.state.context_enabled,
             .context_registry = self.state.cfg.context_registry,
+            .plan_update_ctx = @ptrCast(self),
+            .on_plan_update = onPlanUpdate,
             .output_chunk_ctx = @ptrCast(self),
             .on_output_chunk = onCommandOutputChunk,
             .mcp_progress_ctx = @ptrCast(self),
@@ -3054,6 +3056,18 @@ fn pushEvent(raw_ctx: *anyopaque, event: worker_runtime.WorkerEvent) !void {
         else => {},
     }
     worker_runtime.freeWorkerEvent(std.heap.c_allocator, event);
+}
+
+fn onPlanUpdate(
+    raw_ctx: ?*anyopaque,
+    explanation: ?[]const u8,
+    plan: []const tool_dispatch.PlanStep,
+) error{OutOfMemory}!void {
+    const ctx: *AcpContext = @ptrCast(@alignCast(raw_ctx orelse return));
+    var out: std.Io.Writer.Allocating = .init(ctx.alloc);
+    defer out.deinit();
+    acp_types.writePlanUpdate(&out.writer, explanation, plan) catch return error.OutOfMemory;
+    ctx.sendUpdate(out.writer.buffered()) catch return error.OutOfMemory;
 }
 
 fn pushRouteRecoveryStatus(
