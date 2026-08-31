@@ -32,7 +32,7 @@ pub const Runtime = struct {
         user: types.UserTurn,
         no_color: bool,
     ) !Runtime {
-        const layout = zeroFooterLayout(try ui_terminal.queryLayout(std.posix.STDOUT_FILENO, 0));
+        const layout = zeroFooterLayout(try ui_terminal.queryLayout(ui_terminal.stdoutLayoutHandle(), 0));
         var terminal = shell_runtime.TerminalState{};
         const cursor = probeTerminal(&terminal, layout, no_color);
         return initConfigured(
@@ -195,7 +195,7 @@ pub const Runtime = struct {
     }
 
     fn refreshGeometry(self: *Runtime) !void {
-        const queried = ui_terminal.queryLayout(std.posix.STDOUT_FILENO, 0) catch return;
+        const queried = ui_terminal.queryLayout(ui_terminal.stdoutLayoutHandle(), 0) catch return;
         const layout = zeroFooterLayout(queried);
         if (layout.rows == self.shell.layout.rows and layout.cols == self.shell.layout.cols) return;
         try shell_runtime.applyResizeWithLayout(&self.shell, &self.metrics, layout, true);
@@ -290,7 +290,8 @@ pub const Runtime = struct {
     }
 
     fn writeTerminalBytes(self: *Runtime, bytes: []const u8) !void {
-        try self.shell.stdout_file.writeStreamingAll(io_mod.getIo(), bytes);
+        var stdout_file = self.shell.stdout_file orelse std.Io.File.stdout();
+        try stdout_file.writeStreamingAll(io_mod.getIo(), bytes);
         self.metrics.ansi_bytes += bytes.len;
         if (self.shell.shadow_vt) |shadow| try shadow.feed(bytes);
     }
@@ -400,7 +401,7 @@ fn probeTerminal(
     const fallback = shell_runtime.CursorPosition{ .row = layout.rows, .col = 1 };
     const fallback_light = if (no_color) false else ui_render.explicitThemeOverride() orelse false;
     ui_render.initTheme(fallback_light, null);
-    if (std.c.isatty(std.posix.STDIN_FILENO) == 0) return fallback;
+    terminal.ensureInteractive() catch return fallback;
     terminal.captureOriginalTermios() catch return fallback;
     terminal.enableRawMode() catch return fallback;
     defer terminal.disableRawMode();

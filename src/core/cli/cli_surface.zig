@@ -6,6 +6,7 @@ const background_record_liveness = @import("../background/background_record_live
 const background_store = @import("../background/background_store.zig");
 const chatgpt_oauth = @import("../auth/chatgpt_oauth.zig");
 const grok_oauth = @import("../auth/grok_oauth.zig");
+const provider_setup = @import("../auth/provider_setup.zig");
 const acp_runner = @import("acp_runner.zig");
 const cli_ask = @import("cli_ask.zig");
 const cli_replay = @import("cli_replay.zig");
@@ -57,6 +58,7 @@ pub const Command = union(enum) {
     acp: []const [:0]const u8,
     pr: []const [:0]const u8,
     issue: []const [:0]const u8,
+    setup: []const [:0]const u8,
     login: []const [:0]const u8,
     logout: []const [:0]const u8,
     status: []const [:0]const u8,
@@ -463,6 +465,7 @@ pub fn parse(command_catalog: CommandCatalog, args: []const [:0]const u8) Comman
             if (command_specs.matchesTopLevel(command_catalog, command, .replay)) return .{ .replay = args[1..] };
         },
         's' => {
+            if (command_specs.matchesTopLevel(command_catalog, command, .setup)) return .{ .setup = args[1..] };
             if (command_specs.matchesTopLevel(command_catalog, command, .status)) return .{ .status = args[1..] };
             if (command_specs.matchesTopLevel(command_catalog, command, .sessions)) return .{ .sessions = args[1..] };
             if (command_specs.matchesTopLevel(command_catalog, command, .session)) {
@@ -872,6 +875,27 @@ fn runNonInteractiveWithDeps(
         },
         .pr => |rest| return runGithubWorkflow(alloc, rest, cfg, global_args.modifiers, deps, .pull_request),
         .issue => |rest| return runGithubWorkflow(alloc, rest, cfg, global_args.modifiers, deps, .issue),
+        .setup => |rest| {
+            var json = false;
+            for (rest) |arg| {
+                if (std.mem.eql(u8, arg, "--json") and !json) {
+                    json = true;
+                } else {
+                    try writeTopLevelUsage(cfg.command_catalog, deps, .setup);
+                    return .handled_failure;
+                }
+            }
+            const report = provider_setup.run(alloc) catch |err| {
+                debug_trace.logf("auth", "provider setup failed err={s}", .{@errorName(err)});
+                try writeStderr(deps, "fx setup: provider credential import failed\n");
+                return .handled_failure;
+            };
+            var out: std.Io.Writer.Allocating = .init(alloc);
+            defer out.deinit();
+            if (json) try report.writeJson(&out.writer) else try report.writeText(&out.writer);
+            try writeStdout(deps, out.written());
+            return .handled_success;
+        },
         .login => |rest| {
             const login_provider = parseLoginProvider(rest) catch {
                 try writeStderr(deps, "usage: fx login <codex|grok>\n");

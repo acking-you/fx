@@ -490,7 +490,7 @@ fn requestRefreshToken(
     };
 }
 
-fn accessTokenExpiresAtMs(alloc: Allocator, token: []const u8) !i64 {
+pub fn accessTokenExpiresAtMs(alloc: Allocator, token: []const u8) !i64 {
     var parts = std.mem.splitScalar(u8, token, '.');
     _ = parts.next() orelse return error.InvalidChatGptAccessToken;
     const payload = parts.next() orelse return error.InvalidChatGptAccessToken;

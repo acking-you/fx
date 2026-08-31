@@ -18,6 +18,7 @@ const provider_oauth = @import("../core/auth/provider_oauth.zig");
 const secret = @import("../core/auth/secret.zig");
 const auth_runtime = @import("../core/auth/auth_runtime.zig");
 const provider_activation = @import("../core/auth/provider_activation.zig");
+const provider_setup = @import("../core/auth/provider_setup.zig");
 const login_flow = @import("../core/auth/login_flow.zig");
 const model_capabilities = @import("../core/config/model_capabilities.zig");
 const model_provider = @import("../core/config/model_provider.zig");
@@ -75,6 +76,8 @@ const AcpMethod = enum {
     fx_unified_exec_kill,
     fx_provider_switch,
     fx_provider_configure,
+    fx_provider_setup_start,
+    fx_provider_setup_status,
     fx_provider_login_start,
     fx_provider_login_status,
     fx_provider_login_submit_code,
@@ -102,6 +105,8 @@ const AcpMethod = enum {
         if (std.mem.eql(u8, method, "fx/unifiedExec/kill")) return .fx_unified_exec_kill;
         if (std.mem.eql(u8, method, "fx/provider/switch")) return .fx_provider_switch;
         if (std.mem.eql(u8, method, "fx/provider/configure")) return .fx_provider_configure;
+        if (std.mem.eql(u8, method, "fx/provider/setup/start")) return .fx_provider_setup_start;
+        if (std.mem.eql(u8, method, "fx/provider/setup/status")) return .fx_provider_setup_status;
         if (std.mem.eql(u8, method, "fx/provider/login/start")) return .fx_provider_login_start;
         if (std.mem.eql(u8, method, "fx/provider/login/status")) return .fx_provider_login_status;
         if (std.mem.eql(u8, method, "fx/provider/login/submitCode")) return .fx_provider_login_submit_code;
@@ -126,6 +131,8 @@ const AcpMethod = enum {
             .fx_unified_exec_write_stdin,
             .fx_unified_exec_kill,
             .fx_provider_login_status,
+            .fx_provider_setup_start,
+            .fx_provider_setup_status,
             .fx_provider_login_submit_code,
             .fx_provider_login_cancel,
             .fx_provider_usage,
@@ -151,6 +158,7 @@ const AcpMethod = enum {
             .fx_unified_exec_write_stdin,
             .fx_unified_exec_kill,
             .fx_provider_login_status,
+            .fx_provider_setup_status,
             .fx_provider_login_submit_code,
             .fx_provider_login_cancel,
             .fx_provider_usage,
@@ -408,6 +416,7 @@ pub const ServerState = struct {
     provider_job_cancel: std.atomic.Value(bool) = .init(false),
     provider_login: login_flow.SignInRuntime = .{},
     provider_login_provider: ?provider_oauth.Provider = null,
+    provider_setup: provider_setup.Runtime = provider_setup.Runtime.init(std.heap.c_allocator),
     subagent_store: ?session_store.Store = null,
     subagent_host: ?*subagent_tool_host.Runtime = null,
     capability_resolver: gateway_provider.CapabilityResolver = .{},
@@ -428,6 +437,7 @@ pub const ServerState = struct {
         self.provider_job_cancel.store(true, .seq_cst);
         reapProviderJob(self, true);
         self.provider_login.deinit(self.alloc);
+        self.provider_setup.deinit();
         self.terminal_client.deinit();
         closeActiveSession(self) catch |err| {
             debug_trace.logf(
@@ -1370,6 +1380,12 @@ fn dispatch(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message) !void 
             .message = "Provider operation already in progress",
         });
     }
+    if (state.provider_setup.isRunning() and !method.allowedDuringProviderJob()) {
+        return state.writer.writeError(alloc, msg.id, .{
+            .code = ErrorCode.invalid_request,
+            .message = "Provider setup already in progress",
+        });
+    }
 
     if (method == .session_prompt and
         try prompt_handler.isProcessStatusPrompt(alloc, msg.params_raw))
@@ -1419,6 +1435,8 @@ fn dispatch(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message) !void 
         .fx_unified_exec_kill => prompt_handler.handleUnifiedExecKill(state, alloc, msg),
         .fx_provider_switch => handleProviderSwitch(state, alloc, msg),
         .fx_provider_configure => handleProviderConfigure(state, alloc, msg),
+        .fx_provider_setup_start => handleProviderSetupStart(state, alloc, msg),
+        .fx_provider_setup_status => handleProviderSetupStatus(state, alloc, msg),
         .fx_provider_login_start => handleProviderLoginStart(state, alloc, msg),
         .fx_provider_login_status => handleProviderLoginStatus(state, alloc, msg),
         .fx_provider_login_submit_code => handleProviderLoginSubmitCode(state, alloc, msg),
@@ -1962,6 +1980,51 @@ fn requiredProviderString(root: std.json.Value, name: []const u8) ?[]const u8 {
     const value = root.object.get(name) orelse return null;
     if (value != .string) return null;
     return value.string;
+}
+
+fn handleProviderSetupStart(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message) !void {
+    if (msg.params_raw) |params| {
+        const parsed = std.json.parseFromSlice(std.json.Value, alloc, params, .{}) catch
+            return state.writer.writeError(alloc, msg.id, .{
+                .code = ErrorCode.invalid_params,
+                .message = "Invalid provider setup params",
+            });
+        defer parsed.deinit();
+        if (parsed.value != .object) return state.writer.writeError(alloc, msg.id, .{
+            .code = ErrorCode.invalid_params,
+            .message = "Provider setup params must be an object",
+        });
+    }
+    if (!try state.provider_setup.start()) {
+        return state.writer.writeError(alloc, msg.id, .{
+            .code = ErrorCode.invalid_request,
+            .message = "Provider setup already in progress or awaiting status",
+        });
+    }
+    try state.writer.writeResponse(alloc, msg.id, "{\"state\":\"running\"}");
+}
+
+fn handleProviderSetupStatus(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message) !void {
+    switch (state.provider_setup.poll()) {
+        .idle => try state.writer.writeResponse(alloc, msg.id, "{\"state\":\"idle\"}"),
+        .running => try state.writer.writeResponse(alloc, msg.id, "{\"state\":\"running\"}"),
+        .completed => |outcome| {
+            var out: std.Io.Writer.Allocating = .init(alloc);
+            defer out.deinit();
+            switch (outcome) {
+                .failed => |err| {
+                    try out.writer.writeAll("{\"state\":\"failed\",\"error\":");
+                    try writeJsonStr(@errorName(err), &out.writer);
+                },
+                .report => |report| {
+                    try out.writer.writeAll("{\"state\":\"completed\",\"report\":");
+                    try report.writeJsonValue(&out.writer);
+                },
+            }
+            try out.writer.writeByte('}');
+            try state.writer.writeResponse(alloc, msg.id, out.writer.buffered());
+        },
+    }
 }
 
 fn handleProviderLoginStart(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message) !void {
@@ -3035,6 +3098,8 @@ test "ACP method parser classifies request dispatch methods" {
     try std.testing.expectEqual(AcpMethod.fx_unified_exec_kill, AcpMethod.parse("fx/unifiedExec/kill"));
     try std.testing.expectEqual(AcpMethod.fx_provider_switch, AcpMethod.parse("fx/provider/switch"));
     try std.testing.expectEqual(AcpMethod.fx_provider_configure, AcpMethod.parse("fx/provider/configure"));
+    try std.testing.expectEqual(AcpMethod.fx_provider_setup_start, AcpMethod.parse("fx/provider/setup/start"));
+    try std.testing.expectEqual(AcpMethod.fx_provider_setup_status, AcpMethod.parse("fx/provider/setup/status"));
     try std.testing.expectEqual(AcpMethod.fx_provider_login_start, AcpMethod.parse("fx/provider/login/start"));
     try std.testing.expectEqual(AcpMethod.fx_provider_login_status, AcpMethod.parse("fx/provider/login/status"));
     try std.testing.expectEqual(AcpMethod.fx_provider_login_submit_code, AcpMethod.parse("fx/provider/login/submitCode"));
@@ -3062,6 +3127,8 @@ test "ACP prompt gate policy keeps lifecycle interruption responsive" {
     try std.testing.expect(!AcpMethod.fx_unified_exec_kill.waitsForActivePrompt());
     try std.testing.expect(AcpMethod.fx_provider_switch.waitsForActivePrompt());
     try std.testing.expect(AcpMethod.fx_provider_configure.waitsForActivePrompt());
+    try std.testing.expect(!AcpMethod.fx_provider_setup_start.waitsForActivePrompt());
+    try std.testing.expect(!AcpMethod.fx_provider_setup_status.waitsForActivePrompt());
     try std.testing.expect(AcpMethod.fx_provider_login_start.waitsForActivePrompt());
     try std.testing.expect(!AcpMethod.fx_provider_login_status.waitsForActivePrompt());
     try std.testing.expect(!AcpMethod.fx_provider_login_submit_code.waitsForActivePrompt());
@@ -3077,6 +3144,7 @@ test "ACP provider job gate leaves control-plane methods responsive" {
     try std.testing.expect(AcpMethod.fx_unified_exec_write_stdin.allowedDuringProviderJob());
     try std.testing.expect(AcpMethod.fx_unified_exec_kill.allowedDuringProviderJob());
     try std.testing.expect(AcpMethod.fx_provider_login_status.allowedDuringProviderJob());
+    try std.testing.expect(AcpMethod.fx_provider_setup_status.allowedDuringProviderJob());
     try std.testing.expect(AcpMethod.fx_provider_login_submit_code.allowedDuringProviderJob());
     try std.testing.expect(AcpMethod.fx_provider_login_cancel.allowedDuringProviderJob());
     try std.testing.expect(AcpMethod.fx_provider_usage.allowedDuringProviderJob());

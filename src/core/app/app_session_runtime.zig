@@ -8328,7 +8328,7 @@ test "resume view persistence waits for main frame and retries failed writes" {
     try loaded.log.dir.dir.createDir(
         std.testing.io,
         "resume-view.bin",
-        std.Io.File.Permissions.fromMode(0o700),
+        io_mod.permissionsFromMode(0o700),
     );
     Runtime(TestApp).persistResumeViewAfterFrame(&app);
     try std.testing.expect(loaded.resume_view_stale);

@@ -165,8 +165,43 @@ jobs:
             fx-macos-aarch64.tar.gz
             fx-macos-aarch64.tar.gz.sha256
 
+  build-windows-x86_64:
+    needs: check-version
+    if: needs.check-version.outputs.needed == 'true'
+    name: Build windows-x86_64
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+        with:
+          version: "0.16.0"
+
+      - name: Build
+        run: zig build -Doptimize=ReleaseSafe -Dtarget=x86_64-windows
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $packageDir = Join-Path $env:RUNNER_TEMP "fx-package-windows-x86_64"
+          New-Item -ItemType Directory -Force -Path $packageDir | Out-Null
+          Copy-Item zig-out\bin\fx.exe, LICENSE, THIRD_PARTY_NOTICES.md -Destination $packageDir
+          $archive = "fx-windows-x86_64.zip"
+          Compress-Archive -Path "$packageDir\fx.exe", "$packageDir\LICENSE", "$packageDir\THIRD_PARTY_NOTICES.md" -DestinationPath $archive
+          $hash = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+          "$hash  $archive" | Set-Content -Encoding ascii "$archive.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: fx-windows-x86_64
+          path: |
+            fx-windows-x86_64.zip
+            fx-windows-x86_64.zip.sha256
+
   release:
-    needs: [check-version, build-linux, build-macos-x86_64, build-macos-arm64]
+    needs: [check-version, build-linux, build-macos-x86_64, build-macos-arm64, build-windows-x86_64]
     runs-on: ubuntu-latest
     environment: release
     permissions:
@@ -207,3 +242,5 @@ jobs:
           files: |
             fx-*.tar.gz
             fx-*.tar.gz.sha256
+            fx-*.zip
+            fx-*.zip.sha256

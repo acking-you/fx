@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const model_tool_schema = @import("model_tool_schema.zig");
 const mcp_runtime = @import("../mcp/mcp_runtime.zig");
 const permissions = @import("../permissions/permissions.zig");
+const shell_resolver = @import("../terminal/shell_resolver.zig");
 const tool_dispatch = @import("tool_dispatch.zig");
 const tool_set_contract = @import("tool_set.zig");
 const types = @import("../shared/types.zig");
@@ -836,6 +837,30 @@ fn buildToolProjection(alloc: Allocator, tool_set: tool_set_contract.ToolSet, ki
         }
     }
 
+    if (containsName(advertised_names.items, "exec_command")) {
+        if (!first_custom_guidance) try guidance_out.writer.writeAll("\n\n");
+        first_custom_guidance = false;
+        var shell_buffer: [4096]u8 = undefined;
+        const shell = shell_resolver.configuredOrDefaultLoginShellInto(&shell_buffer);
+        const syntax = shell_resolver.commandSyntax(shell) orelse return error.UnsupportedShell;
+        const shell_name: []const u8 = switch (syntax) {
+            .bash => if (builtin.os.tag == .windows) "Git Bash" else "Bash",
+            .zsh => "Zsh",
+            .cmd => "Command Prompt",
+            .powershell => "PowerShell",
+        };
+        const syntax_name: []const u8 = switch (syntax) {
+            .bash => "Bash",
+            .zsh => "Zsh",
+            .cmd => "cmd.exe",
+            .powershell => "PowerShell",
+        };
+        try guidance_out.writer.print(
+            "The default shell for exec_command on this host is {s} ({s} syntax). Generate compatible cmd text unless the call explicitly supplies a different absolute shell path.",
+            .{ shell_name, syntax_name },
+        );
+    }
+
     if (options.bash_first) {
         if (!first_custom_guidance) try guidance_out.writer.writeAll("\n\n");
         try guidance_out.writer.writeAll(bash_first_guidance);
@@ -897,7 +922,7 @@ fn isBashFirstHiddenTool(tool: tool_dispatch.Tool) bool {
 }
 
 fn unifiedExecSupported() bool {
-    return std.process.can_spawn and builtin.os.tag != .windows and builtin.os.tag != .wasi;
+    return std.process.can_spawn and builtin.os.tag != .wasi;
 }
 
 /// A provider-executed tool is never dispatched locally, so an unsettled `ask`
@@ -1015,10 +1040,15 @@ test "provider-executed search follows settled advertisement permission" {
             case.advertised,
             containsName(projection.advertised_names, "web_search"),
         );
-        try std.testing.expectEqualStrings(
-            if (case.advertised) test_web_search.description else "",
-            projection.custom_guidance,
+        try std.testing.expectEqual(
+            case.advertised,
+            std.mem.find(u8, projection.custom_guidance, test_web_search.description) != null,
         );
+        try std.testing.expect(std.mem.find(
+            u8,
+            projection.custom_guidance,
+            "default shell for exec_command",
+        ) != null);
     }
 }
 
@@ -1071,6 +1101,22 @@ test "bash-first projection hides overlapping discovery tools and guides rg" {
     try expectNotContainsName(projection.advertised_names, "grep_files");
     try expectNotContainsName(projection.advertised_names, "semantic_search");
     try std.testing.expect(std.mem.find(u8, projection.custom_guidance, "rg --files") != null);
+}
+
+test "model tool projection identifies the actual default command shell" {
+    var projection = try buildTestModelToolProjection(std.testing.allocator, .{});
+    defer projection.deinit(std.testing.allocator);
+    try expectContainsName(projection.advertised_names, "exec_command");
+
+    var shell_buffer: [4096]u8 = undefined;
+    const shell = shell_resolver.configuredOrDefaultLoginShellInto(&shell_buffer);
+    const expected: []const u8 = switch (shell_resolver.commandSyntax(shell).?) {
+        .bash => if (builtin.os.tag == .windows) "Git Bash (Bash syntax)" else "Bash (Bash syntax)",
+        .zsh => "Zsh (Zsh syntax)",
+        .cmd => "Command Prompt (cmd.exe syntax)",
+        .powershell => "PowerShell (PowerShell syntax)",
+    };
+    try std.testing.expect(std.mem.find(u8, projection.custom_guidance, expected) != null);
 }
 
 test "bash-first leaves the default projection unchanged" {
@@ -1133,7 +1179,8 @@ fn checkEffectiveToolProjectionAllocationFailures(alloc: Allocator) !void {
         };
     defer projection.deinit(alloc);
     try expectContainsName(projection.advertised_names, "read_file");
-    try std.testing.expectEqualStrings(test_web_search.description, projection.custom_guidance);
+    try std.testing.expect(std.mem.find(u8, projection.custom_guidance, test_web_search.description) != null);
+    try std.testing.expect(std.mem.find(u8, projection.custom_guidance, "default shell for exec_command") != null);
 }
 
 test "effective tool projection cleans up every partial allocation failure" {

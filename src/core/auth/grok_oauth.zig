@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const browser_callback = @import("browser_callback.zig");
 const grok_session = @import("grok_session.zig");
 const debug_trace = @import("../shared/debug_trace.zig");
@@ -392,18 +393,14 @@ const StdinManualCodeReader = struct {
 
     fn poll(self: *StdinManualCodeReader) !?[]const u8 {
         if (self.closed) return null;
-        var fds = [_]std.posix.pollfd{.{
-            .fd = std.posix.STDIN_FILENO,
-            .events = std.posix.POLL.IN,
-            .revents = 0,
-        }};
-        const ready = try std.posix.poll(&fds, 0);
-        if (ready == 0 or
-            (fds[0].revents & (std.posix.POLL.IN | std.posix.POLL.HUP)) == 0) return null;
+        if (!try io_mod.stdinReady(0)) return null;
 
         var chunk: [512]u8 = undefined;
         defer @memset(&chunk, 0);
-        const read_len = try std.posix.read(std.posix.STDIN_FILENO, &chunk);
+        const read_len = if (comptime builtin.os.tag == .windows)
+            try std.Io.File.stdin().readStreaming(io_mod.getIo(), &.{&chunk})
+        else
+            try std.posix.read(std.posix.STDIN_FILENO, &chunk);
         if (read_len == 0) {
             self.closed = true;
             return if (self.len == 0) null else self.buffer[0..self.len];
@@ -503,14 +500,18 @@ fn refreshSession(
 ) !void {
     var body: std.Io.Writer.Allocating = .init(alloc);
     defer body.deinit();
-    var form: FormBody = .{};
-    try form.append(&body.writer, "grant_type", "refresh_token");
-    try form.append(&body.writer, "client_id", client_id);
-    try form.append(&body.writer, "refresh_token", session.refresh_token);
+    try writeRefreshTokenForm(&body.writer, session);
     var token = try requestRefreshToken(alloc, transport, body.written());
     defer token.deinit(alloc);
 
-    const account_id = try fetchAccountId(alloc, transport, token.access_token);
+    const team_principal = if (session.principal_type) |value|
+        std.mem.eql(u8, value, "Team")
+    else
+        false;
+    const account_id = if (team_principal)
+        try alloc.dupe(u8, session.account_id)
+    else
+        try fetchAccountId(alloc, transport, token.access_token);
     errdefer alloc.free(account_id);
     if (!std.mem.eql(u8, account_id, session.account_id)) {
         return error.GrokAccountChanged;
@@ -524,11 +525,17 @@ fn refreshSession(
         break :blk std.math.add(i64, io_mod.milliTimestamp(), duration_ms) catch
             return error.InvalidGrokOAuthResponse;
     } else return error.InvalidGrokOAuthResponse;
+    const principal_type = if (session.principal_type) |value| try alloc.dupe(u8, value) else null;
+    errdefer if (principal_type) |value| alloc.free(value);
+    const principal_id = if (session.principal_id) |value| try alloc.dupe(u8, value) else null;
+    errdefer if (principal_id) |value| alloc.free(value);
     var replacement = grok_session.Session{
         .access_token = token.access_token,
         .refresh_token = refresh_token,
         .expires_at_ms = expires_at_ms,
         .account_id = account_id,
+        .principal_type = principal_type,
+        .principal_id = principal_id,
     };
     token.access_token = &.{};
     errdefer replacement.deinit(alloc);
@@ -539,6 +546,19 @@ fn refreshSession(
     replacement.access_token = &.{};
     replacement.refresh_token = &.{};
     replacement.account_id = &.{};
+}
+
+fn writeRefreshTokenForm(writer: *std.Io.Writer, session: *const grok_session.Session) !void {
+    var form: FormBody = .{};
+    try form.append(writer, "grant_type", "refresh_token");
+    try form.append(writer, "client_id", client_id);
+    try form.append(writer, "refresh_token", session.refresh_token);
+    if (session.principal_type) |principal_type| {
+        try form.append(writer, "principal_type", principal_type);
+    }
+    if (session.principal_id) |principal_id| {
+        try form.append(writer, "principal_id", principal_id);
+    }
 }
 
 const RefreshTokenResponse = struct {
@@ -958,6 +978,24 @@ test "Grok refresh uses form encoding and accepts omitted token rotation" {
     try std.testing.expect(std.mem.find(u8, state.payload[0..state.payload_len], "grant_type=refresh_token") != null);
     try std.testing.expect(response.refresh_token == null);
     try std.testing.expectEqual(@as(?i64, 3600), response.expires_in);
+}
+
+test "Grok team refresh preserves the principal binding" {
+    const session = grok_session.Session{
+        .access_token = @constCast("access"),
+        .refresh_token = @constCast("refresh"),
+        .expires_at_ms = 1,
+        .account_id = @constCast("team-123"),
+        .principal_type = @constCast("Team"),
+        .principal_id = @constCast("team/123"),
+    };
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try writeRefreshTokenForm(&out.writer, &session);
+    try std.testing.expectEqualStrings(
+        "grant_type=refresh_token&client_id=b1a00492-073a-47ea-816f-4c329264a828&refresh_token=refresh&principal_type=Team&principal_id=team%2F123",
+        out.written(),
+    );
 }
 
 test "Grok browser authorization URL uses PKCE without device authentication" {

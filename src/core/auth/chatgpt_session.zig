@@ -43,6 +43,12 @@ pub const DeleteOutcome = enum {
     deleted_not_durable,
 };
 
+pub const SaveIfAbsentOutcome = enum {
+    saved,
+    already_configured,
+    existing_invalid,
+};
+
 pub const Mutation = struct {
     fx_dir: io_mod.VerifiedDir,
     lock: io_mod.TimedAdvisoryLock,
@@ -61,6 +67,20 @@ pub const Mutation = struct {
         const text = try stringify(alloc, session);
         defer secret.zeroAndFree(alloc, text);
         try io_mod.durableReplaceVerified(alloc, &self.fx_dir, auth_file_name, text);
+    }
+
+    pub fn hasAuthFile(self: *Mutation) !bool {
+        var file = self.fx_dir.dir.openFile(io_mod.getIo(), auth_file_name, .{
+            .mode = .read_only,
+            .allow_directory = false,
+            .follow_symlinks = false,
+            .resolve_beneath = true,
+        }) catch |err| switch (err) {
+            error.FileNotFound => return false,
+            else => return err,
+        };
+        file.close(io_mod.getIo());
+        return true;
     }
 
     pub fn delete(self: *Mutation) !DeleteOutcome {
@@ -113,7 +133,7 @@ fn loadFromDir(alloc: Allocator, fx_dir: *std.Io.Dir, report_open_failure: bool)
     defer file.close(io_mod.getIo());
 
     const stat = try file.stat(io_mod.getIo());
-    if (stat.kind != .file or stat.permissions.toMode() & 0o077 != 0) {
+    if (stat.kind != .file or !io_mod.permissionsPrivateFile(stat.permissions)) {
         debug_trace.logf("auth", "ChatGPT session load failed step=permissions err=InsecureAuthFile", .{});
         return null;
     }
@@ -134,6 +154,22 @@ pub fn saveNewSession(alloc: Allocator, session: Session) !void {
     var mutation = try beginMutation();
     defer mutation.deinit();
     try mutation.save(alloc, session);
+}
+
+/// Imports a session without replacing credentials created by fx. The check
+/// and durable write share the provider mutation lock so concurrent setup and
+/// login attempts cannot race into an overwrite.
+pub fn saveImportedSessionIfAbsent(alloc: Allocator, session: Session) !SaveIfAbsentOutcome {
+    if (comptime host_target.is_wasm) return error.ChatGptOAuthUnavailable;
+    var mutation = try beginMutation();
+    defer mutation.deinit();
+    if (try mutation.hasAuthFile()) {
+        var existing = (try mutation.load(alloc)) orelse return .existing_invalid;
+        existing.deinit(alloc);
+        return .already_configured;
+    }
+    try mutation.save(alloc, session);
+    return .saved;
 }
 
 pub fn beginExistingMutation() !?Mutation {
@@ -183,12 +219,12 @@ fn openExistingPrivateFxDir(home_dir: *io_mod.VerifiedDir) !io_mod.VerifiedDir {
 
     const initial_stat = try dir.stat(io_mod.getIo());
     if (initial_stat.kind != .directory) return error.DurablePathUnsafe;
-    if (initial_stat.permissions.toMode() & 0o200 == 0) return error.PrivateStatePermissionsUnsupported;
-    dir.setPermissions(io_mod.getIo(), std.Io.File.Permissions.fromMode(0o700)) catch {
+    if (!io_mod.permissionsWritable(initial_stat.permissions)) return error.PrivateStatePermissionsUnsupported;
+    io_mod.setDirPermissions(dir, io_mod.permissionsFromMode(0o700)) catch {
         return error.PrivateStatePermissionsUnsupported;
     };
     const stat = try dir.stat(io_mod.getIo());
-    if (stat.kind != .directory or stat.permissions.toMode() & 0o777 != 0o700) {
+    if (stat.kind != .directory or !io_mod.permissionsPrivateDir(stat.permissions)) {
         return error.PrivateStatePermissionsUnsupported;
     }
     return .{ .dir = dir };

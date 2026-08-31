@@ -7,9 +7,11 @@ const types = @import("../core/shared/types.zig");
 const transcript_runtime = @import("transcript/runtime.zig");
 const frame_layout = @import("render_engine/frame_layout.zig");
 const cursor_probe = @import("terminal/cursor_probe.zig");
+const event_wake = @import("terminal/event_wake.zig");
 const resize_runtime = @import("resize_runtime.zig");
 const ui_terminal = @import("terminal/terminal.zig");
 const wasm_terminal = if (builtin.os.tag == .wasi) @import("terminal/wasm_terminal.zig") else struct {};
+const windows_console = if (builtin.os.tag == .windows) @import("terminal/windows_console.zig") else struct {};
 
 const Allocator = std.mem.Allocator;
 const Layout = types.Layout;
@@ -37,6 +39,8 @@ extern "c" fn ptsname(fd: c_int) ?[*:0]u8;
 pub const supports_resize_signal = resize_runtime.supports_resize_signal;
 pub const ResizeHandler = if (builtin.os.tag == .wasi)
     *const fn () callconv(.c) void
+else if (builtin.os.tag == .windows)
+    *const fn (std.posix.SIG) callconv(.c) void
 else
     std.posix.Sigaction.handler_fn;
 pub const ResizeApprovalInterlock = resize_runtime.ResizeApprovalInterlock;
@@ -68,10 +72,10 @@ pub const AlternateScreenOwner = enum {
 };
 
 pub const TerminalState = struct {
-    stdin_fd: std.posix.fd_t = std.posix.STDIN_FILENO,
-    wake_read_fd: std.posix.fd_t = -1,
-    wake_write_fd: std.posix.fd_t = -1,
-    original_termios: std.posix.termios = undefined,
+    stdin_fd: if (builtin.os.tag == .windows or builtin.os.tag == .wasi) void else std.posix.fd_t = if (builtin.os.tag == .windows or builtin.os.tag == .wasi) {} else std.posix.STDIN_FILENO,
+    wake: event_wake.Wake = .{},
+    original_termios: if (builtin.os.tag == .windows or builtin.os.tag == .wasi) void else std.posix.termios = if (builtin.os.tag == .windows or builtin.os.tag == .wasi) {} else undefined,
+    windows_state: if (builtin.os.tag == .windows) windows_console.State else void = if (builtin.os.tag == .windows) .{} else {},
     raw_enabled: bool = false,
     alternate_screen_owner: AlternateScreenOwner = .none,
     alternate_frame_layout: frame_layout.CommittedLayoutSnapshot = .{},
@@ -101,48 +105,37 @@ pub const TerminalState = struct {
 
     pub fn ensureInteractive(self: TerminalState) !void {
         if (comptime builtin.os.tag == .wasi) return;
-        if (std.c.isatty(self.stdin_fd) == 0 or std.c.isatty(std.posix.STDOUT_FILENO) == 0) {
-            return error.NotATerminal;
+        if (comptime builtin.os.tag == .windows) {
+            return windows_console.ensureInteractive();
+        } else {
+            if (std.c.isatty(self.stdin_fd) == 0 or std.c.isatty(std.posix.STDOUT_FILENO) == 0) {
+                return error.NotATerminal;
+            }
         }
     }
 
     pub fn captureOriginalTermios(self: *TerminalState) !void {
         if (comptime builtin.os.tag == .wasi) return;
-        self.original_termios = try std.posix.tcgetattr(self.stdin_fd);
+        if (comptime builtin.os.tag == .windows) {
+            try self.windows_state.capture();
+        } else {
+            self.original_termios = try std.posix.tcgetattr(self.stdin_fd);
+        }
     }
 
     /// Creates the native worker-to-terminal wake pipe. The pipe is kept
     /// non-blocking because worker callbacks must never stall on a full wake
     /// channel; one byte is enough to coalesce any number of queued events.
     pub fn initEventWake(self: *TerminalState) !void {
-        if (comptime builtin.os.tag == .wasi) return;
-        if (self.wake_read_fd >= 0 or self.wake_write_fd >= 0) return;
-
-        var fds: [2]std.posix.fd_t = undefined;
-        if (std.c.pipe(&fds) != 0) return error.EventWakePipeFailed;
-        errdefer {
-            closeEventWakeFd(fds[0]);
-            closeEventWakeFd(fds[1]);
-        }
-        try setEventWakeFdFlags(fds[0]);
-        try setEventWakeFdFlags(fds[1]);
-        self.wake_read_fd = fds[0];
-        self.wake_write_fd = fds[1];
+        try self.wake.init();
     }
 
     pub fn deinitEventWake(self: *TerminalState) void {
-        if (comptime builtin.os.tag == .wasi) return;
-        if (self.wake_read_fd >= 0) closeEventWakeFd(self.wake_read_fd);
-        if (self.wake_write_fd >= 0) closeEventWakeFd(self.wake_write_fd);
-        self.wake_read_fd = -1;
-        self.wake_write_fd = -1;
+        self.wake.deinit();
     }
 
     pub fn eventWakeAvailable(self: TerminalState) bool {
-        return if (comptime builtin.os.tag == .wasi)
-            false
-        else
-            self.wake_read_fd >= 0 and self.wake_write_fd >= 0;
+        return self.wake.available();
     }
 
     /// Callback shape used by WorkerRuntime. It is safe to call from a worker
@@ -150,20 +143,11 @@ pub const TerminalState = struct {
     /// already in the pipe and the queue is drained in one batch.
     pub fn notifyEventWake(context: ?*anyopaque) void {
         const self: *TerminalState = @ptrCast(@alignCast(context.?));
-        if (comptime builtin.os.tag == .wasi) return;
-        if (self.wake_write_fd < 0) return;
-        const byte = [_]u8{1};
-        _ = std.c.write(self.wake_write_fd, &byte, byte.len);
+        self.wake.notify();
     }
 
     fn drainEventWake(self: TerminalState) void {
-        if (comptime builtin.os.tag == .wasi) return;
-        if (self.wake_read_fd < 0) return;
-        var bytes: [64]u8 = undefined;
-        while (true) {
-            const count = std.c.read(self.wake_read_fd, &bytes, bytes.len);
-            if (count <= 0 or count < bytes.len) break;
-        }
+        self.wake.drain();
     }
 
     pub fn enableRawMode(self: *TerminalState) !void {
@@ -171,38 +155,46 @@ pub const TerminalState = struct {
             self.raw_enabled = true;
             return;
         }
-        var raw = self.original_termios;
+        if (comptime builtin.os.tag == .windows) {
+            try self.windows_state.enableRaw();
+            self.raw_enabled = true;
+            return;
+        } else {
+            var raw = self.original_termios;
 
-        raw.iflag.BRKINT = false;
-        raw.iflag.IGNCR = false;
-        raw.iflag.ICRNL = false;
-        raw.iflag.INLCR = false;
-        raw.iflag.INPCK = false;
-        raw.iflag.ISTRIP = false;
-        raw.iflag.IXON = false;
-        raw.iflag.IXOFF = false;
+            raw.iflag.BRKINT = false;
+            raw.iflag.IGNCR = false;
+            raw.iflag.ICRNL = false;
+            raw.iflag.INLCR = false;
+            raw.iflag.INPCK = false;
+            raw.iflag.ISTRIP = false;
+            raw.iflag.IXON = false;
+            raw.iflag.IXOFF = false;
 
-        raw.cflag.CSIZE = .CS8;
+            raw.cflag.CSIZE = .CS8;
 
-        raw.lflag.ECHO = false;
-        raw.lflag.ICANON = false;
-        raw.lflag.IEXTEN = false;
-        raw.lflag.ISIG = false;
+            raw.lflag.ECHO = false;
+            raw.lflag.ICANON = false;
+            raw.lflag.IEXTEN = false;
+            raw.lflag.ISIG = false;
 
-        const vmin_idx = vminIndex();
-        const vtime_idx = vtimeIndex();
-        if (vmin_idx < raw.cc.len and vtime_idx < raw.cc.len) {
-            raw.cc[vmin_idx] = 1;
-            raw.cc[vtime_idx] = 0;
+            const vmin_idx = vminIndex();
+            const vtime_idx = vtimeIndex();
+            if (vmin_idx < raw.cc.len and vtime_idx < raw.cc.len) {
+                raw.cc[vmin_idx] = 1;
+                raw.cc[vtime_idx] = 0;
+            }
+
+            try std.posix.tcsetattr(self.stdin_fd, .NOW, raw);
+            self.raw_enabled = true;
         }
-
-        try std.posix.tcsetattr(self.stdin_fd, .NOW, raw);
-        self.raw_enabled = true;
     }
 
     pub fn disableRawMode(self: *TerminalState) void {
         if (!self.raw_enabled) return;
-        if (comptime builtin.os.tag != .wasi) {
+        if (comptime builtin.os.tag == .windows) {
+            self.windows_state.restore();
+        } else if (comptime builtin.os.tag != .wasi) {
             std.posix.tcsetattr(self.stdin_fd, .FLUSH, self.original_termios) catch {};
         }
         self.raw_enabled = false;
@@ -311,10 +303,11 @@ pub const TerminalState = struct {
     }
 
     pub fn read(self: TerminalState, out: []u8) !usize {
-        if (comptime builtin.os.tag == .wasi) {
+        if (comptime builtin.os.tag == .wasi or builtin.os.tag == .windows) {
             return std.Io.File.stdin().readStreaming(io_mod.getIo(), &.{out});
+        } else {
+            return std.posix.read(self.stdin_fd, out);
         }
-        return std.posix.read(self.stdin_fd, out);
     }
 
     pub fn pollInput(self: TerminalState, timeout_ms: i32) !PollResult {
@@ -324,73 +317,42 @@ pub const TerminalState = struct {
                 -1 => .{ .hung_up = true },
                 else => .{},
             };
-        }
-        var fds = [_]std.posix.pollfd{
-            .{
-                .fd = self.stdin_fd,
-                .events = std.posix.POLL.IN,
-                .revents = 0,
-            },
-            .{
-                .fd = self.wake_read_fd,
-                .events = if (self.wake_read_fd >= 0) std.posix.POLL.IN else 0,
-                .revents = 0,
-            },
-        };
+        } else if (comptime builtin.os.tag == .windows) {
+            const wake_handle = self.wake.windows_event orelse return error.EventWakeUnavailable;
+            return switch (try windows_console.waitForInputOrWake(wake_handle, timeout_ms)) {
+                .input => .{ .readable = true },
+                .wake => .{ .woken = true },
+                .timeout => .{},
+            };
+        } else {
+            var fds = [_]std.posix.pollfd{
+                .{
+                    .fd = self.stdin_fd,
+                    .events = std.posix.POLL.IN,
+                    .revents = 0,
+                },
+                .{
+                    .fd = self.wake.read_fd,
+                    .events = if (self.wake.read_fd >= 0) std.posix.POLL.IN else 0,
+                    .revents = 0,
+                },
+            };
 
-        _ = try std.posix.poll(&fds, timeout_ms);
-        const stdin_revents = fds[0].revents;
-        const wake_revents = fds[1].revents;
-        const woken = self.wake_read_fd >= 0 and
-            (wake_revents & (std.posix.POLL.IN | std.posix.POLL.HUP | std.posix.POLL.ERR)) != 0;
-        if (woken) self.drainEventWake();
-        return .{
-            .readable = (stdin_revents & std.posix.POLL.IN) != 0,
-            .hung_up = (stdin_revents & std.posix.POLL.HUP) != 0,
-            .has_error = (stdin_revents & std.posix.POLL.ERR) != 0,
-            .woken = woken,
-        };
+            _ = try std.posix.poll(&fds, timeout_ms);
+            const stdin_revents = fds[0].revents;
+            const wake_revents = fds[1].revents;
+            const woken = self.wake.read_fd >= 0 and
+                (wake_revents & (std.posix.POLL.IN | std.posix.POLL.HUP | std.posix.POLL.ERR)) != 0;
+            if (woken) self.drainEventWake();
+            return .{
+                .readable = (stdin_revents & std.posix.POLL.IN) != 0,
+                .hung_up = (stdin_revents & std.posix.POLL.HUP) != 0,
+                .has_error = (stdin_revents & std.posix.POLL.ERR) != 0,
+                .woken = woken,
+            };
+        }
     }
 };
-
-fn setEventWakeFdFlags(fd: std.posix.fd_t) !void {
-    while (true) switch (std.posix.errno(std.posix.system.fcntl(
-        fd,
-        std.posix.F.SETFD,
-        @as(usize, std.posix.FD_CLOEXEC),
-    ))) {
-        .SUCCESS => break,
-        .INTR => continue,
-        else => return error.EventWakePipeFailed,
-    };
-
-    const current = while (true) {
-        const rc = std.posix.system.fcntl(fd, std.posix.F.GETFL, @as(usize, 0));
-        switch (std.posix.errno(rc)) {
-            .SUCCESS => break @as(usize, @intCast(rc)),
-            .INTR => continue,
-            else => return error.EventWakePipeFailed,
-        }
-    };
-    const nonblock = @as(usize, 1) << @bitOffsetOf(std.posix.O, "NONBLOCK");
-    while (true) switch (std.posix.errno(std.posix.system.fcntl(
-        fd,
-        std.posix.F.SETFL,
-        current | nonblock,
-    ))) {
-        .SUCCESS => break,
-        .INTR => continue,
-        else => return error.EventWakePipeFailed,
-    };
-}
-
-fn closeEventWakeFd(fd: std.posix.fd_t) void {
-    while (true) switch (std.posix.errno(std.posix.system.close(fd))) {
-        .SUCCESS => return,
-        .INTR => continue,
-        else => return,
-    };
-}
 
 fn clearTmuxHistoryForPane(alloc: Allocator, pane: []const u8) void {
     runTmuxHistoryClear(alloc, pane) catch |err| {

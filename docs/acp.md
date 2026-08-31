@@ -27,7 +27,7 @@ The initialize response advertises fx-specific capabilities under `_meta.fx`:
       "backgroundTerminals": true,
       "processStatusCommand": "/ps",
       "unifiedExec": {"writeStdin": true, "kill": true},
-      "providerControl": {"switch": true, "login": true, "configureByok": true, "usage": true}
+      "providerControl": {"switch": true, "login": true, "setup": true, "configureByok": true, "usage": true}
     }
   }
 }
@@ -62,6 +62,29 @@ background activation path. While catalog loading is in progress, the ACP read
 loop remains available for cancellation, turn status, background-terminal
 queries, provider-login status, and Unified Exec writes or termination. Other
 state-changing requests receive `Provider operation already in progress`.
+
+### Provider setup
+
+Import compatible logins already owned by Codex CLI and Grok Build without
+opening another browser authorization flow:
+
+```json
+{"jsonrpc":"2.0","id":18,"method":"fx/provider/setup/start","params":{}}
+```
+
+The start response is immediate. Poll the background import through:
+
+```json
+{"jsonrpc":"2.0","id":19,"method":"fx/provider/setup/status","params":{}}
+```
+
+The terminal response has `state: "completed"` and a credential-free report
+for `codex` and `grok`. Each status is `imported`, `already_configured`,
+`not_found`, `incompatible`, `invalid`, or `unavailable`. The importer reads
+`CODEX_HOME/auth.json` or `~/.codex/auth.json`, and `GROK_HOME/auth.json` or
+`~/.grok/auth.json`. It never changes those source files or replaces an
+existing fx login. Call `fx/provider/switch` afterward when the imported
+provider should become active; setup never changes provider selection.
 
 ### Provider login
 

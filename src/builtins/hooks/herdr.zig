@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const io_mod = @import("../../core/shared/io.zig");
+const socket_poll = @import("../../core/shared/socket_poll.zig");
 const debug_trace = @import("../../core/shared/debug_trace.zig");
 const host_target = @import("../../core/hosts/target.zig");
 const jsonrpc = @import("../../acp/jsonrpc.zig");
@@ -14,7 +15,7 @@ pub const State = enum { idle, working, blocked };
 // herdr protocol limits custom status to 32 bytes.
 const custom_status_max = 32;
 /// Maximum wait for herdr's one-line reply.
-const response_timeout = std.posix.timeval{ .sec = 0, .usec = 250_000 };
+const response_timeout_ms: u32 = 250;
 
 // Third-party reporters use the `custom:` source prefix.
 const source = "custom:fx";
@@ -181,12 +182,7 @@ pub const Client = struct {
 };
 
 fn applyResponseTimeout(stream: std.Io.net.Stream) void {
-    std.posix.setsockopt(
-        stream.socket.handle,
-        std.posix.SOL.SOCKET,
-        std.posix.SO.RCVTIMEO,
-        std.mem.asBytes(&response_timeout),
-    ) catch {};
+    socket_poll.setTimeouts(stream.socket.handle, response_timeout_ms) catch {};
 }
 
 fn clampStatus(custom_status: ?[]const u8) ?[]const u8 {

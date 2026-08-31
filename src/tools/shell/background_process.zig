@@ -85,7 +85,7 @@ fn spawnPrepared(
     };
 
     const child_id = child.id orelse return error.SpawnFailed;
-    const pid = try std.fmt.allocPrint(alloc, "{d}", .{child_id});
+    const pid = try std.fmt.allocPrint(alloc, "{d}", .{io_mod.childProcessId(child_id)});
     var pid_owned = true;
     errdefer if (pid_owned) alloc.free(pid);
 
@@ -245,17 +245,23 @@ fn captureToken(
     alloc: Allocator,
     pid_text: []const u8,
 ) background_process_provider.ProviderError!process_supervisor.ProcessInstanceToken {
-    const pid = std.fmt.parseInt(std.posix.pid_t, pid_text, 10) catch
-        return error.InvalidPid;
     return switch (builtin.os.tag) {
-        .linux => captureLinuxToken(alloc, pid) catch |err| switch (err) {
-            error.OutOfMemory => error.OutOfMemory,
-            error.ProcessNotFound => error.ProcessNotFound,
-            else => error.ProcessIdentityUnavailable,
+        .linux => blk: {
+            const pid = std.fmt.parseInt(std.posix.pid_t, pid_text, 10) catch
+                return error.InvalidPid;
+            break :blk captureLinuxToken(alloc, pid) catch |err| switch (err) {
+                error.OutOfMemory => error.OutOfMemory,
+                error.ProcessNotFound => error.ProcessNotFound,
+                else => error.ProcessIdentityUnavailable,
+            };
         },
-        .macos => captureMacOSToken(pid) catch |err| switch (err) {
-            error.ProcessNotFound => error.ProcessNotFound,
-            else => error.ProcessIdentityUnavailable,
+        .macos => blk: {
+            const pid = std.fmt.parseInt(std.posix.pid_t, pid_text, 10) catch
+                return error.InvalidPid;
+            break :blk captureMacOSToken(pid) catch |err| switch (err) {
+                error.ProcessNotFound => error.ProcessNotFound,
+                else => error.ProcessIdentityUnavailable,
+            };
         },
         else => error.ProcessIdentityUnsupported,
     };
@@ -482,56 +488,64 @@ fn signalProcess(
         },
     }
     if (!host.current().background_processes) return error.Unsupported;
-    const pid = std.fmt.parseInt(std.posix.pid_t, pid_text, 10) catch
-        return error.InvalidPid;
-    try signalPidTree(pid);
+    if (comptime builtin.os.tag == .windows) {
+        return error.Unsupported;
+    } else {
+        const pid = std.fmt.parseInt(std.posix.pid_t, pid_text, 10) catch
+            return error.InvalidPid;
+        try signalPidTree(pid);
+    }
 }
 
 fn signalPidTree(root_pid: std.posix.pid_t) std.posix.KillError!void {
-    const descendants = collectDescendantPids(
-        std.heap.page_allocator,
-        root_pid,
-    ) catch |err| fallback: {
-        debug_trace.logf(
-            "background",
-            "could not inspect background process descendants pid={d} err={s}",
-            .{ root_pid, @errorName(err) },
-        );
-        break :fallback &[_]std.posix.pid_t{};
-    };
-    defer if (descendants.len > 0) {
-        std.heap.page_allocator.free(descendants);
-    };
-
-    var signaled = false;
-    var first_error: ?std.posix.KillError = null;
-    sendSignal(-root_pid, std.posix.SIG.TERM, &signaled, &first_error);
-    for (descendants) |pid| {
-        sendSignal(pid, std.posix.SIG.TERM, &signaled, &first_error);
-    }
-    sendSignal(root_pid, std.posix.SIG.TERM, &signaled, &first_error);
-    if (!signaled) return first_error orelse error.ProcessNotFound;
-
-    waitForProcessTreeExit(root_pid, descendants, 250);
-    var force_killed = false;
-    for (descendants) |pid| {
-        if (!isPidRunningRaw(pid)) continue;
-        sendSignal(pid, std.posix.SIG.KILL, &force_killed, &first_error);
-    }
-    if (isPidRunningRaw(root_pid)) {
-        sendSignal(
+    if (comptime builtin.os.tag == .windows) {
+        return error.ProcessNotFound;
+    } else {
+        const descendants = collectDescendantPids(
+            std.heap.page_allocator,
             root_pid,
-            std.posix.SIG.KILL,
-            &force_killed,
-            &first_error,
-        );
-    }
-    if (force_killed) {
-        debug_trace.logf(
-            "background",
-            "force-killed lingering background process tree pid={d}",
-            .{root_pid},
-        );
+        ) catch |err| fallback: {
+            debug_trace.logf(
+                "background",
+                "could not inspect background process descendants pid={d} err={s}",
+                .{ root_pid, @errorName(err) },
+            );
+            break :fallback &[_]std.posix.pid_t{};
+        };
+        defer if (descendants.len > 0) {
+            std.heap.page_allocator.free(descendants);
+        };
+
+        var signaled = false;
+        var first_error: ?std.posix.KillError = null;
+        sendSignal(-root_pid, std.posix.SIG.TERM, &signaled, &first_error);
+        for (descendants) |pid| {
+            sendSignal(pid, std.posix.SIG.TERM, &signaled, &first_error);
+        }
+        sendSignal(root_pid, std.posix.SIG.TERM, &signaled, &first_error);
+        if (!signaled) return first_error orelse error.ProcessNotFound;
+
+        waitForProcessTreeExit(root_pid, descendants, 250);
+        var force_killed = false;
+        for (descendants) |pid| {
+            if (!isPidRunningRaw(pid)) continue;
+            sendSignal(pid, std.posix.SIG.KILL, &force_killed, &first_error);
+        }
+        if (isPidRunningRaw(root_pid)) {
+            sendSignal(
+                root_pid,
+                std.posix.SIG.KILL,
+                &force_killed,
+                &first_error,
+            );
+        }
+        if (force_killed) {
+            debug_trace.logf(
+                "background",
+                "force-killed lingering background process tree pid={d}",
+                .{root_pid},
+            );
+        }
     }
 }
 
@@ -1033,7 +1047,7 @@ test "native provider captures the current process identity" {
     }
 
     const alloc = std.testing.allocator;
-    const pid = try std.fmt.allocPrint(alloc, "{d}", .{std.c.getpid()});
+    const pid = try std.fmt.allocPrint(alloc, "{d}", .{io_mod.processId()});
     defer alloc.free(pid);
 
     const token = try provider.captureToken(alloc, pid);

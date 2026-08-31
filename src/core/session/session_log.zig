@@ -18,8 +18,8 @@ const session_usage_sidecar = @import("session_usage_sidecar.zig");
 
 const Allocator = std.mem.Allocator;
 const Identifier = session_event.Identifier;
-const private_dir_permissions = std.Io.File.Permissions.fromMode(0o700);
-const private_file_permissions = std.Io.File.Permissions.fromMode(0o600);
+const private_dir_permissions = io_mod.permissionsFromMode(0o700);
+const private_file_permissions = io_mod.permissionsFromMode(0o600);
 const lock_deadline_ms: u64 = 2000;
 const authority_max_bytes: usize = 16 * 1024;
 const authority_intent_max_bytes: usize = 32 * 1024;
@@ -1052,7 +1052,7 @@ pub const Root = struct {
         };
         defer durable_home.close(zio);
         if (mode == .writable) {
-            durable_home.setPermissions(zio, private_dir_permissions) catch
+            io_mod.setDirPermissions(durable_home, private_dir_permissions) catch
                 return error.PrivateStatePermissionsUnsupported;
         }
         try verifyPrivateDir(durable_home, mode);
@@ -1084,7 +1084,7 @@ pub const Root = struct {
         };
         errdefer sessions_dir.close(zio);
         if (mode == .writable) {
-            sessions_dir.setPermissions(zio, private_dir_permissions) catch
+            io_mod.setDirPermissions(sessions_dir, private_dir_permissions) catch
                 return error.PrivateStatePermissionsUnsupported;
         }
         try verifyPrivateDir(sessions_dir, mode);
@@ -1403,7 +1403,7 @@ fn validateLeaf(name: []const u8) !void {
 fn verifyPrivateDir(dir: std.Io.Dir, mode: OpenMode) !void {
     const stat = try dir.stat(io_mod.getIo());
     if (stat.kind != .directory) return error.SessionPathUnsafe;
-    if (mode == .writable and stat.permissions.toMode() & 0o777 != 0o700) {
+    if (mode == .writable and !io_mod.permissionsPrivateDir(stat.permissions)) {
         return error.PrivateStatePermissionsUnsupported;
     }
 }
@@ -1411,7 +1411,7 @@ fn verifyPrivateDir(dir: std.Io.Dir, mode: OpenMode) !void {
 fn verifyManagedFile(file: std.Io.File, mode: OpenMode) !void {
     const stat = try file.stat(io_mod.getIo());
     if (stat.kind != .file or stat.nlink != 1) return error.SessionPathUnsafe;
-    if (mode == .writable and stat.permissions.toMode() & 0o777 != 0o600) {
+    if (mode == .writable and !io_mod.permissionsPrivateFile(stat.permissions)) {
         return error.PrivateStatePermissionsUnsupported;
     }
 }
@@ -1431,7 +1431,7 @@ fn openSessionDir(
     };
     errdefer dir.close(io_mod.getIo());
     if (mode == .writable) {
-        dir.setPermissions(io_mod.getIo(), private_dir_permissions) catch
+        io_mod.setDirPermissions(dir, private_dir_permissions) catch
             return error.PrivateStatePermissionsUnsupported;
     }
     try verifyPrivateDir(dir, mode);
@@ -1453,6 +1453,7 @@ fn openManagedFile(
         error.IsDir, error.NotDir, error.SymLinkLoop => return error.SessionPathUnsafe,
         else => return err,
     };
+    io_mod.alignOpenedFileFlags(&file, false);
     errdefer file.close(io_mod.getIo());
     try verifyManagedFile(file, if (mode == .read_only) .read_only else .writable);
     return file;
@@ -4039,7 +4040,7 @@ fn eventStat(
         .device = try eventDevice(file),
         .inode = @intCast(stat.inode),
         .kind = .regular,
-        .mode = stat.permissions.toMode(),
+        .mode = @intCast(io_mod.permissionsMode(stat.permissions)),
         .link_count = @intCast(stat.nlink),
         .size = stat.size,
         .mtime_ns = stat.mtime.nanoseconds,
@@ -4399,7 +4400,7 @@ fn cleanupOrphansImpl(
             continue;
         };
         if (stat.kind != .file or stat.nlink != 1 or
-            stat.permissions.toMode() & 0o777 != 0o600)
+            !io_mod.permissionsPrivateFile(stat.permissions))
         {
             report.ignored += 1;
             continue;
@@ -4604,7 +4605,7 @@ const TempRoot = struct {
     fn init(alloc: Allocator) !TempRoot {
         var tmp = std.testing.tmpDir(.{});
         errdefer tmp.cleanup();
-        try tmp.dir.createDir(io_mod.getIo(), "home", std.Io.File.Permissions.fromMode(0o700));
+        try tmp.dir.createDir(io_mod.getIo(), "home", io_mod.permissionsFromMode(0o700));
         const home = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "home");
         errdefer alloc.free(home);
         var root = try Root.initFromHome(alloc, home, .writable);
@@ -5111,7 +5112,7 @@ test "torn exact settlement restores stale sidecar backlog over settled rollback
             try self.dir.dir.createDir(
                 io_mod.getIo(),
                 session_usage_sidecar.sidecar_file,
-                std.Io.File.Permissions.fromMode(0o700),
+                io_mod.permissionsFromMode(0o700),
             );
             self.torn = true;
         }
@@ -5293,7 +5294,7 @@ test "unwritable usage sidecar keeps canonical usage resumable and incomplete" {
     try loaded.log.dir.dir.createDir(
         io_mod.getIo(),
         session_usage_sidecar.sidecar_file,
-        std.Io.File.Permissions.fromMode(0o700),
+        io_mod.permissionsFromMode(0o700),
     );
 
     var usage = session_usage.Usage.initFresh();

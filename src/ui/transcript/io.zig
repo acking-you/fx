@@ -39,9 +39,10 @@ pub fn disableShadowVt(shell: anytype) void {
 }
 
 pub fn writeFrameBytes(shell: anytype, metrics: *Metrics, bytes: []const u8) terminal_diff.FrameSinkWriteResult {
+    var stdout_file = outputFile(shell);
     var accepted_bytes: usize = 0;
     while (accepted_bytes < bytes.len) {
-        const written = shell.stdout_file.writeStreaming(
+        const written = stdout_file.writeStreaming(
             io_mod.getIo(),
             &.{},
             &.{bytes[accepted_bytes..]},
@@ -51,6 +52,14 @@ pub fn writeFrameBytes(shell: anytype, metrics: *Metrics, bytes: []const u8) ter
         accepted_bytes += written;
     }
     return recordCompleteFrame(metrics, bytes);
+}
+
+fn outputFile(shell: anytype) std.Io.File {
+    const Field = @TypeOf(shell.stdout_file);
+    return switch (@typeInfo(Field)) {
+        .optional => shell.stdout_file orelse std.Io.File.stdout(),
+        else => shell.stdout_file,
+    };
 }
 
 fn recordPartialFrame(metrics: *Metrics, accepted: []const u8, err: anyerror) terminal_diff.FrameSinkWriteResult {

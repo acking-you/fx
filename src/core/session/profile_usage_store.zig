@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const io_mod = @import("../shared/io.zig");
 const profile_paths = @import("../shared/profile_paths.zig");
 const generation_fact_codec = @import("generation_fact_codec.zig");
@@ -13,8 +14,8 @@ const max_record_bytes: usize = 16 * 1024;
 const max_records: usize = 200_000;
 const compaction_threshold_bytes: u64 = 8 * 1024 * 1024;
 const retention_ms: i64 = std.time.ms_per_day * 35;
-const private_dir_permissions = std.Io.Dir.Permissions.fromMode(0o700);
-const private_file_permissions = std.Io.File.Permissions.fromMode(0o600);
+const private_dir_permissions = io_mod.permissionsFromMode(0o700);
+const private_file_permissions = io_mod.permissionsFromMode(0o600);
 
 pub const AppendOutcome = enum {
     appended,
@@ -271,7 +272,7 @@ pub const Store = struct {
         const durable_home = self.durable_home orelse return;
         const stat = try durable_home.dir.stat(io_mod.getIo());
         if (stat.kind != .directory) return error.DurablePathUnsafe;
-        if (stat.permissions.toMode() & 0o777 != 0o700) {
+        if (!io_mod.permissionsPrivateDir(stat.permissions)) {
             return error.PrivateStatePermissionsUnsupported;
         }
     }
@@ -293,13 +294,13 @@ pub const Store = struct {
                 else => return error.DurableLayoutFailed,
             };
         }
-        self.durable_home.?.dir.setPermissions(
-            io_mod.getIo(),
+        io_mod.setDirPermissions(
+            self.durable_home.?.dir,
             private_dir_permissions,
         ) catch return error.PrivateStatePermissionsUnsupported;
         const stat = try self.durable_home.?.dir.stat(io_mod.getIo());
         if (stat.kind != .directory) return error.DurablePathUnsafe;
-        if (stat.permissions.toMode() & 0o777 != 0o700) {
+        if (!io_mod.permissionsPrivateDir(stat.permissions)) {
             return error.PrivateStatePermissionsUnsupported;
         }
     }
@@ -331,7 +332,7 @@ pub const Store = struct {
         if (stat.kind != .file or stat.nlink != 1) {
             return error.DurablePathUnsafe;
         }
-        if (stat.permissions.toMode() & 0o777 != 0o600) {
+        if (!io_mod.permissionsPrivateFile(stat.permissions)) {
             return error.PrivateStatePermissionsUnsupported;
         }
 
@@ -368,7 +369,7 @@ pub const Store = struct {
         if (stat.kind != .file or stat.nlink != 1) {
             return error.DurablePathUnsafe;
         }
-        if (stat.permissions.toMode() & 0o777 != 0o600) {
+        if (!io_mod.permissionsPrivateFile(stat.permissions)) {
             return error.PrivateStatePermissionsUnsupported;
         }
         return true;
@@ -416,7 +417,7 @@ pub const Store = struct {
                 return error.PrivateStatePermissionsUnsupported;
         }
         const verified = if (writable) try file.stat(zio) else initial;
-        if (verified.permissions.toMode() & 0o777 != 0o600) {
+        if (!io_mod.permissionsPrivateFile(verified.permissions)) {
             return error.PrivateStatePermissionsUnsupported;
         }
         if (created) {
@@ -608,10 +609,14 @@ fn openExistingUsageFile(
     dir: std.Io.Dir,
     mode: std.Io.Dir.OpenFileOptions.Mode,
 ) !std.Io.File {
-    return io_mod.openExistingRegularFile(dir, usage_file, mode) catch |err| switch (err) {
-        error.FileControlFailed => error.UsageReadFailed,
-        else => err,
-    };
+    if (comptime builtin.os.tag == .windows) {
+        return io_mod.openExistingRegularFile(dir, usage_file, mode);
+    } else {
+        return io_mod.openExistingRegularFile(dir, usage_file, mode) catch |err| switch (err) {
+            error.FileControlFailed => error.UsageReadFailed,
+            else => err,
+        };
+    }
 }
 
 fn openExistingDurableHome(home_path: []const u8) !?io_mod.VerifiedDir {
@@ -1296,7 +1301,7 @@ test "profile usage store leaves an incomplete tail intact when repair exceeds r
     try tmp.dir.createDir(
         io_mod.getIo(),
         ".fx",
-        std.Io.Dir.Permissions.fromMode(0o700),
+        io_mod.permissionsFromMode(0o700),
     );
     var profile = try tmp.dir.openDir(io_mod.getIo(), ".fx", .{ .iterate = true });
     defer profile.close(io_mod.getIo());
@@ -1350,7 +1355,7 @@ test "profile usage store repairs an existing profile directory to private mode"
     try tmp.dir.createDir(
         io_mod.getIo(),
         ".fx",
-        std.Io.File.Permissions.fromMode(0o755),
+        io_mod.permissionsFromMode(0o755),
     );
     var profile = try tmp.dir.openDir(io_mod.getIo(), ".fx", .{ .iterate = true });
     defer profile.close(io_mod.getIo());
@@ -1384,7 +1389,7 @@ test "profile usage reads reject an unsafe profile directory without repairing i
     try tmp.dir.createDir(
         io_mod.getIo(),
         ".fx",
-        std.Io.File.Permissions.fromMode(0o755),
+        io_mod.permissionsFromMode(0o755),
     );
     var profile = try tmp.dir.openDir(io_mod.getIo(), ".fx", .{ .iterate = true });
     defer profile.close(io_mod.getIo());
@@ -1431,7 +1436,7 @@ test "profile usage store decodes a large ledger with stable id indexing" {
     try tmp.dir.createDir(
         io_mod.getIo(),
         ".fx",
-        std.Io.File.Permissions.fromMode(0o700),
+        io_mod.permissionsFromMode(0o700),
     );
     var profile = try tmp.dir.openDir(io_mod.getIo(), ".fx", .{ .iterate = true });
     defer profile.close(io_mod.getIo());

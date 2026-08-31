@@ -55,7 +55,7 @@ Fork changes stay deliberately small and shaped like upstream's own code: diverg
 
 ## Install
 
-Build this fork from source using the steps in [Build from source](#build-from-source).
+Download the archive for your platform from [GitHub Releases](https://github.com/acking-you/fx/releases), or build this fork from source using the steps in [Build from source](#build-from-source). Windows x86_64 releases are published as `fx-windows-x86_64.zip` and include `fx.exe`.
 
 ## Run fx
 
@@ -73,6 +73,22 @@ fx login grok
 fx
 ```
 
+If Codex CLI or Grok Build is already signed in, import every compatible OAuth
+session in one step instead of logging in again:
+
+```bash
+fx setup
+```
+
+The same provider-neutral importer is available inside the TUI as `/setup` and
+through ACP. It reads Codex CLI's `auth.json` from `CODEX_HOME` or `~/.codex`
+and Grok Build's `auth.json` from `GROK_HOME` or `~/.grok`. Source files are
+read-only, existing fx provider logins are never overwritten, and each
+provider reports `imported`, `already_configured`, `not_found`, `incompatible`,
+`invalid`, or `unavailable`. Setup never changes the selected provider; use
+`/provider codex` or `/provider grok` afterward. Use `fx setup --json` for
+structured output.
+
 `fx login codex` and `fx login grok` select that provider and a model from its authenticated catalog. Inside fx, use `/provider` to choose between BYOK Responses, Codex, and Grok, or switch directly with `/provider gateway`, `/provider codex`, or `/provider grok`. Provider credential refresh, catalog loading, and durable subscription logout run in the background, so the composer, status commands, and terminal activity remain responsive while those operations settle. `/login` is reserved for provider sign-in and credential selection. `/model` lists the active provider's fetched models. Subscription model IDs are the raw IDs returned by each authenticated catalog. Use `/logout codex` or `/logout grok` to remove that subscription session; selecting the provider again starts sign-in when needed.
 
 The OpenAI Codex route uses ChatGPT subscription access directly. The session is stored privately at `~/.fx/chatgpt-auth.json` and refreshed when needed. Its unified `web_search` tool uses the authenticated Codex search service directly. On supported Codex models, `/fast` requests OpenAI's priority service tier and consumes ChatGPT credits at the higher Fast mode rate.
@@ -84,6 +100,13 @@ For direct BYOK access to the Responses API, set an OpenAI API key:
 ```bash
 export OPENAI_API_KEY="your-key"
 fx
+```
+
+On Windows PowerShell, use:
+
+```powershell
+$env:OPENAI_API_KEY = "your-key"
+.\fx.exe
 ```
 
 To use another endpoint that implements the Responses API, set its base URL before running fx:
@@ -172,7 +195,7 @@ blocks on a remote quota request. See [Unified OAuth and usage](docs/unified-oau
 
 With `--json`, `output` contains accumulated assistant Markdown across the request, while `final_output` contains only a completed final assistant response and is `""` for interrupted, failed, background, or otherwise absent final responses.
 
-Model shell execution has one Codex-style Unified Exec family: `exec_command` starts a command and `write_stdin` polls or interacts with that same process. There is no second model-facing command executor or command-shaped skill shortcut. `exec_command` returns output immediately when the process finishes within the yield window; a still-running command returns a numeric session ID. The shell defaults to the user's configured shell. Output is continuously drained, bounded, UTF-8 safe, and streamed into the active TUI tool row without waiting for command completion. TUI, ACP, noninteractive CLI, and child sessions share the same lifecycle labels: `Running` becomes `Ran`, while empty polls and input use `Waiting/Waited` and `Interacting/Interacted`. Yielding never kills the process, and the manager keeps sessions alive across turns until they exit or the owning fx session is closed. Hosts without native process support advertise neither tool and do not fall back to the removed `terminal` API.
+Model shell execution has one Codex-style Unified Exec family: `exec_command` starts a command and `write_stdin` polls or interacts with that same process. There is no second model-facing command executor or command-shaped skill shortcut. `exec_command` returns output immediately when the process finishes within the yield window; a still-running command returns a numeric session ID. The shell defaults to the user's configured shell. On Windows, fx prefers an installed Git Bash and otherwise keeps the native configured-shell fallback; the shared tool projection tells the model which command syntax is active. Output is continuously drained, bounded, UTF-8 safe, and streamed into the active TUI tool row without waiting for command completion. TUI, ACP, noninteractive CLI, and child sessions share the same lifecycle labels: `Running` becomes `Ran`, while empty polls and input use `Waiting/Waited` and `Interacting/Interacted`. Yielding never kills the process, and the manager keeps sessions alive across turns until they exit or the owning fx session is closed. Hosts without native process support advertise neither tool and do not fall back to the removed `terminal` API.
 
 For codebase discovery, `/bash-first` (or ACP `fx/toolMode/set`) hides the overlapping `list_files`, `glob_files`, `grep_files`, and `semantic_search` tools and tells the model to use the unified shell with `rg` and `rg --files`. The setting applies to the next turn and can be toggled back to the standard projection at any time. See [Bash-first workspace mode](docs/bash-first-mode.md).
 
@@ -221,6 +244,8 @@ cd fx
 zig build -Doptimize=ReleaseSafe
 ./zig-out/bin/fx
 ```
+
+On Windows PowerShell, run the built executable as `.\zig-out\bin\fx.exe`.
 
 Run the test suite with `zig build test`. See [CONTRIBUTING.md](CONTRIBUTING.md) for development and contribution guidelines.
 

@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const contracts = @import("contracts.zig");
 const command_environment = @import("../execution/command_environment.zig");
+const io_mod = @import("../shared/io.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -14,17 +15,120 @@ pub const ResolveError = error{
 pub const Profile = command_environment.Profile;
 pub const Environment = command_environment.Environment;
 
-const ShellKind = enum { bash, zsh };
+pub const CommandSyntax = enum { bash, zsh, cmd, powershell };
 
-fn shellKind(path: []const u8) ?ShellKind {
+fn shellKind(path: []const u8) ?CommandSyntax {
     const basename = std.fs.path.basename(path);
-    if (std.mem.eql(u8, basename, "bash")) return .bash;
-    if (std.mem.eql(u8, basename, "zsh")) return .zsh;
+    if (std.ascii.eqlIgnoreCase(basename, "bash") or std.ascii.eqlIgnoreCase(basename, "bash.exe")) return .bash;
+    if (std.ascii.eqlIgnoreCase(basename, "zsh") or std.ascii.eqlIgnoreCase(basename, "zsh.exe")) return .zsh;
+    if (std.ascii.eqlIgnoreCase(basename, "cmd") or std.ascii.eqlIgnoreCase(basename, "cmd.exe")) return .cmd;
+    if (std.ascii.eqlIgnoreCase(basename, "powershell") or
+        std.ascii.eqlIgnoreCase(basename, "powershell.exe") or
+        std.ascii.eqlIgnoreCase(basename, "pwsh") or
+        std.ascii.eqlIgnoreCase(basename, "pwsh.exe")) return .powershell;
     return null;
 }
 
+pub fn commandSyntax(path: []const u8) ?CommandSyntax {
+    return shellKind(path);
+}
+
 fn fallbackLoginShell() []const u8 {
+    if (builtin.os.tag == .windows) return "C:\\Windows\\System32\\cmd.exe";
     return if (builtin.os.tag == .macos) "/bin/zsh" else "/bin/bash";
+}
+
+const WindowsGitBashEnvironment = struct {
+    program_files: ?[]const u8 = null,
+    program_w6432: ?[]const u8 = null,
+    program_files_x86: ?[]const u8 = null,
+    local_app_data: ?[]const u8 = null,
+    path: ?[]const u8 = null,
+
+    fn fromProcess() WindowsGitBashEnvironment {
+        return .{
+            .program_files = io_mod.getenv("ProgramFiles"),
+            .program_w6432 = io_mod.getenv("ProgramW6432"),
+            .program_files_x86 = io_mod.getenv("ProgramFiles(x86)"),
+            .local_app_data = io_mod.getenv("LOCALAPPDATA"),
+            .path = io_mod.getenv("PATH"),
+        };
+    }
+};
+
+const PathProbe = struct {
+    context: ?*anyopaque = null,
+    exists_fn: *const fn (?*anyopaque, []const u8) bool,
+
+    fn exists(self: PathProbe, path: []const u8) bool {
+        return self.exists_fn(self.context, path);
+    }
+};
+
+fn nativePathExists(_: ?*anyopaque, path: []const u8) bool {
+    if (!std.fs.path.isAbsolute(path)) return false;
+    var file = std.Io.Dir.openFileAbsolute(io_mod.getIo(), path, .{}) catch return false;
+    file.close(io_mod.getIo());
+    return true;
+}
+
+fn candidateInto(
+    buffer: []u8,
+    root: []const u8,
+    suffix: []const u8,
+    probe: PathProbe,
+) ?[]const u8 {
+    const trimmed_root = std.mem.trimEnd(u8, root, "\\/");
+    if (trimmed_root.len == 0) return null;
+    const candidate = std.fmt.bufPrint(buffer, "{s}\\{s}", .{
+        trimmed_root,
+        suffix,
+    }) catch return null;
+    return if (probe.exists(candidate)) candidate else null;
+}
+
+fn windowsGitBashIntoWith(
+    buffer: []u8,
+    environment_value: WindowsGitBashEnvironment,
+    probe: PathProbe,
+) ?[]const u8 {
+    const roots = [_]struct { value: ?[]const u8, suffix: []const u8 }{
+        .{ .value = environment_value.program_files, .suffix = "Git\\bin\\bash.exe" },
+        .{ .value = environment_value.program_w6432, .suffix = "Git\\bin\\bash.exe" },
+        .{ .value = environment_value.program_files_x86, .suffix = "Git\\bin\\bash.exe" },
+        .{ .value = environment_value.local_app_data, .suffix = "Programs\\Git\\bin\\bash.exe" },
+    };
+    for (roots) |root| {
+        if (root.value) |value| {
+            if (candidateInto(buffer, value, root.suffix, probe)) |path| return path;
+        }
+    }
+
+    const raw_path = environment_value.path orelse return null;
+    var entries = std.mem.splitScalar(u8, raw_path, ';');
+    var scratch: [4096]u8 = undefined;
+    while (entries.next()) |raw_entry| {
+        const unquoted = std.mem.trim(u8, raw_entry, " \t\"");
+        const entry = std.mem.trimEnd(u8, unquoted, "\\/");
+        if (entry.len == 0 or !std.fs.path.isAbsolute(entry)) continue;
+        const basename = std.fs.path.basename(entry);
+        const parent = std.fs.path.dirname(entry) orelse continue;
+        if (std.ascii.eqlIgnoreCase(basename, "cmd")) {
+            if (candidateInto(&scratch, entry, "git.exe", probe) == null) continue;
+            if (candidateInto(buffer, parent, "bin\\bash.exe", probe)) |path| return path;
+        } else if (std.ascii.eqlIgnoreCase(basename, "bin")) {
+            if (candidateInto(&scratch, parent, "cmd\\git.exe", probe) == null) continue;
+            if (candidateInto(buffer, entry, "bash.exe", probe)) |path| return path;
+        }
+    }
+    return null;
+}
+
+fn windowsGitBashInto(buffer: []u8) ?[]const u8 {
+    if (comptime builtin.os.tag != .windows) return null;
+    return windowsGitBashIntoWith(buffer, .fromProcess(), .{
+        .exists_fn = nativePathExists,
+    });
 }
 
 /// Returns whether a shell path can be launched with the supported
@@ -52,7 +156,7 @@ fn supportedLoginShell(configured_login_shell: ?[]const u8) ResolveError![]const
 
 pub const Invocation = struct {
     path: []const u8,
-    values: [6][]const u8 = @splat(""),
+    values: [8][]const u8 = @splat(""),
     len: usize = 0,
 
     pub fn argv(self: *const Invocation) []const []const u8 {
@@ -65,7 +169,14 @@ pub const Invocation = struct {
     }
 
     pub fn setCommand(self: *Invocation, command: []const u8) void {
-        self.append("-c");
+        switch (shellKind(self.path).?) {
+            .bash, .zsh => self.append("-c"),
+            .cmd => {
+                self.append("/S");
+                self.append("/C");
+            },
+            .powershell => self.append("-Command"),
+        }
         self.append(command);
     }
 };
@@ -114,12 +225,27 @@ pub fn resolve(
             }
             result.append("-i");
         },
+        .cmd => {
+            result.append("/D");
+            result.append("/Q");
+        },
+        .powershell => {
+            result.append("-NoLogo");
+            if (selection.clean_start) result.append("-NoProfile");
+        },
     }
     return result;
 }
 
 pub fn configuredLoginShellInto(buffer: []u8) ?[]const u8 {
-    if (comptime !builtin.link_libc or builtin.os.tag == .windows or builtin.os.tag == .wasi) {
+    if (comptime builtin.os.tag == .windows) {
+        if (windowsGitBashInto(buffer)) |git_bash| return git_bash;
+        const configured = io_mod.getenv("COMSPEC") orelse return null;
+        if (configured.len == 0 or configured.len > buffer.len) return null;
+        @memcpy(buffer[0..configured.len], configured);
+        return buffer[0..configured.len];
+    }
+    if (comptime !builtin.link_libc or builtin.os.tag == .wasi) {
         return null;
     }
     var entry: std.c.passwd = undefined;
@@ -197,13 +323,14 @@ pub fn capturedInvocation(
                 .path = path,
                 .clean_start = true,
             } });
-            removeInteractiveFlag(&invocation);
+            if (shellKind(path) == .bash or shellKind(path) == .zsh)
+                removeInteractiveFlag(&invocation);
             invocation.setCommand(command);
             return invocation;
         },
         .user => |path| {
             var invocation = try resolve(path, .user_login);
-            if (std.mem.eql(u8, std.fs.path.basename(path), "bash")) {
+            if (shellKind(path) == .bash) {
                 removeInteractiveFlag(&invocation);
                 invocation.append("-O");
                 invocation.append("expand_aliases");
@@ -216,6 +343,46 @@ pub fn capturedInvocation(
             return invocation;
         },
     }
+}
+
+/// Builds the captured command invocation used by Unified Exec. This keeps
+/// shell selection, validation, and platform argument semantics in one owner.
+pub fn commandInvocation(
+    path: []const u8,
+    login: bool,
+    command: []const u8,
+) ResolveError!Invocation {
+    if (!std.fs.path.isAbsolute(path)) return error.RelativeShellPath;
+    var invocation = Invocation{ .path = path };
+    invocation.append(path);
+    const kind = shellKind(path) orelse {
+        // Unified Exec historically accepted any absolute Unix shell and
+        // invoked it with the conventional sh-compatible flags. Preserve
+        // that contract while requiring an explicitly supported invocation
+        // shape on Windows, where cmd and PowerShell use different syntax.
+        if (comptime builtin.os.tag == .windows) return error.UnsupportedShell;
+        invocation.append(if (login) "-lc" else "-c");
+        invocation.append(command);
+        invocation.append("fx-exec");
+        return invocation;
+    };
+    switch (kind) {
+        .bash, .zsh => invocation.append(if (login) "-lc" else "-c"),
+        .cmd => {
+            invocation.append("/D");
+            invocation.append("/S");
+            invocation.append("/C");
+        },
+        .powershell => {
+            invocation.append("-NoLogo");
+            if (!login) invocation.append("-NoProfile");
+            invocation.append("-NonInteractive");
+            invocation.append("-Command");
+        },
+    }
+    invocation.append(command);
+    if (kind == .bash or kind == .zsh) invocation.append("fx-exec");
+    return invocation;
 }
 
 pub fn formatInvocationCommand(
@@ -376,6 +543,128 @@ test "resolver rejects missing relative and unsupported shells" {
     try std.testing.expectError(
         error.UnsupportedShell,
         resolve(null, .{ .executable = .{ .path = "/bin/fish" } }),
+    );
+}
+
+test "Windows shell discovery prefers Git Bash installations and PATH roots" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const FakeProbe = struct {
+        existing: []const []const u8,
+
+        fn exists(context: ?*anyopaque, path: []const u8) bool {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            for (self.existing) |candidate| {
+                if (std.ascii.eqlIgnoreCase(candidate, path)) return true;
+            }
+            return false;
+        }
+    };
+
+    var standard_probe = FakeProbe{ .existing = &.{
+        "D:\\Apps\\Git\\bin\\bash.exe",
+        "E:\\Local\\Programs\\Git\\bin\\bash.exe",
+    } };
+    var buffer: [4096]u8 = undefined;
+    const standard = windowsGitBashIntoWith(&buffer, .{
+        .program_files = "D:\\Apps",
+        .local_app_data = "E:\\Local",
+    }, .{
+        .context = &standard_probe,
+        .exists_fn = FakeProbe.exists,
+    }) orelse return error.TestExpectedEqual;
+    try std.testing.expectEqualStrings("D:\\Apps\\Git\\bin\\bash.exe", standard);
+
+    var path_probe = FakeProbe{ .existing = &.{
+        "F:\\Portable\\Git\\cmd\\git.exe",
+        "F:\\Portable\\Git\\bin\\bash.exe",
+    } };
+    const from_path = windowsGitBashIntoWith(&buffer, .{
+        .path = "\"F:\\Portable\\Git\\cmd\";C:\\Windows\\System32",
+    }, .{
+        .context = &path_probe,
+        .exists_fn = FakeProbe.exists,
+    }) orelse return error.TestExpectedEqual;
+    try std.testing.expectEqualStrings("F:\\Portable\\Git\\bin\\bash.exe", from_path);
+}
+
+test "resolver builds Windows command invocations" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const cmd = try commandInvocation(
+        "C:\\Windows\\System32\\cmd.exe",
+        false,
+        "echo ready",
+    );
+    try std.testing.expectEqualSlices(
+        []const u8,
+        &.{ "C:\\Windows\\System32\\cmd.exe", "/D", "/S", "/C", "echo ready" },
+        cmd.argv(),
+    );
+
+    const powershell = try commandInvocation(
+        "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+        false,
+        "Write-Output ready",
+    );
+    try std.testing.expectEqualSlices(
+        []const u8,
+        &.{
+            "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "Write-Output ready",
+        },
+        powershell.argv(),
+    );
+
+    const git_bash = try commandInvocation(
+        "C:\\Program Files\\Git\\bin\\bash.exe",
+        false,
+        "printf ready",
+    );
+    try std.testing.expectEqualSlices(
+        []const u8,
+        &.{ "C:\\Program Files\\Git\\bin\\bash.exe", "-c", "printf ready", "fx-exec" },
+        git_bash.argv(),
+    );
+
+    const captured_git_bash = try capturedInvocation(
+        std.testing.allocator,
+        .{ .user = "C:\\Program Files\\Git\\bin\\bash.exe" },
+        "printf ready",
+    );
+    try std.testing.expectEqualSlices(
+        []const u8,
+        &.{
+            "C:\\Program Files\\Git\\bin\\bash.exe",
+            "--login",
+            "-O",
+            "expand_aliases",
+            "-c",
+            "printf ready",
+        },
+        captured_git_bash.argv(),
+    );
+}
+
+test "resolver preserves generic Unix command invocations" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const command = try commandInvocation("/bin/sh", false, "printf ready");
+    try std.testing.expectEqualSlices(
+        []const u8,
+        &.{ "/bin/sh", "-c", "printf ready", "fx-exec" },
+        command.argv(),
+    );
+
+    const login = try commandInvocation("/usr/bin/fish", true, "printf ready");
+    try std.testing.expectEqualSlices(
+        []const u8,
+        &.{ "/usr/bin/fish", "-lc", "printf ready", "fx-exec" },
+        login.argv(),
     );
 }
 

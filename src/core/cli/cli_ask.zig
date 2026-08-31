@@ -3996,7 +3996,11 @@ fn testProcessQueuedPromptChecksExecAndWebSearch(deps: *const agent_runtime.Agen
     ));
     try std.testing.expect(std.mem.find(u8, advertised_terminal.description, "plain pipes") != null);
     try std.testing.expect(std.mem.find(u8, advertised_terminal.description, "numeric session id") != null);
-    try std.testing.expectEqualStrings("", cfg.custom_tool_guidance);
+    try std.testing.expect(std.mem.find(
+        u8,
+        cfg.custom_tool_guidance,
+        "default shell for exec_command",
+    ) != null);
     try std.testing.expectEqualStrings("test model overlay", cfg.model_prompt_overlay.?);
     const runtime_terminal = deps.tool_registry.lookup("exec_command") orelse
         return error.TestExpectedEqual;
@@ -7459,7 +7463,7 @@ test "saved ask ignores existing legacy task files" {
         tasks_path,
         .{
             .truncate = true,
-            .permissions = std.Io.File.Permissions.fromMode(0o600),
+            .permissions = io_mod.permissionsFromMode(0o600),
         },
     );
     tasks_file.close(io_mod.getIo());

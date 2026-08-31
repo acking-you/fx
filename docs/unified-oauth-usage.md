@@ -6,6 +6,13 @@ their protocol details, but login start, stored-session detection, credential
 loading, refresh mode, account identity, and TUI/ACP routing all use the same
 interface.
 
+The independent `fx setup` importer uses that same boundary without reviving
+the removed vendor onboarding flow. It discovers compatible Codex CLI and
+Grok Build OAuth files, copies only missing provider sessions into fx's private
+profile, and preserves Grok team-principal refresh metadata. TUI `/setup` and
+ACP `fx/provider/setup/start` plus `fx/provider/setup/status` run the import on
+a worker so their event loops remain responsive.
+
 `fx/provider/login/start` accepts an optional `provider`. When it is omitted,
 fx checks stored OAuth sessions in deterministic order (Codex first, Grok as a
 fallback) without making a network request. An explicit provider remains

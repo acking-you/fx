@@ -121,7 +121,7 @@ pub fn validateExec(ctx: tool_dispatch.DispatchContext, erased: tool_dispatch.To
     const input = erased.as(ExecInput);
     if (std.mem.trim(u8, input.cmd, " \t\r\n").len == 0) return try ctx.allocator.dupe(u8, "exec_command field \"cmd\" must not be empty");
     if (std.mem.trim(u8, input.shell, " \t\r\n").len == 0) return try ctx.allocator.dupe(u8, "exec_command field \"shell\" must not be empty");
-    if (!shell_resolver.isSupportedShell(input.shell)) return try ctx.allocator.dupe(u8, "exec_command field \"shell\" must be an absolute bash or zsh path");
+    if (!shell_resolver.isSupportedShell(input.shell)) return try ctx.allocator.dupe(u8, "exec_command field \"shell\" must be an absolute supported shell path");
     if (input.tty) return try ctx.allocator.dupe(u8, "exec_command tty=true is unavailable on this host; omit tty");
     return null;
 }

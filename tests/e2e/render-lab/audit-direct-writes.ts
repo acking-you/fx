@@ -40,7 +40,8 @@ type StdioProvenance = {
 
 const allowlist: AllowRule[] = [
   rule("src/ui/transcript/io.zig", "writeFrameBytes", /stdio_write/, "frame_commit", "normal interactive frame delivery"),
-  rule("src/ui/transcript/runtime.zig", "<top-level>", /stdio_acquisition/, "interactive_terminal_owner", "stored interactive stdout handle"),
+  rule("src/ui/transcript/runtime.zig", "(?:<top-level>|stdoutFile)", /stdio_acquisition/, "interactive_terminal_owner", "stored interactive stdout handle and accessor fallback"),
+  rule("src/ui/transcript/io.zig", "outputFile", /stdio_acquisition/, "interactive_terminal_owner", "select the transcript-owned frame output handle"),
   rule("src/core/app/app_lifecycle.zig", "writeLifecycleTerminalBytes", /stdio_write/, "initialization_teardown", "interactive startup and teardown control"),
   rule("src/core/app/app_lifecycle.zig", "bootstrapInteractiveApp", /stdio_acquisition_write/, "initialization_teardown", "pre-raw-mode Keychain onboarding prompt"),
   rule("src/ui/shell_runtime.zig", "clearTmuxScreenAndHistory", /stdio_(?:acquisition|write)/, "terminal_reset", "tmux pane reset before history cleanup"),
@@ -48,13 +49,16 @@ const allowlist: AllowRule[] = [
   rule("src/core/app/app_lifecycle.zig", "abnormalExitHandlerWithRestore", /(?:fixed_descriptor|raw_fd_write)/, "crash_recovery", "async-signal-safe terminal restoration"),
   rule("src/core/hosts/wasm_panic.zig", "panicToStderr", /debug_print/, "crash_recovery", "WASM panic message before trap"),
   rule("src/ui/shell_runtime.zig", "ensureInteractive", /fixed_descriptor/, "terminal_probe", "TTY capability probe"),
+  rule("src/ui/terminal/terminal.zig", "stdoutLayoutHandle", /fixed_descriptor/, "terminal_probe", "portable stdout geometry handle"),
+  rule("src/ui/terminal/windows_console.zig", "capture", /stdio_acquisition/, "interactive_terminal_owner", "capture the Windows console modes owned by the interactive session"),
+  rule("src/ui/terminal/windows_console.zig", "(?:ensureInteractive|querySize)", /stdio_acquisition/, "terminal_probe", "Windows console capability and geometry probe"),
   rule("src/ui/shell_runtime.zig", "(?:query|requestResize)CursorPosition", /stdio_(?:acquisition|write)/, "terminal_probe", "cursor-position query"),
   rule("src/ui/shell_runtime.zig", "(?:requestThemeColorScheme|requestThemeResponseFence|requestThemeBackground)", /stdio_(?:acquisition|write)/, "terminal_probe", "terminal theme query"),
   rule("src/ui/terminal/theme_detection.zig", "queryTerminalBackground", /stdio_(?:acquisition|write)/, "terminal_probe", "terminal background query"),
   rule("src/ui/ask_presentation.zig", "init", /fixed_descriptor/, "terminal_probe", "ask stdout geometry probe"),
   rule("src/ui/ask_presentation.zig", "init", /stdio_acquisition/, "interactive_terminal_owner", "stored ask presenter stdout handle"),
   rule("src/ui/ask_presentation.zig", "refreshGeometry", /fixed_descriptor/, "terminal_probe", "ask stdout geometry refresh"),
-  rule("src/ui/ask_presentation.zig", "writeTerminalBytes", /stdio_write/, "initialization_teardown", "ask terminal prepare and restore control"),
+  rule("src/ui/ask_presentation.zig", "writeTerminalBytes", /stdio_(?:acquisition|write)/, "initialization_teardown", "ask terminal prepare and restore control"),
   rule("src/ui/render.zig", "(?:setTerminalTitleLabel|clearTerminalTitleProvider)", /stdio_(?:acquisition|write)/, "title_control", "terminal title control"),
   rule("src/acp/jsonrpc.zig", ".+", /stdio_(?:acquisition|write)/, "acp_protocol_transport", "ACP JSON-RPC transport"),
   rule("src/core/execution/command_runner.zig", "(?:runForegroundSessionBootstrap|writeForegroundSessionReplaceFailure)", /stdio_acquisition_write/, "subprocess_protocol_transport", "foreground command bootstrap protocol"),
@@ -76,6 +80,7 @@ const allowlist: AllowRule[] = [
   rule("src/core/shared/debug_trace.zig", "(?:writeLine|writeNoninteractiveStderr)", /debug_print/, "noninteractive_output", "opt-in tracing"),
   rule("tests/json-schema/corpus_runner.zig", "printLine", /stdio_acquisition/, "noninteractive_output", "JSON Schema corpus report output"),
   rule("src/main.zig", "(?:writeStdoutFast|writeStderrFast)", /(?:stdio_acquisition_write|fixed_fd_write|raw_fd_write)/, "noninteractive_output", "top-level help and CLI validation output"),
+  rule("src/main.zig", "init", /stdio_acquisition/, "interactive_terminal_owner", "composition root installs the stable interactive stdout handle"),
   rule("src/main.zig", "(?:stdoutIsTerminal|stdoutTerminalColumns)", /fixed_descriptor/, "terminal_probe", "top-level help terminal capability probe"),
   rule("src/main.zig", "runExternalInteractive", /stdio_acquisition_write/, "initialization_teardown", "external CLI handoff spacing"),
   rule("benchmarks/activity_progress.zig", "main", /stdio_acquisition/, "benchmark_output", "benchmark report output"),
@@ -98,7 +103,7 @@ function listZigFiles(root: string, directory = "src"): string[] {
   if (!existsSync(absolute)) return [];
   const files: string[] = [];
   for (const entry of readdirSync(absolute)) {
-    const path = join(directory, entry);
+    const path = join(directory, entry).replaceAll("\\", "/");
     const metadata = statSync(join(root, path));
     if (metadata.isDirectory()) files.push(...listZigFiles(root, path));
     else if (entry.endsWith(".zig")) files.push(path);

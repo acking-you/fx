@@ -6,6 +6,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   readdirSync,
   rmSync,
   statSync,
@@ -171,9 +172,26 @@ async function startFx(
 
 function chatgptAccessToken(accountId = "acct_e2e"): string {
   const payload = Buffer.from(JSON.stringify({
+    exp: 4_102_444_800,
     "https://api.openai.com/auth": { chatgpt_account_id: accountId },
   })).toString("base64url");
   return `header.${payload}.signature`;
+}
+
+function writeCodexSetupSource(testHome: string, accessToken: string): string {
+  const codexHome = join(testHome, "codex-source");
+  mkdirSync(codexHome, { recursive: true, mode: 0o700 });
+  const authPath = join(codexHome, "auth.json");
+  writeFileSync(authPath, JSON.stringify({
+    auth_mode: "chatgpt",
+    tokens: {
+      access_token: accessToken,
+      refresh_token: "codex-setup-refresh",
+      account_id: "acct_e2e",
+    },
+  }), { mode: 0o600 });
+  chmodSync(authPath, 0o600);
+  return codexHome;
 }
 
 function startFakeChatGptOAuth(
@@ -1094,6 +1112,41 @@ tmuxTest(
     await session.sendKeys("Escape");
     await session.waitForComposer(TIMEOUT);
 
+    expect(session.isAlive()).toBe(true);
+    expect(readFileSync(stderrPath, "utf8")).toBe("");
+  },
+  60_000,
+);
+
+tmuxTest(
+  "provider setup imports without switching and provider command activates Codex",
+  async () => {
+    home = realpathSync(mkdtempSync(join(tmpdir(), "fx-tui-provider-setup-")));
+    stderrPath = join(home, "stderr.log");
+    writeFileSync(stderrPath, "");
+    gateway = startFakeGateway([]);
+    chatgptOauth = startFakeChatGptOAuth();
+    const codexHome = writeCodexSetupSource(home, chatgptOauth.accessToken);
+    const sourcePath = join(codexHome, "auth.json");
+    const sourceBefore = readFileSync(sourcePath, "utf8");
+    const providerEnv = {
+      ...chatgptOauth.env,
+      HOME: home,
+      CODEX_HOME: codexHome,
+      GROK_HOME: join(home, "missing-grok-home"),
+      FX_DISABLE_KEYCHAIN: "1",
+    };
+    session = await startFx(home, stderrPath, gateway, undefined, providerEnv);
+    await session.waitForComposer(TIMEOUT);
+    await session.sendText("/setup");
+    await session.waitForText("Codex: imported from Codex CLI.", TIMEOUT);
+    await session.sendText("/provider codex");
+    await session.waitForText("Switched to Codex subscription with gpt-5.6-sol.", TIMEOUT);
+    await session.sendText("Use the imported Codex CLI login.");
+    await session.waitForText("CHATGPT_DIRECT_RESPONSE", TIMEOUT);
+
+    expect(readFileSync(sourcePath, "utf8")).toBe(sourceBefore);
+    expect(existsSync(join(home, ".fx", "chatgpt-auth.json"))).toBe(true);
     expect(session.isAlive()).toBe(true);
     expect(readFileSync(stderrPath, "utf8")).toBe("");
   },
