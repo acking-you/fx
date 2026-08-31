@@ -620,8 +620,8 @@ pub fn permissionsWritableByGroupOrOther(permissions: std.Io.File.Permissions) b
 }
 
 pub fn permissionsPrivateFile(permissions: std.Io.File.Permissions) bool {
-    if (comptime builtin.os.tag == .windows) return !permissions.toAttributes().READONLY;
-    return permissions.toMode() & 0o777 == 0o600;
+    if (comptime builtin.os.tag == .windows) return true;
+    return permissions.toMode() & 0o077 == 0;
 }
 
 pub fn permissionsPrivateDir(permissions: std.Io.File.Permissions) bool {
@@ -1557,6 +1557,13 @@ test "private durable file mode is exactly 0600" {
 
     const stat = try dir.dir.statFile(getIo(), "settings.json", .{ .follow_symlinks = false });
     try std.testing.expectEqual(@as(std.posix.mode_t, 0o600), stat.permissions.toMode() & 0o777);
+}
+
+test "private file permissions accept owner-only read-only mode" {
+    try std.testing.expect(permissionsPrivateFile(permissionsFromMode(0o400)));
+    if (comptime builtin.os.tag != .windows) {
+        try std.testing.expect(!permissionsPrivateFile(permissionsFromMode(0o440)));
+    }
 }
 
 test "private durable directory mode is exactly 0700" {

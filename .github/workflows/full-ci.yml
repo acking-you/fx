@@ -62,6 +62,8 @@ jobs:
             --test-filter "Codex CLI parser validates the account bound to the access token" `
             --test-filter "Grok Build parser" `
             --test-filter "provider setup JSON never contains credentials" `
+            --test-filter "provider setup poll does not expose the completion transition as idle" `
+            --test-filter "private file permissions accept owner-only read-only mode" `
             --test-filter "Grok team refresh preserves the principal binding" `
             --test-filter "Grok team principal round trips for refresh" `
             --test-filter "recovery markers are idempotent and clear durably" `
@@ -87,10 +89,11 @@ jobs:
           )
           $responses = @($requests | .\zig-out\bin\fx.exe acp)
           if ($LASTEXITCODE -ne 0 -or $responses.Count -lt 4) { throw "ACP smoke test failed" }
-          $initialize = $responses[0] | ConvertFrom-Json
-          $newSession = $responses[1] | ConvertFrom-Json
-          $setupStart = $responses[2] | ConvertFrom-Json
-          $setupStatus = $responses[3] | ConvertFrom-Json
+          $parsedResponses = @($responses | ForEach-Object { $_ | ConvertFrom-Json })
+          $initialize = $parsedResponses | Where-Object id -eq 1 | Select-Object -First 1
+          $newSession = $parsedResponses | Where-Object id -eq 2 | Select-Object -First 1
+          $setupStart = $parsedResponses | Where-Object id -eq 3 | Select-Object -First 1
+          $setupStatus = $parsedResponses | Where-Object id -eq 4 | Select-Object -First 1
           if (-not $initialize.result.agentInfo.name -or
               -not $initialize.result._meta.fx.providerControl.setup -or
               -not $newSession.result.sessionId -or

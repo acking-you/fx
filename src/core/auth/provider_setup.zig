@@ -54,12 +54,6 @@ pub const Report = struct {
     codex: ProviderResult,
     grok: ProviderResult,
 
-    pub fn availableProvider(self: Report) ?Provider {
-        if (providerAvailable(self.codex.disposition)) return .codex;
-        if (providerAvailable(self.grok.disposition)) return .grok;
-        return null;
-    }
-
     pub fn writeText(self: Report, writer: *std.Io.Writer) !void {
         try writer.writeAll("Provider setup finished.\n");
         try writeProviderText(writer, "Codex", self.codex);
@@ -79,12 +73,6 @@ pub const Report = struct {
         try writer.writeByte('}');
     }
 };
-
-pub const Provider = enum { codex, grok };
-
-fn providerAvailable(disposition: Disposition) bool {
-    return disposition == .imported or disposition == .already_configured;
-}
 
 fn writeProviderText(writer: *std.Io.Writer, provider: []const u8, result: ProviderResult) !void {
     const detail = switch (result.disposition) {
@@ -116,7 +104,11 @@ pub fn run(alloc: Allocator) !Report {
 
 fn importCodex(alloc: Allocator) !ProviderResult {
     const result = ProviderResult{ .source = .codex_cli, .disposition = .already_configured };
-    if (try chatgpt_oauth.sourceExists(alloc)) return result;
+    const already_configured = chatgpt_oauth.sourceExists(alloc) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return .{ .source = .codex_cli, .disposition = .unavailable },
+    };
+    if (already_configured) return result;
 
     const bytes = readSourceAuth(alloc, "CODEX_HOME", ".codex") catch |err| {
         return .{ .source = .codex_cli, .disposition = sourceReadDisposition(err) };
@@ -133,15 +125,20 @@ fn importCodex(alloc: Allocator) !ProviderResult {
         error.OutOfMemory => return err,
         else => return .{ .source = .codex_cli, .disposition = .unavailable },
     };
-    return .{
-        .source = .codex_cli,
-        .disposition = if (saved == .saved) .imported else .already_configured,
-    };
+    return .{ .source = .codex_cli, .disposition = switch (saved) {
+        .saved => .imported,
+        .already_configured => .already_configured,
+        .existing_invalid => .invalid,
+    } };
 }
 
 fn importGrok(alloc: Allocator) !ProviderResult {
     const result = ProviderResult{ .source = .grok_build, .disposition = .already_configured };
-    if (try grokSourceExists(alloc)) return result;
+    const already_configured = grokSourceExists(alloc) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return .{ .source = .grok_build, .disposition = .unavailable },
+    };
+    if (already_configured) return result;
 
     const bytes = readSourceAuth(alloc, "GROK_HOME", ".grok") catch |err| {
         return .{ .source = .grok_build, .disposition = sourceReadDisposition(err) };
@@ -158,10 +155,11 @@ fn importGrok(alloc: Allocator) !ProviderResult {
         error.OutOfMemory => return err,
         else => return .{ .source = .grok_build, .disposition = .unavailable },
     };
-    return .{
-        .source = .grok_build,
-        .disposition = if (saved == .saved) .imported else .already_configured,
-    };
+    return .{ .source = .grok_build, .disposition = switch (saved) {
+        .saved => .imported,
+        .already_configured => .already_configured,
+        .existing_invalid => .invalid,
+    } };
 }
 
 fn grokSourceExists(alloc: Allocator) !bool {
@@ -351,6 +349,12 @@ pub const Outcome = union(enum) {
     failed: anyerror,
 };
 
+pub const Poll = union(enum) {
+    idle,
+    running,
+    completed: Outcome,
+};
+
 const Operation = struct {
     context: ?*anyopaque = null,
     run_fn: *const fn (?*anyopaque, Allocator) anyerror!Report = runOperation,
@@ -418,20 +422,33 @@ pub const Runtime = struct {
     }
 
     pub fn takeCompletion(self: *Self) ?Outcome {
+        return switch (self.poll()) {
+            .completed => |outcome| outcome,
+            .idle, .running => null,
+        };
+    }
+
+    /// Returns one coherent runtime state. In particular, completion cannot
+    /// race a separate running check and briefly appear as idle.
+    pub fn poll(self: *Self) Poll {
         self.mutex.lockUncancelable(io_mod.getIo());
-        const completion = self.completion orelse {
-            const thread = if (!self.running) self.thread else null;
-            if (thread != null) self.thread = null;
+        if (self.completion) |completion| {
+            self.completion = null;
+            const thread = self.thread;
+            self.thread = null;
             self.mutex.unlock(io_mod.getIo());
             if (thread) |handle| handle.join();
-            return null;
-        };
-        self.completion = null;
+            return .{ .completed = completion };
+        }
+        if (self.running) {
+            self.mutex.unlock(io_mod.getIo());
+            return .running;
+        }
         const thread = self.thread;
-        self.thread = null;
+        if (thread != null) self.thread = null;
         self.mutex.unlock(io_mod.getIo());
         if (thread) |handle| handle.join();
-        return completion;
+        return .idle;
     }
 
     fn threadMain(self: *Self) void {
@@ -516,10 +533,33 @@ test "provider setup JSON never contains credentials" {
     );
 }
 
-test "provider setup selects an existing validated login" {
-    const report = Report{
-        .codex = .{ .source = .codex_cli, .disposition = .already_configured },
+fn testImmediateSetupOperation(_: ?*anyopaque, _: Allocator) !Report {
+    return .{
+        .codex = .{ .source = .codex_cli, .disposition = .not_found },
         .grok = .{ .source = .grok_build, .disposition = .not_found },
     };
-    try std.testing.expectEqual(Provider.codex, report.availableProvider().?);
+}
+
+test "provider setup poll does not expose the completion transition as idle" {
+    var runtime = Runtime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.operation = .{ .run_fn = testImmediateSetupOperation };
+    try std.testing.expect(try runtime.start());
+
+    var attempts: usize = 0;
+    while (attempts < 10_000) : (attempts += 1) {
+        switch (runtime.poll()) {
+            .running => std.Thread.yield() catch {},
+            .completed => |outcome| {
+                switch (outcome) {
+                    .report => {},
+                    .failed => |err| return err,
+                }
+                try std.testing.expectEqual(Poll.idle, runtime.poll());
+                return;
+            },
+            .idle => return error.UnexpectedIdleSetupState,
+        }
+    }
+    return error.SetupDidNotComplete;
 }

@@ -1118,7 +1118,7 @@ tmuxTest(
 );
 
 tmuxTest(
-  "provider setup activates a previously imported Codex CLI login",
+  "provider setup imports without switching and provider command activates Codex",
   async () => {
     home = mkdtempSync(join(tmpdir(), "fx-tui-provider-setup-"));
     stderrPath = join(home, "stderr.log");
@@ -1135,17 +1135,11 @@ tmuxTest(
       GROK_HOME: join(home, "missing-grok-home"),
       FX_DISABLE_KEYCHAIN: "1",
     };
-    const imported = await runFx(["setup", "--json"], {
-      env: providerEnv,
-      timeoutMs: TIMEOUT,
-    });
-    expect(imported.code, imported.stderr).toBe(0);
-    expect(JSON.parse(imported.stdout).codex.status).toBe("imported");
-
     session = await startFx(home, stderrPath, gateway, undefined, providerEnv);
     await session.waitForComposer(TIMEOUT);
     await session.sendText("/setup");
-    await session.waitForText("Codex: kept the existing fx login from Codex CLI.", TIMEOUT);
+    await session.waitForText("Codex: imported from Codex CLI.", TIMEOUT);
+    await session.sendText("/provider codex");
     await session.waitForText("Switched to Codex subscription with gpt-5.6-sol.", TIMEOUT);
     await session.sendText("Use the imported Codex CLI login.");
     await session.waitForText("CHATGPT_DIRECT_RESPONSE", TIMEOUT);

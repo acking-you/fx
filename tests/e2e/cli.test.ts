@@ -404,6 +404,19 @@ describe("cli: provider setup", () => {
         expect(readFileSync(grokTarget, "utf8")).toBe(grokTargetBefore);
         expect(readFileSync(source.codexPath, "utf8")).toBe(codexSourceBefore);
         expect(readFileSync(source.grokPath, "utf8")).toBe(grokSourceBefore);
+
+        writeFileSync(codexTarget, "{invalid codex credential", { mode: 0o600 });
+        writeFileSync(grokTarget, "{invalid grok credential", { mode: 0o600 });
+        const invalidCodexBefore = readFileSync(codexTarget, "utf8");
+        const invalidGrokBefore = readFileSync(grokTarget, "utf8");
+        const third = await runFx(["setup", "--json"], { env });
+        expect(third.code).toBe(0);
+        expect(JSON.parse(third.stdout)).toEqual({
+          codex: { source: "codex_cli", status: "invalid" },
+          grok: { source: "grok_build", status: "invalid" },
+        });
+        expect(readFileSync(codexTarget, "utf8")).toBe(invalidCodexBefore);
+        expect(readFileSync(grokTarget, "utf8")).toBe(invalidGrokBefore);
       } finally {
         rmSync(root, { recursive: true, force: true });
       }

@@ -168,13 +168,6 @@ pub fn Runtime(comptime App: type) type {
                             .neutral,
                         .body = out.written(),
                     }, true);
-                    if (report.availableProvider()) |provider| {
-                        const target: model_provider.ProviderId = switch (provider) {
-                            .codex => .codex,
-                            .grok => .grok,
-                        };
-                        try switchProvider(app, target, true, .manual);
-                    }
                 },
             }
             app.shell.render_requests.request(.footer);

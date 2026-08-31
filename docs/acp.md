@@ -84,7 +84,7 @@ for `codex` and `grok`. Each status is `imported`, `already_configured`,
 `CODEX_HOME/auth.json` or `~/.codex/auth.json`, and `GROK_HOME/auth.json` or
 `~/.grok/auth.json`. It never changes those source files or replaces an
 existing fx login. Call `fx/provider/switch` afterward when the imported
-provider is not already active.
+provider should become active; setup never changes provider selection.
 
 ### Provider login
 

@@ -46,6 +46,7 @@ pub const DeleteOutcome = enum {
 pub const SaveIfAbsentOutcome = enum {
     saved,
     already_configured,
+    existing_invalid,
 };
 
 pub const Mutation = struct {
@@ -162,7 +163,11 @@ pub fn saveImportedSessionIfAbsent(alloc: Allocator, session: Session) !SaveIfAb
     if (comptime host_target.is_wasm) return error.ChatGptOAuthUnavailable;
     var mutation = try beginMutation();
     defer mutation.deinit();
-    if (try mutation.hasAuthFile()) return .already_configured;
+    if (try mutation.hasAuthFile()) {
+        var existing = (try mutation.load(alloc)) orelse return .existing_invalid;
+        existing.deinit(alloc);
+        return .already_configured;
+    }
     try mutation.save(alloc, session);
     return .saved;
 }

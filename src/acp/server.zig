@@ -2005,30 +2005,26 @@ fn handleProviderSetupStart(state: *ServerState, alloc: Allocator, msg: *jsonrpc
 }
 
 fn handleProviderSetupStatus(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message) !void {
-    if (state.provider_setup.takeCompletion()) |outcome| {
-        var out: std.Io.Writer.Allocating = .init(alloc);
-        defer out.deinit();
-        switch (outcome) {
-            .failed => |err| {
-                try out.writer.writeAll("{\"state\":\"failed\",\"error\":");
-                try writeJsonStr(@errorName(err), &out.writer);
-            },
-            .report => |report| {
-                try out.writer.writeAll("{\"state\":\"completed\",\"report\":");
-                try report.writeJsonValue(&out.writer);
-            },
-        }
-        try out.writer.writeByte('}');
-        return state.writer.writeResponse(alloc, msg.id, out.writer.buffered());
+    switch (state.provider_setup.poll()) {
+        .idle => try state.writer.writeResponse(alloc, msg.id, "{\"state\":\"idle\"}"),
+        .running => try state.writer.writeResponse(alloc, msg.id, "{\"state\":\"running\"}"),
+        .completed => |outcome| {
+            var out: std.Io.Writer.Allocating = .init(alloc);
+            defer out.deinit();
+            switch (outcome) {
+                .failed => |err| {
+                    try out.writer.writeAll("{\"state\":\"failed\",\"error\":");
+                    try writeJsonStr(@errorName(err), &out.writer);
+                },
+                .report => |report| {
+                    try out.writer.writeAll("{\"state\":\"completed\",\"report\":");
+                    try report.writeJsonValue(&out.writer);
+                },
+            }
+            try out.writer.writeByte('}');
+            try state.writer.writeResponse(alloc, msg.id, out.writer.buffered());
+        },
     }
-    try state.writer.writeResponse(
-        alloc,
-        msg.id,
-        if (state.provider_setup.isRunning())
-            "{\"state\":\"running\"}"
-        else
-            "{\"state\":\"idle\"}",
-    );
 }
 
 fn handleProviderLoginStart(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message) !void {
