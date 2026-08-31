@@ -16,6 +16,7 @@ const js_host_auth = @import("core/auth/js_host_auth.zig");
 const credentials = @import("core/auth/credentials.zig");
 const secret = @import("core/auth/secret.zig");
 const model_cache_runtime = @import("core/app/model_cache_runtime.zig");
+const usage_dashboard_runtime = @import("core/app/usage_dashboard_runtime.zig");
 const app_auth_runtime = @import("core/app/app_auth_runtime.zig");
 const app_host_config_runtime = @import("core/app/app_host_config_runtime.zig");
 const app_entry_runtime = @import("core/app/app_entry_runtime.zig");
@@ -538,6 +539,7 @@ const App = struct {
     provider_logout: provider_logout.Runtime = provider_logout.Runtime.init(std.heap.c_allocator),
     provider_setup: provider_setup.Runtime = provider_setup.Runtime.init(std.heap.c_allocator),
     model_cache: model_cache_runtime.Runtime = model_cache_runtime.Runtime.init(std.heap.c_allocator, builtin_gateway.models_path),
+    usage_dashboard: usage_dashboard_runtime.Runtime = usage_dashboard_runtime.Runtime.init(std.heap.c_allocator),
     workspace_root: []u8 = &.{},
     workspace_identity: statusline_identity.Runtime = .{},
     workspace_host: WorkspaceHostRuntime = .{},
@@ -627,6 +629,7 @@ const App = struct {
     pub fn init(alloc: Allocator, launch: *cli_surface.InteractiveLaunch) !Self {
         var app = Self{
             .alloc = alloc,
+            .usage_dashboard = undefined,
             .shell = .{ .stdout_file = std.Io.File.stdout() },
             .subagents = ui_subagents.Controller.init(),
             .lifecycle_runtime = hooks.Runtime.init(alloc),
@@ -640,6 +643,7 @@ const App = struct {
                 background_process.provider),
             .unified_exec = unified_exec_runtime.Manager.init(std.heap.c_allocator),
         };
+        usage_dashboard_runtime.Runtime.initInto(&app.usage_dashboard, std.heap.c_allocator);
         if (comptime host_profile.js_host_workspace) {
             app.workspace_host = js_host_workspace.Runtime.init(alloc) catch |err| blk: {
                 if (err != error.WorkspaceUnavailable) {
@@ -833,6 +837,7 @@ const App = struct {
         self.provider_logout.deinit();
         self.provider_setup.deinit();
         self.model_cache.deinit();
+        self.usage_dashboard.deinit();
         InputSubmitRuntime.clearPendingSubmission(self, "shutdown");
         const resume_handoff = if (capture_resume_handoff and
             direct_deinit_disposition == .settled)
@@ -2868,6 +2873,9 @@ const App = struct {
         if (try self.model_cache.pollLoadTransition()) {
             RenderAppRuntime.requestActiveSurfaceFrame(self, .footer);
         }
+        if (try app_commands.Handlers(App).collectUsageDashboardFacts(self)) {
+            RenderAppRuntime.requestActiveSurfaceFrame(self, .footer);
+        }
         try app_commands.Handlers(App).collectMcpAuthenticationFacts(self);
         try app_commands.Handlers(App).collectMcpReloadFacts(self);
         if (comptime host_profile.native_auth or host_profile.js_host_auth) {
@@ -4160,6 +4168,7 @@ test {
     _ = @import("core/app/app_input_runtime.zig");
     _ = @import("core/app/app_lifecycle.zig");
     _ = @import("core/app/model_cache_runtime.zig");
+    _ = @import("core/app/usage_dashboard_runtime.zig");
     _ = @import("core/app/app_process_runtime.zig");
     _ = @import("core/app/app_render_runtime.zig");
     _ = @import("core/app/app_terminal_takeover_runtime.zig");
