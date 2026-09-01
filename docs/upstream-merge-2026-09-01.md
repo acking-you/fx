@@ -19,8 +19,11 @@ The merge boundary is:
 | Earlier update merge | `b8494532` |
 | Previous upstream main merged | `fc50c8da53f476c0c021a6c6289c7fff5c78d7f6` |
 | Previous update merge | `6121534a` |
-| Current upstream main merged | `1f6ebd87cae1da4bd66603fbb7281b6bd882c177` |
-| Current update merge | `a78ff0a3` |
+| Earlier upstream main merged | `1f6ebd87cae1da4bd66603fbb7281b6bd882c177` |
+| Earlier update merge | `a78ff0a3` |
+| Current upstream main merged | `350c6efea07b96d3d0e54adae7f2033c16ce818e` |
+| Current update merge | `726ce8d5` |
+| Provider-neutral help repair | `dc2c7e64` |
 | Final merge-regression repair | `8a0e7c90` |
 | Final runtime and E2E contract repair | `30ca1e45` |
 | Final asynchronous E2E stabilization | `8431e1a4` |
@@ -115,6 +118,12 @@ The complete slice was removed:
 - the PGSO documentation count, reduced from twenty-eight to twenty-seven deterministic training files.
 
 No production Ctrl+O code was removed. The retained `tui-resume.test.ts` pressure scenario still drives mixed assistant history and live Unified Exec output through open, PageUp, PageDown, close, repeated entry, final persistence, and replay. It also requires a single alternate-screen owner, unchanged compact scrollback, empty stderr, and clean exit. Focused Ctrl+O resume, streaming, approval, subagent, render-replay, input, resize, page, and lifecycle tests retain the narrower failure owners.
+
+### Provider-neutral top-level help cleanup
+
+Upstream's consolidated help-alias test, plain `fx` body copy, command grouping, and clearer command-specific help note were retained. The fork adapts the provider group to its actual surface: provider-neutral setup import, Codex and Grok login or logout, provider selection, model listing, and local or Codex usage. Short top-level summaries keep the navigation page compact while command-specific help preserves the complete typed descriptions.
+
+The conflicting upstream Vercel login option, Gateway key setup, teams, credits, auto-upgrade command, `fx.sh` resource, and `/feedback` route were discarded. The deterministic help tests now assert that all three aliases render identical output and that none of those removed product entries reappear. The only resource link remains the fork repository.
 
 ### Provider usage dashboard
 
@@ -320,6 +329,7 @@ These files existed on the BYOK first parent and were removed from the review re
 | `src/tools/memory/memory.zig` | Removed product feature with no supported BYOK persistence contract |
 | `src/ui/catalog_screen_layout.zig` | Replaced by the consolidated menu state and presentation |
 | `src/ui/skills_screen.zig` | Replaced by unified capability retrieval and the consolidated menu |
+| `tests/e2e/tui-full-transcript-brutal.test.ts` | Redundant trace, profiler, RSS, and timing harness whose user-visible Ctrl+O contracts already have deterministic owners |
 
 ### Removed model-facing tool surfaces
 
@@ -373,6 +383,8 @@ One permission test for searching outside the workspace was deleted because it d
 The final upstream update also modified the deleted Vercel Gateway transport to shorten Exa highlights and added provider-specific Exa, Parallel, and Perplexity search accounting to trace reports. Those changes were intentionally not retained. After removal of `src/builtins/gateway.zig`, the fork has no production owner for the Gateway Exa provider advertisement; retaining its alias table, hard-coded provider names, fixed tool indices, `terminal` fixtures, and trace-only tests would be unreachable duplicate policy. The provider-neutral `web_search` projection and its existing TUI, ACP, CLI, child-session, Codex, Responses, and Grok lifecycle remain the sole search contract.
 
 Upstream `93bfedfe` again extended ACP around the deleted Gateway aliases `exa_search`, `perplexity_search`, and `parallel_search`, with its deterministic owner in the already deleted `tests/e2e/web-search-fake-gateway.test.ts`. That slice was not restored. The useful generic part of the same upstream work, namely named and redacted ACP tool-call input, was retained without adding provider aliases or a second Web Search projection owner. The unreferenced `src/builtins/system_prompt.md` also remains deleted; upstream's redundant GitHub-handle guidance removal was applied to `src/builtins/context.zig`, the typed runtime prompt owner.
+
+Upstream `350c6efe` reorganized the top-level help and added concise descriptions. Its Vercel-specific setup, teams, credits, upgrade, hosted documentation, and feedback rows were rejected because their runtime owners are absent from the fork. The generic copy and alias consolidation were retained against the existing BYOK command registry, so the help page cannot advertise a vendor route that is not executable.
 
 Historical `run_command`, `list_files`, and `memory` strings remain only where a saved session codec, replay renderer, migration test, redaction test, or explicit non-executability test needs them. Internal terminal-session state is unrelated to the removed model-facing `terminal` tool.
 
@@ -458,6 +470,8 @@ The session or connection-local projection hides `glob_files` and `grep_files` a
 | `b8494532` | Merge upstream through `93bfedfe`, retain generic named and redacted ACP tool metadata plus anchored dollar skill menus, and discard the deleted Gateway alias slice |
 | `6121534a` | Merge upstream through `fc50c8da`, showing only selected skill names while preserving the bound source and path internally |
 | `a78ff0a3` | Merge upstream through `1f6ebd87`, preserving rapid-exit resume handoff with a bounded POSIX SIGINT guard and no deleted relaunch state |
+| `726ce8d5` | Merge upstream through `350c6efe`, retaining the generic help cleanup while rejecting Vercel product rows |
+| `dc2c7e64` | Keep short top-level BYOK summaries separate from complete command-specific help and align the consolidated alias E2E |
 
 ## CI policy for this merge
 
@@ -578,6 +592,8 @@ The smaller `.github/workflows/ci.yml` workflow is not used as the merge decisio
 - PGSO manifest classification lists cleanly after removing the stale training owner; all 32 corpus unit tests pass
 - E2E shard planning passes all 8 tests after removing the stale file weight and still classifies every committed test exactly once
 - The retained deterministic `tui-resume.test.ts` Ctrl-O pressure scenario passes from commit `9e7c2dc2` in a fresh ext4 ReleaseSafe build with 62 assertions, 45 unrelated tests filtered out, and empty stderr
+- ReleaseSafe filtered Zig coverage for the top-level help passes from `dc2c7e64`, including identical visible plain and ANSI content, compact widths, provider-neutral rows, and complete command-specific setup help
+- The consolidated CLI help alias E2E passes from the same fresh ReleaseSafe build with 45 assertions, 83 unrelated cases filtered out, and no Vercel, teams, credits, upgrade, hosted documentation, or feedback rows
 
 The local setup smoke detected both `codex_cli` and `grok_build` sources without printing credential bytes. The full unfiltered Zig suite was run locally on WSL's native ext4 filesystem because the test graph requires POSIX private-mode, lock, rename, and process semantics; Windows still runs the explicit native subset in Full CI.
 
