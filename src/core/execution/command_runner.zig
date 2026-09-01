@@ -4584,7 +4584,7 @@ test "accepted short timeout matrix returns timeout errors" {
     }
 }
 
-test "supervisor handoff does not extend the parent timeout deadline" {
+test "supervisor handoff remains bounded by the fallback deadline" {
     if (builtin.os.tag == .windows or builtin.os.tag == .wasi) return;
 
     const alloc = std.testing.allocator;
@@ -4598,7 +4598,7 @@ test "supervisor handoff does not extend the parent timeout deadline" {
     defer alloc.free(quoted_effect);
     const command = try std.fmt.allocPrint(
         alloc,
-        "sleep 0.6; printf trailing > {s}",
+        "sleep 0.8; printf trailing > {s}",
         .{quoted_effect},
     );
     defer alloc.free(command);

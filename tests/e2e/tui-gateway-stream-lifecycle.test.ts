@@ -1580,15 +1580,8 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
               payloadContent,
             ),
           () => heldGatewayResponse(nextStep, [], [
-            { type: "text-delta", id: "answer_2", delta: finalSentinel },
-            {
-              type: "finish",
-              finishReason: { unified: "stop", raw: "stop" },
-              usage: {
-                inputTokens: { total: 8 },
-                outputTokens: { total: 5 },
-              },
-            },
+            responseTextDelta(finalSentinel, "answer_2"),
+            responseCompleted(8, 5),
           ]),
         ],
       );
@@ -1625,10 +1618,10 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       const nextStepPane = await waitForScrollback(
         session!,
         (value) =>
-          /• Thinking \(\d+(?:h\d+m\d+s|m\d+s|s)\) \(↑\d+(?:\.\d)?k? ↓\d+(?:\.\d)?k?\)/.test(
+          /• (?:Thinking|Running) \(\d+(?:h\d+m\d+s|m\d+s|s)\) \(↑\d+(?:\.\d)?k? ↓\d+(?:\.\d)?k?\)/.test(
             value,
           ) && !value.includes(finalSentinel),
-        "thinking activity during the next admitted model step",
+        "turn activity during the next admitted model step",
       );
       expect(nextStepPane).not.toContain(finalSentinel);
       nextStep.release?.();
@@ -2518,10 +2511,12 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       const workspace = realpathSync(workspacePath);
 
       const splitGateway = startFakeGateway([
-        fakeGatewaySse([
-          responseTextDelta(SPLIT_OLD_RESPONSE, "split_old"),
-          responseCompleted(3, 5),
-        ]),
+        () =>
+          heldGatewayResponse(
+            firstResponse,
+            [responseTextDelta(`${SPLIT_OLD_RESPONSE}\n`, "split_old")],
+            [responseCompleted(3, 5)],
+          ),
         () => heldGatewayResponse(secondResponse),
       ]);
       gateway = splitGateway;

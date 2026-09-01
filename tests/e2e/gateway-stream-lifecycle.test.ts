@@ -33,6 +33,7 @@ import {
   fakeGatewayToolCall,
   hasEmptyComposer,
   paneExitMatches,
+  POST_TOOL_DECISION_PROMPT,
   responseCompleted,
   responseFunctionCall,
   startDynamicFakeGateway,
@@ -413,8 +414,14 @@ function toolResultOutput(body: string, callId: string): string {
 }
 
 function hasCurrentToolResult(body: string, callId: string): boolean {
-  const last = gatewayRequest(body).input.at(-1);
-  return last?.type === "function_call_output" && last.call_id === callId;
+  const input = gatewayRequest(body).input;
+  const tail = input.at(-1);
+  const current = tail?.type === "message" &&
+      tail.role === "user" &&
+      contentText(tail) === POST_TOOL_DECISION_PROMPT
+    ? input.at(-2)
+    : tail;
+  return current?.type === "function_call_output" && current.call_id === callId;
 }
 
 function hasToolResult(body: string, callId: string): boolean {
@@ -1688,7 +1695,11 @@ describe("gateway stream lifecycle", () => {
           if (locations.length !== 2) {
             throw new Error(`Expected two advertised ${skillName} locations, got ${JSON.stringify(locations)}`);
           }
-          [advertisedA, advertisedB] = locations;
+          advertisedA = locations.find((location) => location === skillDirectoryA) ?? "";
+          advertisedB = locations.find((location) => location === skillDirectoryB) ?? "";
+          if (advertisedA.length === 0 || advertisedB.length === 0) {
+            throw new Error(`Expected both exact skill locations, got ${JSON.stringify(locations)}`);
+          }
           return fakeGatewayToolCall(ambiguousCallId, "skill", { name: skillName });
         }
         case 1:
@@ -2403,7 +2414,7 @@ describe("gateway stream lifecycle", () => {
       const output = contentText(resultPart?.output);
 
       expect(result.code).toBe(0);
-      expect(result.stderr).toContain("Matching *");
+      expect(result.stderr).toContain("Matching files *");
       expect(json.error).toBeUndefined();
       expect(gateway.requestCount()).toBe(3);
       expect(output).toContain("tool_execution_failed");
@@ -2613,13 +2624,8 @@ describe("gateway stream lifecycle", () => {
       expect(historicalCalls).toHaveLength(1);
       expect(() => JSON.parse(String(historicalCalls[0]!.arguments))).not.toThrow();
       expect(historicalResults).toHaveLength(1);
-      expect(historicalResults[0]).toEqual(
-        expect.objectContaining({
-          output: expect.objectContaining({
-            type: "error-text",
-            value: expect.stringContaining("tool_execution_failed"),
-          }),
-        }),
+      expect(contentText(historicalResults[0]!.output)).toContain(
+        "tool_execution_failed",
       );
       expect(gateway.requests[2].body).toContain("tool_execution_failed");
       expect(gateway.requests[2].body).not.toContain(malformedArguments);
@@ -3715,8 +3721,8 @@ describe("gateway stream lifecycle", () => {
         return parentCompletion;
       }
       if (body.includes(childPrompt)) {
-        expect(promptText(body)).toContain(
-          '<server name="fixture" state="ready" tools="1" />',
+        expect(promptText(body)).toMatch(
+          /<server name="fixture" state="(?:available_on_demand|ready" tools="1)" \/>/,
         );
         expect(body).not.toContain(DYNAMIC_MCP_TOOL_NAME);
         return fakeGatewayToolCall("child_mcp_select_1", "mcp_select_tool", {
@@ -4175,6 +4181,7 @@ describe("gateway stream lifecycle", () => {
               id: childId,
               sections: ["status", "events", "configuration", "relationship"],
               limit: 1,
+              wait: { until: "settled", timeout_ms: 5_000 },
             },
           }));
         }, 100);

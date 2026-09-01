@@ -2954,7 +2954,11 @@ test "initial allocation failure reports failure and a later load retries" {
     try std.testing.expectEqual(GenerationState.ready, loading.currentState());
     try std.testing.expect(index.joinThreadIfDone(alloc));
     try std.testing.expectEqual(State.ready, index.currentState());
-    try std.testing.expectEqual(@as(usize, 0), index.count());
+    try std.testing.expectEqual(@as(usize, 1), index.count());
+    var search: TestSearchBuffer(1) = .{};
+    const results = try search.run(&index, "retry");
+    try std.testing.expectEqual(@as(usize, 1), results.len);
+    try std.testing.expectEqualStrings("retry.txt", results[0].path);
 }
 
 test "latest and identical refresh roots coalesce without a second loader" {
@@ -3045,7 +3049,11 @@ test "failed generation starts one queued refresh after reap" {
     try std.testing.expectEqual(GenerationState.ready, queued.currentState());
     try std.testing.expect(index.joinThreadIfDone(alloc));
     try std.testing.expect(index.active_generation.? != previous_active);
-    try std.testing.expectEqual(@as(usize, 0), index.count());
+    try std.testing.expectEqual(@as(usize, 1), index.count());
+    var search: TestSearchBuffer(1) = .{};
+    const results = try search.run(&index, "queued");
+    try std.testing.expectEqual(@as(usize, 1), results.len);
+    try std.testing.expectEqualStrings("queued.txt", results[0].path);
 }
 
 test "stop before and after completion suppresses queued work" {

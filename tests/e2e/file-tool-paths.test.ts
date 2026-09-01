@@ -12,6 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EVAL_MODEL, HAS_API_KEY, runFx } from "../evals/eval-helpers";
+import { POST_TOOL_DECISION_PROMPT } from "./tmux-helpers";
 
 const TIMEOUT = 20_000;
 const MODEL = "openai/gpt-5";
@@ -120,10 +121,20 @@ function toolResultOutput(body: string, callId: string): string {
 
 function hasCurrentToolResult(body: string, callId: string): boolean {
   const request = JSON.parse(body) as {
-    input: Array<{ type?: string; call_id?: string }>;
+    input: Array<{
+      type?: string;
+      role?: string;
+      call_id?: string;
+      content?: unknown;
+    }>;
   };
-  const latest = request.input.at(-1);
-  return latest?.type === "function_call_output" && latest.call_id === callId;
+  const tail = request.input.at(-1);
+  const current = tail?.type === "message" &&
+      tail.role === "user" &&
+      contentText(tail.content) === POST_TOOL_DECISION_PROMPT
+    ? request.input.at(-2)
+    : tail;
+  return current?.type === "function_call_output" && current.call_id === callId;
 }
 
 function occurrenceCount(text: string, needle: string) {

@@ -862,9 +862,7 @@ pub const WorkerRuntime = struct {
         if (steer_if_active and
             self.worker_processing and
             self.active_turn_id != 0 and
-            queued.images.len == 0 and
-            queued.skill_bindings.len == 0 and
-            queued.skill_display_spans.len == 0)
+            self.queue_admission == null)
         {
             queued.steer_target_turn_id = self.active_turn_id;
         }

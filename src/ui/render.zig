@@ -376,6 +376,7 @@ pub fn buildHintLine(
     out: []u8,
 ) []const u8 {
     _ = active_label;
+    _ = stream_active;
 
     var model_buf: [96]u8 = undefined;
     const model_label = compactModelLabel(model, &model_buf);
@@ -389,9 +390,6 @@ pub fn buildHintLine(
     if (!awaiting_permission and queued_count > 0) {
         var queued_buf: [32]u8 = undefined;
         appendStatusSegment(out, &end, std.fmt.bufPrint(&queued_buf, "queued {d}", .{queued_count}) catch "");
-    }
-    if (stream_active and !awaiting_permission) {
-        appendStatusSegment(out, &end, "enter queue");
     }
     const status_limit = @min(@as(usize, width), out.len);
     // Effort is a user-visible session setting. Model capability metadata may

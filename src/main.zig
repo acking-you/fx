@@ -1440,7 +1440,7 @@ const App = struct {
                 review,
             );
 
-        try self.worker.enqueuePrompt(std.heap.c_allocator, .{
+        try self.worker.admitPrompt(std.heap.c_allocator, .{
             .turn_id = if (recovery_checkpoint) |checkpoint| checkpoint.turn_id else turn_id,
             .prompt = prompt_copy,
             .images = images_copy,
@@ -1461,7 +1461,7 @@ const App = struct {
             .recovery_checkpoint = recovery_checkpoint_copy,
             .recovery_source_already_presented = recovery_checkpoint != null,
             .user_prompt_already_presented = user_prompt_already_presented,
-        });
+        }, recovery_checkpoint == null);
         HerdrAppRuntime.reportWorking(self);
         return true;
     }
@@ -2927,6 +2927,14 @@ const App = struct {
 
         if (comptime !host_target.is_wasm) {
             try SessionAppRuntime.pollSessionPicker(self);
+        }
+        if (try self.shell.pollFullTranscriptPageLoad()) {
+            RenderAppRuntime.requestActiveSurfaceFrame(self, .modal);
+        }
+        if (self.subagents.childConversationRuntime()) |child| {
+            if (try child.pollFullTranscriptPageLoad()) {
+                RenderAppRuntime.requestActiveSurfaceFrame(self, .modal);
+            }
         }
         if (!self.terminal_takeover.blocksFxSurface(&self.terminal)) {
             const input_now_ms = io_mod.milliTimestamp();
