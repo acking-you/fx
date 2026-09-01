@@ -8,12 +8,14 @@ The merge boundary is:
 
 | Item | Commit |
 | --- | --- |
-| BYOK first parent before the content merge | `fe2ec9e05250ccc789d6a3d939fcd0b72cd6157c` |
-| Upstream main merged | `1685a855868820a1b9f317dc589190c32b011684` |
-| Merge commit | `d7d3f8f2d471cb1c6a6c8cb306b19d312ba64ab0` |
+| BYOK first parent before the initial content merge | `fe2ec9e05250ccc789d6a3d939fcd0b72cd6157c` |
+| Initial upstream main merged | `1685a855868820a1b9f317dc589190c32b011684` |
+| Initial content merge | `d7d3f8f2d471cb1c6a6c8cb306b19d312ba64ab0` |
+| Latest upstream main merged | `24ff3083cb3e19cdc818403ecbc40ff14ace04c9` |
+| Latest update merge | `f3ad5781` |
 | Review branch | `merge/upstream-2026-09-01` |
 
-Compared with the pre-merge BYOK tree, the review result changes 246 files with 28,521 insertions and 17,194 deletions. The large count comes primarily from upstream MCP, transcript, rendering, and E2E work. It does not represent a new vendor product route or a large new model-facing tool surface.
+Compared with the pre-merge BYOK tree, the review result changes 249 files with 28,719 insertions and 17,209 deletions. The large count comes primarily from upstream MCP, transcript, rendering, and E2E work. It does not represent a new vendor product route or a large new model-facing tool surface.
 
 ## Reconciliation policy
 
@@ -85,6 +87,17 @@ Primary paths:
 - `src/core/agent/runtime/orchestrator.zig`
 - `src/core/app/app_callbacks.zig`
 - `src/ui/footer/input_presentation.zig`
+
+### Prompt history ownership
+
+Recalled slash commands remain prompt-history entries until the user edits them. Plain Up and Down therefore continue navigating history instead of handing control to the slash menu merely because the recalled text begins with `/`. The slash menu is temporarily suppressed for the recall episode, reappears after an edit, and remains normally available for a newly typed slash command. This is a bounded input-state bug fix with focused Zig and deterministic TUI coverage.
+
+Primary paths:
+
+- `src/core/input/composer_history.zig`
+- `src/core/input/picker_state.zig`
+- `src/core/app/input_completion_runtime.zig`
+- `tests/e2e/prompt-history.test.ts`
 
 ### Unified provider activity phases
 
@@ -229,6 +242,8 @@ The final reconciliation also removed the inert `--record` launch parser, its un
 
 One permission test for searching outside the workspace was deleted because it depended on the removed semantic-search era target classifier and no longer exercised the registered `grep_files` contract. The live-authority regression was rewritten around the current registered `skill` tool, preserving the authority refresh assertion without resurrecting the deleted `create_folder` implementation. Other failing expectations were updated only where the retained runtime contract had deliberately changed: account picker wording, Unified Exec labels, collapsed code-block borders, action-oriented post-tool messages, and removal of `--record` from resume usage.
 
+The final upstream update also modified the deleted Vercel Gateway transport to shorten Exa highlights and added provider-specific Exa, Parallel, and Perplexity search accounting to trace reports. Those changes were intentionally not retained. After removal of `src/builtins/gateway.zig`, the fork has no production owner for the Gateway Exa provider advertisement; retaining its alias table, hard-coded provider names, fixed tool indices, `terminal` fixtures, and trace-only tests would be unreachable duplicate policy. The provider-neutral `web_search` projection and its existing TUI, ACP, CLI, child-session, Codex, Responses, and Grok lifecycle remain the sole search contract.
+
 Historical `run_command`, `list_files`, and `memory` strings remain only where a saved session codec, replay renderer, migration test, redaction test, or explicit non-executability test needs them. Internal terminal-session state is unrelated to the removed model-facing `terminal` tool.
 
 ## Protected BYOK conflict decisions
@@ -293,6 +308,7 @@ The session or connection-local projection hides `glob_files` and `grep_files` a
 | `a91bcc82` | Repair explicit steering tests, Windows Unified Exec coverage, and stale bash-first guidance |
 | `399cbf6d` | Restore the generic top-level MCP vertical slice, remove inert recording compatibility, repair WASM loader compilation, and fix Windows MCP child environments |
 | `d17eb51a` | Restore post-tool continuation, dynamic MCP generation binding, trace lineage, native-versus-fallback Vision policy, portable image reads, and cross-platform trace append |
+| `f3ad5781` | Merge upstream through `24ff3083`, retaining prompt-history ownership while discarding unreachable Vercel Gateway and provider-specific search-trace additions |
 
 ## CI policy for this merge
 
@@ -307,6 +323,8 @@ Only a run attached to the commit containing this document is acceptable. All fo
 
 An earlier run on `7629b56386572c4c38bda8a45634556e7c10efa4` was cancelled after its Linux and macOS arm64 unit jobs exposed 24 stale or regressed assertions plus one configuration crash. Those failures were audited individually. The complete 201-test `processQueuedPrompt` family now passes locally in ReleaseSafe, and focused ReleaseSafe coverage passes for every remaining failed owner. Because the fixes change the commit, that cancelled run is evidence used during repair and is not accepted as the merge gate. A new Full CI run on the final document commit is required.
 
+Run `33465449602` on `d4abc25a93d7172ae338744a0dcd0351ed6c790f` was also cancelled before qualification when a final fetch showed that upstream had advanced to `24ff3083`. It had no authority over the later merge result. The next run must be attached to the commit containing the latest-upstream merge and this updated document.
+
 The smaller `.github/workflows/ci.yml` workflow is not used as the merge decision. Benchmark and binary-size workflows are retained because startup latency and unexplained binary growth are useful signals; neither replaces Full CI.
 
 ## Local verification completed before push
@@ -320,6 +338,7 @@ The smaller `.github/workflows/ci.yml` workflow is not used as the merge decisio
 - The complete 201-test ReleaseSafe `processQueuedPrompt` family, including post-tool continuation, confirmed-result recovery, same-step steering suppression, Vision routing, MCP runtime generation binding, lifecycle presentation, and trace identity
 - ReleaseSafe verified-snapshot coverage for inline bytes, ordinary files, symlinked files, and symlinked directory chains, including the Windows no-follow path
 - ReleaseSafe focused regressions for `collapse_tool_calls`, canonical multi-line trace append, current registered-tool live authority, provisional tool labels, account picker and approval rendering, resume usage, evidence-led prompts, and collapsed semantic code blocks
+- ReleaseSafe prompt-history regressions for slash-command recall suppression, plain-arrow ownership, draft restoration, and re-enabling slash completion after editing
 - Windows provider tests covering Codex CLI parsing, Grok Build parsing, setup secret redaction, OAuth fallback order, ChatGPT and Grok callback path/state validation, ephemeral ports, delayed callback bytes, and Windows AFD reset handling
 - TypeScript checking for every E2E file changed during reconciliation
 - Bun E2E: removed filesystem tools are absent and Unified Exec completes the flow
