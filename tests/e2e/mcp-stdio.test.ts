@@ -12,7 +12,10 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runFx } from "../evals/eval-helpers";
-import { contentText } from "./conditional-guidance-oracle";
+import {
+  contentText,
+  parseGatewayRequest,
+} from "./conditional-guidance-oracle";
 import {
   fakeGatewayFinalText,
   fakeGatewayToolCall,
@@ -2483,9 +2486,11 @@ exec "$FX_MCP_FIXTURE_RUNTIME" "$FX_MCP_FIXTURE_PATH"
       await tui.waitForText("Terminal MCP startup complete.", 20_000);
       await waitForTtyAskExit(tui, 0);
       expect(activeGateway.requests).toHaveLength(1);
-      const prompt = (JSON.parse(activeGateway.requests[0]!.body) as {
-        prompt: Array<{ content: unknown }>;
-      }).prompt.map((message) => contentText(message.content)).join("\n");
+      const request = parseGatewayRequest(activeGateway.requests[0]!.body);
+      const prompt = [
+        request.instructions ?? "",
+        ...(request.input ?? []).map((message) => contentText(message.content)),
+      ].join("\n");
       expect(prompt).toContain(
         '<server name="fixture" state="ready" tools="1" />',
       );
