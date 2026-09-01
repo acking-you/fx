@@ -477,7 +477,7 @@ describe("tui: render record/replay", () => {
       );
 
       await session.sendText(marker);
-      await session.waitForText("fx needs access to Vercel AI Gateway", 5_000);
+      await session.waitForText("Fx needs a model credential", 5_000);
       execFileSync(FX_BIN, [
         "replay",
         launched.tapePath,
