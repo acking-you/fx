@@ -58,7 +58,6 @@ const MEASURED_ACTION_NAMES = [
   "fileQuery",
   "questionNavigate",
   "approvalNavigate",
-  "subagentManagerOpen",
   "fullOpen",
   "fullScroll",
   "fullScrollCacheMiss",
@@ -69,7 +68,6 @@ const MEASURED_ACTION_NAMES = [
 ] as const;
 
 const APP_PANE_ACTION_NAMES = new Set<string>([
-  "subagentManagerOpen",
   ...LOCAL_MENU_ACTIONS.map((action) => action.name),
 ]);
 
@@ -845,16 +843,6 @@ test.skipIf(!ENABLED || !tmuxAvailable())(
         }
       }
 
-      for (let cycle = 0; cycle < WARMUPS + SAMPLES; cycle += 1) {
-        const before = await session.capturePane();
-        const open = await measurePaneAction(
-          () => session!.sendKeysImmediate(["C-x"]),
-          () => waitForPaneText(session!, "Agents & processes", before),
-        );
-        await closeSurface(session, "Agents & processes", "C-x");
-        if (cycle >= WARMUPS) appendMeasured(samples.subagentManagerOpen, open);
-      }
-
       await session.sendText("Open the performance question.");
       await session.waitForText("Which performance path should I use?", TIMEOUT);
       for (let cycle = 0; cycle < WARMUPS + SAMPLES; cycle += 1) {
@@ -901,7 +889,6 @@ test.skipIf(!ENABLED || !tmuxAvailable())(
         boundary: "recorded application stdin frame to recorded stdout frame",
         boundaryExceptions: {
           catalogMenus: "user input dispatch to changed exclusive catalog pane",
-          subagentManagerOpen: "user input dispatch to changed manager pane",
         },
         buildMode: "ReleaseSafe",
         warmups: WARMUPS,
