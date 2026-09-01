@@ -32,7 +32,6 @@ pub const ParsedCommand = union(enum) {
     stats,
     usage,
     undo,
-    mcp: []const u8,
     skills: []const u8,
     copy,
     trace,
@@ -77,7 +76,6 @@ pub const CommandHandlers = struct {
     show_stats: *const fn (ctx: *anyopaque) anyerror!void,
     show_usage: *const fn (ctx: *anyopaque) anyerror!void,
     undo_last: *const fn (ctx: *anyopaque) anyerror!void,
-    handle_mcp: *const fn (ctx: *anyopaque, rest: []const u8) anyerror!void,
     handle_skills: *const fn (ctx: *anyopaque, rest: []const u8) anyerror!void,
     copy_last: *const fn (ctx: *anyopaque) anyerror!void,
     create_trace: *const fn (ctx: *anyopaque) anyerror!void,
@@ -128,7 +126,6 @@ fn parsedCommand(kind: SlashKind, payload: []const u8) ParsedCommand {
         .stats => .stats,
         .usage => .usage,
         .undo => .undo,
-        .mcp => .{ .mcp = payload },
         .skills => .{ .skills = payload },
         .copy => .copy,
         .trace => .trace,
@@ -187,7 +184,6 @@ pub fn route(registry: SlashRegistry, handlers: *const CommandHandlers, cmd: []c
         .stats => try handlers.show_stats(handlers.ctx),
         .usage => try handlers.show_usage(handlers.ctx),
         .undo => try handlers.undo_last(handlers.ctx),
-        .mcp => |rest| try handlers.handle_mcp(handlers.ctx, rest),
         .skills => |rest| try handlers.handle_skills(handlers.ctx, rest),
         .copy => try handlers.copy_last(handlers.ctx),
         .trace => try handlers.create_trace(handlers.ctx),
@@ -324,13 +320,6 @@ test "parse extracts image commands" {
     }
 }
 
-test "parse extracts mcp command payload" {
-    switch (parse(testSlashRegistry(), "/mcp add everything npx -y @modelcontextprotocol/server-everything")) {
-        .mcp => |rest| try std.testing.expectEqualStrings("add everything npx -y @modelcontextprotocol/server-everything", rest),
-        else => return error.TestExpectedEqual,
-    }
-}
-
 test "parse recognizes exact no-payload commands" {
     try std.testing.expectEqual(ParsedCommand.copy, parse(testSlashRegistry(), "/copy"));
     try std.testing.expectEqual(ParsedCommand.trace, parse(testSlashRegistry(), "/trace"));
@@ -386,10 +375,6 @@ test "parse tolerates trailing whitespace on exact-match commands" {
 test "parse returns empty payload for bare prefix commands" {
     switch (parse(testSlashRegistry(), "/model")) {
         .model => |query| try std.testing.expectEqualStrings("", query),
-        else => return error.TestExpectedEqual,
-    }
-    switch (parse(testSlashRegistry(), "/mcp")) {
-        .mcp => |rest| try std.testing.expectEqualStrings("", rest),
         else => return error.TestExpectedEqual,
     }
     switch (parse(testSlashRegistry(), "/allowlist")) {
@@ -534,7 +519,6 @@ fn testHandlers(ctx: *TestContext) CommandHandlers {
         .show_stats = unexpectedNoPayload,
         .show_usage = unexpectedNoPayload,
         .undo_last = unexpectedNoPayload,
-        .handle_mcp = unexpectedPayload,
         .handle_skills = unexpectedPayload,
         .copy_last = unexpectedNoPayload,
         .create_trace = unexpectedNoPayload,

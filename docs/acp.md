@@ -332,7 +332,7 @@ A native writable ACP session advertises `exec_command` and `write_stdin`. `exec
 
 Unified Exec processes are session-local and are not durable terminal catalog entries, so they do not appear in `/ps` or `fx/backgroundTerminals/list`. WASM ACP sessions, read-only sessions, and configurations without native process support do not advertise these tools and do not fall back to the removed model-facing `terminal` tool.
 
-These are the only model-facing shell tools. Internal provider, MCP, search, and
+These are the only model-facing shell tools. Internal provider, search, and
 authentication subprocesses remain service implementation details and are not
 advertised as alternate command tools.
 

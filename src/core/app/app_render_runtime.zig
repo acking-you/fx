@@ -754,26 +754,6 @@ pub fn Runtime(comptime App: type) type {
                     render_input.skillsMenuProjection(&app.skills)
                 else
                     .{},
-                .mcp_menu = if (comptime @hasField(App, "mcp")) blk: {
-                    const view = app.mcp.menuView();
-                    break :blk .{
-                        .state = view.state,
-                        .servers = if (view.health) |health| health.servers else &.{},
-                        .tools = view.tools,
-                        .resources = if (view.resources) |catalog| catalog.resources.items else &.{},
-                        .resource_templates = if (view.resources) |catalog| catalog.templates.items else &.{},
-                        .prompts = if (view.prompts) |catalog| catalog.items else &.{},
-                        .configuration_issue_count = if (view.health) |health| health.configuration_issues.len else 0,
-                        .preview = view.preview,
-                        .feedback = view.feedback,
-                        .add_name = view.add_form.name.items,
-                        .add_target = view.add_form.target.items,
-                        .add_arguments = view.add_form.arguments.items,
-                        .add_draft = app.input_runtime.edit_state.input.items,
-                        .arguments = view.argument_fields,
-                        .argument_draft = app.input_runtime.edit_state.input.items,
-                    };
-                } else .{},
                 .help_menu = render_input.helpMenuProjection(
                     &app.input_runtime.help_menu,
                     app.slashRegistry(),
@@ -1342,7 +1322,6 @@ pub fn Runtime(comptime App: type) type {
                 render_input.skillsMenuProjection(&app.skills)
             else
                 .{};
-            ctx.mcp_menu = .{};
             ctx.help_menu = .{};
             ctx.settings_menu.active = false;
             ctx.model_menu = if (comptime @hasField(App, "model_cache"))
@@ -1506,8 +1485,8 @@ pub fn Runtime(comptime App: type) type {
                 }
             }
             if (comptime @hasField(App, "subagents") and
-                @hasDecl(App, "describeToolActionDeniedWithAdvertised") and
-                @hasDecl(App, "describeToolActionCompletedWithAdvertised") and
+                @hasDecl(App, "describeToolActionDeniedForRuntime") and
+                @hasDecl(App, "describeToolActionCompletedForRuntime") and
                 @hasDecl(@TypeOf(app.subagents), "childPresentationView") and
                 @hasDecl(@TypeOf(app.subagents), "childConversationRuntime"))
             {
@@ -1803,8 +1782,8 @@ pub fn Runtime(comptime App: type) type {
             var checkpoint_storage = transcriptBuildCheckpoint(app);
             const checkpoint = if (checkpoint_storage) |*value| value else null;
             const supports_child_conversation_projection =
-                @hasDecl(App, "describeToolActionDeniedWithAdvertised") and
-                @hasDecl(App, "describeToolActionCompletedWithAdvertised");
+                @hasDecl(App, "describeToolActionDeniedForRuntime") and
+                @hasDecl(App, "describeToolActionCompletedForRuntime");
             const child_view: ?ui_subagents.ChildPresentationView =
                 if (comptime supports_child_conversation_projection)
                     app.subagents.childPresentationView()

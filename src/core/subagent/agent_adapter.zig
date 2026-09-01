@@ -15,9 +15,6 @@ const tool_presentation = @import("../tooling/tool_presentation.zig");
 const tool_result_errors = @import("../tooling/tool_result_errors.zig");
 const model_tool_schema = @import("../tooling/model_tool_schema.zig");
 const tool_runtime = @import("../tooling/tool_runtime.zig");
-const tool_mcp_runtime = @import("../tooling/tool_mcp_runtime.zig");
-const mcp_access = @import("../mcp/access_policy.zig");
-const model_catalog = @import("../mcp/model_catalog.zig");
 const context_contract = @import("../workspace/context_contract.zig");
 const hooks = @import("../hooks/hooks.zig");
 const execution_memory = @import("../agent/execution_memory.zig");
@@ -85,15 +82,6 @@ const Context = struct {
         result.session_grants = self.admission.grants;
         result.permission_rules = self.admission.rules;
         result.permission_state_override = &self.admission.permission_state;
-        result.advertised_dynamic_tool_names = self.admission.integration_names;
-        result.mcp_access = if (self.admission.mcp_view) |*view|
-            .{ .scoped = .{
-                .captured = view,
-                .admission_authority_generation = self.admission.authority_generation,
-                .live = .{ .context = self, .resolve_fn = resolveLiveMcpView },
-            } }
-        else
-            .disabled;
         result.subagent_host = self.config.host;
         result.subagent_caller_id = self.turn.child_id;
         result.session_child_capability = self.turn.childCapability() catch null;
@@ -114,22 +102,6 @@ const Context = struct {
             .session_id = self.turn.child_id,
         };
         return result;
-    }
-
-    fn resolveLiveMcpView(
-        raw: *anyopaque,
-        alloc: Allocator,
-    ) !tool_mcp_runtime.ResolvedLiveView {
-        const self: *Context = @ptrCast(@alignCast(raw));
-        var authority = try self.turn.resolveLiveAuthority(alloc);
-        defer authority.deinit(alloc);
-        const view = authority.mcp_view orelse return error.McpRuntimeUnavailable;
-        authority.mcp_view = null;
-        return .{
-            .authority_generation = mcp_access.authorityGeneration(view),
-            .action_authority_generation = authority.generation,
-            .view = view,
-        };
     }
 };
 
@@ -435,74 +407,6 @@ fn appendStaticContext(raw: *anyopaque, arena: Allocator, messages: *std.ArrayLi
     try context.config.context_registry.appendDefaultStatic(.{
         .project_context = context.config.project_context,
     }, arena, messages);
-    var snapshot = try snapshotModelCatalogForView(
-        arena,
-        if (context.admission.mcp_view) |*view| view else null,
-    );
-    defer snapshot.deinit(arena);
-    const section = try model_catalog.render(arena, snapshot);
-    if (section.text.len > 0) {
-        try messages.append(arena, .{ .role = .system, .content = section.text });
-    }
-    if (section.notice) |notice| try pushLiveNotice(raw, notice);
-}
-
-fn snapshotModelCatalogForView(
-    alloc: Allocator,
-    maybe_view: ?*const mcp_access.View,
-) !model_catalog.Snapshot {
-    const view = maybe_view orelse return model_catalog.Snapshot.empty(alloc);
-    const servers = try alloc.alloc(model_catalog.ServerSummary, view.servers.len);
-    var initialized: usize = 0;
-    errdefer {
-        for (servers[0..initialized]) |server| alloc.free(server.name);
-        alloc.free(servers);
-    }
-    for (view.servers, 0..) |server, index| {
-        var tool_count: usize = 0;
-        for (view.tools) |tool| {
-            if (std.mem.eql(u8, tool.server_name, server.name)) tool_count += 1;
-        }
-        servers[index] = .{
-            .name = try alloc.dupe(u8, server.name),
-            .availability = .ready,
-            .tool_count = tool_count,
-        };
-        initialized += 1;
-    }
-    return .{ .servers = servers };
-}
-
-test "subagent model catalog counts only tools in the captured MCP view" {
-    const alloc = std.testing.allocator;
-    var servers = [_]mcp_access.ServerIdentity{.{
-        .name = @constCast("chrome-devtools"),
-        .source = .profile,
-        .scope = .profile,
-        .connection_generation = 1,
-        .catalog_generation = 2,
-        .auth_generation = 3,
-    }};
-    var tools = [_]mcp_access.ToolIdentity{
-        .{ .name = @constCast("mcp_chrome_one"), .server_name = @constCast("chrome-devtools") },
-        .{ .name = @constCast("mcp_chrome_two"), .server_name = @constCast("chrome-devtools") },
-    };
-    const view = mcp_access.View{
-        .runtime_generation = 1,
-        .owner_id = @constCast("child"),
-        .parent_id = @constCast("parent"),
-        .features_visible = false,
-        .servers = &servers,
-        .tools = &tools,
-    };
-
-    var snapshot = try snapshotModelCatalogForView(alloc, &view);
-    defer snapshot.deinit(alloc);
-
-    try std.testing.expectEqual(@as(usize, 1), snapshot.servers.len);
-    try std.testing.expectEqualStrings("chrome-devtools", snapshot.servers[0].name);
-    try std.testing.expectEqual(model_catalog.Availability.ready, snapshot.servers[0].availability);
-    try std.testing.expectEqual(@as(?usize, 2), snapshot.servers[0].tool_count);
 }
 
 fn validateToolCall(raw: *anyopaque, arena: Allocator, call: types.ToolCall) !agent_runtime.ToolCallValidationResult {
@@ -517,10 +421,9 @@ fn checkToolAvailability(raw: *anyopaque, arena: Allocator, call: types.ToolCall
 
 fn admissionContext(
     context: *Context,
-    dynamic_names: []const []const u8,
     review: ?auto_classifier.ReviewTurnContext,
 ) tool_runtime.Context {
-    var tool_ctx = tool_runtime.withAdvertisedDynamicToolNames(context.toolContext(), dynamic_names);
+    var tool_ctx = context.toolContext();
     tool_ctx.permission_review_turn = review;
     tool_ctx.permission_prompter = context.turn.permissionPrompter();
     return tool_ctx;
@@ -535,10 +438,9 @@ fn requestToolPermission(
     grants: []const types.PermissionGrant,
     live: ?agent_runtime.LiveToolAuthority,
     revalidation: ?agent_runtime.LivePermissionRevalidation,
-    dynamic_names: []const []const u8,
 ) !command_admission.PermissionOutcome {
     const context: *Context = @ptrCast(@alignCast(raw));
-    const tool_ctx = admissionContext(context, dynamic_names, review);
+    const tool_ctx = admissionContext(context, review);
     if (revalidation) |request| return switch (request) {
         .action => |action| tool_admission.revalidateLiveActionPermissionOutcome(
             tool_ctx.admissionInputWithLiveAuthority(live),
@@ -568,10 +470,9 @@ fn requestPreparedFileMutationPermission(
     mode: types.PermissionMode,
     grants: []const types.PermissionGrant,
     live: ?agent_runtime.LiveToolAuthority,
-    dynamic_names: []const []const u8,
 ) !command_admission.PermissionOutcome {
     const context: *Context = @ptrCast(@alignCast(raw));
-    const tool_ctx = admissionContext(context, dynamic_names, review);
+    const tool_ctx = admissionContext(context, review);
     return tool_admission.requestPreparedFileMutationPermissionOutcome(
         tool_ctx.admissionInputWithLiveAuthority(live),
         arena,
@@ -582,7 +483,7 @@ fn requestPreparedFileMutationPermission(
     );
 }
 
-fn describeToolAction(raw: *anyopaque, arena: Allocator, call: types.ToolCall, file_path: ?[]const u8, _: []const []const u8) ![]const u8 {
+fn describeToolAction(raw: *anyopaque, arena: Allocator, call: types.ToolCall, file_path: ?[]const u8) ![]const u8 {
     const context: *Context = @ptrCast(@alignCast(raw));
     return tool_presentation.formatPlainAction(arena, .{
         .tool_registry = context.config.tool_context.tool_registry,
@@ -592,7 +493,7 @@ fn describeToolAction(raw: *anyopaque, arena: Allocator, call: types.ToolCall, f
     });
 }
 
-fn describeToolActionCompleted(raw: *anyopaque, arena: Allocator, call: types.ToolCall, file_path: ?[]const u8, _: []const []const u8) ![]const u8 {
+fn describeToolActionCompleted(raw: *anyopaque, arena: Allocator, call: types.ToolCall, file_path: ?[]const u8) ![]const u8 {
     const context: *Context = @ptrCast(@alignCast(raw));
     return tool_presentation.formatPlainActionForState(arena, .{
         .tool_registry = context.config.tool_context.tool_registry,
@@ -609,8 +510,7 @@ fn resolveToolActionDisplayTarget(raw: *anyopaque, arena: Allocator, call: types
     return null;
 }
 
-fn describeToolActionDenied(raw: *anyopaque, arena: Allocator, call: types.ToolCall, file_path: ?[]const u8, label: []const u8, dynamic_names: []const []const u8) ![]const u8 {
-    _ = dynamic_names;
+fn describeToolActionDenied(raw: *anyopaque, arena: Allocator, call: types.ToolCall, file_path: ?[]const u8, label: []const u8) ![]const u8 {
     const context: *Context = @ptrCast(@alignCast(raw));
     return tool_presentation.formatPlainActionForState(arena, .{
         .tool_registry = context.config.tool_context.tool_registry,
@@ -620,11 +520,10 @@ fn describeToolActionDenied(raw: *anyopaque, arena: Allocator, call: types.ToolC
     }, .denied, label);
 }
 
-fn permissionTargetForCall(raw: *anyopaque, arena: Allocator, call: types.ToolCall, dynamic_names: []const []const u8) ![]const u8 {
+fn permissionTargetForCall(raw: *anyopaque, arena: Allocator, call: types.ToolCall) ![]const u8 {
     const context: *Context = @ptrCast(@alignCast(raw));
-    const tool_ctx = tool_runtime.withAdvertisedDynamicToolNames(context.toolContext(), dynamic_names);
     return tool_admission.permissionTargetForLiveAuthority(
-        tool_ctx.admissionInput(),
+        context.toolContext().admissionInput(),
         arena,
         call,
     );

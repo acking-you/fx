@@ -6,7 +6,6 @@ const communication = @import("communication.zig");
 const communication_store = @import("communication_store.zig");
 const control_store = @import("control_store.zig");
 const domain = @import("domain.zig");
-const mcp_access = @import("../mcp/access_policy.zig");
 const session_permission_state = @import("../permissions/session_permission_state.zig");
 
 const Allocator = std.mem.Allocator;
@@ -87,43 +86,34 @@ pub const Error = error{
 pub const HostAuthority = struct {
     generation: u64,
     tools: [][]u8,
-    integrations: [][]u8,
     rules: types.PermissionRuleSet,
     grants: []types.PermissionGrant,
     permission_state: session_permission_state.State = .{},
-    mcp_view: ?mcp_access.View = null,
 
     pub fn capture(
         alloc: Allocator,
         tools: []const []const u8,
-        integrations: []const []const u8,
         rules: types.PermissionRuleSet,
         grants: []const types.PermissionGrant,
     ) !HostAuthority {
-        return captureWithPermissionStateAndMcpView(
+        return captureWithPermissionState(
             alloc,
             tools,
-            integrations,
             rules,
             grants,
             .{},
-            null,
         );
     }
 
-    pub fn captureWithPermissionStateAndMcpView(
+    pub fn captureWithPermissionState(
         alloc: Allocator,
         tools: []const []const u8,
-        integrations: []const []const u8,
         rules: types.PermissionRuleSet,
         grants: []const types.PermissionGrant,
         permission_state: session_permission_state.State,
-        mcp_view: ?*const mcp_access.View,
     ) !HostAuthority {
         const owned_tools = try cloneStrings(alloc, tools);
         errdefer freeStrings(alloc, owned_tools);
-        const owned_integrations = try cloneStrings(alloc, integrations);
-        errdefer freeStrings(alloc, owned_integrations);
         var owned_rules = try types.dupePermissionRuleSet(alloc, rules);
         errdefer owned_rules.deinit(alloc);
         const owned_permission_state = try session_permission_state.projectForChild(
@@ -135,33 +125,25 @@ pub const HostAuthority = struct {
             var value = owned_permission_state;
             value.deinit(alloc);
         }
-        var owned_mcp_view = if (mcp_view) |view| try view.clone(alloc) else null;
-        errdefer if (owned_mcp_view) |*view| view.deinit(alloc);
         return .{
             .generation = hostGeneration(
                 tools,
-                integrations,
                 rules,
                 grants,
                 owned_permission_state,
-                mcp_view,
             ),
             .tools = owned_tools,
-            .integrations = owned_integrations,
             .rules = owned_rules,
             .grants = try types.dupePermissionGrantSlice(alloc, grants),
             .permission_state = owned_permission_state,
-            .mcp_view = owned_mcp_view,
         };
     }
 
     pub fn deinit(self: *HostAuthority, alloc: Allocator) void {
         freeStrings(alloc, self.tools);
-        freeStrings(alloc, self.integrations);
         self.rules.deinit(alloc);
         types.freePermissionGrantSlice(alloc, self.grants);
         self.permission_state.deinit(alloc);
-        if (self.mcp_view) |*mcp_view| mcp_view.deinit(alloc);
         self.* = undefined;
     }
 };
@@ -199,14 +181,12 @@ test "host authority preserves session denies and filters undelegated allows" {
         return error.TestExpectedAppliedState;
     defer parent_state.deinit(alloc);
 
-    var host = try HostAuthority.captureWithPermissionStateAndMcpView(
+    var host = try HostAuthority.captureWithPermissionState(
         alloc,
         &.{"run_command"},
-        &.{},
         .{},
         &.{},
         parent_state,
-        null,
     );
     defer host.deinit(alloc);
 
@@ -231,18 +211,14 @@ test "host authority preserves session denies and filters undelegated allows" {
 
 fn hostGeneration(
     tools: []const []const u8,
-    integrations: []const []const u8,
     rules: types.PermissionRuleSet,
     grants: []const types.PermissionGrant,
     permission_state: session_permission_state.State,
-    mcp_view: ?*const mcp_access.View,
 ) u64 {
     var hash = std.crypto.hash.sha2.Sha256.init(.{});
     hash.update("fx.subagent.host-authority.v2\x00");
     hashU64(&hash, tools.len);
     for (tools) |tool| hashString(&hash, tool);
-    hashU64(&hash, integrations.len);
-    for (integrations) |integration| hashString(&hash, integration);
     hashU64(&hash, rules.rules.len);
     for (rules.rules) |rule| {
         hashString(&hash, rule.permission);
@@ -263,24 +239,6 @@ fn hostGeneration(
         hashString(&hash, rule.key.canonical);
         hashString(&hash, @tagName(rule.decision));
         hashU64(&hash, rule.generation);
-    }
-    if (mcp_view) |view| {
-        hashU64(&hash, view.runtime_generation);
-        hashString(&hash, view.owner_id);
-        hashString(&hash, view.parent_id);
-        hashU64(&hash, @intFromBool(view.features_visible));
-        for (view.servers) |server_identity| {
-            hashString(&hash, server_identity.name);
-            hashString(&hash, @tagName(server_identity.source));
-            hashString(&hash, @tagName(server_identity.scope));
-            hashU64(&hash, server_identity.connection_generation);
-            hashU64(&hash, server_identity.catalog_generation);
-            hashU64(&hash, server_identity.auth_generation);
-        }
-        for (view.tools) |tool_identity| {
-            hashString(&hash, tool_identity.name);
-            hashString(&hash, tool_identity.server_name);
-        }
     }
     var digest: [32]u8 = undefined;
     hash.final(&digest);
@@ -314,22 +272,18 @@ pub const Snapshot = struct {
     root_id: []u8,
     generation: u64,
     tools: [][]u8,
-    integrations: [][]u8,
     rules: types.PermissionRuleSet,
     grants: []types.PermissionGrant,
     permission_state: session_permission_state.State = .{},
     permission_mode: types.PermissionMode = .yolo,
-    mcp_view: ?mcp_access.View = null,
 
     pub fn deinit(self: *Snapshot, alloc: Allocator) void {
         alloc.free(self.child_id);
         alloc.free(self.root_id);
         freeStrings(alloc, self.tools);
-        freeStrings(alloc, self.integrations);
         self.rules.deinit(alloc);
         types.freePermissionGrantSlice(alloc, self.grants);
         self.permission_state.deinit(alloc);
-        if (self.mcp_view) |*mcp_view| mcp_view.deinit(alloc);
         self.* = undefined;
     }
 
@@ -338,7 +292,6 @@ pub const Snapshot = struct {
             .generation = self.generation,
             .root_id = self.root_id,
             .tools = self.tools,
-            .integrations = self.integrations,
             .rules = self.rules,
             .grants = self.grants,
             .permission_state = &self.permission_state,
@@ -465,8 +418,6 @@ pub const Resolver = struct {
         errdefer alloc.free(owned_root_id);
         const tools = try cloneStrings(alloc, host.tools);
         errdefer freeStrings(alloc, tools);
-        const integrations = try cloneStrings(alloc, host.integrations);
-        errdefer freeStrings(alloc, integrations);
         var rules = try types.dupePermissionRuleSet(alloc, host.rules);
         errdefer rules.deinit(alloc);
         const permission_state = session_permission_state.dupe(
@@ -480,12 +431,6 @@ pub const Resolver = struct {
             var value = permission_state;
             value.deinit(alloc);
         }
-        var mcp_view = if (host.mcp_view) |view| try view.clone(alloc) else null;
-        errdefer if (mcp_view) |*view| view.deinit(alloc);
-        if (mcp_view) |*view| {
-            const parent_id = if (seen.items.len > 1) seen.items[1] else root;
-            try rebindMcpViewOwnership(alloc, view, child_id, parent_id);
-        }
         return .{
             .child_id = owned_child_id,
             .root_id = owned_root_id,
@@ -497,12 +442,10 @@ pub const Resolver = struct {
                 durable_generation,
             ),
             .tools = tools,
-            .integrations = integrations,
             .rules = rules,
             .grants = grants,
             .permission_state = permission_state,
             .permission_mode = permission_mode,
-            .mcp_view = mcp_view,
         };
     }
 
@@ -555,21 +498,6 @@ pub const Resolver = struct {
         }
     }
 };
-
-fn rebindMcpViewOwnership(
-    alloc: Allocator,
-    view: *mcp_access.View,
-    owner_id: []const u8,
-    parent_id: []const u8,
-) !void {
-    const owned_owner = try alloc.dupe(u8, owner_id);
-    errdefer alloc.free(owned_owner);
-    const owned_parent = try alloc.dupe(u8, parent_id);
-    alloc.free(view.owner_id);
-    alloc.free(view.parent_id);
-    view.owner_id = owned_owner;
-    view.parent_id = owned_parent;
-}
 
 fn authorityGeneration(
     child_id: []const u8,

@@ -1,5 +1,4 @@
 const std = @import("std");
-const mcp_access = @import("../mcp/access_policy.zig");
 const session_permission_state = @import("../permissions/session_permission_state.zig");
 const session_layout = @import("../session/session_layout.zig");
 const types = @import("../shared/types.zig");
@@ -347,9 +346,7 @@ pub const AdmissionSnapshot = struct {
     rules: types.PermissionRuleSet,
     grants: []types.PermissionGrant,
     permission_state: session_permission_state.State = .{},
-    integration_names: [][]u8,
     authority_generation: u64 = 0,
-    mcp_view: ?mcp_access.View = null,
 
     pub fn deinit(self: *AdmissionSnapshot, alloc: Allocator) void {
         alloc.free(self.parent_id);
@@ -359,8 +356,6 @@ pub const AdmissionSnapshot = struct {
         self.rules.deinit(alloc);
         types.freePermissionGrantSlice(alloc, self.grants);
         self.permission_state.deinit(alloc);
-        freeStrings(alloc, self.integration_names);
-        if (self.mcp_view) |*view| view.deinit(alloc);
         self.* = undefined;
     }
 
@@ -386,9 +381,6 @@ pub const AdmissionSnapshot = struct {
             var value = permission_state;
             value.deinit(alloc);
         }
-        var mcp_view = if (self.mcp_view) |view| try view.clone(alloc) else null;
-        errdefer if (mcp_view) |*view| view.deinit(alloc);
-        const integration_names = try cloneStrings(alloc, self.integration_names);
         return .{
             .parent_id = parent_id,
             .source_id = source_id,
@@ -400,9 +392,7 @@ pub const AdmissionSnapshot = struct {
             .rules = rules,
             .grants = grants,
             .permission_state = permission_state,
-            .integration_names = integration_names,
             .authority_generation = self.authority_generation,
-            .mcp_view = mcp_view,
         };
     }
 };
@@ -418,9 +408,7 @@ pub const AdmissionInput = struct {
     rules: types.PermissionRuleSet = .{},
     grants: []const types.PermissionGrant = &.{},
     permission_state: session_permission_state.State = .{},
-    integration_names: []const []const u8 = &.{},
     authority_generation: u64 = 0,
-    mcp_view: ?mcp_access.View = null,
 };
 
 pub const AdmissionError = error{
@@ -441,13 +429,11 @@ pub fn captureAdmission(
         return error.InvalidModel;
     if (input.tool_names.len > max_admission_items or
         input.rules.rules.len > max_admission_items or
-        input.grants.len > max_admission_items or
-        input.integration_names.len > max_admission_items)
+        input.grants.len > max_admission_items)
     {
         return error.TooManyAdmissionItems;
     }
     try validateAdmissionStrings(input.tool_names);
-    try validateAdmissionStrings(input.integration_names);
     for (input.rules.rules) |rule| {
         try validateAdmissionText(rule.permission);
         try validateAdmissionText(rule.pattern);
@@ -482,9 +468,6 @@ pub fn captureAdmission(
         var value = permission_state;
         value.deinit(alloc);
     }
-    var mcp_view = if (input.mcp_view) |view| try view.clone(alloc) else null;
-    errdefer if (mcp_view) |*view| view.deinit(alloc);
-    const integration_names = try cloneStrings(alloc, input.integration_names);
     return .{
         .parent_id = parent_id,
         .source_id = source_id,
@@ -496,9 +479,7 @@ pub fn captureAdmission(
         .rules = rules,
         .grants = grants,
         .permission_state = permission_state,
-        .integration_names = integration_names,
         .authority_generation = input.authority_generation,
-        .mcp_view = mcp_view,
     };
 }
 

@@ -1302,7 +1302,7 @@ test "cloneEnvironMap converts the native Windows environment to WTF-8" {
 
     var cloned = try cloneEnvironMap(std.testing.allocator);
     defer cloned.deinit();
-    try cloned.put("FX_MCP_OVERRIDE", "present");
+    try cloned.put("FX_TEST_OVERRIDE", "present");
     const block = try cloned.createWindowsBlock(std.testing.allocator, .{});
     defer block.deinit(std.testing.allocator);
     try std.testing.expect(!block.isEmpty());

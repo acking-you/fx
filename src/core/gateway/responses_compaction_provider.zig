@@ -26,7 +26,6 @@ pub const BuildRequest = struct {
     serialized_tools: []const u8,
     messages: []const types.ChatMessage,
     tool_choice: types.ToolChoice,
-    selected_dynamic_tool_schemas: []const []const u8 = &.{},
     vision_mode: stream_provider.VisionMode = .unavailable,
     provider_options: model_capabilities.ResolvedProviderOptions,
     max_output_tokens: ?u32 = null,

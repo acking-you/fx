@@ -61,7 +61,6 @@ const provider_catalog = @import("core/auth/provider_catalog.zig");
 const model_catalog = @import("core/gateway/model_catalog.zig");
 const agent_stream_provider = @import("core/agent/stream_provider.zig");
 const builtin_hooks = @import("builtins/hooks.zig");
-const builtin_mcp = @import("builtins/mcp.zig");
 const builtin_modes = @import("builtins/modes.zig");
 const builtin_skills = @import("builtins/skills.zig");
 const host = @import("core/hosts/host.zig");
@@ -73,13 +72,6 @@ const native_host = @import("core/hosts/native.zig");
 const debug_trace = @import("core/shared/debug_trace.zig");
 const display_width = @import("core/shared/display_width.zig");
 const file_index_mod = @import("core/workspace/file_index.zig");
-const mcp_command_provider = @import("core/mcp/command_provider.zig");
-const mcp_runtime_mod = @import("core/mcp/mcp_runtime.zig");
-const mcp_model_catalog = @import("core/mcp/model_catalog.zig");
-const mcp_access_policy = @import("core/mcp/access_policy.zig");
-const app_mcp_runtime = @import("core/app/app_mcp_runtime.zig");
-const app_mcp_menu_runtime = @import("core/app/app_mcp_menu_runtime.zig");
-const mcp_menu_state = @import("core/mcp/menu_state.zig");
 const skill_commands = @import("core/skills/skill_commands.zig");
 const skill_runtime = @import("core/skills/skill_runtime.zig");
 const cli_surface = @import("core/cli/cli_surface.zig");
@@ -123,7 +115,6 @@ const command_output_content = @import("core/tooling/command_output_content.zig"
 const thought_presentation = @import("core/output/thought_presentation.zig");
 const tool_dispatch = @import("core/tooling/tool_dispatch.zig");
 const tool_set_contract = @import("core/tooling/tool_set.zig");
-const tool_mcp_runtime = @import("core/tooling/tool_mcp_runtime.zig");
 const tool_runtime = @import("core/tooling/tool_runtime.zig");
 const web_fetch_runtime = @import("core/tooling/web_fetch_runtime.zig");
 const web_search_runtime = @import("core/tooling/web_search_runtime.zig");
@@ -398,10 +389,6 @@ const App = struct {
         return builtin_commands.slash_registry;
     }
 
-    pub fn mcpCommandProvider(_: *const Self) mcp_command_provider.Provider {
-        return builtin_mcp.command_provider;
-    }
-
     pub fn skillsCommandProvider(_: *const Self) skill_commands.Provider {
         return builtin_skills.command_provider;
     }
@@ -584,7 +571,6 @@ const App = struct {
     terminal_takeover: app_terminal_takeover_runtime.Controller = .{},
     subagents: ui_subagents.Controller = .{},
     change_tracker: change_tracker_mod.ChangeTracker = .{},
-    mcp: app_mcp_runtime.State = .{},
     skills: skill_runtime.Runtime = .{},
     context_snapshot: context_contract.GatheredContextSnapshot = .{},
     file_index: file_index_mod.FileIndex = .{},
@@ -619,14 +605,6 @@ const App = struct {
 
     stream: StreamState = .{},
     metrics: Metrics = .{},
-    fn loadNoMcpRuntime(
-        _: Allocator,
-        _: []const u8,
-        _: @import("core/mcp/elicitation.zig").Capabilities,
-    ) !?*mcp_runtime_mod.McpRuntime {
-        return null;
-    }
-
     pub fn init(alloc: Allocator, launch: *cli_surface.InteractiveLaunch) !Self {
         var app = Self{
             .alloc = alloc,
@@ -674,7 +652,6 @@ const App = struct {
             default_max_agent_steps,
             handle_sigwinch,
             .{
-                .load_mcp_runtime = if (comptime host_target.is_wasm) loadNoMcpRuntime else builtin_mcp.loadRuntime,
                 .skill_root_policy = if (comptime host_target.is_wasm) wasm_skill_root_policy else builtin_skills.root_policy,
                 .terminal_title = app.terminalTitle(),
             },
@@ -877,7 +854,6 @@ const App = struct {
         self.change_tracker.deinit(std.heap.c_allocator);
         for (self.diff_entries.items) |*entry| entry.deinit(std.heap.c_allocator);
         self.diff_entries.deinit(std.heap.c_allocator);
-        self.mcp.deinit(self.alloc);
         self.skills.deinit(std.heap.c_allocator);
         self.context_snapshot.deinit(self.alloc);
         self.file_index.deinit(std.heap.c_allocator);
@@ -1466,210 +1442,6 @@ const App = struct {
         return true;
     }
 
-    pub fn installInitialMcpRuntime(self: *App, runtime: ?*mcp_runtime_mod.McpRuntime) void {
-        self.mcp.installInitial(runtime);
-    }
-
-    pub fn acquireMcpRuntime(self: *App) ?app_mcp_runtime.Lease {
-        return self.mcp.acquire();
-    }
-
-    pub fn snapshotMcpModelCatalog(
-        self: *App,
-        alloc: Allocator,
-        permission_rules: types.PermissionRuleSet,
-        include_ask_deferred: bool,
-    ) !mcp_model_catalog.Snapshot {
-        return self.mcp.snapshotModelCatalog(
-            alloc,
-            permission_rules,
-            include_ask_deferred,
-        );
-    }
-
-    pub fn waitForRequiredMcp(
-        self: *App,
-        alloc: Allocator,
-        cancel_flag: ?*std.atomic.Value(bool),
-    ) !?[]u8 {
-        return self.mcp.waitForRequired(
-            alloc,
-            cancel_flag,
-            @intCast(@max(io_mod.milliTimestamp(), 0)),
-        );
-    }
-
-    pub fn beginMcpReload(self: *App) !void {
-        return self.mcp.beginReload(
-            self.alloc,
-            self.workspace_root,
-            .{ .form = true, .url = true },
-            if (comptime host_target.is_wasm) loadNoMcpRuntime else builtin_mcp.loadRuntime,
-            builtin_mcp.previewNativeWorkspaceAuthority,
-            self.toolRegistry(),
-            @intCast(@max(io_mod.milliTimestamp(), 0)),
-        );
-    }
-
-    pub fn beginMcpMenuReload(self: *App, generation: u64) !void {
-        return self.mcp.beginMenuReload(
-            self.alloc,
-            self.workspace_root,
-            .{ .form = true, .url = true },
-            if (comptime host_target.is_wasm) loadNoMcpRuntime else builtin_mcp.loadRuntime,
-            builtin_mcp.previewNativeWorkspaceAuthority,
-            self.toolRegistry(),
-            @intCast(@max(io_mod.milliTimestamp(), 0)),
-            generation,
-        );
-    }
-
-    pub fn beginMcpAuthorityReduction(self: *App, rebuild: bool) !void {
-        return self.mcp.beginAuthorityReduction(
-            self.alloc,
-            self.workspace_root,
-            .{ .form = true, .url = true },
-            if (comptime host_target.is_wasm) loadNoMcpRuntime else builtin_mcp.loadRuntime,
-            self.toolRegistry(),
-            @intCast(@max(io_mod.milliTimestamp(), 0)),
-            rebuild,
-        ) catch |err| {
-            self.mcp.retireAuthoritySynchronously(self.alloc);
-            return err;
-        };
-    }
-
-    pub fn beginMcpMenuAuthorityReduction(
-        self: *App,
-        rebuild: bool,
-        generation: u64,
-    ) !void {
-        return self.mcp.beginMenuAuthorityReduction(
-            self.alloc,
-            self.workspace_root,
-            .{ .form = true, .url = true },
-            if (comptime host_target.is_wasm) loadNoMcpRuntime else builtin_mcp.loadRuntime,
-            self.toolRegistry(),
-            @intCast(@max(io_mod.milliTimestamp(), 0)),
-            rebuild,
-            generation,
-        ) catch |err| {
-            self.mcp.retireAuthoritySynchronously(self.alloc);
-            return err;
-        };
-    }
-
-    pub fn startMcpAuthentication(
-        self: *App,
-        server_name: []const u8,
-    ) !mcp_command_provider.AuthenticationStart {
-        return self.mcp.startAuthentication(
-            self.alloc,
-            server_name,
-            self.urlOpener(),
-        );
-    }
-
-    pub fn beginMcpMenuAuthentication(self: *App, generation: u64) !void {
-        const server_name = self.mcp.selectedMenuServerName() orelse
-            return error.McpServerNotFound;
-        const started = try self.mcp.startMenuAuthentication(
-            self.alloc,
-            server_name,
-            self.urlOpener(),
-            generation,
-        );
-        if (started == .busy) return error.McpAuthenticationBusy;
-    }
-
-    pub fn takeMcpAuthenticationCompletion(
-        self: *App,
-    ) !?app_mcp_runtime.AuthenticationCompletion {
-        return self.mcp.takeAuthenticationCompletion();
-    }
-
-    pub fn mcpAuthenticationCompletionOrigin(self: *const App) app_mcp_runtime.PresentationOrigin {
-        return self.mcp.authenticationCompletionOrigin();
-    }
-
-    pub fn applyMcpMenuAuthenticationCompletion(
-        self: *App,
-        generation: u64,
-        completion: *const app_mcp_runtime.AuthenticationCompletion,
-    ) !void {
-        if (try self.mcp.applyMenuAuthenticationCompletion(
-            self.alloc,
-            generation,
-            completion,
-        )) {
-            self.beginMcpMenuReload(generation) catch |err| {
-                try self.mcp.recordMenuEffectFailure(self.alloc, generation, err);
-            };
-        }
-        self.shell.render_requests.request(.footer);
-    }
-
-    pub fn mcpAuthenticationPending(
-        self: *App,
-        server_name: []const u8,
-    ) bool {
-        return self.mcp.authenticationPending(server_name);
-    }
-
-    pub fn takeMcpReloadCompletion(self: *App) !?app_mcp_runtime.ReloadCompletion {
-        return self.mcp.takeReloadCompletion();
-    }
-
-    pub fn mcpReloadCompletionOrigin(self: *const App) app_mcp_runtime.PresentationOrigin {
-        return self.mcp.reloadCompletionOrigin();
-    }
-
-    pub fn applyMcpMenuReloadCompletion(
-        self: *App,
-        generation: u64,
-        completion: *const app_mcp_runtime.ReloadCompletion,
-    ) !void {
-        try self.mcp.applyMenuReloadCompletion(
-            self.alloc,
-            generation,
-            completion,
-            @intCast(@max(io_mod.milliTimestamp(), 0)),
-        );
-        self.shell.render_requests.request(.footer);
-    }
-
-    pub fn startMcpDiscovery(self: *App) void {
-        self.mcp.startDiscovery(self.toolRegistry());
-    }
-
-    pub fn presentProjectMcpPrompt(self: *App) !void {
-        const name = (try self.mcp.projectPromptDisplayName(self.alloc)) orelse return;
-        defer self.alloc.free(name);
-        var notice: std.Io.Writer.Allocating = .init(self.alloc);
-        defer notice.deinit();
-        try notice.writer.print(
-            "Project MCP server '{s}' is defined in .mcp.json.\n  [1] Approve  [2] Approve all  [3] Reject  [Esc] Dismiss remaining prompts\n",
-            .{name},
-        );
-        try self.writeTranscriptClassified(
-            notice.writer.buffered(),
-            true,
-            .unknown_raw,
-        );
-    }
-
-    pub fn projectMcpPromptActive(self: *App) bool {
-        return self.mcp.projectPromptActive();
-    }
-
-    pub fn projectMcpPromptName(self: *App, alloc: Allocator) !?[]u8 {
-        return self.mcp.projectPromptName(alloc);
-    }
-
-    pub fn suppressProjectMcpPrompts(self: *App) void {
-        self.mcp.suppressProjectPrompts();
-    }
-
     fn effectiveToolSet(self: *const App) tool_set_contract.ToolSet {
         if (comptime host_profile.tools) {
             return builtin_tools.advertisement_set;
@@ -1686,116 +1458,6 @@ const App = struct {
 
     pub fn toolAdvertisementSet(self: *const App) tool_set_contract.ToolSet {
         return self.effectiveToolSet();
-    }
-
-    pub fn hasMcpTool(self: *App, name: []const u8, access: tool_mcp_runtime.Access) bool {
-        return self.mcp.hasTool(name, access);
-    }
-
-    pub fn validateMcpTool(
-        self: *App,
-        arena: Allocator,
-        name: []const u8,
-        arguments_json: []const u8,
-        access: tool_mcp_runtime.Access,
-    ) !tool_mcp_runtime.ValidationResult {
-        return self.mcp.validateTool(arena, name, arguments_json, access);
-    }
-
-    pub fn callMcpTool(
-        self: *App,
-        arena: Allocator,
-        name: []const u8,
-        arguments_json: []const u8,
-        max_tool_result_bytes: usize,
-        options: tool_mcp_runtime.CallOptions,
-    ) !?tool_mcp_runtime.CallResult {
-        return self.mcp.callTool(arena, name, arguments_json, max_tool_result_bytes, options);
-    }
-
-    pub fn searchMcpTools(self: *App, arena: Allocator, request: tool_mcp_runtime.SearchRequest, permission_rules: types.PermissionRuleSet, access: tool_mcp_runtime.Access) !tool_mcp_runtime.SearchResult {
-        return self.mcp.searchTools(arena, request, permission_rules, self.context_limits, access);
-    }
-
-    pub fn mcpToolSchemaJson(self: *App, arena: Allocator, name: []const u8, permission_rules: types.PermissionRuleSet, access: tool_mcp_runtime.Access) !?tool_mcp_runtime.ToolSchemaResult {
-        return self.mcp.toolSchema(arena, name, permission_rules, self.context_limits, access);
-    }
-
-    pub fn listMcpServersAndTools(self: *App, alloc: Allocator) ![]u8 {
-        return self.mcp.renderHealth(alloc);
-    }
-
-    pub fn openMcpMenu(self: *App) !void {
-        try self.mcp.openMenu(
-            self.alloc,
-            @intCast(@max(io_mod.milliTimestamp(), 0)),
-        );
-    }
-
-    pub fn closeMcpMenu(self: *App) void {
-        self.mcp.closeMenu(self.alloc);
-    }
-
-    pub fn beginMcpMenuEffect(self: *App, effect: mcp_menu_state.Effect) !void {
-        return self.mcp.beginMenuEffect(
-            self.alloc,
-            effect,
-            self.permission_engine.rules,
-            self.context_limits,
-        );
-    }
-
-    pub fn recordMcpMenuEffectFailure(
-        self: *App,
-        generation: u64,
-        err: anyerror,
-    ) !void {
-        return self.mcp.recordMenuEffectFailure(self.alloc, generation, err);
-    }
-
-    pub fn saveMcpMenuAdd(
-        self: *App,
-        generation: u64,
-        transport: mcp_menu_state.AddTransport,
-    ) !void {
-        return app_mcp_menu_runtime.Runtime(App).saveAdd(self, generation, transport);
-    }
-
-    pub fn removeMcpMenuServer(self: *App, generation: u64) !void {
-        return app_mcp_menu_runtime.Runtime(App).removeServer(self, generation);
-    }
-
-    pub fn applyMcpMenuTrustAction(
-        self: *App,
-        generation: u64,
-        action: mcp_menu_state.Action,
-    ) !void {
-        return app_mcp_menu_runtime.Runtime(App).applyTrustAction(self, generation, action);
-    }
-
-    pub fn summarizeMcpServers(self: *App, alloc: Allocator) ![]u8 {
-        return self.mcp.renderHealthSummary(alloc);
-    }
-
-    pub fn snapshotMcpToolNames(self: *App, alloc: Allocator) ![][]u8 {
-        return self.mcp.snapshotToolNames(alloc, self.permission_engine.rules);
-    }
-
-    pub fn snapshotMcpAccessView(
-        self: *App,
-        alloc: Allocator,
-        owner_id: []const u8,
-        parent_id: []const u8,
-        permission_rules: types.PermissionRuleSet,
-        features_visible: bool,
-    ) !?mcp_access_policy.View {
-        return self.mcp.snapshotAccessView(
-            alloc,
-            owner_id,
-            parent_id,
-            permission_rules,
-            features_visible,
-        );
     }
 
     pub fn snapshotModelToolProjection(
@@ -1856,7 +1518,7 @@ const App = struct {
         model: []const u8,
     ) !tool_projection.EffectiveToolProjection {
         const bundle = self.providerSet().select(provider);
-        return app_mcp_runtime.buildModelToolProjection(&self.mcp, alloc, self.toolAdvertisementSet(), .{
+        return tool_projection.buildModelToolProjectionForSet(alloc, self.toolAdvertisementSet(), .{
             .permission_mode = permission_mode,
             .permission_rules = permission_rules,
             .subagent_available = self.session_persistence.subagent_host != null,
@@ -1928,44 +1590,28 @@ const App = struct {
         return providers;
     }
 
-    pub fn describeToolAction(self: *App, arena: Allocator, call: ToolCall, display_target: ?[]const u8, advertised_dynamic_tool_names: []const []const u8) ![]const u8 {
-        return AgentAppRuntime.describeToolAction(self, arena, call, display_target, advertised_dynamic_tool_names, &ignored_list_entries, max_list_entries, max_read_file_bytes, max_read_file_lines, max_read_file_line_len, max_command_output_bytes, builtin_gateway.retry_count, builtin_gateway.defaultChatUrl());
+    pub fn describeToolActionForRuntime(self: *App, arena: Allocator, call: ToolCall, display_target: ?[]const u8) ![]const u8 {
+        return AgentAppRuntime.describeToolAction(self, arena, call, display_target, &ignored_list_entries, max_list_entries, max_read_file_bytes, max_read_file_lines, max_read_file_line_len, max_command_output_bytes, builtin_gateway.retry_count, builtin_gateway.defaultChatUrl());
     }
 
     pub fn resolveToolActionDisplayTarget(self: *App, arena: Allocator, call: ToolCall) !?[]const u8 {
         return AgentAppRuntime.resolveToolActionDisplayTarget(self, arena, call, &ignored_list_entries, max_list_entries, max_read_file_bytes, max_read_file_lines, max_read_file_line_len, max_command_output_bytes, builtin_gateway.retry_count, builtin_gateway.defaultChatUrl());
     }
 
-    pub fn describeToolActionWithAdvertised(self: *App, arena: Allocator, call: ToolCall, display_target: ?[]const u8, advertised_dynamic_tool_names: []const []const u8) ![]const u8 {
-        return self.describeToolAction(arena, call, display_target, advertised_dynamic_tool_names);
+    pub fn describeToolActionCompletedForRuntime(self: *App, arena: Allocator, call: ToolCall, display_target: ?[]const u8) ![]const u8 {
+        return AgentAppRuntime.describeToolActionCompleted(self, arena, call, display_target, &ignored_list_entries, max_list_entries, max_read_file_bytes, max_read_file_lines, max_read_file_line_len, max_command_output_bytes, builtin_gateway.retry_count, builtin_gateway.defaultChatUrl());
     }
 
-    pub fn describeToolActionCompleted(self: *App, arena: Allocator, call: ToolCall, display_target: ?[]const u8, advertised_dynamic_tool_names: []const []const u8) ![]const u8 {
-        return AgentAppRuntime.describeToolActionCompleted(self, arena, call, display_target, advertised_dynamic_tool_names, &ignored_list_entries, max_list_entries, max_read_file_bytes, max_read_file_lines, max_read_file_line_len, max_command_output_bytes, builtin_gateway.retry_count, builtin_gateway.defaultChatUrl());
+    pub fn describeToolActionDeniedForRuntime(self: *App, arena: Allocator, call: ToolCall, display_target: ?[]const u8, label: []const u8) ![]const u8 {
+        return AgentAppRuntime.describeToolActionDenied(self, arena, call, display_target, label, &ignored_list_entries, max_list_entries, max_read_file_bytes, max_read_file_lines, max_read_file_line_len, max_command_output_bytes, builtin_gateway.retry_count, builtin_gateway.defaultChatUrl());
     }
 
-    pub fn describeToolActionCompletedWithAdvertised(self: *App, arena: Allocator, call: ToolCall, display_target: ?[]const u8, advertised_dynamic_tool_names: []const []const u8) ![]const u8 {
-        return self.describeToolActionCompleted(arena, call, display_target, advertised_dynamic_tool_names);
+    pub fn requestToolPermissionSyncForRuntime(self: *App, arena: Allocator, call: ToolCall, review_turn: permission_auto_classifier.ReviewTurnContext, permission_mode: PermissionMode, local_grants: []const PermissionGrant, live_authority: ?agent_runtime.LiveToolAuthority, revalidation: ?agent_runtime.LivePermissionRevalidation) !command_admission.PermissionOutcome {
+        return AgentAppRuntime.requestToolPermissionSync(self, arena, call, review_turn, permission_mode, local_grants, live_authority, revalidation, &ignored_list_entries, max_list_entries, max_read_file_bytes, max_read_file_lines, max_read_file_line_len, max_command_output_bytes, builtin_gateway.retry_count, builtin_gateway.defaultChatUrl());
     }
 
-    pub fn describeToolActionDenied(self: *App, arena: Allocator, call: ToolCall, display_target: ?[]const u8, label: []const u8, advertised_dynamic_tool_names: []const []const u8) ![]const u8 {
-        return AgentAppRuntime.describeToolActionDenied(self, arena, call, display_target, label, advertised_dynamic_tool_names, &ignored_list_entries, max_list_entries, max_read_file_bytes, max_read_file_lines, max_read_file_line_len, max_command_output_bytes, builtin_gateway.retry_count, builtin_gateway.defaultChatUrl());
-    }
-
-    pub fn describeToolActionDeniedWithAdvertised(self: *App, arena: Allocator, call: ToolCall, display_target: ?[]const u8, label: []const u8, advertised_dynamic_tool_names: []const []const u8) ![]const u8 {
-        return self.describeToolActionDenied(arena, call, display_target, label, advertised_dynamic_tool_names);
-    }
-
-    pub fn requestToolPermissionSync(self: *App, arena: Allocator, call: ToolCall, review_turn: permission_auto_classifier.ReviewTurnContext, permission_mode: PermissionMode, local_grants: []const PermissionGrant, live_authority: ?agent_runtime.LiveToolAuthority, revalidation: ?agent_runtime.LivePermissionRevalidation, advertised_dynamic_tool_names: []const []const u8) !command_admission.PermissionOutcome {
-        return AgentAppRuntime.requestToolPermissionSync(self, arena, call, review_turn, permission_mode, local_grants, live_authority, revalidation, advertised_dynamic_tool_names, &ignored_list_entries, max_list_entries, max_read_file_bytes, max_read_file_lines, max_read_file_line_len, max_command_output_bytes, builtin_gateway.retry_count, builtin_gateway.defaultChatUrl());
-    }
-
-    pub fn requestToolPermissionSyncWithAdvertised(self: *App, arena: Allocator, call: ToolCall, review_turn: permission_auto_classifier.ReviewTurnContext, permission_mode: PermissionMode, local_grants: []const PermissionGrant, live_authority: ?agent_runtime.LiveToolAuthority, revalidation: ?agent_runtime.LivePermissionRevalidation, advertised_dynamic_tool_names: []const []const u8) !command_admission.PermissionOutcome {
-        return self.requestToolPermissionSync(arena, call, review_turn, permission_mode, local_grants, live_authority, revalidation, advertised_dynamic_tool_names);
-    }
-
-    pub fn requestPreparedFileMutationPermissionSyncWithAdvertised(self: *App, arena: Allocator, call: ToolCall, prepared: *tool_admission.PreparedFileMutationCall, review_turn: permission_auto_classifier.ReviewTurnContext, permission_mode: PermissionMode, local_grants: []const PermissionGrant, live_authority: ?agent_runtime.LiveToolAuthority, advertised_dynamic_tool_names: []const []const u8) !command_admission.PermissionOutcome {
-        return AgentAppRuntime.requestPreparedFileMutationPermissionSync(self, arena, call, prepared, review_turn, permission_mode, local_grants, live_authority, advertised_dynamic_tool_names, &ignored_list_entries, max_list_entries, max_read_file_bytes, max_read_file_lines, max_read_file_line_len, max_command_output_bytes, builtin_gateway.retry_count, builtin_gateway.defaultChatUrl());
+    pub fn requestPreparedFileMutationPermissionSyncForRuntime(self: *App, arena: Allocator, call: ToolCall, prepared: *tool_admission.PreparedFileMutationCall, review_turn: permission_auto_classifier.ReviewTurnContext, permission_mode: PermissionMode, local_grants: []const PermissionGrant, live_authority: ?agent_runtime.LiveToolAuthority) !command_admission.PermissionOutcome {
+        return AgentAppRuntime.requestPreparedFileMutationPermissionSync(self, arena, call, prepared, review_turn, permission_mode, local_grants, live_authority, &ignored_list_entries, max_list_entries, max_read_file_bytes, max_read_file_lines, max_read_file_line_len, max_command_output_bytes, builtin_gateway.retry_count, builtin_gateway.defaultChatUrl());
     }
 
     pub fn validateToolCall(self: *App, arena: Allocator, call: ToolCall) !agent_runtime.ToolCallValidationResult {
@@ -1976,12 +1622,8 @@ const App = struct {
         return AgentAppRuntime.checkToolAvailability(self, arena, call, &ignored_list_entries, max_list_entries, max_read_file_bytes, max_read_file_lines, max_read_file_line_len, max_command_output_bytes, builtin_gateway.retry_count, builtin_gateway.defaultChatUrl());
     }
 
-    pub fn permissionTargetForCall(self: *App, arena: Allocator, call: ToolCall, advertised_dynamic_tool_names: []const []const u8) ![]const u8 {
-        return AgentAppRuntime.permissionTargetForCall(self, arena, call, advertised_dynamic_tool_names, &ignored_list_entries, max_list_entries, max_read_file_bytes, max_read_file_lines, max_read_file_line_len, max_command_output_bytes, builtin_gateway.retry_count, builtin_gateway.defaultChatUrl());
-    }
-
-    pub fn permissionTargetForCallWithAdvertised(self: *App, arena: Allocator, call: ToolCall, advertised_dynamic_tool_names: []const []const u8) ![]const u8 {
-        return self.permissionTargetForCall(arena, call, advertised_dynamic_tool_names);
+    pub fn permissionTargetForCallForRuntime(self: *App, arena: Allocator, call: ToolCall) ![]const u8 {
+        return AgentAppRuntime.permissionTargetForCall(self, arena, call, &ignored_list_entries, max_list_entries, max_read_file_bytes, max_read_file_lines, max_read_file_line_len, max_command_output_bytes, builtin_gateway.retry_count, builtin_gateway.defaultChatUrl());
     }
 
     pub fn preparePermissionStateAction(
@@ -2208,7 +1850,7 @@ const App = struct {
         return AgentAppRuntime.executeToolCall(self, request, &ignored_list_entries, max_list_entries, max_read_file_bytes, max_read_file_lines, max_read_file_line_len, max_command_output_bytes, builtin_gateway.retry_count, builtin_gateway.defaultChatUrl());
     }
 
-    pub fn executeToolCallWithAdvertised(self: *App, request: agent_runtime.ToolExecutionRequest) !ToolExecutionResult {
+    pub fn executeToolCallForRuntime(self: *App, request: agent_runtime.ToolExecutionRequest) !ToolExecutionResult {
         return self.executeToolCall(request);
     }
 
@@ -2877,18 +2519,6 @@ const App = struct {
         if (try app_commands.Handlers(App).collectUsageDashboardFacts(self)) {
             RenderAppRuntime.requestActiveSurfaceFrame(self, .footer);
         }
-        switch (try self.mcp.collectMenuCompletion(self.alloc)) {
-            .none => {},
-            .repaint => RenderAppRuntime.requestActiveSurfaceFrame(self, .footer),
-            .reload => |generation| {
-                self.beginMcpMenuReload(generation) catch |err| {
-                    try self.mcp.recordMenuEffectFailure(self.alloc, generation, err);
-                };
-                RenderAppRuntime.requestActiveSurfaceFrame(self, .footer);
-            },
-        }
-        try app_commands.Handlers(App).collectMcpAuthenticationFacts(self);
-        try app_commands.Handlers(App).collectMcpReloadFacts(self);
         if (comptime host_profile.native_auth or host_profile.js_host_auth) {
             try AuthAppRuntime.collectSignInFacts(self);
             try AuthAppRuntime.collectProviderSwitchFacts(self);
@@ -3528,12 +3158,6 @@ fn needsEarlyThreadedIo(args: []const [:0]const u8) bool {
     const effective_args = cli_surface.argsAfterGlobalLaunchArgs(args);
     if (effective_args.len == 0) return false;
     const command = effective_args[0];
-    if (std.mem.eql(u8, command, "mcp")) {
-        if (effective_args.len < 2) return false;
-        return std.mem.eql(u8, effective_args[1], "auth") or
-            std.mem.eql(u8, effective_args[1], "list") or
-            std.mem.eql(u8, effective_args[1], "logout");
-    }
     return std.mem.eql(u8, command, "login") or
         std.mem.eql(u8, command, "setup") or
         std.mem.eql(u8, command, "logout") or
@@ -3573,19 +3197,6 @@ test "credential-reading commands use early threaded io without full entry confi
         @as([:0]const u8, "usage"),
         @as([:0]const u8, "--period"),
         @as([:0]const u8, "7d"),
-    }));
-}
-
-test "MCP process commands use early threaded io" {
-    for ([_][:0]const u8{ "auth", "list", "logout" }) |operation| {
-        try std.testing.expect(needsEarlyThreadedIo(&.{
-            @as([:0]const u8, "mcp"),
-            operation,
-        }));
-    }
-    try std.testing.expect(!needsEarlyThreadedIo(&.{
-        @as([:0]const u8, "mcp"),
-        @as([:0]const u8, "path"),
     }));
 }
 
@@ -3688,11 +3299,6 @@ fn fullEntryConfig() app_entry_runtime.Config {
         .context_registry = default_context_registry,
         .mode_registry = builtin_modes.registry,
         .tool_set = builtin_tools.advertisement_set,
-        .inspect_mcp_profile_config = builtin_mcp.inspectProfileConfig,
-        .inspect_mcp_local_config = builtin_mcp.inspectLocalConfig,
-        .load_mcp_runtime = builtin_mcp.loadRuntime,
-        .add_mcp_profile_server = builtin_mcp.addProfileServer,
-        .remove_mcp_profile_server = builtin_mcp.removeProfileServer,
         .acp_runner = .{ .run_fn = runAcpServer },
     };
 }
@@ -3725,11 +3331,6 @@ fn localEntryConfig() app_entry_runtime.Config {
         .context_registry = default_context_registry,
         .mode_registry = builtin_modes.registry,
         .tool_set = builtin_tools.advertisement_set,
-        .inspect_mcp_profile_config = builtin_mcp.inspectProfileConfig,
-        .inspect_mcp_local_config = builtin_mcp.inspectLocalConfig,
-        .load_mcp_runtime = builtin_mcp.loadRuntime,
-        .add_mcp_profile_server = builtin_mcp.addProfileServer,
-        .remove_mcp_profile_server = builtin_mcp.removeProfileServer,
         .acp_runner = .{ .run_fn = runAcpServer },
     };
 }
@@ -3762,11 +3363,6 @@ fn emptyEntryConfig() app_entry_runtime.Config {
         .context_registry = default_context_registry,
         .mode_registry = builtin_modes.registry,
         .tool_set = builtin_tools.advertisement_set,
-        .inspect_mcp_profile_config = builtin_mcp.inspectProfileConfig,
-        .inspect_mcp_local_config = builtin_mcp.inspectLocalConfig,
-        .load_mcp_runtime = builtin_mcp.loadRuntime,
-        .add_mcp_profile_server = builtin_mcp.addProfileServer,
-        .remove_mcp_profile_server = builtin_mcp.removeProfileServer,
         .acp_runner = .{ .run_fn = runAcpServer },
     };
 }
@@ -4284,11 +3880,6 @@ test {
     _ = @import("core/permissions/direct_command.zig");
     _ = @import("core/permissions/auto_classifier.zig");
     _ = @import("core/permissions/command_admission.zig");
-    _ = @import("core/mcp/mcp_runtime.zig");
-    _ = @import("core/mcp/features/common.zig");
-    _ = @import("core/mcp/features/resources.zig");
-    _ = @import("core/mcp/features/prompts.zig");
-    _ = @import("core/mcp/features/completion.zig");
     _ = @import("core/config/model_capabilities.zig");
     _ = @import("core/output/output_contracts.zig");
     _ = @import("core/output/thought_presentation.zig");
@@ -4353,7 +3944,6 @@ test {
     _ = @import("core/tooling/tool_runtime.zig");
     _ = @import("core/tooling/tool_specs.zig");
     _ = @import("builtins/commands.zig");
-    _ = @import("builtins/mcp.zig");
     _ = @import("builtins/modes.zig");
     _ = @import("builtins/tools.zig");
     _ = @import("tools/agent/ask_user_question.zig");

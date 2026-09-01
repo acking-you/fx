@@ -98,57 +98,6 @@ pub fn build(b: *std.Build) void {
         addNapiArtifact(b, napi_surface, target, git_commit, app_version);
     }
 
-    const mcp_test_exports = b.createModule(.{
-        .root_source_file = b.path("src/mcp_test_exports.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    mcp_test_exports.addImport("build_options", build_options.createModule());
-    const json_schema_corpus = b.addExecutable(.{
-        .name = "json-schema-corpus",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/json-schema/corpus_runner.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-        }),
-    });
-    json_schema_corpus.root_module.addImport(
-        "mcp_test_exports",
-        mcp_test_exports,
-    );
-    const run_json_schema_corpus = b.addRunArtifact(json_schema_corpus);
-    if (b.args) |args| run_json_schema_corpus.addArgs(args);
-    const json_schema_corpus_step = b.step(
-        "run-json-schema-corpus",
-        "Run the pinned JSON Schema Test Suite corpus",
-    );
-    json_schema_corpus_step.dependOn(&run_json_schema_corpus.step);
-
-    const mcp_dispatcher_e2e = b.addExecutable(.{
-        .name = "mcp-stdio-dispatcher-driver",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path(
-                "tests/e2e/fixtures/mcp-stdio-dispatcher-driver.zig",
-            ),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-        }),
-    });
-    mcp_dispatcher_e2e.root_module.addImport(
-        "mcp_test_exports",
-        mcp_test_exports,
-    );
-    const run_mcp_dispatcher_e2e = b.addRunArtifact(mcp_dispatcher_e2e);
-    if (b.args) |args| run_mcp_dispatcher_e2e.addArgs(args);
-    const mcp_dispatcher_e2e_step = b.step(
-        "run-mcp-stdio-dispatcher-e2e",
-        "Run the MCP stdio dispatcher E2E driver",
-    );
-    mcp_dispatcher_e2e_step.dependOn(&run_mcp_dispatcher_e2e.step);
-
     // --- file_index search benchmark ---
     const benchmark_exports_mod = b.createModule(.{
         .root_source_file = b.path("src/benchmark_exports.zig"),

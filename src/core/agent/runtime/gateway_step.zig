@@ -153,40 +153,6 @@ fn clampTokenCount(value: ?u64) u32 {
 
 pub const VisionToolMode = agent_stream_provider.VisionMode;
 
-pub fn recordSelectedDynamicTool(
-    alloc: Allocator,
-    names: *std.ArrayList([]const u8),
-    tools: *std.ArrayList(agent_stream_provider.DynamicFunctionTool),
-    execution: ToolExecutionResult,
-) !void {
-    const name = execution.selected_dynamic_tool_name orelse return;
-    const schema_json = execution.selected_dynamic_tool_schema_json orelse return;
-    for (names.items) |existing| {
-        if (std.mem.eql(u8, existing, name)) return;
-    }
-    const schema = try std.json.parseFromSliceLeaky(
-        std.json.Value,
-        alloc,
-        schema_json,
-        .{},
-    );
-    if (schema != .object) return error.InvalidToolSchema;
-    const schema_name = schema.object.get("name") orelse return error.InvalidToolSchema;
-    const description = schema.object.get("description") orelse return error.InvalidToolSchema;
-    const input_schema = schema.object.get("inputSchema") orelse return error.InvalidToolSchema;
-    if (schema_name != .string or description != .string or input_schema != .object or
-        !std.mem.eql(u8, schema_name.string, name))
-    {
-        return error.InvalidToolSchema;
-    }
-    try names.append(alloc, name);
-    try tools.append(alloc, .{
-        .name = name,
-        .description = description.string,
-        .input_schema = input_schema,
-    });
-}
-
 pub fn gatewayHttpErrorDetail(
     alloc: Allocator,
     status: std.http.Status,

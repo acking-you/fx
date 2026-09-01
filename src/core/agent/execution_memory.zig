@@ -1165,7 +1165,7 @@ test "durable execution memory masks token-shaped values" {
     const alloc = std.testing.allocator;
     const call = ToolCall{
         .id = "call_secret",
-        .name = "mcp__fixture__echo",
+        .name = "custom_fixture_echo",
         .arguments_json =
         \\{"command":"OPENAI_API_KEY=abcdefghijklmnop curl -H 'Authorization: Bearer abcdefghijklmnop' https://example.com sk-abcdefghijklmnop","nested":{"values":["github_pat_abcdefghijklmnop","xoxb-abcdefghijklmnop","plain"]},"api_key":"named-secret"}
         ,
@@ -1246,7 +1246,7 @@ test "durable execution memory redacts credential keys without hiding benign met
     const alloc = std.testing.allocator;
     const call = ToolCall{
         .id = "call_metadata",
-        .name = "mcp__fixture__echo",
+        .name = "custom_fixture_echo",
         .arguments_json =
         \\{"token_count":128,"authorization_docs":"public","cookie_policy":"strict","token":"secret-value","client_secret":"hidden"}
         ,

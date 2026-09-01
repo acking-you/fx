@@ -15,7 +15,6 @@ const debug_trace = @import("../shared/debug_trace.zig");
 const record_tape = @import("../workspace/record_tape.zig");
 const statusline_identity = @import("../workspace/statusline_identity.zig");
 const shared_io = @import("../shared/io.zig");
-const mcp_runtime = @import("../mcp/mcp_runtime.zig");
 const permissions = @import("../permissions/permissions.zig");
 const skill_contract = @import("../skills/skill_contract.zig");
 const skill_runtime = @import("../skills/skill_runtime.zig");
@@ -30,7 +29,6 @@ const transcript_runtime = @import("../../ui/transcript/runtime.zig");
 const Allocator = std.mem.Allocator;
 
 pub const CapabilityProviders = struct {
-    load_mcp_runtime: mcp_runtime.LoadRuntimeFn,
     skill_root_policy: skill_contract.RootPolicy,
     terminal_title: host.TerminalTitle,
 };
@@ -63,7 +61,6 @@ fn BootstrapDeps(comptime App: type) type {
         initialize_persistence: InitializePersistenceFn,
         stage_requested_resume_view: StageRequestedResumeViewFn,
         publish_staged_resume_view: PublishStagedResumeViewFn,
-        load_mcp_runtime: mcp_runtime.LoadRuntimeFn,
         load_skills: LoadSkillsFn,
         skill_root_policy: skill_contract.RootPolicy,
         welcome_message: WelcomeMessageFn,
@@ -100,7 +97,6 @@ pub fn Runtime(comptime App: type) type {
                 .initialize_persistence = initializePersistenceDefault,
                 .stage_requested_resume_view = stageRequestedResumeViewDefault,
                 .publish_staged_resume_view = publishStagedResumeViewDefault,
-                .load_mcp_runtime = capability_providers.load_mcp_runtime,
                 .load_skills = app_runtime_setup.loadSkills,
                 .skill_root_policy = capability_providers.skill_root_policy,
                 .welcome_message = welcomeMessageDefault,
@@ -311,17 +307,6 @@ pub fn Runtime(comptime App: type) type {
                 deps.stage_requested_resume_view(app)
             else
                 app_session_runtime.ResumeViewStage.none;
-            const profile_mcp = try deps.load_mcp_runtime(
-                app.alloc,
-                app.workspace_root,
-                .{ .form = true, .url = true },
-            );
-            if (comptime @hasDecl(App, "installInitialMcpRuntime")) {
-                app.installInitialMcpRuntime(profile_mcp);
-            } else {
-                app.mcp_runtime = profile_mcp;
-            }
-
             const loaded = try deps.load_skills(
                 std.heap.c_allocator,
                 app.workspace_root,
@@ -348,9 +333,6 @@ pub fn Runtime(comptime App: type) type {
                     },
                 );
                 try app.writeTranscriptClassified(welcome_message, true, .welcome);
-                if (comptime @hasDecl(App, "presentProjectMcpPrompt")) {
-                    try app.presentProjectMcpPrompt();
-                }
             }
             if (app.skills.diagnostics.len > 0) {
                 var notice_writer: std.Io.Writer.Allocating = .init(app.alloc);
@@ -548,7 +530,6 @@ const TestApp = struct {
     statusline_session: bool = false,
     workspace_identity: statusline_identity.Runtime = .{},
     requested_resume: ?u8 = null,
-    mcp_runtime: ?*mcp_runtime.McpRuntime = null,
     skills: skill_runtime.Runtime = .{},
     transcript: std.ArrayList(u8) = .empty,
     transcript_recorded: bool = false,
@@ -570,11 +551,6 @@ const TestApp = struct {
         self.selected_model.deinit(self.alloc);
         self.permission_engine.deinit(self.alloc);
         self.worker.deinit(std.heap.c_allocator);
-        if (self.mcp_runtime) |runtime| {
-            runtime.deinit();
-            self.alloc.destroy(runtime);
-            self.mcp_runtime = null;
-        }
         self.skills.deinit(std.heap.c_allocator);
         self.input_runtime.deinit(self.alloc);
         self.terminal_input_runtime.deinit(self.alloc);
@@ -623,7 +599,6 @@ fn testDeps() BootstrapDeps(TestApp) {
         .initialize_persistence = initializePersistenceForTest,
         .stage_requested_resume_view = stageRequestedResumeViewForTest,
         .publish_staged_resume_view = publishStagedResumeViewForTest,
-        .load_mcp_runtime = loadMcpRuntimeForTest,
         .load_skills = loadSkillsForTest,
         .skill_root_policy = .{
             .workspace_roots = &test_workspace_skill_roots,
@@ -719,11 +694,6 @@ fn stageRequestedResumeViewForTest(_: *TestApp) app_session_runtime.ResumeViewSt
 fn publishStagedResumeViewForTest(_: *TestApp, entry_id: u32) !void {
     try std.testing.expectEqual(@as(u32, 1), entry_id);
     active_capture.?.recordEvent("resume_view_publish");
-}
-
-fn loadMcpRuntimeForTest(_: Allocator, _: []const u8, _: @import("../mcp/elicitation.zig").Capabilities) !?*mcp_runtime.McpRuntime {
-    active_capture.?.recordEvent("load_mcp");
-    return null;
 }
 
 fn loadSkillsForTest(
@@ -881,13 +851,12 @@ test "app_bootstrap_runtime transfers startup state and starts a fresh session" 
     try std.testing.expectEqual(@as(usize, 1), capture.load_skills_workspace_root_count);
     try std.testing.expectEqual(@as(usize, 1), capture.load_skills_global_root_count);
     const events = capture.eventSlice();
-    try std.testing.expectEqual(@as(usize, 6), events.len);
-    try std.testing.expectEqualStrings("load_mcp", events[0]);
-    try std.testing.expectEqualStrings("load_skills", events[1]);
-    try std.testing.expectEqualStrings("welcome", events[2]);
-    try std.testing.expectEqualStrings("begin_fresh", events[3]);
-    try std.testing.expectEqualStrings("enable_stores", events[4]);
-    try std.testing.expectEqualStrings("title", events[5]);
+    try std.testing.expectEqual(@as(usize, 5), events.len);
+    try std.testing.expectEqualStrings("load_skills", events[0]);
+    try std.testing.expectEqualStrings("welcome", events[1]);
+    try std.testing.expectEqualStrings("begin_fresh", events[2]);
+    try std.testing.expectEqualStrings("enable_stores", events[3]);
+    try std.testing.expectEqualStrings("title", events[4]);
     try std.testing.expectEqual(@as(usize, 1), capture.begin_calls);
     try std.testing.expectEqual(@as(usize, 1), capture.enable_calls);
     try std.testing.expectEqualStrings("workspace · model-x", capture.titleText());
@@ -952,9 +921,8 @@ test "app_bootstrap_runtime stages requested sessions with the first frame pendi
     try std.testing.expect(!app.transcript_recorded);
     const events = capture.eventSlice();
     try std.testing.expectEqualStrings("resume_view_stage", events[0]);
-    try std.testing.expectEqualStrings("load_mcp", events[1]);
-    try std.testing.expectEqualStrings("load_skills", events[2]);
-    try std.testing.expectEqualStrings("resume_view_publish", events[3]);
+    try std.testing.expectEqualStrings("load_skills", events[1]);
+    try std.testing.expectEqualStrings("resume_view_publish", events[2]);
 }
 
 test "app_bootstrap_runtime publishes a staged resume view after startup notices" {
@@ -971,7 +939,6 @@ test "app_bootstrap_runtime publishes a staged resume view after startup notices
         []const u8,
         &.{
             "resume_view_stage",
-            "load_mcp",
             "load_skills",
             "welcome",
             "welcome",

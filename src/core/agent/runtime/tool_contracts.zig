@@ -23,7 +23,6 @@ pub const LiveToolAuthority = struct {
     generation: u64,
     root_id: []const u8,
     tools: []const []const u8,
-    integrations: []const []const u8,
     rules: types.PermissionRuleSet,
     grants: []const PermissionGrant,
     permission_state: ?*const session_permission_state.State = null,
@@ -84,8 +83,6 @@ pub const ToolExecutionResult = struct {
     web_search_completion: ?types.WebSearchCompletion = null,
     web_fetch_completion: ?types.WebFetchCompletion = null,
     inner_usage: ?types.ToolUsage = null,
-    selected_dynamic_tool_name: ?[]const u8 = null,
-    selected_dynamic_tool_schema_json: ?[]const u8 = null,
     tool_result_memory: ?types.ToolResultMemory = null,
     tool_result_memory_prepared: bool = false,
     committed_file_handoff: ?file_mutation.CommittedFileHandoff = null,
@@ -143,8 +140,6 @@ pub const ToolExecutionRequest = struct {
     current_turn_messages: []const ChatMessage = &.{},
     session_grants: []const PermissionGrant,
     live_authority: ?LiveToolAuthority = null,
-    expected_mcp_runtime_generation: ?u64 = null,
-    advertised_dynamic_tool_names: []const []const u8,
     max_tool_result_bytes: usize,
     /// The owning agent loop already ran its policy-neutral idempotency and
     /// availability classifiers for this exact effective call.
@@ -161,9 +156,7 @@ pub const ToolExecutionRequest = struct {
 
 pub const DiffEntryPayload = diff.DiffEntryPayload;
 
-pub const ToolCallValidationWitness = struct {
-    mcp_runtime_generation: ?u64 = null,
-};
+pub const ToolCallValidationWitness = struct {};
 
 pub const ToolCallValidationResult = union(enum) {
     not_registered,

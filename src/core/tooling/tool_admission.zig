@@ -11,7 +11,6 @@ const file_mutation = @import("file_mutation.zig");
 const file_mutation_contract = @import("file_mutation_contract.zig");
 const image_attachments = @import("../images/image_attachments.zig");
 const io_mod = @import("../shared/io.zig");
-const text_utils = @import("../shared/text_utils.zig");
 const diff_mod = @import("../output/diff.zig");
 const pathing = @import("../workspace/pathing.zig");
 const permission_auto_classifier = @import("../permissions/auto_classifier.zig");
@@ -22,7 +21,6 @@ const permissions = @import("../permissions/permissions.zig");
 const shell_resolver = @import("../terminal/shell_resolver.zig");
 const tool_args = @import("tool_args.zig");
 const tool_dispatch = @import("tool_dispatch.zig");
-const tool_mcp_runtime = @import("tool_mcp_runtime.zig");
 const tool_presentation = @import("tool_presentation.zig");
 const test_builtin_tools = if (builtin.is_test)
     @import("../../builtins/tools.zig")
@@ -30,7 +28,6 @@ else
     struct {};
 const types = @import("../shared/types.zig");
 const worker_runtime = @import("../agent/worker_runtime.zig");
-const context_limits = @import("../config/context_limits.zig");
 const workspace_access = @import("../workspace/workspace_access.zig");
 const current_branch = @import("../workspace/current_branch.zig");
 
@@ -77,9 +74,6 @@ pub const Input = struct {
     worker: *WorkerRuntime,
     permission_prompter: ?permission_prompter.Prompter = null,
     background: *BackgroundRuntime,
-    advertised_dynamic_tool_names: []const []const u8,
-    mcp_runtime: tool_mcp_runtime.RuntimeCapabilities,
-    context_limits: context_limits.Values = .{},
     auto_classifier: permission_auto_classifier.Classifier = .disabled(),
     host_sandbox_default: HostSandboxDefault = .none,
 };
@@ -686,35 +680,11 @@ fn fileMutationPermissionTargets(
     return targets;
 }
 
-fn schemaForReview(
-    input: Input,
-    arena: Allocator,
-    call: ToolCall,
-    is_dynamic_tool: bool,
-) !?[]const u8 {
-    if (!is_dynamic_tool) return null;
-    const context = input.mcp_runtime.context orelse return null;
-    const tool_schema = input.mcp_runtime.tool_schema orelse return null;
-    const result = (try tool_schema(
-        context,
-        arena,
-        call.name,
-        input.permission_rules,
-        input.context_limits,
-        input.mcp_runtime.access,
-    )) orelse return null;
-    return switch (result) {
-        .selected => |payload| payload.model_output,
-        .rejected => null,
-    };
-}
-
 fn reviewRequestForCall(
     input: Input,
     arena: Allocator,
     call: ToolCall,
     targets: []const permissions.PermissionCallTarget,
-    is_dynamic_tool: bool,
     file_authorization: ?file_mutation_contract.FileExecutionAuthorization,
 ) !permission_auto_classifier.ReviewRequest {
     const action: permission_auto_classifier.Action =
@@ -744,13 +714,8 @@ fn reviewRequestForCall(
             break :blk .{ .tool = .{
                 .tool_name = call.name,
                 .arguments_json = call.arguments_json,
-                .schema_json = try schemaForReview(
-                    input,
-                    arena,
-                    call,
-                    is_dynamic_tool,
-                ),
-                .schema_required = is_dynamic_tool,
+                .schema_json = null,
+                .schema_required = false,
             } };
         };
     var review_turn = input.permission_review_turn orelse
@@ -956,7 +921,6 @@ fn automaticReviewOutcome(
     arena: Allocator,
     call: ToolCall,
     targets: []const permissions.PermissionCallTarget,
-    is_dynamic_tool: bool,
     file_authorization: ?file_mutation_contract.FileExecutionAuthorization,
 ) !command_admission.PermissionOutcome {
     if (!input.auto_classifier.enabled()) return reviewerUnavailableOutcome(call);
@@ -967,7 +931,6 @@ fn automaticReviewOutcome(
         arena,
         call,
         targets,
-        is_dynamic_tool,
         file_authorization,
     );
     const review = try runAutomaticReview(input, arena, call, request);
@@ -1041,7 +1004,6 @@ fn resolveOrdinaryPermissionOutcome(
     arena: Allocator,
     call: ToolCall,
     targets: []const permissions.PermissionCallTarget,
-    is_dynamic_tool: bool,
     permission_mode: PermissionMode,
 ) !command_admission.PermissionOutcome {
     const command_call = try isCommandCall(input, arena, call);
@@ -1060,7 +1022,7 @@ fn resolveOrdinaryPermissionOutcome(
         else
             .{ .decision = .permission_required };
     }
-    if (!command_call and !toolRequiresApproval(input, call.name) and !is_dynamic_tool) {
+    if (!command_call and !toolRequiresApproval(input, call.name)) {
         return ordinaryPermissionOutcome(.once);
     }
 
@@ -1084,7 +1046,6 @@ fn resolveOrdinaryPermissionOutcome(
             arena,
             call,
             targets,
-            is_dynamic_tool,
             null,
         );
     }
@@ -1187,7 +1148,6 @@ fn resolveFileMutationPreflightAdmission(
                     arena,
                     call,
                     targets,
-                    false,
                     authorization,
                 );
                 if (reviewed.decision != .permission_required) {
@@ -1262,10 +1222,8 @@ fn requestPermissionOutcomeResolved(
             local_grants,
         );
     }
-    const is_mcp_tool = isAvailableDynamicTool(input, call.name);
     const command_call = try isCommandCall(input, arena, call);
     if (!toolHasPermissionContract(input, call.name) and
-        !is_mcp_tool and
         !command_call)
     {
         return ordinaryPermissionOutcome(.once);
@@ -1393,7 +1351,6 @@ fn requestPermissionOutcomeResolved(
         arena,
         call,
         policy_targets,
-        is_mcp_tool,
         permission_mode,
     );
     if (resolution.decision != .permission_required) {
@@ -2220,21 +2177,13 @@ fn interactivePermissionRequest(
             .amendment_allowed = true,
         };
     }
-    const tool_arguments_preview = if (isAvailableDynamicTool(input, call.name)) blk: {
-        const encoded = try text_utils.encodeTerminalSafe(
-            arena,
-            call.arguments_json,
-            permission_request.max_tool_arguments_preview_bytes,
-        );
-        break :blk encoded.bytes;
-    } else null;
     return .{
         .label = label_override orelse try tool_presentation.formatPermissionLabel(
             arena,
             input.tool_registry,
             call,
         ),
-        .tool_arguments_preview = tool_arguments_preview,
+        .tool_arguments_preview = null,
     };
 }
 
@@ -2293,11 +2242,6 @@ pub fn permissionTargetResolutionFailureMessage(
 }
 
 fn permissionTargetsForCall(input: Input, arena: Allocator, call: ToolCall) !permissions.PermissionCallTargets {
-    if (isAvailableDynamicTool(input, call.name)) {
-        const items = try arena.alloc(permissions.PermissionCallTarget, 1);
-        items[0] = .{ .role = "target", .path = try arena.dupe(u8, call.name) };
-        return .{ .items = items };
-    }
     if (registeredWebSearchTarget(input, call.name)) |target_name| {
         const items = try arena.alloc(permissions.PermissionCallTarget, 1);
         errdefer arena.free(items);
@@ -2351,7 +2295,6 @@ fn sessionGrantsAllowAll(grants: []const PermissionGrant, tool_name: []const u8,
 }
 
 pub fn permissionTargetForCall(input: Input, arena: Allocator, call: ToolCall) ![]const u8 {
-    if (isAvailableDynamicTool(input, call.name)) return arena.dupe(u8, call.name);
     if (registeredWebSearchTarget(input, call.name)) |target_name| return arena.dupe(u8, target_name);
     const tool = registeredTool(input, call.name) orelse return error.UnsupportedTool;
     if (try isCommandCall(input, arena, call)) {
@@ -2405,14 +2348,6 @@ fn recoverableExistingPathResolutionFailure(err: anyerror) bool {
         => true,
         else => false,
     };
-}
-
-fn isAvailableDynamicTool(input: Input, name: []const u8) bool {
-    return tool_mcp_runtime.isAvailableDynamicTool(.{
-        .is_registered_tool = registeredTool(input, name) != null,
-        .advertised_dynamic_tool_names = input.advertised_dynamic_tool_names,
-        .runtime = input.mcp_runtime,
-    }, name);
 }
 
 test "permission target resolution reports a missing home" {
@@ -2619,112 +2554,6 @@ test "Vision path admission retains the canonical execution targets" {
     );
     try std.testing.expect(replaced.decision.isDenied());
     try std.testing.expect(replaced.execution_authority == null);
-}
-
-test "dynamic MCP admission checks built-in and advertised names before runtime lookup" {
-    const CountingMcp = struct {
-        calls: usize = 0,
-
-        fn hasTool(raw_ctx: *anyopaque, _: []const u8, _: tool_mcp_runtime.Access) bool {
-            const self: *@This() = @ptrCast(@alignCast(raw_ctx));
-            self.calls += 1;
-            return true;
-        }
-    };
-
-    var worker: WorkerRuntime = .{};
-    defer worker.deinit(std.testing.allocator);
-    var background: BackgroundRuntime = .{};
-    defer background.deinit(std.testing.allocator);
-    var mcp = CountingMcp{};
-    const advertised = [_][]const u8{"mcp_example"};
-    const input: Input = .{
-        .workspace_root = "/tmp/workspace",
-        .permission_grants = &.{},
-        .permission_rules = .{},
-        .worker = &worker,
-        .background = &background,
-        .tool_registry = test_admission_registry,
-        .advertised_dynamic_tool_names = &advertised,
-        .mcp_runtime = .{
-            .context = @ptrCast(&mcp),
-            .has_tool = CountingMcp.hasTool,
-        },
-    };
-
-    try std.testing.expect(!isAvailableDynamicTool(input, "glob_files"));
-    try std.testing.expect(!isAvailableDynamicTool(input, "mcp_unadvertised"));
-    try std.testing.expectEqual(@as(usize, 0), mcp.calls);
-    try std.testing.expect(isAvailableDynamicTool(input, "mcp_example"));
-    try std.testing.expectEqual(@as(usize, 1), mcp.calls);
-}
-
-test "interactive dynamic MCP approval projects bounded terminal-safe arguments only" {
-    const AvailableMcp = struct {
-        fn hasTool(_: *anyopaque, _: []const u8, _: tool_mcp_runtime.Access) bool {
-            return true;
-        }
-    };
-
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-    var worker: WorkerRuntime = .{};
-    defer worker.deinit(std.testing.allocator);
-    var background: BackgroundRuntime = .{};
-    defer background.deinit(std.testing.allocator);
-    var mcp: u8 = 0;
-    const advertised = [_][]const u8{"mcp_example"};
-    const input: Input = .{
-        .workspace_root = "/tmp/workspace",
-        .permission_grants = &.{},
-        .permission_rules = .{},
-        .worker = &worker,
-        .background = &background,
-        .tool_registry = test_admission_registry,
-        .advertised_dynamic_tool_names = &advertised,
-        .mcp_runtime = .{
-            .context = @ptrCast(&mcp),
-            .has_tool = AvailableMcp.hasTool,
-        },
-    };
-
-    const request = try interactivePermissionRequest(input, arena, .{
-        .id = "dynamic",
-        .name = "mcp_example",
-        .arguments_json = "{\"text\":\"line\\n\x1b[31m\"}",
-    }, null);
-    try std.testing.expectEqualStrings(
-        "{\"text\":\"line\\n\\x1b[31m\"}",
-        request.tool_arguments_preview.?,
-    );
-
-    const non_dynamic = try interactivePermissionRequest(input, arena, .{
-        .id = "builtin",
-        .name = "glob_files",
-        .arguments_json = "{\"pattern\":\"*\"}",
-    }, null);
-    try std.testing.expectEqual(@as(?[]const u8, null), non_dynamic.tool_arguments_preview);
-
-    const oversized = try arena.alloc(
-        u8,
-        permission_request.max_tool_arguments_preview_bytes + 1,
-    );
-    @memset(oversized, 'x');
-    const bounded = try interactivePermissionRequest(input, arena, .{
-        .id = "bounded",
-        .name = "mcp_example",
-        .arguments_json = oversized,
-    }, null);
-    try std.testing.expectEqual(
-        permission_request.max_tool_arguments_preview_bytes,
-        bounded.tool_arguments_preview.?.len,
-    );
-    try std.testing.expect(std.mem.endsWith(
-        u8,
-        bounded.tool_arguments_preview.?,
-        "...",
-    ));
 }
 
 test "file mutation preflight reports malformed input before authority construction" {
@@ -3314,8 +3143,6 @@ fn testInputWithClassifier(
         .tool_registry = test_admission_registry,
         .worker = worker,
         .background = background,
-        .advertised_dynamic_tool_names = &.{},
-        .mcp_runtime = .{},
         .auto_classifier = classifier,
         .permission_review_turn = testReviewTurn(),
     };
@@ -4080,74 +3907,6 @@ test "prepared session deny blocks local file mutation without setup effects" {
         error.FileNotFound,
         tmp.dir.openFile(io_mod.getIo(), "workspace/blocked.txt", .{}),
     );
-}
-
-test "selected dynamic MCP review receives exact arguments and advertised schema" {
-    const Mcp = struct {
-        fn hasTool(_: *anyopaque, name: []const u8, _: tool_mcp_runtime.Access) bool {
-            return std.mem.eql(u8, name, "mcp_example_write");
-        }
-
-        fn schema(
-            _: *anyopaque,
-            alloc: Allocator,
-            name: []const u8,
-            _: types.PermissionRuleSet,
-            _: context_limits.Values,
-            _: tool_mcp_runtime.Access,
-        ) anyerror!?tool_mcp_runtime.ToolSchemaResult {
-            if (!std.mem.eql(u8, name, "mcp_example_write")) return null;
-            return .{ .selected = .{ .model_output = try alloc.dupe(
-                u8,
-                "{\"name\":\"mcp_example_write\",\"inputSchema\":{\"type\":\"object\"}}",
-            ) } };
-        }
-    };
-
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    var worker: WorkerRuntime = .{};
-    defer worker.deinit(std.testing.allocator);
-    var background: BackgroundRuntime = .{};
-    defer background.deinit(std.testing.allocator);
-    var marker: u8 = 0;
-    var fake = FakeAutoClassifier{};
-    const advertised = [_][]const u8{"mcp_example_write"};
-    var input = testInputWithClassifier(
-        &worker,
-        &background,
-        permission_auto_classifier.Classifier.withOverride(
-            @ptrCast(&fake),
-            FakeAutoClassifier.classify,
-        ),
-    );
-    input.advertised_dynamic_tool_names = &advertised;
-    input.mcp_runtime = .{
-        .context = @ptrCast(&marker),
-        .has_tool = Mcp.hasTool,
-        .tool_schema = Mcp.schema,
-    };
-
-    const arguments = "{\"path\":\"outside.txt\",\"value\":\"exact\"}";
-    const outcome = try requestPermissionOutcome(
-        input,
-        arena_state.allocator(),
-        .{
-            .id = "mcp-review",
-            .name = "mcp_example_write",
-            .arguments_json = arguments,
-        },
-        .auto,
-        &.{},
-    );
-
-    try std.testing.expectEqual(@as(usize, 1), fake.calls);
-    try std.testing.expectEqualStrings(arguments, fake.exact_arguments_json.?);
-    try std.testing.expect(
-        std.mem.find(u8, fake.schema_json.?, "mcp_example_write") != null,
-    );
-    try std.testing.expectEqual(ToolPermissionDecision.once, outcome.decision);
-    try std.testing.expect(outcome.execution_authority != null);
 }
 
 test "external prepared file review carries frozen path and diff authority" {

@@ -1511,14 +1511,13 @@ fn buildApprovalPanelLineWithLabel(
     const r = ui_render.reset_style;
     const target = approvalTarget(label);
     const explanation = approval.request.explanation;
-    const dynamic_mcp = approval.request.tool_arguments_preview != null;
 
     if (row_count >= interaction_state.approval_panel_rows_spacious) {
         return switch (row_index) {
             0 => "  Permission needed · Choose one",
             1 => "",
-            2 => std.fmt.bufPrint(buf, "  {s}{s}{s}", .{ b, approvalQuestion(label, dynamic_mcp), r }) catch "  Permission request",
-            3 => approvalReasonLine(buf, label, target, explanation, dynamic_mcp),
+            2 => std.fmt.bufPrint(buf, "  {s}{s}{s}", .{ b, approvalQuestion(label), r }) catch "  Permission request",
+            3 => approvalReasonLine(buf, label, target, explanation),
             4 => approvalActionLine(buf, label, target),
             5 => "",
             6 => approvalChoiceLine(buf, approval.choice_index == 0, approvalChoiceLabel(approval, 0)),
@@ -1532,8 +1531,8 @@ fn buildApprovalPanelLineWithLabel(
 
     return switch (row_index) {
         0 => "  Permission needed · Choose one",
-        1 => std.fmt.bufPrint(buf, "  {s}{s}{s}", .{ b, approvalQuestion(label, dynamic_mcp), r }) catch "  Permission request",
-        2 => approvalReasonLine(buf, label, target, explanation, dynamic_mcp),
+        1 => std.fmt.bufPrint(buf, "  {s}{s}{s}", .{ b, approvalQuestion(label), r }) catch "  Permission request",
+        2 => approvalReasonLine(buf, label, target, explanation),
         3 => approvalActionLine(buf, label, target),
         4 => approvalChoiceLine(buf, approval.choice_index == 0, approvalChoiceLabel(approval, 0)),
         5 => approvalChoiceLine(buf, approval.choice_index == 1, approvalChoiceLabel(approval, 1)),
@@ -1783,10 +1782,7 @@ fn composeApprovalHeaderRow(
         "Permission needed · Choose one",
     );
     defer title.deinit(alloc);
-    const kind = approvalKind(
-        label,
-        approval.request.tool_arguments_preview != null,
-    );
+    const kind = approvalKind(label);
     const inset_width = 2;
     const right_margin = 2;
     const inner_width = @as(usize, width) -| (inset_width + right_margin);
@@ -1843,10 +1839,9 @@ fn approvalTitle(
     };
 }
 
-fn approvalKind(label: []const u8, dynamic_mcp: bool) []const u8 {
+fn approvalKind(label: []const u8) []const u8 {
     if (std.mem.startsWith(u8, label, "Remember ") or
         std.mem.startsWith(u8, label, "Revoke saved-session")) return "Permission rule";
-    if (dynamic_mcp) return "MCP tool";
     if (std.mem.startsWith(u8, label, "exec_command ")) return "Command";
     if (std.mem.startsWith(u8, label, "write_file ")) return "Write file";
     if (std.mem.startsWith(u8, label, "edit_file ")) return "Edit file";
@@ -1855,7 +1850,7 @@ fn approvalKind(label: []const u8, dynamic_mcp: bool) []const u8 {
     return "Tool";
 }
 
-fn approvalQuestion(label: []const u8, dynamic_mcp: bool) []const u8 {
+fn approvalQuestion(label: []const u8) []const u8 {
     if (std.mem.eql(u8, label, "Remember allow for this saved session")) {
         return "Remember allow for this saved session?";
     }
@@ -1865,7 +1860,6 @@ fn approvalQuestion(label: []const u8, dynamic_mcp: bool) []const u8 {
     if (std.mem.eql(u8, label, "Revoke saved-session permission rule")) {
         return "Revoke this saved-session permission rule?";
     }
-    if (dynamic_mcp) return "Allow this MCP tool call?";
     if (std.mem.startsWith(u8, label, "exec_command ")) return "Would you like to run the following command?";
     if (std.mem.startsWith(u8, label, "write_file ")) return "Would you like to create or update this file?";
     if (std.mem.startsWith(u8, label, "edit_file ")) return "Would you like to edit this file?";
@@ -1893,7 +1887,6 @@ fn approvalReasonLine(
     label: []const u8,
     target: []const u8,
     explanation: ?[]const u8,
-    dynamic_mcp: bool,
 ) []const u8 {
     const dim = ui_render.dim_style;
     const r = ui_render.reset_style;
@@ -1902,13 +1895,6 @@ fn approvalReasonLine(
     }
     if (approvalAnnotation(target)) |annotation| {
         return std.fmt.bufPrint(buf, "  {s}Reason:{s} {s}", .{ dim, r, annotation }) catch "  Reason: permission required";
-    }
-    if (dynamic_mcp) {
-        return std.fmt.bufPrint(
-            buf,
-            "  {s}Reason:{s} This MCP tool needs approval before fx can send the request.",
-            .{ dim, r },
-        ) catch "  Reason: MCP tool approval required";
     }
     if (std.mem.startsWith(u8, label, "exec_command ")) {
         if (firstUrlHost(target)) |host| {
@@ -1968,9 +1954,7 @@ pub fn commandTargetForApproval(label: []const u8, command: ?[]const u8) ?[]cons
 }
 
 fn approvalAlwaysChoice(approval: ApprovalProjection, label: []const u8) []const u8 {
-    if (approval.request.tool_arguments_preview != null) {
-        return "2. Allow this MCP tool for this session";
-    }
+    _ = approval;
     if (std.mem.startsWith(u8, label, "exec_command ")) return "2. Yes, and don't ask again for this exact command";
     return "2. Yes, and don't ask again for this request";
 }
@@ -2208,7 +2192,7 @@ test "approval panel shows bounded terminal-safe tool arguments with ellipsis" {
     var prompt = ApprovalPrompt{};
     defer prompt.deinit(alloc);
     try std.testing.expect(try prompt.syncRequest(alloc, .{
-        .label = "mcp_fixture_echo",
+        .label = "custom_fixture_echo",
         .tool_arguments_preview = "{\"text\":\"\x1b\n\xff sentinel\"}",
     }));
 
@@ -2228,11 +2212,11 @@ test "approval panel shows bounded terminal-safe tool arguments with ellipsis" {
 
     const projection = prompt.projection().?;
     inline for ([_]struct { row: u16, expected: []const u8 }{
-        .{ .row = 0, .expected = "MCP tool" },
-        .{ .row = 2, .expected = "Allow this MCP tool call?" },
-        .{ .row = 3, .expected = "This MCP tool needs approval" },
+        .{ .row = 0, .expected = "Tool" },
+        .{ .row = 2, .expected = "Would you like to allow this action?" },
+        .{ .row = 3, .expected = "This action needs approval" },
         .{ .row = 6, .expected = "Allow once" },
-        .{ .row = 7, .expected = "Allow this MCP tool for this session" },
+        .{ .row = 7, .expected = "don't ask again for this request" },
         .{ .row = 8, .expected = "Deny" },
     }) |expectation| {
         var row = try composeApprovalPanelRow(

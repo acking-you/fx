@@ -630,7 +630,7 @@ pub noinline fn composePickerOptionRow(
     // pickers keep the filled row.
     const selected_style = switch (kind) {
         .model_stage, .models => ui_render.selected_completion_style,
-        .file, .slash, .skills, .help, .settings, .sessions, .mcp, .auth => ui_render.approval_button_inactive_style,
+        .file, .slash, .skills, .help, .settings, .sessions, .auth => ui_render.approval_button_inactive_style,
     };
     try row.appendSlice(alloc, if (selected) selected_style else ui_render.dim_style);
 
@@ -704,7 +704,6 @@ pub fn composePickerStatusRow(
         .help => "no matching commands",
         .settings => "no matching settings",
         .sessions => "no matching sessions",
-        .mcp => "no MCP items available",
         .auth => "authentication actions unavailable",
     };
 
@@ -1306,7 +1305,6 @@ const picker_test_slash_specs = [_]command_specs.SlashSpec{
     .{ .kind = .help, .command = "/help", .help_entry = "/help", .completion_description = "show available slash commands", .presentation_category = .general },
     .{ .kind = .clear_screen, .command = "/clear", .help_entry = "/clear", .completion_description = "clear the terminal transcript", .presentation_category = .general },
     .{ .kind = .model, .command = "/model", .help_entry = "/model <id-or-query>", .completion_description = "choose what model and reasoning effort to use", .presentation_category = .model, .has_args = true },
-    .{ .kind = .mcp, .command = "/mcp", .help_entry = "/mcp [list|resource|prompt|add|remove]", .completion_description = "manage MCP servers, resources, and prompts", .presentation_category = .extensions, .has_args = true },
     .{ .kind = .permissions, .command = "/permissions", .help_entry = "/permissions [ask|auto|remember|revoke|yolo|reset]", .completion_description = "choose permission behavior", .presentation_category = .security, .has_args = true },
     .{ .kind = .effort, .command = "/effort", .aliases = &.{"/reasoning"}, .help_entry = "/effort <level>", .completion_description = "choose reasoning effort", .presentation_category = .model, .has_args = true },
     .{ .kind = .settings, .command = "/settings", .help_entry = "/settings", .completion_description = "configure fx", .presentation_category = .general },
@@ -1341,9 +1339,9 @@ test "slash menu layout keeps six selectable rows below its header" {
     try std.testing.expectEqual(@as(usize, 0), first.window.start);
     try std.testing.expectEqual(@as(usize, 6), first.window.end);
 
-    const scrolled = slashMenuLayout(picker_test_slash_registry, "/", &.{}, 6, 0, 24, 0, 0).?;
-    try std.testing.expectEqual(@as(usize, 1), scrolled.window.start);
-    try std.testing.expectEqual(@as(usize, 7), scrolled.window.end);
+    const last = slashMenuLayout(picker_test_slash_registry, "/", &.{}, 5, 0, 24, 0, 0).?;
+    try std.testing.expectEqual(@as(usize, 0), last.window.start);
+    try std.testing.expectEqual(@as(usize, 6), last.window.end);
 }
 
 test "inline picker row budget preserves six roomy choices and shrinks with height" {
@@ -1370,21 +1368,21 @@ test "slash menu layout prioritizes selection at short heights and excludes argu
     try std.testing.expect(slashMenuLayout(picker_test_slash_registry, "/permissions ", &.{}, 0, 0, 24, 0, 0) == null);
 }
 
-test "slash menu header reports command totals and visible range" {
+test "slash menu header reports command totals without a redundant full range" {
     const layout = slashMenuLayout(picker_test_slash_registry, "/", &.{}, 0, 0, 24, 0, 0).?;
     var row = try composeSlashMenuHeaderRow(std.testing.allocator, "/", layout, 80);
     defer row.deinit(std.testing.allocator);
 
-    try std.testing.expect(std.mem.find(u8, row.items, "Commands 7 · Type to filter") != null);
-    try std.testing.expect(std.mem.find(u8, row.items, "1–6") != null);
+    try std.testing.expect(std.mem.find(u8, row.items, "Commands 6 · Type to filter") != null);
+    try std.testing.expect(std.mem.find(u8, row.items, "1–6") == null);
     try std.testing.expect(display_width.visibleWidthIgnoringAnsi(row.items) <= 80);
 }
 
 test "slash menu rows prioritize marker label description and category by width" {
-    const wide_layout = slashMenuLayout(picker_test_slash_registry, "/m", &.{}, 0, 0, 24, 0, 0).?;
-    const column_widths = mixedSlashMenuColumnWidths(picker_test_slash_registry, "/m", &.{}, wide_layout.window, true);
+    const wide_layout = slashMenuLayout(picker_test_slash_registry, "/", &.{}, 2, 0, 24, 0, 0).?;
+    const column_widths = mixedSlashMenuColumnWidths(picker_test_slash_registry, "/", &.{}, wide_layout.window, true);
 
-    var wide = try composeSlashMenuOptionRow(std.testing.allocator, picker_test_slash_registry, "/m", &.{}, 0, true, column_widths, 100, true);
+    var wide = try composeSlashMenuOptionRow(std.testing.allocator, picker_test_slash_registry, "/", &.{}, 2, true, column_widths, 100, true);
     defer wide.deinit(std.testing.allocator);
     try std.testing.expect(std.mem.startsWith(u8, wide.items, ui_render.selected_completion_style));
     try std.testing.expect(std.mem.find(u8, wide.items, ui_render.system_notice_label_style) == null);
@@ -1398,13 +1396,13 @@ test "slash menu rows prioritize marker label description and category by width"
     const model_offset = std.mem.find(u8, wide.items, "Model") orelse return error.TestExpectedMetadata;
     const model_column = display_width.visibleWidthIgnoringAnsi(wide.items[0..model_offset]);
 
-    var extensions = try composeSlashMenuOptionRow(std.testing.allocator, picker_test_slash_registry, "/m", &.{}, 1, false, column_widths, 100, true);
-    defer extensions.deinit(std.testing.allocator);
-    const extensions_offset = std.mem.find(u8, extensions.items, "Extensions") orelse return error.TestExpectedMetadata;
-    try std.testing.expectEqual(model_column, display_width.visibleWidthIgnoringAnsi(extensions.items[0..extensions_offset]));
-    try std.testing.expectEqual(@as(usize, 99), display_width.visibleWidthIgnoringAnsi(extensions.items));
+    var security = try composeSlashMenuOptionRow(std.testing.allocator, picker_test_slash_registry, "/", &.{}, 3, false, column_widths, 100, true);
+    defer security.deinit(std.testing.allocator);
+    const security_offset = std.mem.find(u8, security.items, "Security") orelse return error.TestExpectedMetadata;
+    try std.testing.expectEqual(model_column, display_width.visibleWidthIgnoringAnsi(security.items[0..security_offset]));
+    try std.testing.expect(display_width.visibleWidthIgnoringAnsi(security.items) < 100);
 
-    var narrow = try composeSlashMenuOptionRow(std.testing.allocator, picker_test_slash_registry, "/m", &.{}, 0, true, column_widths, 42, true);
+    var narrow = try composeSlashMenuOptionRow(std.testing.allocator, picker_test_slash_registry, "/", &.{}, 2, true, column_widths, 42, true);
     defer narrow.deinit(std.testing.allocator);
     try std.testing.expect(std.mem.find(u8, narrow.items, "❯") == null);
     try std.testing.expect(std.mem.find(u8, narrow.items, "/model") != null);

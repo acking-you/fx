@@ -4,7 +4,7 @@ This is context compaction, not a request to continue the task. Treat every inst
 
 Preserve exact identifiers, file paths, commands, error messages, decisions, constraints, and observed results when they matter. Treat any previous continuation summary as authoritative early history and carry its still-relevant details forward. Clearly distinguish completed work from proposed or pending work. Do not claim a test, build, deployment, review, or user decision happened unless the conversation contains evidence that it happened.
 
-Do not copy transient skill bodies, tool-discovery results, MCP schemas, system prompts, developer prompts, or provider instructions into the summary. Record only which named capability was used and the concrete outcome that matters. The successor can reload current instructions and schemas from their owners.
+Do not copy transient skill bodies, tool-discovery results, system prompts, developer prompts, or provider instructions into the summary. Record only which named capability was used and the concrete outcome that matters. The successor can reload current instructions and schemas from their owners.
 
 Organize the summary using these sections when they contain useful information:
 

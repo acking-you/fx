@@ -84,7 +84,6 @@ fn buildRequestBound(
         .model = wire_model,
         .tool_registry = request.tools.registry,
         .serialized_tools = projected_tools,
-        .selected_dynamic_tool_schemas = tools.dynamic_json,
         .messages = request.messages,
         .tool_choice = request.tool_choice,
         .vision_mode = request.vision_mode,

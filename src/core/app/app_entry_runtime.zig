@@ -17,10 +17,6 @@ const skill_contract = @import("../skills/skill_contract.zig");
 const command_specs = @import("../slash_commands/command_specs.zig");
 const context_contract = @import("../workspace/context_contract.zig");
 const mode_registry = @import("../modes/mode_registry.zig");
-const mcp_contract = @import("../mcp/mcp_contract.zig");
-const mcp_command_provider = @import("../mcp/command_provider.zig");
-const mcp_health = @import("../mcp/health.zig");
-const mcp_runtime = @import("../mcp/mcp_runtime.zig");
 const tool_set_contract = @import("../tooling/tool_set.zig");
 const test_builtin_gateway = if (builtin.is_test)
     @import("../../builtins/responses.zig")
@@ -92,14 +88,6 @@ pub const Config = struct {
     context_registry: context_contract.Registry,
     mode_registry: mode_registry.Registry,
     tool_set: tool_set_contract.ToolSet,
-    inspect_mcp_profile_config: mcp_contract.InspectProfileConfigFn,
-    inspect_mcp_local_config: mcp_health.InspectLocalConfigFn =
-        mcp_health.inspectLocalConfigUnavailable,
-    load_mcp_runtime: mcp_runtime.LoadRuntimeFn,
-    add_mcp_profile_server: mcp_command_provider.AddProfileServerFn =
-        mcp_command_provider.addProfileServerUnavailable,
-    remove_mcp_profile_server: mcp_command_provider.RemoveProfileServerFn =
-        mcp_command_provider.removeProfileServerUnavailable,
     acp_runner: acp_runner.Runner,
 };
 
@@ -284,7 +272,6 @@ fn runInteractiveWithDeps(comptime App: type, comptime cooperative: bool, alloc:
         }
     };
     if (comptime !cooperative) {
-        if (@hasDecl(App, "startMcpDiscovery")) app.startMcpDiscovery();
         if (@hasDecl(App, "rebindAfterInit")) app.rebindAfterInit();
     }
     var app_needs_deinit = true;
@@ -370,11 +357,6 @@ fn cliSurfaceConfig(cfg: Config) cli_surface.Config {
         .context_registry = cfg.context_registry,
         .mode_registry = cfg.mode_registry,
         .tool_set = cfg.tool_set,
-        .inspect_mcp_profile_config = cfg.inspect_mcp_profile_config,
-        .inspect_mcp_local_config = cfg.inspect_mcp_local_config,
-        .load_mcp_runtime = cfg.load_mcp_runtime,
-        .add_mcp_profile_server = cfg.add_mcp_profile_server,
-        .remove_mcp_profile_server = cfg.remove_mcp_profile_server,
         .acp_runner = cfg.acp_runner,
     };
 }
@@ -450,16 +432,6 @@ const test_entry_context_registry = context_contract.Registry{ .default_provider
     .append_transient_fn = appendNoopTransientContextForTest,
 } };
 
-fn noMcpRuntimeForTest(_: Allocator, _: []const u8, _: @import("../mcp/elicitation.zig").Capabilities) !?*mcp_runtime.McpRuntime {
-    return null;
-}
-
-fn noMcpConfigInspectionForTest(
-    _: Allocator,
-) error{OutOfMemory}!mcp_contract.ProfileConfigDiagnostic {
-    return .clear;
-}
-
 fn unexpectedAcpRunForTest(_: ?*anyopaque, _: Allocator, _: acp_runner.Config) anyerror!void {
     return error.TestUnexpectedAcpRun;
 }
@@ -489,8 +461,6 @@ fn testConfig() Config {
         .max_history_turns = 32,
         .context_registry = test_entry_context_registry,
         .mode_registry = .{ .default_mode_id = "entry" },
-        .inspect_mcp_profile_config = noMcpConfigInspectionForTest,
-        .load_mcp_runtime = noMcpRuntimeForTest,
         .acp_runner = .{ .run_fn = unexpectedAcpRunForTest },
         .tool_set = .{
             .registry = .{ .tools = &.{} },
@@ -685,10 +655,6 @@ const TestApp = struct {
         appendTestEvent("file-index");
     }
 
-    fn startMcpDiscovery(_: *TestApp) void {
-        appendTestEvent("mcp-discovery");
-    }
-
     fn rebindAfterInit(_: *TestApp) void {
         appendTestEvent("rebind-after-init");
     }
@@ -743,8 +709,6 @@ test "app entry returns after handled CLI success without initializing app" {
     try std.testing.expect(capture.seen_config.?.url_opener.open_fn == cfg.url_opener.open_fn);
     try std.testing.expect(capture.seen_config.?.secret_store.context == cfg.secret_store.context);
     try std.testing.expect(capture.seen_config.?.secret_store.load_fn == cfg.secret_store.load_fn);
-    try std.testing.expect(capture.seen_config.?.inspect_mcp_profile_config == noMcpConfigInspectionForTest);
-    try std.testing.expect(capture.seen_config.?.load_mcp_runtime == noMcpRuntimeForTest);
     try std.testing.expectEqual(@as(usize, 0), test_event_count);
 }
 
@@ -800,7 +764,7 @@ test "app entry runs interactive startup callbacks in active order" {
 
     try std.testing.expectEqual(RunOutcome.returned, outcome);
     try std.testing.expectEqual(@as(usize, 0), capture.stdout_calls);
-    try expectEvents(&.{ "init:none", "mcp-discovery", "rebind-after-init", "file-index", "worker-thread", "model-cache", "run", "terminal-release", "deinit" });
+    try expectEvents(&.{ "init:none", "rebind-after-init", "file-index", "worker-thread", "model-cache", "run", "terminal-release", "deinit" });
 }
 
 test "app entry writes exact resume handoff after interactive teardown" {
@@ -821,7 +785,6 @@ test "app entry writes exact resume handoff after interactive teardown" {
     try std.testing.expectEqualStrings("", capture.stderr.written());
     try expectEvents(&.{
         "init:none",
-        "mcp-discovery",
         "rebind-after-init",
         "file-index",
         "worker-thread",
@@ -908,7 +871,7 @@ test "app entry releases terminal before reporting worker start errors" {
     try std.testing.expectError(error.TestWorkerStartFailed, runWithDeps(TestApp, alloc, &.{}, testConfig(), capture.deps()));
     try std.testing.expectEqualStrings("fx: TestWorkerStartFailed\n", capture.stderr.written());
     try std.testing.expectEqual(@as(usize, 1), capture.stderr_calls);
-    try expectEvents(&.{ "init:none", "mcp-discovery", "rebind-after-init", "file-index", "worker-thread", "terminal-release", "stderr-attempt", "deinit" });
+    try expectEvents(&.{ "init:none", "rebind-after-init", "file-index", "worker-thread", "terminal-release", "stderr-attempt", "deinit" });
 }
 
 test "app entry releases terminal before reporting initial context failures exactly" {
@@ -939,7 +902,6 @@ test "app entry releases terminal before reporting initial context failures exac
         try std.testing.expectEqual(@as(usize, 1), capture.stderr_calls);
         try expectEvents(&.{
             "init:none",
-            "mcp-discovery",
             "rebind-after-init",
             "file-index",
             "worker-thread",
@@ -963,7 +925,7 @@ test "app entry reports run errors before deinit and outer cleanup" {
     try std.testing.expectEqualStrings("fx: TestRunFailed\n", capture.stderr.written());
     try std.testing.expectEqual(@as(usize, 1), capture.stderr_calls);
     try std.testing.expectEqual(@as(usize, 0), capture.stdout_calls);
-    try expectEvents(&.{ "init:none", "mcp-discovery", "rebind-after-init", "file-index", "worker-thread", "model-cache", "run", "terminal-release", "stderr-attempt", "deinit", "outer-defer" });
+    try expectEvents(&.{ "init:none", "rebind-after-init", "file-index", "worker-thread", "model-cache", "run", "terminal-release", "stderr-attempt", "deinit", "outer-defer" });
 }
 
 test "app entry treats terminal input closure as abnormal cleanup without stderr" {
@@ -988,7 +950,6 @@ test "app entry treats terminal input closure as abnormal cleanup without stderr
     try std.testing.expectEqual(@as(usize, 0), capture.stdout_calls);
     try expectEvents(&.{
         "init:none",
-        "mcp-discovery",
         "rebind-after-init",
         "file-index",
         "worker-thread",
@@ -1009,7 +970,7 @@ test "app entry preserves run errors when fatal formatting fails" {
     try std.testing.expectError(error.TestRunFailed, runWithDeps(TestApp, alloc, &.{}, testConfig(), capture.deps()));
     try std.testing.expectEqualStrings("", capture.stderr.written());
     try std.testing.expectEqual(@as(usize, 0), capture.stderr_calls);
-    try expectEvents(&.{ "init:none", "mcp-discovery", "rebind-after-init", "file-index", "worker-thread", "model-cache", "run", "terminal-release", "deinit" });
+    try expectEvents(&.{ "init:none", "rebind-after-init", "file-index", "worker-thread", "model-cache", "run", "terminal-release", "deinit" });
 }
 
 test "app entry preserves run errors when fatal writer fails" {
@@ -1023,7 +984,7 @@ test "app entry preserves run errors when fatal writer fails" {
     try std.testing.expectError(error.TestRunFailed, runWithDeps(TestApp, alloc, &.{}, testConfig(), capture.deps()));
     try std.testing.expectEqualStrings("", capture.stderr.written());
     try std.testing.expectEqual(@as(usize, 1), capture.stderr_calls);
-    try expectEvents(&.{ "init:none", "mcp-discovery", "rebind-after-init", "file-index", "worker-thread", "model-cache", "run", "terminal-release", "stderr-attempt", "deinit" });
+    try expectEvents(&.{ "init:none", "rebind-after-init", "file-index", "worker-thread", "model-cache", "run", "terminal-release", "stderr-attempt", "deinit" });
 }
 
 test "app entry passes requested resume into app init" {
@@ -1034,7 +995,7 @@ test "app entry passes requested resume into app init" {
     const outcome = try runWithDeps(TestApp, alloc, &.{ @constCast("resume"), @constCast("session-123") }, testConfig(), capture.deps());
 
     try std.testing.expectEqual(RunOutcome.returned, outcome);
-    try expectEvents(&.{ "init:session-123", "mcp-discovery", "rebind-after-init", "file-index", "worker-thread", "model-cache", "run", "terminal-release", "deinit" });
+    try expectEvents(&.{ "init:session-123", "rebind-after-init", "file-index", "worker-thread", "model-cache", "run", "terminal-release", "deinit" });
 }
 
 test "app entry maps noninteractive terminal startup to exit one" {

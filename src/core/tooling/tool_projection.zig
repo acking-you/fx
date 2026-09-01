@@ -1,7 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const model_tool_schema = @import("model_tool_schema.zig");
-const mcp_runtime = @import("../mcp/mcp_runtime.zig");
 const permissions = @import("../permissions/permissions.zig");
 const shell_resolver = @import("../terminal/shell_resolver.zig");
 const tool_dispatch = @import("tool_dispatch.zig");
@@ -13,7 +12,6 @@ const Allocator = std.mem.Allocator;
 pub const Options = struct {
     permission_mode: types.PermissionMode = .auto,
     permission_rules: types.PermissionRuleSet = .{},
-    mcp_runtime: ?*mcp_runtime.McpRuntime = null,
     subagent_available: bool = false,
     web_search_available: bool = true,
     /// Prefer the unified shell for workspace discovery and code search.
@@ -279,7 +277,7 @@ const test_skill = blk: {
 const test_capability_search = blk: {
     var spec = test_skill;
     spec.name = "capability_search";
-    spec.description = "Test capability search. When to use: discover skill and MCP metadata together. When NOT to use: load or execute a match.";
+    spec.description = "Test capability search. When to use: discover skill metadata. When NOT to use: load or execute a match.";
     spec.model_schema = .{
         .name = "capability_search",
         .description = spec.description,
@@ -323,31 +321,6 @@ const test_subagent = blk: {
     spec.completed_action_label = "Managed";
     spec.label_arg_kind = .none;
     spec.label_arg_default = "subagent";
-    break :blk spec;
-};
-
-const test_mcp_select_tool = blk: {
-    var spec = test_skill;
-    spec.name = "mcp_select_tool";
-    spec.description = "Test MCP selection. When to use: exercise deferred MCP projection. When NOT to use: assert product-specific MCP guidance.";
-    spec.model_schema = .{
-        .name = "mcp_select_tool",
-        .description = spec.description,
-        .input_schema = .{
-            .properties = &.{
-                .{ .name = "name", .json_type = .string },
-            },
-            .required = &.{"name"},
-        },
-    };
-    spec.executor_kind = .mcp_select_tool;
-    spec.activity_kind = .read;
-    spec.requires_approval = false;
-    spec.action_label = "Selecting MCP tool";
-    spec.completed_action_label = "Selected MCP tool";
-    spec.label_arg_kind = .name;
-    spec.label_arg_default = "dynamic tool";
-    spec.permission_target_kind = .none;
     break :blk spec;
 };
 
@@ -524,7 +497,6 @@ const test_all_tools = [_]tool_dispatch.Tool{
     test_skill,
     test_install_skill,
     test_subagent,
-    test_mcp_select_tool,
     test_ask_user_question,
     test_vision,
     test_read_tool_result,
@@ -541,7 +513,6 @@ const test_order = [_][]const u8{
     "capability_search",
     "skill",
     "install_skill",
-    "mcp_select_tool",
     "ask_user_question",
     "web_fetch",
     "web_search",
@@ -798,36 +769,6 @@ fn indexOfName(names: []const []const u8, expected: []const u8) !usize {
     return error.TestExpectedEqual;
 }
 
-fn appendTestMcpTool(runtime: *mcp_runtime.McpRuntime, server_index: usize, name: []const u8) !void {
-    const alloc = runtime.alloc;
-    const description = try alloc.dupe(u8, "test MCP tool");
-    errdefer alloc.free(description);
-    const input_schema = try alloc.dupe(u8, "{\"type\":\"object\"}");
-    errdefer alloc.free(input_schema);
-    const tags = try alloc.alloc([]u8, 1);
-    errdefer alloc.free(tags);
-    tags[0] = try alloc.dupe(u8, "test");
-    errdefer alloc.free(tags[0]);
-    try runtime.servers.items[server_index].tool_catalog.tools.append(alloc, .{
-        .original_name = try alloc.dupe(u8, name),
-        .prefixed_name = try alloc.dupe(u8, name),
-        .description = description,
-        .input_schema_json = input_schema,
-        .tags = tags,
-    });
-}
-
-fn appendTestMcpServer(runtime: *mcp_runtime.McpRuntime, name: []const u8) !usize {
-    const config = mcp_runtime.McpServerConfig{
-        .name = try runtime.alloc.dupe(u8, name),
-        .enabled = true,
-    };
-    try runtime.addServer(config);
-    const index = runtime.servers.items.len - 1;
-    runtime.servers.items[index].state = .ready;
-    return index;
-}
-
 test "provider-executed search follows settled advertisement permission" {
     const cases = [_]struct {
         action: ?types.PermissionAction,
@@ -1003,35 +944,6 @@ test "effective tool projection cleans up every partial allocation failure" {
         checkEffectiveToolProjectionAllocationFailures,
         .{},
     );
-}
-
-test "MCP tools stay deferred and base selection is stable across catalog churn" {
-    const alloc = std.testing.allocator;
-    var first_runtime = mcp_runtime.McpRuntime.init(alloc);
-    defer first_runtime.deinit();
-    const first_server = try appendTestMcpServer(&first_runtime, "first");
-    try appendTestMcpTool(&first_runtime, first_server, "mcp_first_a");
-
-    var second_runtime = mcp_runtime.McpRuntime.init(alloc);
-    defer second_runtime.deinit();
-    const second_server = try appendTestMcpServer(&second_runtime, "second");
-    try appendTestMcpTool(&second_runtime, second_server, "mcp_second_a");
-    try appendTestMcpTool(&second_runtime, second_server, "mcp_second_b");
-
-    var first = try buildTestModelToolProjection(alloc, .{ .mcp_runtime = &first_runtime });
-    defer first.deinit(alloc);
-    var second = try buildTestModelToolProjection(alloc, .{ .mcp_runtime = &second_runtime });
-    defer second.deinit(alloc);
-
-    try expectContainsName(first.advertised_names, "capability_search");
-    try expectNotContainsName(first.advertised_names, "skill_search");
-    try expectNotContainsName(first.advertised_names, "mcp_search_tools");
-    try expectContainsName(first.advertised_names, "mcp_select_tool");
-    try expectNotContainsName(first.advertised_names, "mcp_first_a");
-    try std.testing.expectEqual(first.advertised_names.len, second.advertised_names.len);
-    for (first.advertised_names, second.advertised_names) |left, right| {
-        try std.testing.expectEqualStrings(left, right);
-    }
 }
 
 test "subagent and exec selection follow host capability" {

@@ -16,10 +16,6 @@ const agent_execution_memory = @import("../core/agent/execution_memory.zig");
 const diff_mod = @import("../core/output/diff.zig");
 const file_mutation = @import("../core/tooling/file_mutation.zig");
 const file_mutation_contract = @import("../core/tooling/file_mutation_contract.zig");
-const mcp_runtime = @import("../core/mcp/mcp_runtime.zig");
-const mcp_model_catalog = @import("../core/mcp/model_catalog.zig");
-const mcp_elicitation = @import("../core/mcp/elicitation.zig");
-const mrtr = @import("../core/mcp/mrtr.zig");
 const permission_auto_classifier = @import("../core/permissions/auto_classifier.zig");
 const auto_classifier_context = @import("../core/permissions/auto_classifier_context.zig");
 const permission_gate = @import("../core/permissions/permission_gate.zig");
@@ -53,7 +49,6 @@ const tool_admission = @import("../core/tooling/tool_admission.zig");
 const tool_dispatch = @import("../core/tooling/tool_dispatch.zig");
 const tool_specs = @import("../core/tooling/tool_specs.zig");
 const tool_set_contract = @import("../core/tooling/tool_set.zig");
-const tool_mcp_runtime = @import("../core/tooling/tool_mcp_runtime.zig");
 const tool_presentation = @import("../core/tooling/tool_presentation.zig");
 const tool_result_errors = @import("../core/tooling/tool_result_errors.zig");
 const tool_runtime = @import("../core/tooling/tool_runtime.zig");
@@ -81,7 +76,6 @@ const PermissionGrant = types.PermissionGrant;
 const PermissionMode = types.PermissionMode;
 const ToolPermissionDecision = types.ToolPermissionDecision;
 const ToolExecutionResult = agent_runtime.ToolExecutionResult;
-const McpHasToolFn = tool_mcp_runtime.HasToolFn;
 
 pub const TerminalOutcome = union(enum) {
     stop_reason: acp_types.StopReason,
@@ -566,7 +560,7 @@ const AcpContext = struct {
                 .usage_allocator = self.state.alloc,
             });
         }
-        var tc: tool_runtime.Context = .{
+        const tc: tool_runtime.Context = .{
             .workspace_root = self.state.workspace_root,
             .access_scope = self.state.workspace_access.scope(self.state.workspace_root),
             .ignored_list_entries = self.state.cfg.ignored_list_entries,
@@ -619,8 +613,6 @@ const AcpContext = struct {
             .on_plan_update = onPlanUpdate,
             .output_chunk_ctx = @ptrCast(self),
             .on_output_chunk = onCommandOutputChunk,
-            .mcp_progress_ctx = @ptrCast(self),
-            .on_mcp_progress = onMcpProgress,
             .background_url_ctx = @ptrCast(self),
             .on_background_url_ready = onBackgroundUrlReady,
             .session_child_capability = if (session.writable) |*writable|
@@ -648,17 +640,6 @@ const AcpContext = struct {
                 .session_id = session.session_id,
             },
         };
-        if (comptime !host_target.is_wasm) {
-            if (session.mcp != null) {
-                tc.mcp_ctx = @ptrCast(self);
-                tc.mcp_has_tool = mcpHasTool;
-                tc.mcp_validate_tool = mcpValidateTool;
-                tc.mcp_call_tool = mcpCallTool;
-                tc.mcp_search_tools = mcpSearchTools;
-                tc.mcp_tool_schema = mcpToolSchemaJson;
-                tc.mcp_call_feature = mcpCallFeature;
-            }
-        }
         return tc;
     }
 
@@ -676,45 +657,6 @@ fn activeToolSet(state: *const server.ServerState) tool_set_contract.ToolSet {
     if (comptime host_target.is_wasm) return tool_set_contract.empty;
     return if (state.cfg.allow_native_tools) builtin_tools.advertisement_set else tool_set_contract.empty;
 }
-
-const AcpElicitationResponderContext = struct {
-    const AcceptedLegacyUrl = struct {
-        acp_id: []u8,
-
-        fn deinit(self: *AcceptedLegacyUrl, alloc: Allocator) void {
-            alloc.free(self.acp_id);
-            self.* = undefined;
-        }
-    };
-
-    acp: *AcpContext,
-    tool_call_id: []const u8,
-    operation_cancel_flag: ?*const std.atomic.Value(bool),
-    accepted_url_ids: std.ArrayListUnmanaged([]u8) = .empty,
-    accepted_legacy_urls: std.ArrayListUnmanaged(AcceptedLegacyUrl) = .empty,
-
-    fn deinit(self: *AcpElicitationResponderContext) void {
-        for (self.accepted_url_ids.items) |id| self.acp.state.alloc.free(id);
-        self.accepted_url_ids.deinit(self.acp.state.alloc);
-        for (self.accepted_legacy_urls.items) |*accepted| {
-            server.removeLegacyUrl(self.acp.state, accepted.acp_id);
-            accepted.deinit(self.acp.state.alloc);
-        }
-        self.accepted_legacy_urls.deinit(self.acp.state.alloc);
-        self.* = undefined;
-    }
-
-    fn responder(self: *AcpElicitationResponderContext) ?tool_mcp_runtime.InputResponder {
-        const capabilities = self.acp.state.client_elicitation;
-        if (!capabilities.any()) return null;
-        return .{
-            .context = @ptrCast(self),
-            .capabilities = capabilities,
-            .callback = respondToAcpMcpInput,
-            .continuation_terminal = finishAcpUrlElicitations,
-        };
-    }
-};
 
 const Osc8Link = struct {
     uri: []const u8,
@@ -828,7 +770,6 @@ fn handleCompactCommand(
         .{
             .permission_mode = ctx.captured_permission_mode orelse session.permission_mode,
             .permission_rules = session.permission_rules,
-            .mcp_runtime = session.mcp,
             .subagent_available = ctx.state.subagent_host != null,
             .web_search_available = providerWebSearchAvailable(
                 ctx.state,
@@ -1017,7 +958,6 @@ pub fn handlePrompt(
     var tool_projection = try state.cfg.mode_registry.buildModelToolProjection(alloc, activeToolSet(state), captured_mode, .{
         .permission_mode = captured_permission_mode,
         .permission_rules = session.permission_rules,
-        .mcp_runtime = session.mcp,
         .subagent_available = state.subagent_host != null,
         .web_search_available = providerWebSearchAvailable(
             state,
@@ -1719,7 +1659,6 @@ pub fn runSubagentChild(
     const session_id = active.session_id;
     const captured_mode = active.mode;
     const bash_first = state.bash_first;
-    const mcp = active.mcp;
     state.subagent_authority_mutex.unlock(io_mod.getIo());
     var ctx = AcpContext{
         .alloc = alloc,
@@ -1737,7 +1676,6 @@ pub fn runSubagentChild(
         .{
             .permission_mode = admission.permission_mode,
             .permission_rules = admission.rules,
-            .mcp_runtime = mcp,
             .subagent_available = true,
             .web_search_available = providerWebSearchAvailable(
                 state,
@@ -2388,20 +2326,6 @@ fn appendStaticContext(raw_ctx: *anyopaque, arena: Allocator, messages: *std.Arr
     try ctx.state.cfg.context_registry.appendDefaultStatic(.{
         .project_context = ctx.modelVisibleProjectContext(),
     }, arena, messages);
-    const active_session = if (ctx.state.active_session) |*session| session else null;
-    var snapshot = if (active_session) |session|
-        if (session.mcp) |mcp|
-            try mcp.snapshotModelCatalog(arena, session.permission_rules, false)
-        else
-            try mcp_model_catalog.Snapshot.empty(arena)
-    else
-        try mcp_model_catalog.Snapshot.empty(arena);
-    defer snapshot.deinit(arena);
-    const section = try mcp_model_catalog.render(arena, snapshot);
-    if (section.text.len > 0) {
-        try messages.append(arena, .{ .role = .system, .content = section.text });
-    }
-    if (section.notice) |notice| try pushContextNotice(raw_ctx, notice);
 }
 
 fn validateToolCall(raw_ctx: *anyopaque, arena: Allocator, call: ToolCall) !agent_runtime.ToolCallValidationResult {
@@ -2420,9 +2344,9 @@ fn checkToolAvailability(raw_ctx: *anyopaque, arena: Allocator, call: ToolCall) 
     return tool_runtime.checkToolAvailability(ctx.toolContext(), arena, call);
 }
 
-fn requestPreparedFileMutationPermissionOutcomeForRuntime(raw_ctx: *anyopaque, arena: Allocator, call: ToolCall, prepared: *tool_admission.PreparedFileMutationCall, review_turn: permission_auto_classifier.ReviewTurnContext, permission_mode: PermissionMode, local_grants: []const PermissionGrant, live_authority: ?agent_runtime.LiveToolAuthority, advertised_dynamic_tool_names: []const []const u8) !command_admission.PermissionOutcome {
+fn requestPreparedFileMutationPermissionOutcomeForRuntime(raw_ctx: *anyopaque, arena: Allocator, call: ToolCall, prepared: *tool_admission.PreparedFileMutationCall, review_turn: permission_auto_classifier.ReviewTurnContext, permission_mode: PermissionMode, local_grants: []const PermissionGrant, live_authority: ?agent_runtime.LiveToolAuthority) !command_admission.PermissionOutcome {
     const ctx: *AcpContext = @ptrCast(@alignCast(raw_ctx));
-    var tool_ctx = tool_runtime.withAdvertisedDynamicToolNames(ctx.toolContext(), advertised_dynamic_tool_names);
+    var tool_ctx = ctx.toolContext();
     tool_ctx.permission_review_turn = review_turn;
     const admission = tool_ctx.admissionInputWithLiveAuthority(live_authority);
     return tool_admission.requestPreparedFileMutationPermissionOutcome(
@@ -2435,9 +2359,9 @@ fn requestPreparedFileMutationPermissionOutcomeForRuntime(raw_ctx: *anyopaque, a
     );
 }
 
-fn requestToolPermissionOutcome(raw_ctx: *anyopaque, arena: Allocator, call: ToolCall, permission_mode: PermissionMode, local_grants: []const PermissionGrant, advertised_dynamic_tool_names: []const []const u8) !command_admission.PermissionOutcome {
+fn requestToolPermissionOutcome(raw_ctx: *anyopaque, arena: Allocator, call: ToolCall, permission_mode: PermissionMode, local_grants: []const PermissionGrant) !command_admission.PermissionOutcome {
     const ctx: *AcpContext = @ptrCast(@alignCast(raw_ctx));
-    const tool_ctx = tool_runtime.withAdvertisedDynamicToolNames(ctx.toolContext(), advertised_dynamic_tool_names);
+    const tool_ctx = ctx.toolContext();
     return tool_admission.requestPermissionOutcome(
         tool_ctx.admissionInput(),
         arena,
@@ -2447,9 +2371,9 @@ fn requestToolPermissionOutcome(raw_ctx: *anyopaque, arena: Allocator, call: Too
     );
 }
 
-fn requestToolPermissionOutcomeWithRequest(raw_ctx: *anyopaque, arena: Allocator, call: ToolCall, review_turn: permission_auto_classifier.ReviewTurnContext, permission_mode: PermissionMode, local_grants: []const PermissionGrant, live_authority: ?agent_runtime.LiveToolAuthority, revalidation: ?agent_runtime.LivePermissionRevalidation, advertised_dynamic_tool_names: []const []const u8) !command_admission.PermissionOutcome {
+fn requestToolPermissionOutcomeWithRequest(raw_ctx: *anyopaque, arena: Allocator, call: ToolCall, review_turn: permission_auto_classifier.ReviewTurnContext, permission_mode: PermissionMode, local_grants: []const PermissionGrant, live_authority: ?agent_runtime.LiveToolAuthority, revalidation: ?agent_runtime.LivePermissionRevalidation) !command_admission.PermissionOutcome {
     const ctx: *AcpContext = @ptrCast(@alignCast(raw_ctx));
-    var tool_ctx = tool_runtime.withAdvertisedDynamicToolNames(ctx.toolContext(), advertised_dynamic_tool_names);
+    var tool_ctx = ctx.toolContext();
     tool_ctx.permission_review_turn = review_turn;
     const admission = tool_ctx.admissionInputWithLiveAuthority(live_authority);
     return if (revalidation) |request| switch (request) {
@@ -2570,13 +2494,12 @@ fn writePermissionOption(
     try writer.writeByte('}');
 }
 
-fn describeToolAction(raw_ctx: *anyopaque, arena: Allocator, call: ToolCall, display_target: ?[]const u8, advertised_dynamic_tool_names: []const []const u8) ![]const u8 {
+fn describeToolAction(raw_ctx: *anyopaque, arena: Allocator, call: ToolCall, display_target: ?[]const u8) ![]const u8 {
     const ctx: *AcpContext = @ptrCast(@alignCast(raw_ctx));
     return tool_presentation.formatPlainAction(arena, .{
         .tool_registry = ctx.toolRegistry(),
         .call = call,
         .display_target = display_target,
-        .is_available_dynamic_mcp_tool = lifecycleDynamicMcpToolAvailable(ctx, call.name, advertised_dynamic_tool_names),
     });
 }
 
@@ -2587,45 +2510,27 @@ fn resolveToolActionDisplayTarget(raw_ctx: *anyopaque, arena: Allocator, call: T
     return null;
 }
 
-fn describeToolActionCompleted(raw_ctx: *anyopaque, arena: Allocator, call: ToolCall, display_target: ?[]const u8, advertised_dynamic_tool_names: []const []const u8) ![]const u8 {
+fn describeToolActionCompleted(raw_ctx: *anyopaque, arena: Allocator, call: ToolCall, display_target: ?[]const u8) ![]const u8 {
     const ctx: *AcpContext = @ptrCast(@alignCast(raw_ctx));
     return tool_presentation.formatPlainActionForState(arena, .{
         .tool_registry = ctx.toolRegistry(),
         .call = call,
         .display_target = display_target,
-        .is_available_dynamic_mcp_tool = lifecycleDynamicMcpToolAvailable(ctx, call.name, advertised_dynamic_tool_names),
     }, .completed, null);
 }
 
-fn describeToolActionDenied(raw_ctx: *anyopaque, arena: Allocator, call: ToolCall, display_target: ?[]const u8, label: []const u8, advertised_dynamic_tool_names: []const []const u8) ![]const u8 {
+fn describeToolActionDenied(raw_ctx: *anyopaque, arena: Allocator, call: ToolCall, display_target: ?[]const u8, label: []const u8) ![]const u8 {
     const ctx: *AcpContext = @ptrCast(@alignCast(raw_ctx));
     return tool_presentation.formatPlainActionForState(arena, .{
         .tool_registry = ctx.toolRegistry(),
         .call = call,
         .display_target = display_target,
-        .is_available_dynamic_mcp_tool = lifecycleDynamicMcpToolAvailable(ctx, call.name, advertised_dynamic_tool_names),
     }, .denied, label);
 }
 
-fn lifecycleDynamicMcpToolAvailable(ctx: *AcpContext, name: []const u8, advertised_dynamic_tool_names: []const []const u8) bool {
-    if (comptime host_target.is_wasm) return false;
-    return dynamicMcpToolAvailable(ctx.toolRegistry(), name, advertised_dynamic_tool_names, @ptrCast(ctx), mcpHasTool, .unrestricted);
-}
-
-fn dynamicMcpToolAvailable(registry: tool_dispatch.Registry, name: []const u8, advertised_dynamic_tool_names: []const []const u8, mcp_ctx: ?*anyopaque, has_tool: ?McpHasToolFn, access: tool_mcp_runtime.Access) bool {
-    if (!tool_presentation.isAdvertisedDynamicMcpName(registry, name, advertised_dynamic_tool_names)) return false;
-    const raw_ctx = mcp_ctx orelse return false;
-    const has = has_tool orelse return false;
-    return has(raw_ctx, name, access);
-}
-
-fn permissionTargetForCall(raw_ctx: *anyopaque, arena: Allocator, call: ToolCall, advertised_dynamic_tool_names: []const []const u8) ![]const u8 {
+fn permissionTargetForCall(raw_ctx: *anyopaque, arena: Allocator, call: ToolCall) ![]const u8 {
     const ctx: *AcpContext = @ptrCast(@alignCast(raw_ctx));
-    const tool_ctx = tool_runtime.withAdvertisedDynamicToolNames(
-        ctx.toolContext(),
-        advertised_dynamic_tool_names,
-    );
-    return tool_admission.permissionTargetForCall(tool_ctx.admissionInput(), arena, call);
+    return tool_admission.permissionTargetForCall(ctx.toolContext().admissionInput(), arena, call);
 }
 
 fn executeWebToolCall(
@@ -2645,13 +2550,6 @@ fn executeToolCall(
     ctx.sendToolCallProgressText(acp_id, null) catch {};
 
     var tool_ctx = ctx.toolContext();
-    var elicitation_responder = AcpElicitationResponderContext{
-        .acp = ctx,
-        .tool_call_id = acp_id,
-        .operation_cancel_flag = tool_ctx.cancel_flag,
-    };
-    defer elicitation_responder.deinit();
-    tool_ctx.mcp_input_responder = elicitation_responder.responder();
     tool_ctx.root_user_intent_context = request.root_user_intent_context;
     tool_ctx.root_user_messages = request.root_user_messages;
     tool_ctx.root_user_evidence_complete = request.root_user_evidence_complete;
@@ -2662,7 +2560,6 @@ fn executeToolCall(
     tool_ctx.web_fetch_progress_ctx = @ptrCast(&fetch_progress_ctx);
     tool_ctx.on_web_fetch_progress = onWebFetchProgress;
     tool_ctx.session_grants = request.session_grants;
-    tool_ctx.advertised_dynamic_tool_names = request.advertised_dynamic_tool_names;
     tool_ctx.max_tool_result_bytes = request.max_tool_result_bytes;
     const result = tool_runtime.executeToolCallAuthorized(
         tool_ctx,
@@ -3176,474 +3073,6 @@ fn onCommandOutputChunk(raw_ctx: *anyopaque, lifecycle_id: ?types.ToolLifecycleI
     try ctx.sendCommandOutputDelta(id.call_id, stream, chunk);
 }
 
-fn onMcpProgress(raw_ctx: *anyopaque, lifecycle_id: types.ToolLifecycleId, text: []const u8) void {
-    const ctx: *AcpContext = @ptrCast(@alignCast(raw_ctx));
-    ctx.sendToolCallProgressText(lifecycle_id.call_id, text) catch |err| {
-        debug_trace.logf("mcp", "failed to publish ACP MCP progress err={s}", .{@errorName(err)});
-    };
-}
-
-const AcpInputResponse = struct {
-    key: []const u8,
-    json: []u8,
-
-    fn deinit(self: *AcpInputResponse, alloc: Allocator) void {
-        alloc.free(self.json);
-        self.* = undefined;
-    }
-};
-
-fn respondToAcpMcpInput(
-    raw_ctx: *anyopaque,
-    alloc: Allocator,
-    origin: tool_mcp_runtime.InputOrigin,
-    required: tool_mcp_runtime.InputRequired,
-) anyerror![]const u8 {
-    const responder: *AcpElicitationResponderContext = @ptrCast(@alignCast(raw_ctx));
-    const requests = try mrtr.parseRequestJsonForWire(
-        alloc,
-        required.input_requests_json,
-        origin.wire,
-        .{},
-    );
-    defer {
-        for (requests) |*request| request.deinit(alloc);
-        alloc.free(requests);
-    }
-    if (requests.len == 0) return error.McpInputRequired;
-
-    const responses = try alloc.alloc(AcpInputResponse, requests.len);
-    var response_count: usize = 0;
-    errdefer {
-        for (responses[0..response_count]) |*response| response.deinit(alloc);
-        alloc.free(responses);
-    }
-
-    var cancelled = false;
-    for (requests) |request| {
-        const response_json = if (cancelled)
-            try alloc.dupe(u8, "{\"action\":\"cancel\"}")
-        else response: {
-            const input_request = switch (request.payload) {
-                .elicitation_create => |value| value,
-                else => return error.McpInputRequired,
-            };
-            if (!responder.acp.state.client_elicitation.supports(input_request.mode)) {
-                return error.McpInputRequired;
-            }
-            const direct = try requestAcpElicitation(
-                responder,
-                alloc,
-                origin,
-                input_request,
-            );
-            if (std.mem.eql(u8, direct, "{\"action\":\"cancel\"}")) cancelled = true;
-            break :response direct;
-        };
-        responses[response_count] = .{ .key = request.key, .json = response_json };
-        response_count += 1;
-    }
-
-    var out: std.Io.Writer.Allocating = .init(alloc);
-    defer out.deinit();
-    try out.writer.writeByte('{');
-    for (responses, 0..) |response, index| {
-        if (index > 0) try out.writer.writeByte(',');
-        try std.json.Stringify.value(response.key, .{}, &out.writer);
-        try out.writer.writeByte(':');
-        try out.writer.writeAll(response.json);
-    }
-    try out.writer.writeByte('}');
-    const result = try out.toOwnedSlice();
-    for (responses) |*response| response.deinit(alloc);
-    alloc.free(responses);
-    return result;
-}
-
-fn requestAcpElicitation(
-    responder: *AcpElicitationResponderContext,
-    alloc: Allocator,
-    origin: tool_mcp_runtime.InputOrigin,
-    input_request: mcp_elicitation.Request,
-) ![]u8 {
-    const state = responder.acp.state;
-    const outbound_id = (try server.beginOutboundRequest(state, .elicitation)) orelse
-        return error.McpInputRequired;
-    var awaiting = true;
-    errdefer if (awaiting) {
-        server.cancelOutboundRequest(state, outbound_id);
-        if (server.awaitOutboundResponse(state, outbound_id, .elicitation)) |owned| {
-            var response = owned;
-            response.deinit(state.alloc);
-        }
-    };
-
-    var id_buffer: [48]u8 = undefined;
-    const url_id = if (input_request.mode == .url)
-        try std.fmt.bufPrint(&id_buffer, "fx-{d}", .{outbound_id})
-    else
-        null;
-    const legacy_source_id = if (origin.wire.isLegacy() and input_request.mode == .url)
-        input_request.elicitation_id orelse return error.McpInputRequired
-    else
-        null;
-    var legacy_url_retained = false;
-    if (legacy_source_id) |source_id| {
-        if (!try server.reserveLegacyUrl(
-            state,
-            origin,
-            source_id,
-            url_id.?,
-            responder.acp.session_id,
-            responder.tool_call_id,
-        )) return error.McpInputRequired;
-        if (activeMcp(responder.acp)) |runtime| {
-            runtime.reconcileLegacyUrlCompletion(
-                origin,
-                source_id,
-                server.legacyUrlCompletionSink(state),
-            );
-        }
-    }
-    defer if (legacy_source_id != null and !legacy_url_retained) {
-        server.removeLegacyUrl(state, url_id.?);
-    };
-    const display_message = try formatAcpElicitationMessage(alloc, origin.server_name, input_request);
-    defer alloc.free(display_message);
-    const params = try mcp_elicitation.projectToAcpCreateParams(
-        alloc,
-        input_request,
-        .{ .session = .{
-            .session_id = responder.acp.session_id,
-            .tool_call_id = responder.tool_call_id,
-        } },
-        url_id,
-        display_message,
-        .{},
-    );
-    defer alloc.free(params);
-    try state.writer.writeRequest(
-        alloc,
-        .{ .integer = @intCast(outbound_id) },
-        "elicitation/create",
-        params,
-    );
-
-    const maybe_response = try awaitAcpElicitationResponse(
-        state,
-        outbound_id,
-        origin,
-        responder.operation_cancel_flag,
-    );
-    awaiting = false;
-    var response = maybe_response orelse return error.Cancelled;
-    defer response.deinit(state.alloc);
-    if (response.cancelled) return error.Cancelled;
-    if (response.error_json != null) return error.McpInputRequired;
-    const response_json = response.result_json orelse return error.McpInputRequired;
-
-    var projected_request = try mcp_elicitation.parseRequest(alloc, .acp, params, .{});
-    defer projected_request.deinit(alloc);
-    const canonical_response = try mcp_elicitation.canonicalResponse(
-        alloc,
-        projected_request,
-        response_json,
-        .{},
-    );
-    errdefer alloc.free(canonical_response);
-    const action = try mcp_elicitation.validateResponse(
-        alloc,
-        projected_request,
-        canonical_response,
-        .{},
-    );
-    var transition_state: mcp_elicitation.RequestState = .pending;
-    const live_witness = if (activeMcp(responder.acp)) |runtime|
-        runtime.inputIdentityWitness(origin.server_name)
-    else
-        null;
-    const transition = mcp_elicitation.decideTransition(
-        transition_state,
-        bindingForAcpInput(responder, origin),
-        answerBindingForAcpInput(responder, origin, live_witness),
-        acpAwakeMillis(),
-        live_witness != null,
-    );
-    switch (transition) {
-        .consume => transition_state = .consumed,
-        .reject => return error.McpInputRequired,
-    }
-    std.debug.assert(transition_state == .consumed);
-
-    if (input_request.mode == .url and action == .accept) {
-        if (legacy_source_id != null) {
-            const runtime = activeMcp(responder.acp) orelse return error.McpInputRequired;
-            const accept_result = runtime.acceptLegacyUrlCompletion(
-                origin,
-                url_id.?,
-                server.legacyUrlCompletionSink(state),
-            ) orelse return error.McpInputRequired;
-            if (accept_result == .awaiting_completion) {
-                const retained_acp_id = try state.alloc.dupe(u8, url_id.?);
-                errdefer state.alloc.free(retained_acp_id);
-                try responder.accepted_legacy_urls.append(state.alloc, .{
-                    .acp_id = retained_acp_id,
-                });
-                legacy_url_retained = true;
-            }
-        } else {
-            const retained_id = try state.alloc.dupe(u8, url_id.?);
-            errdefer state.alloc.free(retained_id);
-            try responder.accepted_url_ids.append(state.alloc, retained_id);
-        }
-    }
-    return canonical_response;
-}
-
-fn formatAcpElicitationMessage(
-    alloc: Allocator,
-    server_name: []const u8,
-    request: mcp_elicitation.Request,
-) ![]u8 {
-    return switch (request.mode) {
-        .form => std.fmt.allocPrint(
-            alloc,
-            "fx received a form request from MCP server {s}. {s}",
-            .{ server_name, request.message },
-        ),
-        .url => std.fmt.allocPrint(
-            alloc,
-            "fx received a URL request from MCP server {s} for host {s}. {s}",
-            .{ server_name, request.url_host orelse "unknown", request.message },
-        ),
-        .unknown => error.McpInputRequired,
-    };
-}
-
-fn bindingForAcpInput(
-    responder: *AcpElicitationResponderContext,
-    origin: tool_mcp_runtime.InputOrigin,
-) mcp_elicitation.Binding {
-    return .{
-        .server_name = origin.server_name,
-        .scope = .{ .acp_session = .{
-            .session_id = responder.acp.session_id,
-            .tool_call_id = responder.tool_call_id,
-        } },
-        .runtime_generation = origin.runtime_generation,
-        .connection_generation = origin.connection_generation,
-        .client_generation = origin.client_generation,
-        .catalog_generation = origin.catalog_generation,
-        .request_generation = origin.request_generation,
-        .auth_generation = origin.auth_generation,
-        .deadline_ms = origin.deadline_ms,
-    };
-}
-
-fn answerBindingForAcpInput(
-    responder: *AcpElicitationResponderContext,
-    origin: tool_mcp_runtime.InputOrigin,
-    witness: ?tool_mcp_runtime.InputIdentityWitness,
-) mcp_elicitation.AnswerBinding {
-    const current: tool_mcp_runtime.InputIdentityWitness = witness orelse .{
-        .runtime_generation = origin.runtime_generation,
-        .connection_generation = origin.connection_generation,
-        .client_generation = origin.client_generation,
-        .catalog_generation = origin.catalog_generation,
-        .auth_generation = origin.auth_generation,
-    };
-    return .{
-        .server_name = origin.server_name,
-        .scope = .{ .acp_session = .{
-            .session_id = responder.acp.session_id,
-            .tool_call_id = responder.tool_call_id,
-        } },
-        .runtime_generation = current.runtime_generation,
-        .connection_generation = current.connection_generation,
-        .client_generation = current.client_generation,
-        .catalog_generation = current.catalog_generation,
-        .request_generation = origin.request_generation,
-        .auth_generation = current.auth_generation,
-    };
-}
-
-const AcpElicitationWait = union(enum) {
-    response: ?server.OutboundResponse,
-    deadline: anyerror!void,
-    cancelled: anyerror!void,
-};
-
-fn awaitAcpElicitationResponse(
-    state: *server.ServerState,
-    id: u64,
-    origin: tool_mcp_runtime.InputOrigin,
-    operation_cancel_flag: ?*const std.atomic.Value(bool),
-) !?server.OutboundResponse {
-    const Cleanup = struct {
-        fn drain(state_alloc: Allocator, select: *std.Io.Select(AcpElicitationWait)) void {
-            while (select.cancel()) |item| switch (item) {
-                .response => |maybe_response| if (maybe_response) |owned| {
-                    var response = owned;
-                    response.deinit(state_alloc);
-                },
-                .deadline, .cancelled => {},
-            };
-        }
-    };
-
-    var select_buffer: [3]AcpElicitationWait = undefined;
-    var select: std.Io.Select(AcpElicitationWait) = .init(io_mod.getIo(), &select_buffer);
-    try select.concurrent(.response, server.awaitOutboundResponse, .{ state, id, server.OutboundKind.elicitation });
-    select.concurrent(.deadline, waitForAcpElicitationDeadline, .{origin.deadline_ms}) catch |err| {
-        Cleanup.drain(state.alloc, &select);
-        return err;
-    };
-    select.concurrent(.cancelled, waitForAcpElicitationCancellation, .{
-        origin.lifecycle_cancel_flag,
-        operation_cancel_flag,
-    }) catch |err| {
-        Cleanup.drain(state.alloc, &select);
-        return err;
-    };
-    const event = select.await() catch |err| {
-        Cleanup.drain(state.alloc, &select);
-        return err;
-    };
-    return switch (event) {
-        .response => |response| result: {
-            Cleanup.drain(state.alloc, &select);
-            break :result response;
-        },
-        .deadline, .cancelled => result: {
-            server.cancelOutboundRequest(state, id);
-            Cleanup.drain(state.alloc, &select);
-            break :result null;
-        },
-    };
-}
-
-fn waitForAcpElicitationDeadline(deadline_ms: i64) anyerror!void {
-    while (acpAwakeMillis() < deadline_ms) {
-        const remaining = deadline_ms - acpAwakeMillis();
-        try io_mod.getIo().sleep(.fromMilliseconds(@intCast(@max(@min(remaining, 20), 1))), .awake);
-    }
-}
-
-fn waitForAcpElicitationCancellation(
-    lifecycle_cancel_flag: ?*const std.atomic.Value(bool),
-    operation_cancel_flag: ?*const std.atomic.Value(bool),
-) anyerror!void {
-    while ((lifecycle_cancel_flag == null or !lifecycle_cancel_flag.?.load(.acquire)) and
-        (operation_cancel_flag == null or !operation_cancel_flag.?.load(.acquire)))
-    {
-        try io_mod.getIo().sleep(.fromMilliseconds(10), .awake);
-    }
-}
-
-fn acpAwakeMillis() i64 {
-    const now = std.Io.Clock.Timestamp.now(io_mod.getIo(), .awake);
-    const milliseconds = @divFloor(now.raw.nanoseconds, std.time.ns_per_ms);
-    return std.math.cast(i64, milliseconds) orelse if (milliseconds < 0)
-        std.math.minInt(i64)
-    else
-        std.math.maxInt(i64);
-}
-
-fn finishAcpUrlElicitations(
-    raw_ctx: *anyopaque,
-    alloc: Allocator,
-    _: tool_mcp_runtime.InputOrigin,
-    outcome: tool_mcp_runtime.ContinuationTerminal,
-) void {
-    const responder: *AcpElicitationResponderContext = @ptrCast(@alignCast(raw_ctx));
-    for (responder.accepted_url_ids.items) |id| {
-        if (outcome == .completed) {
-            var params: std.Io.Writer.Allocating = .init(alloc);
-            defer params.deinit();
-            params.writer.writeAll("{\"elicitationId\":") catch continue;
-            std.json.Stringify.value(id, .{}, &params.writer) catch continue;
-            params.writer.writeByte('}') catch continue;
-            responder.acp.state.writer.writeNotification(
-                alloc,
-                "elicitation/complete",
-                params.writer.buffered(),
-            ) catch {};
-        }
-        responder.acp.state.alloc.free(id);
-    }
-    responder.accepted_url_ids.clearRetainingCapacity();
-    for (responder.accepted_legacy_urls.items) |*accepted| {
-        if (outcome != .completed) {
-            server.removeLegacyUrl(responder.acp.state, accepted.acp_id);
-        }
-        accepted.deinit(responder.acp.state.alloc);
-    }
-    responder.accepted_legacy_urls.clearRetainingCapacity();
-}
-
-fn mcpHasTool(raw_ctx: *anyopaque, name: []const u8, access: tool_mcp_runtime.Access) bool {
-    const ctx: *AcpContext = @ptrCast(@alignCast(raw_ctx));
-    const mcp = activeMcp(ctx) orelse return false;
-    return mcp.hasToolWithAccess(name, access);
-}
-
-fn mcpValidateTool(raw_ctx: *anyopaque, arena: Allocator, name: []const u8, arguments_json: []const u8, access: tool_mcp_runtime.Access) anyerror!tool_mcp_runtime.ValidationResult {
-    const ctx: *AcpContext = @ptrCast(@alignCast(raw_ctx));
-    const runtime = activeMcp(ctx) orelse return .not_available;
-    return runtime.validateToolArgumentsByNameWithAccess(
-        arena,
-        name,
-        arguments_json,
-        access,
-    );
-}
-
-fn mcpCallTool(raw_ctx: *anyopaque, arena: Allocator, name: []const u8, arguments_json: []const u8, max_tool_result_bytes: usize, options: tool_mcp_runtime.CallOptions) anyerror!?tool_mcp_runtime.CallResult {
-    const ctx: *AcpContext = @ptrCast(@alignCast(raw_ctx));
-    const mcp = activeMcp(ctx) orelse return null;
-    return mcp.callToolByNameWithOptions(
-        arena,
-        name,
-        arguments_json,
-        max_tool_result_bytes,
-        options,
-    );
-}
-
-fn mcpSearchTools(raw_ctx: *anyopaque, arena: Allocator, request: tool_mcp_runtime.SearchRequest, permission_rules: types.PermissionRuleSet, limits: config_runtime.context_limits.Values, access: tool_mcp_runtime.Access) anyerror!tool_mcp_runtime.SearchResult {
-    const ctx: *AcpContext = @ptrCast(@alignCast(raw_ctx));
-    const mcp = activeMcp(ctx) orelse return error.McpServerNotFound;
-    return mcp.searchToolsPrepared(arena, request, permission_rules, limits, access);
-}
-
-fn mcpToolSchemaJson(raw_ctx: *anyopaque, arena: Allocator, name: []const u8, permission_rules: types.PermissionRuleSet, limits: config_runtime.context_limits.Values, access: tool_mcp_runtime.Access) anyerror!?tool_mcp_runtime.ToolSchemaResult {
-    const ctx: *AcpContext = @ptrCast(@alignCast(raw_ctx));
-    const mcp = activeMcp(ctx) orelse return null;
-    return mcp.toolSchemaJsonByNameWithAccess(
-        arena,
-        name,
-        permission_rules,
-        limits,
-        access,
-    );
-}
-
-fn mcpCallFeature(
-    raw_ctx: *anyopaque,
-    arena: Allocator,
-    request: tool_mcp_runtime.FeatureRequest,
-    options: tool_mcp_runtime.FeatureCallOptions,
-) anyerror!tool_mcp_runtime.FeatureResult {
-    const ctx: *AcpContext = @ptrCast(@alignCast(raw_ctx));
-    const mcp = activeMcp(ctx) orelse return error.McpRuntimeUnavailable;
-    return mcp.callFeatureForModel(arena, request, options);
-}
-
-fn activeMcp(ctx: *AcpContext) ?*mcp_runtime.McpRuntime {
-    const session = if (ctx.state.active_session) |*active| active else return null;
-    return session.mcp;
-}
-
 fn onBackgroundUrlReady(_: *anyopaque, _: u64, _: []const u8) void {}
 
 pub fn mapToolKind(tool_name: []const u8) acp_types.ToolCallKind {
@@ -3674,86 +3103,6 @@ fn describeToolTitle(registry: tool_dispatch.Registry, arena: Allocator, call: T
         return std.fmt.allocPrint(arena, "{s}", .{presentation.action_label});
     }
     return std.fmt.allocPrint(arena, "{s}", .{call.name});
-}
-
-test "ACP lifecycle action preserves dynamic MCP availability boundaries" {
-    const Fixture = struct {
-        calls: usize = 0,
-        available: bool = false,
-
-        fn hasTool(raw_ctx: *anyopaque, _: []const u8, _: tool_mcp_runtime.Access) bool {
-            const self: *@This() = @ptrCast(@alignCast(raw_ctx));
-            self.calls += 1;
-            return self.available;
-        }
-    };
-    const alloc = std.testing.allocator;
-    const advertised = [_][]const u8{"mcp_lookup"};
-    var fixture = Fixture{};
-
-    const missing = dynamicMcpToolAvailable(builtin_tools.registry, "mcp_lookup", &advertised, @ptrCast(&fixture), Fixture.hasTool, .unrestricted);
-    try std.testing.expect(!missing);
-    try std.testing.expectEqual(@as(usize, 1), fixture.calls);
-    const missing_label = try tool_presentation.formatPlainAction(alloc, .{
-        .tool_registry = builtin_tools.registry,
-        .call = .{ .id = "missing", .name = "mcp_lookup", .arguments_json = "{}" },
-        .is_available_dynamic_mcp_tool = missing,
-    });
-    defer alloc.free(missing_label);
-    try std.testing.expectEqualStrings("Working: mcp_lookup", missing_label);
-
-    const builtin = dynamicMcpToolAvailable(builtin_tools.registry, "unknown_tool", &.{"unknown_tool"}, @ptrCast(&fixture), Fixture.hasTool, .unrestricted);
-    try std.testing.expect(!builtin);
-    try std.testing.expectEqual(@as(usize, 2), fixture.calls);
-}
-
-test "ACP lifecycle resolves dynamic MCP availability through session context" {
-    const alloc = std.testing.allocator;
-    var state = try initTestAcpState(alloc, "/tmp/workspace", .auto);
-    defer state.deinit();
-
-    const runtime = try alloc.create(mcp_runtime.McpRuntime);
-    runtime.* = mcp_runtime.McpRuntime.init(alloc);
-    var runtime_owned = true;
-    defer if (runtime_owned) {
-        runtime.deinit();
-        alloc.destroy(runtime);
-    };
-    try runtime.addServer(.{
-        .name = try alloc.dupe(u8, "fixture"),
-    });
-    const mcp_server = &runtime.servers.items[0];
-    mcp_server.state = .ready;
-    try mcp_server.tool_catalog.tools.append(alloc, .{
-        .original_name = try alloc.dupe(u8, "echo"),
-        .prefixed_name = try alloc.dupe(u8, "mcp_fixture_echo"),
-        .description = try alloc.dupe(u8, "Echo input"),
-        .input_schema_json = try alloc.dupe(u8, "{\"type\":\"object\"}"),
-        .tags = &.{},
-    });
-    state.active_session.?.mcp = runtime;
-    runtime_owned = false;
-
-    var ctx = AcpContext{
-        .alloc = alloc,
-        .state = &state,
-        .session_id = "session_1",
-    };
-    try std.testing.expect(lifecycleDynamicMcpToolAvailable(
-        &ctx,
-        "mcp_fixture_echo",
-        &.{"mcp_fixture_echo"},
-    ));
-    try std.testing.expect(!lifecycleDynamicMcpToolAvailable(
-        &ctx,
-        "mcp_fixture_echo",
-        &.{},
-    ));
-    try std.testing.expect(!lifecycleDynamicMcpToolAvailable(
-        &ctx,
-        "mcp_missing",
-        &.{"mcp_missing"},
-    ));
 }
 
 test "mapToolKind maps common tools" {
@@ -4930,11 +4279,10 @@ test "ACP registry callbacks preserve snapshot bytes before transient context" {
     try deps.append_static_context.?(deps.ctx, arena, &messages);
     try deps.append_runtime_context(deps.ctx, arena, &messages);
 
-    try std.testing.expectEqual(@as(usize, 4), messages.items.len);
+    try std.testing.expectEqual(@as(usize, 3), messages.items.len);
     try std.testing.expectEqualStrings("base system", messages.items[0].content.?);
     try std.testing.expectEqualStrings("ACP registry context 1", messages.items[1].content.?);
-    try std.testing.expect(std.mem.find(u8, messages.items[2].content.?, "<mcp_servers>") != null);
-    try std.testing.expectEqualStrings("ACP registry transient", messages.items[3].content.?);
+    try std.testing.expectEqualStrings("ACP registry transient", messages.items[2].content.?);
     try std.testing.expectEqualStrings("ACP registry context 1", AcpContextRegistryFixture.static_context.?);
     try std.testing.expectEqual(@as(usize, 1), AcpContextRegistryFixture.transient_calls);
     try std.testing.expectEqual(
@@ -5067,7 +4415,7 @@ test "ACP default user commands require configured authority or review" {
         .id = "direct",
         .name = "exec_command",
         .arguments_json = "{\"cmd\":\"pwd\"}",
-    }, .ask, &.{}, &.{}));
+    }, .ask, &.{}));
     try std.testing.expectEqual(ToolPermissionDecision.permission_required, direct.decision);
     try std.testing.expect(direct.execution_authority == null);
 
@@ -5075,7 +4423,7 @@ test "ACP default user commands require configured authority or review" {
         .id = "blocked",
         .name = "exec_command",
         .arguments_json = "{\"cmd\":\"touch blocked.txt\"}",
-    }, .ask, &.{}, &.{}));
+    }, .ask, &.{}));
     try std.testing.expectEqual(ToolPermissionDecision.permission_required, blocked.decision);
     try std.testing.expect(blocked.execution_authority == null);
 
@@ -5084,7 +4432,7 @@ test "ACP default user commands require configured authority or review" {
         .id = "configured",
         .name = "exec_command",
         .arguments_json = "{\"cmd\":\"touch configured.txt\"}",
-    }, .ask, &.{}, &.{}));
+    }, .ask, &.{}));
     switch ((configured.execution_authority orelse return error.TestExpectedEqual).command) {
         .direct_only => return error.TestExpectedShellAllowed,
         .shell_allowed => |authority| try std.testing.expectEqual(command_admission.ShellAuthorizationSource.configured_rule, authority.source),
@@ -5096,7 +4444,7 @@ test "ACP default user commands require configured authority or review" {
         .id = "automatic",
         .name = "exec_command",
         .arguments_json = "{\"cmd\":\"touch automatic.txt\"}",
-    }, .auto, &.{}, &.{}));
+    }, .auto, &.{}));
     try std.testing.expectEqual(ToolPermissionDecision.deny, automatic.decision);
     try std.testing.expectEqual(types.ToolPermissionDenialReason.review_unavailable, automatic.denial_reason.?);
     try std.testing.expect(automatic.execution_authority == null);
@@ -5156,7 +4504,6 @@ test "ACP auto mode uses automatic review clear and caution without prompting" {
         &.{},
         null,
         null,
-        &.{},
     );
     try std.testing.expectEqual(
         command_admission.ShellAuthorizationSource.auto_classifier,
@@ -5170,7 +4517,7 @@ test "ACP auto mode uses automatic review clear and caution without prompting" {
         .arguments_json = "{\"cmd\":\"touch accepted.txt\"}",
     };
     var accepted_review = TestReviewTurn.init("Create accepted.txt.", accepted_call);
-    const accepted = try requestToolPermissionOutcomeWithRequest(&ctx, arena, accepted_call, accepted_review.context(), .auto, &.{}, null, null, &.{});
+    const accepted = try requestToolPermissionOutcomeWithRequest(&ctx, arena, accepted_call, accepted_review.context(), .auto, &.{}, null, null);
     switch ((accepted.execution_authority orelse return error.TestExpectedEqual).command) {
         .direct_only => return error.TestExpectedShellAllowed,
         .shell_allowed => |authority| try std.testing.expectEqual(
@@ -5191,7 +4538,7 @@ test "ACP auto mode uses automatic review clear and caution without prompting" {
         .arguments_json = "{\"cmd\":\"touch check.txt\"}",
     };
     var blocked_review = TestReviewTurn.init("Check whether this is allowed.", blocked_call);
-    const blocked = try requestToolPermissionOutcomeWithRequest(&ctx, arena, blocked_call, blocked_review.context(), .auto, &.{}, null, null, &.{});
+    const blocked = try requestToolPermissionOutcomeWithRequest(&ctx, arena, blocked_call, blocked_review.context(), .auto, &.{}, null, null);
     try std.testing.expectEqual(ToolPermissionDecision.deny, blocked.decision);
     try std.testing.expectEqual(types.ToolPermissionDenialReason.review_caution, blocked.denial_reason.?);
     try std.testing.expect(blocked.execution_authority == null);
@@ -5263,7 +4610,7 @@ test "ACP auto mode automatic review clears or cautions prepared external file m
         .arguments_json = arguments_json,
     };
     var accepted_review = TestReviewTurn.init("Create desktop-test.txt with hello.", accepted_call);
-    const accepted = try requestToolPermissionOutcomeWithRequest(&ctx, arena, accepted_call, accepted_review.context(), .auto, &.{}, null, null, &.{});
+    const accepted = try requestToolPermissionOutcomeWithRequest(&ctx, arena, accepted_call, accepted_review.context(), .auto, &.{}, null, null);
 
     try std.testing.expectEqual(@as(usize, 0), fake.calls);
     try std.testing.expect(!fake.saw_file_mutation_context);
@@ -5292,7 +4639,7 @@ test "ACP auto mode automatic review clears or cautions prepared external file m
         .arguments_json = arguments_json,
     };
     var blocked_review = TestReviewTurn.init("Create desktop-test.txt with hello.", blocked_call);
-    const blocked = try requestToolPermissionOutcomeWithRequest(&ctx, arena, blocked_call, blocked_review.context(), .auto, &.{}, null, null, &.{});
+    const blocked = try requestToolPermissionOutcomeWithRequest(&ctx, arena, blocked_call, blocked_review.context(), .auto, &.{}, null, null);
     try std.testing.expectEqual(@as(usize, 1), fake.calls);
     try std.testing.expectEqual(ToolPermissionDecision.deny, blocked.decision);
     try std.testing.expectEqual(types.ToolPermissionDenialReason.review_caution, blocked.denial_reason.?);
@@ -5316,17 +4663,17 @@ test "ACP web_fetch ignores configured ask and deny rules" {
         .name = "web_fetch",
         .arguments_json = "{\"url\":\"https://example.com/docs\"}",
     };
-    const default_outcome = try requestToolPermissionOutcome(&ctx, arena, call, .auto, &.{}, &.{});
+    const default_outcome = try requestToolPermissionOutcome(&ctx, arena, call, .auto, &.{});
     try std.testing.expectEqual(ToolPermissionDecision.once, default_outcome.decision);
     try std.testing.expect(default_outcome.execution_authority != null);
 
     state.active_session.?.permission_rules = try testPermissionRuleSet(alloc, "web_fetch", "*", .ask);
-    const asked_outcome = try requestToolPermissionOutcome(&ctx, arena, call, .auto, &.{}, &.{});
+    const asked_outcome = try requestToolPermissionOutcome(&ctx, arena, call, .auto, &.{});
     try std.testing.expectEqual(ToolPermissionDecision.once, asked_outcome.decision);
 
     state.active_session.?.permission_rules.deinit(alloc);
     state.active_session.?.permission_rules = try testPermissionRuleSet(alloc, "web_fetch", "*", .deny);
-    const denied_outcome = try requestToolPermissionOutcome(&ctx, arena, call, .auto, &.{}, &.{});
+    const denied_outcome = try requestToolPermissionOutcome(&ctx, arena, call, .auto, &.{});
     try std.testing.expectEqual(ToolPermissionDecision.once, denied_outcome.decision);
     state.active_session.?.permission_rules.deinit(alloc);
     state.active_session.?.permission_rules = .{};
@@ -5345,7 +4692,7 @@ test "ACP admits default-safe web_search before execution" {
         .id = "search",
         .name = "web_search",
         .arguments_json = "{\"query\":\"current news\"}",
-    }, .auto, &.{}, &.{})).decision;
+    }, .auto, &.{})).decision;
 
     try std.testing.expectEqual(ToolPermissionDecision.once, decision);
 }
@@ -5363,7 +4710,7 @@ test "ACP admits unrestricted web_fetch before execution" {
         .id = "fetch",
         .name = "web_fetch",
         .arguments_json = "{\"url\":\"https://example.com/docs\"}",
-    }, .auto, &.{}, &.{})).decision;
+    }, .auto, &.{})).decision;
 
     try std.testing.expectEqual(ToolPermissionDecision.once, decision);
 }

@@ -73,7 +73,7 @@ remaining work, and the next action. Exact identifiers, paths, commands,
 errors, and user requirements are retained when they affect continuation.
 Previous summaries are treated as authoritative history rather than rewritten
 speculatively. The prompt forbids copying transient skill bodies,
-capability-discovery output, MCP schemas, and prompt instructions. Deterministic
+capability-discovery output, and prompt instructions. Deterministic
 projections and continuation anchors also hard-omit those tool bodies, and the
 cleaner removes echoed skill-content blocks. The handoff records the named
 capability and relevant outcome so current context can be loaded again from its

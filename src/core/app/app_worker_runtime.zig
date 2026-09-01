@@ -846,7 +846,7 @@ pub fn Runtime(comptime App: type) type {
                                     app.dispatchAttentionRequired(
                                         app.worker.activeTurnId(),
                                         switch (question_snapshot.source) {
-                                            .agent_question, .mcp_elicitation => .question,
+                                            .agent_question => .question,
                                             .route_recovery => .route_recovery,
                                         },
                                     );
@@ -2980,7 +2980,6 @@ test "core.app_worker_runtime emits question and route recovery attention only f
         expected: @import("../hooks/hooks.zig").AttentionKind,
     }{
         .{ .source = .agent_question, .expected = .question },
-        .{ .source = .mcp_elicitation, .expected = .question },
         .{ .source = .route_recovery, .expected = .route_recovery },
     };
 

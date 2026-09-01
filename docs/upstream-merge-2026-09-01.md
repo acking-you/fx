@@ -2,610 +2,319 @@
 
 ## Review status
 
-This document records the reconciliation of the latest `vercel-labs/fx` mainline into the BYOK fork. The result is intentionally held on `merge/upstream-2026-09-01` for review. It has not been merged into `byok`.
+This document records the final reconciliation of `vercel-labs/fx` into the
+BYOK fork. The result remains on `merge/upstream-2026-09-01` for review and has
+not been merged into `byok`.
 
-The merge boundary is:
-
-| Item | Commit |
+| Boundary | Commit |
 | --- | --- |
-| BYOK first parent before the initial content merge | `fe2ec9e05250ccc789d6a3d939fcd0b72cd6157c` |
-| Initial upstream main merged | `1685a855868820a1b9f317dc589190c32b011684` |
-| Initial content merge | `d7d3f8f2d471cb1c6a6c8cb306b19d312ba64ab0` |
-| Prior upstream main merged | `24ff3083cb3e19cdc818403ecbc40ff14ace04c9` |
-| Prior update merge | `f3ad5781` |
-| Latest upstream main merged | `766e70f0106393b551e2363526cf6a41e60587c3` |
-| Latest update merge | `867eddd7` |
-| Earlier upstream main merged | `93bfedfe104dc4353442777295ac42130c840089` |
-| Earlier update merge | `b8494532` |
-| Previous upstream main merged | `fc50c8da53f476c0c021a6c6289c7fff5c78d7f6` |
-| Previous update merge | `6121534a` |
-| Earlier upstream main merged | `1f6ebd87cae1da4bd66603fbb7281b6bd882c177` |
-| Earlier update merge | `a78ff0a3` |
-| Current upstream main merged | `350c6efea07b96d3d0e54adae7f2033c16ce818e` |
-| Current update merge | `726ce8d5` |
-| Provider-neutral help repair | `dc2c7e64` |
-| Final merge-regression repair | `8a0e7c90` |
-| Final runtime and E2E contract repair | `30ca1e45` |
-| Final asynchronous E2E stabilization | `8431e1a4` |
-| Final asynchronous completion-boundary repair | `36f0b037` |
-| Final committed transcript-navigation repair | `0bffb9db` |
-| Final committed scroll-attempt repair | `64c2f6e6` |
-| Final verified navigation batching | `6a29c074` |
-| Final visible navigation observation | `352323d9` |
-| Final command-completion page refresh | `8565f4f0` |
-| Final stale-trace navigation retry | `355bd3b6` |
-| Final child full-detail restore observation | `821f3d79` |
-| Final reopened-tail observation | `d2eac99b` |
-| Stale reopened-tail diagnostic trace | `54f0e3b7` |
-| Final viewer-lifetime page invalidation | `542d43b3` |
-| Redundant transcript stress harness removal | `9e7c2dc2` |
-| Review branch | `merge/upstream-2026-09-01` |
+| BYOK first parent before this merge series | `fe2ec9e05250ccc789d6a3d939fcd0b72cd6157c` |
+| Latest upstream main included | `5fabddd7` |
+| Merge commit for that upstream head | `821634d5` |
+| Tree before the final product pruning | `ccf8680a` |
+| Final pruning and audit | This review change |
 
-At review commit `9e7c2dc2`, the result changes 254 files with 29,663 insertions and 18,581 deletions compared with the pre-merge BYOK tree. The large count comes primarily from upstream MCP, transcript, rendering, and E2E work. It does not represent a new vendor product route or a large new model-facing tool surface.
+The final product decision is explicit: this fork does not support MCP. Skills
+are the extension mechanism. No MCP configuration, transport, authentication,
+catalog, prompt, resource, dynamic tool, menu, ACP bridge, fixture, or
+conformance suite remains executable.
 
 ## Reconciliation policy
 
-The merge used these rules:
-
-1. Preserve upstream structure where it remains provider-neutral and useful.
+1. Preserve upstream structure when it is provider-neutral and useful to BYOK.
 2. Preserve every protected BYOK contract in `AGENTS.md`.
-3. Remove vendor onboarding, duplicate runtimes, duplicate policy owners, and redundant model-facing tools.
-4. Keep historical names only where saved-session replay or presentation compatibility requires them. A historical name must not become executable.
-5. Keep tests that prove runtime behavior. Remove or rewrite fixtures whose only owner was a deleted tool or obsolete UI state.
-6. Use the fork's exact-commit Full CI as the release gate. Upstream PR CI is not accepted as proof for this merge.
+3. Remove vendor onboarding, duplicate policy owners, redundant model-facing
+   tools, and capabilities this fork does not intend to support.
+4. Diagnose tests by product ownership. Delete a test only when its sole owner
+   was removed, its assertion duplicated a stronger boundary, or it measured a
+   harness detail rather than supported behavior.
+5. Keep generic crash, persistence, concurrency, rendering, and protocol tests
+   even when their old fixture happened to use a removed feature.
+6. Use the fork's exact-commit Full CI as the merge gate. Upstream CI is not
+   accepted as proof for this branch.
 
-## User-visible and architectural additions retained
+## Additions retained from upstream
 
-### Unified capability retrieval
+### Skill-only capability retrieval
 
-Upstream's capability-search work was retained as one bounded `capability_search` entrypoint. Skill and MCP discovery share that owner. The separate model-facing `skill_search` and `mcp_search_tools` compatibility tools were removed.
+`capability_search` remains the single bounded discovery entrypoint and now
+searches only installed skills. A terminal `no_match` result suppresses the
+search tool for only the immediately following model step. The old standalone
+`skill_search` compatibility name is not executable.
 
-A terminal `no_match` result now removes `capability_search` from only the immediately following model step. This prevents an empty capability search from broadening or repeating while allowing later tool groups to regain the unified discovery capability. Projection remains centralized in `tool_projection.zig`; the orchestrator does not own a second policy.
-
-Primary paths:
+Owners:
 
 - `src/core/tooling/capability_retrieval.zig`
 - `src/tools/capabilities/capability_search.zig`
 - `src/core/tooling/tool_projection.zig`
 - `src/core/tooling/tool_dispatch.zig`
 
-### Generic MCP configuration and menu
+### Full transcript details
 
-The MCP work is provider-neutral and useful to BYOK, so the following were retained:
+Ctrl+O retains richer turn metadata, bounded pagination, off-UI-thread page
+loading, final command-output revisions, and viewer-lifetime invalidation. Page
+completion is collected by the composition root and rendered only on the UI
+thread.
 
-- project and workspace scoped MCP configuration;
-- project trust boundaries;
-- local and HTTP server management;
-- the complete top-level `fx mcp` surface for `add`, `remove`, `path`, `list`, `auth`, `logout`, and project `trust` operations;
-- side-effect-free MCP configuration snapshots in `status` and `doctor`, with transport discovery reserved for explicit `mcp list --connect`;
-- Docker command normalization for configured MCP servers;
-- a consolidated MCP catalog/menu instead of separate overlapping screens;
-- bounded HTTP content-length handling and runtime compatibility checks.
-
-This does not add a second model-facing MCP search tool. Dynamic selection remains behind `capability_search` and `mcp_select_tool`.
-
-The final merge audit found that upstream's menu worker and state machine had been retained while the composition-root completion poll had been dropped. That omission left authentication, logout, reload, and other generated menu effects waiting indefinitely after their background task finished. `loopCollectFacts` now collects the menu completion, schedules a reload when requested, records failures through the MCP runtime, and requests only the footer frame. This restores the existing generic MCP owner without adding another task loop or product policy.
-
-### Full transcript details and asynchronous loading
-
-Ctrl+O full transcript support now retains richer turn metadata, paginates large histories, and loads detailed pages away from the UI loop. This was kept because it improves observability without changing provider policy.
-
-The composition root now polls both the main and active child full-transcript page workers and requests a modal frame when a page completes. The merge had retained the worker but dropped this completion polling, leaving Ctrl+O and render-lab stuck at `Preparing full detail…`.
-
-Live command pages still refresh in bounded revision strides while output is open, but atomic command completion now always publishes one final content revision. Without that terminal revision, a last partial stride could leave an installed page permanently pinned to an incomplete live-output snapshot even after the command and compact transcript were complete. The final refresh is owned by the existing recorded-command consolidation path and uses the ordinary queued render request; it adds no callback-side transcript mutation or second page policy.
-
-An installed page is now scoped to one full-detail viewer lifetime. Closing Ctrl+O cancels its active page request, resets navigation to the tail, and releases the installed page through the same reset owner. Reopening therefore takes a current structured snapshot instead of accepting a same-request page captured while live command output was still changing. This removes the stale cross-viewer cache without changing content revisions, adding a second invalidation policy, or disabling pagination inside one viewer session.
-
-Primary paths:
+Owners:
 
 - `src/core/output/full_transcript_metadata.zig`
 - `src/core/output/full_transcript_page.zig`
 - `src/ui/transcript/full_transcript_worker.zig`
 - `src/ui/full_transcript_screen.zig`
 
-### Redundant full-transcript stress harness removed
+### Provider-neutral help and authentication
 
-The 1,336-line `tests/e2e/tui-full-transcript-brutal.test.ts` owner was removed after exact-commit Full CI failed its only default scenario twice at different observer timeouts. One attempt waited for a pane predicate while live output was still moving; the other recorded a scroll transition from offset 4,142 to 4,168, then rejected the following frame because its installed page still reported offset 4,142. Neither attempt crashed fx, produced stderr, lost a committed turn, or showed transcript corruption.
+The consolidated help aliases, compact command summaries, generic setup import,
+Codex login, Grok login, provider selection, logout, model listing, and usage
+commands remain. Vercel Gateway setup, teams, credits, upgrade, feedback, and
+hosted product links remain removed.
 
-The file combined one always-on soak with three opt-in profiler and large-load harnesses. It asserted internal trace ordering, process RSS, terminal byte counts, and millisecond budgets while duplicating user-visible Ctrl+O behavior already owned by deterministic E2E and Zig lifecycle tests. Repeated repairs had accumulated more observer state without making the scenario portable on macOS x86_64. Keeping it would add merge and CI cost without a distinct supported-product contract.
-
-The complete slice was removed:
-
-- the test file and its process, metrics, profiler, trace, fake-gateway, and retained-artifact helpers;
-- its PGSO training scenario;
-- its E2E shard weight;
-- the production-manifest expectation and scenario totals that named it;
-- the PGSO documentation count, reduced from twenty-eight to twenty-seven deterministic training files.
-
-No production Ctrl+O code was removed. The retained `tui-resume.test.ts` pressure scenario still drives mixed assistant history and live Unified Exec output through open, PageUp, PageDown, close, repeated entry, final persistence, and replay. It also requires a single alternate-screen owner, unchanged compact scrollback, empty stderr, and clean exit. Focused Ctrl+O resume, streaming, approval, subagent, render-replay, input, resize, page, and lifecycle tests retain the narrower failure owners.
-
-### Provider-neutral top-level help cleanup
-
-Upstream's consolidated help-alias test, plain `fx` body copy, command grouping, and clearer command-specific help note were retained. The fork adapts the provider group to its actual surface: provider-neutral setup import, Codex and Grok login or logout, provider selection, model listing, and local or Codex usage. Short top-level summaries keep the navigation page compact while command-specific help preserves the complete typed descriptions.
-
-The conflicting upstream Vercel login option, Gateway key setup, teams, credits, auto-upgrade command, `fx.sh` resource, and `/feedback` route were discarded. The deterministic help tests now assert that all three aliases render identical output and that none of those removed product entries reappear. The only resource link remains the fork repository.
+The Windows OAuth callback repair remains part of the provider-neutral Codex and
+Grok login path. Setup still detects stored Codex first and Grok second, and the
+automatic fallback remains independent of the removed extension stack.
 
 ### Provider usage dashboard
 
-The local usage dashboard was wired into the composition root. Remote quota work remains asynchronous, and TUI and ACP use the same aggregate-only snapshot.
-
-Primary paths:
-
-- `src/core/app/usage_dashboard_runtime.zig`
-- `src/core/session/provider_usage.zig`
-- `src/main.zig`
+The local usage dashboard and aggregate provider snapshot remain wired into the
+composition root. Remote quota work stays asynchronous for both TUI and ACP.
 
 ### Same-turn steering
 
-Interactive input during an active turn is retained as same-turn steering. The next model-step boundary consumes it; input losing the completion race becomes an ordinary next-turn prompt without duplication. Queue review and between-turn compaction retain their separate contracts.
+Ordinary interactive input during an active turn remains same-turn steering.
+The next model-step boundary consumes it; input that loses the completion race
+becomes one ordinary next-turn prompt without loss or duplication. The partial
+upstream Ctrl+Enter steering split was removed as a conflicting second policy.
 
-The merge briefly carried part of upstream's newer explicit submission split: ordinary Enter queued a next turn while Ctrl+Enter used a separate steering intent. That conflicts with the fork contract and duplicated prompt admission policy. The complete product slice was removed: the `steer_submit` action, Ctrl+Enter escape decoding, the second submit intent, the composition-root `steerPrompt` adapter, the streaming `enter queue` hint, and their test-only state. One ordinary submission path again admits same-turn steering by default, including prompts with images or skill bindings. A manual queue review blocks steering consumption, and a late input retains FIFO next-turn fallback.
+### Prompt history and slash completion
 
-The queued-prompt preview dropped during conflict resolution was restored. The footer again shows the terminal-safe text of the first pending steering prompt while the active response streams, but yields to explicit queue-review cards while paused so the same prompt is never painted twice.
+Prompt history keeps durable command filtering, draft restoration, and normal
+arrow ownership. Empty slash-completion results remain an explicit menu state,
+and editing can repopulate candidates without reopening a second picker owner.
 
-Primary paths:
+### Skills presentation
 
-- `src/core/agent/worker_runtime.zig`
-- `src/core/agent/runtime/orchestrator.zig`
-- `src/core/app/app_callbacks.zig`
-- `src/ui/footer/input_presentation.zig`
+Dollar-trigger skill completion works after ordinary composer text. Selected
+skills use the compact name-only display while their instructions continue to
+load only through the typed skill invocation boundary.
 
-### Prompt history ownership
+### ACP tool-call metadata
 
-Recalled slash commands remain prompt-history entries until the user edits them. Plain Up and Down therefore continue navigating history instead of handing control to the slash menu merely because the recalled text begins with `/`. The slash menu is temporarily suppressed for the recall episode, reappears after an edit, and remains normally available for a newly typed slash command. This is a bounded input-state bug fix with focused Zig and deterministic TUI coverage.
+ACP retains stable tool-call IDs, structured and redacted input, incremental
+output, terminal replacement updates, plan visualization, provider control,
+Codex and Grok authentication, connection-local BYOK configuration, and
+nonblocking Unified Exec control. No extension-server bridge is advertised.
 
-Primary paths:
+### Unified provider activity
 
-- `src/core/input/composer_history.zig`
-- `src/core/input/picker_state.zig`
-- `src/core/app/input_completion_runtime.zig`
-- `tests/e2e/prompt-history.test.ts`
-
-### Empty slash completion menus
-
-An unmatched slash prefix now remains ordinary editable composer input without reserving a non-selectable `no matching slash commands` row. Escape therefore retains its normal composer behavior when there are zero candidates, while a visible candidate menu still owns Escape. Deleting back to a matching prefix restores the menu, and command arguments retain their existing completion ownership.
-
-The change was kept because it removes a presentation-only empty state without adding product state or a second input policy. The upstream absolute-path scenario was also made host-independent so the same fixture runs on Linux and macOS. Focused Zig coverage and the complete slash-menu and render-stress TUI files exercise the transition.
-
-Primary paths:
-
-- `src/core/app/input_completion_runtime.zig`
-- `src/ui/footer/input_presentation.zig`
-- `src/ui/footer/surface_frame.zig`
-- `tests/e2e/tui-slash-menu.test.ts`
-- `tests/e2e/tui-render-stress.test.ts`
-
-### Inline skill menus from any dollar trigger
-
-A typed `$` can now open the existing anchored skill menu at any composer position, including directly after ordinary text. The nearest unterminated dollar owns the query; zero-result mention menus remain internally recoverable by Backspace but do not reserve footer space or steal navigation from the composer. Escape dismisses only the current mention episode, and typing a later `$` starts a fresh episode.
-
-This retains one skill runtime and one picker state. It adds no model-facing tool, no second skill catalog, and no persistence surface.
-
-Primary paths:
-
-- `src/core/input/picker_state.zig`
-- `src/core/skills/skill_runtime.zig`
-- `src/core/app/app_input_runtime.zig`
-- `src/ui/footer/render_input.zig`
-- `tests/e2e/tui-slash-menu.test.ts`
-
-### Compact selected-skill display
-
-Selected skill entities now render only their skill name in the composer and sent user-message card. Their source and path remain attached to the typed entity, survive kill/yank and history recall, and still determine the exact bound skill; only the redundant source suffix is removed from visual width and rendering.
-
-This is a presentation simplification over the existing skill-token contract. It removes no provenance and adds no alternate skill identity.
-
-Primary paths:
-
-- `src/ui/input/visual_layout.zig`
-- `src/ui/footer/input_presentation.zig`
-- `src/ui/assistant/user_message_card.zig`
-- `src/ui/render.zig`
-- `tests/e2e/tui-composer-edit-contracts.test.ts`
-
-### Complete provider-neutral ACP tool-call metadata
-
-ACP pending tool calls now include the public tool name and validated structured `rawInput`. Credential-like fields are redacted through the existing execution-memory owner before publication, while malformed JSON omits `rawInput`. Permission requests expose the same name and input contract.
-
-The change was merged into the fork's existing one-terminal-update aggregator. Unified Exec still accumulates bounded incremental UTF-8 output, and the shared lifecycle still replaces `Running` with `Ran` instead of publishing a second contradictory terminal record. `web_fetch` is reported with ACP's `fetch` kind.
-
-Primary paths:
-
-- `src/core/agent/execution_memory.zig`
-- `src/acp/types.zig`
-- `src/acp/prompt.zig`
-- `tests/e2e/acp.test.ts`
-- `tests/e2e/web-fetch-fake-network.test.ts`
-
-### Unified provider activity phases
-
-Upstream's provider activity phases were reconciled with the fork's existing UI activity model. One phase owner now drives worker events, footer text, resize fixtures, render-lab analysis, and E2E expectations. Duplicate status derivation was deleted.
+Provider activation, refresh, catalog loading, cancellation, and logout retain
+one shared lifecycle vocabulary across the TUI, ACP, CLI, and child sessions.
 
 ### Session and tool-result detail
 
-The merge retains:
+Large results keep bounded previews, durable handles, range reads, replay, and
+redaction. Session resume retains canonical turn ownership, recovery markers,
+usage sidecars, terminal lifecycle state, and asynchronous picker loading.
 
-- completed-turn summaries in the session codec;
-- assistant block publication before tool entries;
-- typed tool result output and durable result handles;
-- collapsed compact tool groups while full transcript keeps complete detail;
-- ACP session pagination and workspace filtering;
-- cancellation and terminal-outcome integrity fixes.
+### Agent-step integrity
 
-### Runtime and release maintenance
+Subagent turns retain stable trace and lifecycle identities. Tool errors publish
+one canonical final result, post-tool continuation remains intact, and selected
+tools are validated against the captured turn projection before execution.
 
-Useful upstream maintenance was kept where it matches the fork:
+### Vision routing
 
-- native runtime and binary layout reductions;
-- shared runtime deduplication;
-- idle activity animation fixes;
-- subagent lifecycle and trace-lineage fixes;
-- macOS signing script fixes that apply to the fork's existing release path;
-- vision capability routing coverage;
-- deterministic PGSO corpus updates for changed E2E owners.
+Vision remains conditional on model capability. ACP image blocks, verified
+image snapshots, native provider routing, and the configured fallback path keep
+their existing typed owners.
 
-The upstream stable-signing job that conflicted with the fork's release workflow was not restored. The local signing script and tests were reconciled instead.
+### Portable tracing and settings
 
-Rapid Ctrl-C during active-turn exit now preserves the validated resume handoff. On POSIX hosts, SIGINT is ignored only across interactive teardown and handoff publication, then the prior handler is restored. Windows and WASM use an explicit empty guard so the portable fork continues to compile there. The upstream condition tied to its automatic-upgrade relaunch state was reduced to BYOK's sole non-cooperative exit path; the removed relaunch fields and tests were not restored.
+Cross-platform trace append, profile setting ownership, provider-specific model
+preferences, slash-menu category persistence, and runtime environment handling
+remain. Windows child-process environment conversion is retained where generic
+provider and execution subprocesses still need it.
 
-The final CI reconciliation also fixed two merge regressions and one Windows process bug:
+### Release tooling
 
-- the WASM no-MCP loader now implements the current workspace-aware loader contract;
-- the top-level MCP help, parser, runtime dispatch, profile mutation providers, and status/doctor inspection now form one complete vertical slice instead of a help-only stub;
-- Windows child processes that need environment overrides clone the native wide environment into WTF-8, avoiding `InvalidWtf8` when MCP stdio servers are launched from a localized environment.
-
-The final regression audit added four more repairs:
-
-- full-transcript page completion is polled for main and child conversations;
-- a terminal capability-search miss suppresses only the next step's duplicate search surface;
-- queued steering text and the fork's default same-turn admission contract are restored while upstream's conflicting explicit-submit surface is deleted;
-- file-index retry tests now verify the successfully indexed fixture filename instead of asserting the obsolete zero-file count. Their temporary roots are independent Git worktrees with the target file tracked, so production's authoritative Git discovery does not mistake a parent worktree's ignored `.zig-cache` for the fixture contract.
-
-The last CI reconciliation restored the missing MCP menu-completion poll described above. The remaining failures were obsolete or timing-sensitive deterministic fixtures rather than new production branches: ACP and subagent gateways now emit and recognize the current Responses function-call protocol, transcript fixtures use the retained single full-detail screen, settings and page-load assertions wait for their asynchronous owners, recording fixtures use `FX_DEBUG_RECORD` instead of the deliberately removed `--record` input, and remote compaction waits for the actual opaque compaction request instead of a removed transient label.
-
-The arm64 timeout regression was a loaded-runner gap in the test, not a production deadline change. Production still permits the documented 200 ms supervisor handoff fallback. The test effect now lands after that fallback window and proves the command remains bounded rather than depending on a 100 ms scheduling gap.
-
-### Agent step integrity and dynamic MCP execution
-
-The merge now retains the upstream action-oriented decision boundary after every completed tool batch and after confirmed-result recovery. The decision instruction is appended as one no-cache user message, is suppressed when same-step steering already supplies the next instruction, and cannot end a turn with only a progress update while executable work remains.
-
-Subagent turns receive one stable trace and lifecycle identity before finalization. Dynamic MCP calls are validated against the last live runtime generation immediately before execution, so a tool advertised by an earlier generation cannot be redirected into a replacement runtime. Tool errors emit one canonical pair of final trace events after output preparation instead of an early error record plus a second contradictory result record.
-
-### Vision routing and verified image snapshots
-
-Image routing is owned by one `image_input_support` policy:
-
-- native-image models receive verified native image inputs and do not see the `vision` fallback tool;
-- non-native models receive the text-only authorized image catalog and see `vision` only when the provider and registry both support the fallback;
-- unknown or unavailable capability states fail closed instead of guessing a route.
-
-The same decision source is used for native and fallback message projection. Windows path-backed Vision reads now align native handle flags before positional reads. Verified snapshot loading reuses the shared no-follow regular-file opener, rejects symlinked or reparse-point directory chains, and normalizes the Windows no-follow error into the typed unsafe-path result.
-
-### Portable trace append and profile settings
-
-Debug trace files now append through Zig's file writer at the current stat size. The prior C `lseek` call treated a Windows `HANDLE` as a C file descriptor and could overwrite earlier trace lines. A regression verifies that multiple records survive in order.
-
-The existing `collapse_tool_calls` profile setting is now parsed and merged by the profile configuration owner. This completes an already-present setting rather than adding a second presentation switch.
+The PGSO corpus manifest, exact test-file classification, deterministic shard
+planning, benchmark checks, and binary-size checks remain fork-owned. The
+manifest was reduced only where a product owner was deleted.
 
 ## Exact new files retained
 
-These files did not exist on the BYOK first parent and are present in the review result:
+The following files did not exist on the BYOK first parent and remain in the
+review tree:
 
 | File | Purpose |
 | --- | --- |
-| `docs/upstream-merge-2026-09-01.md` | This exact additions, deletions, conflict-decision, and verification record |
-| `src/core/app/app_mcp_menu_runtime.zig` | App-owned MCP menu coordination |
+| `docs/upstream-merge-2026-09-01.md` | Final merge additions, deletions, decisions, and verification record |
 | `src/core/app/usage_dashboard_runtime.zig` | Asynchronous provider usage runtime |
-| `src/core/mcp/docker_run.zig` | MCP Docker command representation |
-| `src/core/mcp/menu_state.zig` | Typed MCP menu state |
-| `src/core/mcp/project_config.zig` | Project-scoped MCP configuration |
-| `src/core/mcp/workspace_config.zig` | Workspace MCP configuration and resolution |
 | `src/core/output/full_transcript_metadata.zig` | Full transcript metadata contract |
 | `src/core/output/full_transcript_page.zig` | Paged full transcript output contract |
-| `src/core/tooling/capability_retrieval.zig` | Unified capability retrieval owner |
-| `src/ui/footer/mcp_menu_presentation.zig` | MCP menu presentation |
+| `src/core/tooling/capability_retrieval.zig` | Skill capability retrieval owner |
 | `src/ui/transcript/full_transcript_worker.zig` | Off-UI-thread transcript page loading |
-| `tests/e2e/fixtures/mcp-content-length-http.ts` | Bounded MCP HTTP fixture |
 | `tests/evals/vision-capability-routing.test.ts` | Live vision route evaluation owner |
 
 ## Deletions
 
-### Exact deleted files
+### Complete MCP vertical slice
 
-These files existed on the BYOK first parent and were removed from the review result:
+The final pruning removes the entire MCP capability, including code introduced
+by the upstream merge and older fork code that served the same feature.
 
-| File | Reason |
+Production removal:
+
+- every file under `src/core/mcp/`, including local and HTTP transports,
+  protocol negotiation, JSON schema handling, discovery caches, prompts,
+  resources, tools, completion, elicitation, trust, authentication, health,
+  subscriptions, and runtime coordination;
+- `src/acp/mcp_servers.zig`, `src/builtins/mcp.zig`,
+  `src/core/app/app_mcp_runtime.zig`, the merge-added app menu runtime,
+  `src/ui/footer/mcp_menu_presentation.zig`, and `src/mcp_test_exports.zig`;
+- `src/core/tooling/tool_mcp_dispatch.zig`,
+  `tool_mcp_feature_dispatch.zig`, `tool_mcp_registry.zig`, and
+  `tool_mcp_runtime.zig`;
+- `src/core/hosts/native_keychain.zig`, whose only remaining owner was removed
+  server authentication. Codex and Grok credentials continue through the
+  provider-neutral OAuth and credential-store owners;
+- build registrations, composition-root imports, NAPI and WASM adapters, ACP
+  initialization capabilities, provider host fields, and background menu
+  polling for the removed runtime;
+- profile and project configuration parsing, `.mcp.json` trust state,
+  settings fields, status and doctor diagnostics, top-level and slash commands,
+  menus, approval copy, and startup discovery;
+- dynamic tool advertisement, selection, schema serialization, admission,
+  review, dispatch, lifecycle presentation, tool-result conversion, compaction
+  request fields, Responses output-item variants, and child inheritance;
+- extension-specific context budgets and prompt guidance. The remaining
+  capability budget belongs only to skills.
+
+Test and release removal:
+
+- `tests/e2e/mcp-auth.test.ts`, `mcp-http.test.ts`,
+  `mcp-legacy-remote.test.ts`, and `mcp-stdio.test.ts`;
+- all `tests/e2e/fixtures/mcp-*` fixtures;
+- the complete `tests/e2e/conformance/` package;
+- the standalone `tests/json-schema/` corpus, whose production owner was the
+  removed dynamic-tool schema validator;
+- pure MCP blocks embedded in CLI, ACP, gateway, startup, slash-menu, and TUI
+  lifecycle suites;
+- stale E2E shard weights, PGSO training scenarios, corpus expectations, and
+  Keychain exceptions that belonged only to those deleted files.
+
+Generic tests were not discarded with those blocks. Unknown-tool rendering,
+slash-menu metadata layout, response output ordering, permission presentation,
+capability prompt exclusion, and provider subprocess diagnostics now use
+generic fixtures and continue to protect their actual owners.
+
+One additional TUI assertion was deleted after runtime diagnosis. It required
+an exact token summary after an HTTP retry whose first request was already sent
+but returned no usage. That number cannot be proven. Retry behavior remains
+covered by the Gateway suite, and the adjacent TUI route-recovery test still
+requires the visible retry state, final response, normal summary, two requests,
+and clean stderr.
+
+README and repository instructions now state that skills are the extension
+mechanism and that legacy MCP profile files are ignored.
+
+### Other product and duplicate surfaces removed
+
+These files existed on the BYOK first parent and remain deleted:
+
+| File or slice | Reason |
 | --- | --- |
-| `src/core/tooling/tracked_file_mutations.zig` | Duplicate mutation tracking after the typed file mutation owner was consolidated |
+| `src/core/tooling/tracked_file_mutations.zig` | Duplicate mutation tracking after typed file-mutation consolidation |
 | `src/core/workspace/list_files_listing.zig` | Only served the removed `list_files` tool |
 | `src/tools/filesystem/copy_file.zig` | Redundant command-shaped filesystem operation |
 | `src/tools/filesystem/create_folder.zig` | Redundant command-shaped filesystem operation |
 | `src/tools/filesystem/delete_file.zig` | Redundant command-shaped filesystem operation |
 | `src/tools/filesystem/file_info.zig` | Redundant with direct reads and Unified Exec |
 | `src/tools/filesystem/list_files.zig` | Redundant with `glob_files` and `rg --files` |
-| `src/tools/filesystem/open_file.zig` | Host-specific side effect with no required agent contract |
+| `src/tools/filesystem/open_file.zig` | Host-specific side effect without a required agent contract |
 | `src/tools/filesystem/rename_file.zig` | Redundant command-shaped filesystem operation |
-| `src/tools/filesystem/semantic_search.zig` | Duplicate search surface without a distinct required contract |
-| `src/tools/memory/memory.zig` | Removed product feature with no supported BYOK persistence contract |
-| `src/ui/catalog_screen_layout.zig` | Replaced by the consolidated menu state and presentation |
-| `src/ui/skills_screen.zig` | Replaced by unified capability retrieval and the consolidated menu |
-| `tests/e2e/tui-full-transcript-brutal.test.ts` | Redundant trace, profiler, RSS, and timing harness whose user-visible Ctrl+O contracts already have deterministic owners |
-
-### Removed model-facing tool surfaces
-
-The following names are not executable and are not advertised:
-
-| Removed name | Current owner or replacement |
-| --- | --- |
-| `terminal` | `exec_command` starts a process; `write_stdin` polls or interacts |
-| `run_command` | Historical replay only; execution uses Unified Exec |
-| `list_files` | `glob_files` or `exec_command` with `rg --files` |
-| `file_info` | `read_file` or Unified Exec |
-| `delete_file` | Unified Exec under the ordinary permission system |
-| `rename_file` | Unified Exec under the ordinary permission system |
-| `copy_file` | Unified Exec under the ordinary permission system |
-| `create_folder` | Unified Exec under the ordinary permission system |
-| `open_file` | Removed without a model-facing replacement |
-| `semantic_search` | `grep_files`, Unified Exec, or unified capability retrieval depending on intent |
-| `memory` | Removed without replacement |
-| `skill_search` | `capability_search` |
-| `mcp_search_tools` | `capability_search` plus `mcp_select_tool` |
-
-The remaining registered built-ins are exactly:
-
-`glob_files`, `grep_files`, `read_file`, `write_file`, `edit_file`, `update_plan`, `web_fetch`, `web_search`, `exec_command`, `write_stdin`, `capability_search`, `skill`, `install_skill`, `subagent`, `mcp_select_tool`, `mcp_features`, `ask_user_question`, `vision`, and `read_tool_result`.
-
-`vision` and `read_tool_result` are projected conditionally. The other 17 form the base advertisement set subject to provider, permission, host, and bash-first projection.
-
-### Deleted duplicate runtime and test logic
-
-The reconciliation commits also removed code inside surviving files:
-
-- a second execution-memory and orchestration path introduced by the merge;
-- duplicate worker steering/status state and duplicate rendering derivation;
-- old terminal and `run_command` execution compatibility branches;
-- old file-tool admission, dispatch, CLI, system-prompt, and presentation branches;
-- copied test registries that advertised deleted tools;
-- stale Vercel credential wording in the render replay fixture;
-- E2E scenarios whose only owner was a removed memory or filesystem tool;
-- empty negative assertions that claimed bash-first hid tools already absent globally.
-
-The unreferenced `src/builtins/system_prompt.md` remains deleted. Its runtime owner is the typed prompt assembled in `src/builtins/context.zig`; the repository has no file reader or build dependency for the Markdown copy. The latest upstream removal of two redundant verification instructions was applied to that typed owner instead of resurrecting the duplicate file.
-
-The final reconciliation also removed the inert `--record` launch parser, its unused intent field, its early-startup special case, and tests for behavior that no longer had a runtime owner. `--record` is now ordinary unknown input. A stale `credits` early-I/O predicate was removed with it because the fork has no top-level credits command. Two E2E assertions that required a model catalog request even when `FX_MODEL` already selects a direct Responses route were also deleted; they tested an unnecessary network side effect rather than the ask contract.
-
-The automatic replay fixture no longer passes the removed `--record` input while also enabling environment-driven recording. It now exercises only the supported `FX_DEBUG_RECORD` path. Full-transcript fixtures no longer require the deleted intermediate `Review` depth or left/right mode switching; Ctrl+O owns one asynchronous full-detail surface. Assertions tied only to a transient resume notice surviving native-scrollback reopening, a hidden row beyond the retained replay cap, or internal animation trace scheduling were deleted. The retained assertions still prove the restored session contents, replay cap, elapsed activity updates, marker animation, and unchanged native scrollback. These deletions remove test-only compatibility expectations and do not remove user-visible runtime behavior.
-
-Upstream's partial Ctrl+Enter steering split was also deleted as a conflicting duplicate. Removed code includes the `steer_submit` input action, Kitty Ctrl+Enter decoder branch, secondary `Intent` dispatch, `steerPrompt` composition adapter, `enter queue` stream hint, and their dedicated fake-app fields and tests. No `/steer` command or second prompt queue remains. The model-facing and user-facing contract is the fork's single default steering path described above.
-
-One permission test for searching outside the workspace was deleted because it depended on the removed semantic-search era target classifier and no longer exercised the registered `grep_files` contract. The live-authority regression was rewritten around the current registered `skill` tool, preserving the authority refresh assertion without resurrecting the deleted `create_folder` implementation. Other failing expectations were updated only where the retained runtime contract had deliberately changed: account picker wording, Unified Exec labels, collapsed code-block borders, action-oriented post-tool messages, and removal of `--record` from resume usage.
-
-The final upstream update also modified the deleted Vercel Gateway transport to shorten Exa highlights and added provider-specific Exa, Parallel, and Perplexity search accounting to trace reports. Those changes were intentionally not retained. After removal of `src/builtins/gateway.zig`, the fork has no production owner for the Gateway Exa provider advertisement; retaining its alias table, hard-coded provider names, fixed tool indices, `terminal` fixtures, and trace-only tests would be unreachable duplicate policy. The provider-neutral `web_search` projection and its existing TUI, ACP, CLI, child-session, Codex, Responses, and Grok lifecycle remain the sole search contract.
-
-Upstream `93bfedfe` again extended ACP around the deleted Gateway aliases `exa_search`, `perplexity_search`, and `parallel_search`, with its deterministic owner in the already deleted `tests/e2e/web-search-fake-gateway.test.ts`. That slice was not restored. The useful generic part of the same upstream work, namely named and redacted ACP tool-call input, was retained without adding provider aliases or a second Web Search projection owner. The unreferenced `src/builtins/system_prompt.md` also remains deleted; upstream's redundant GitHub-handle guidance removal was applied to `src/builtins/context.zig`, the typed runtime prompt owner.
-
-Upstream `350c6efe` reorganized the top-level help and added concise descriptions. Its Vercel-specific setup, teams, credits, upgrade, hosted documentation, and feedback rows were rejected because their runtime owners are absent from the fork. The generic copy and alias consolidation were retained against the existing BYOK command registry, so the help page cannot advertise a vendor route that is not executable.
-
-Historical `run_command`, `list_files`, and `memory` strings remain only where a saved session codec, replay renderer, migration test, redaction test, or explicit non-executability test needs them. Internal terminal-session state is unrelated to the removed model-facing `terminal` tool.
-
-## Protected BYOK conflict decisions
-
-### Provider transports and OAuth
-
-- Kept Codex Responses as the default ChatGPT subscription route.
-- Kept the account-bound Responses endpoint, beta headers, remote compaction trigger, and encrypted reasoning replay.
-- Kept Grok and Codex behind the provider-neutral OAuth boundary.
-- Kept deterministic stored-session detection with Codex first and Grok fallback.
-- Kept Windows loopback callback handling, including delayed request bytes and Windows AFD reset classification.
-- Kept provider-neutral `fx setup` as an importer for Codex CLI and Grok Build credentials. It is not Vercel setup.
-- Kept `/provider` for selection and `/login` for authentication.
-- Kept durable asynchronous logout and provider-specific activation cancellation.
-- Kept ACP `_meta.fx.providerControl`, including connection-scoped BYOK URL and API key binding.
-
-No Vercel setup, login, key, gateway default, or product route was reintroduced. Source search found no Vercel references under `src/`.
-
-### Compaction
-
-Every semantic compaction entrypoint still delegates to `src/core/agent/runtime/compaction.zig`. Eligible Responses routes try the native opaque checkpoint, then the active model produces a validated full replacement, and the bounded deterministic projection is the availability fallback. ACP, TUI, overflow recovery, and turn-window projection do not own separate fallback policy.
-
-### Worker and UI ownership
-
-Gateway and agent callbacks enqueue worker events. Thought, assistant text, semantic notices, command output, and lifecycle mutation are applied during UI-thread drain. Newline-free assistant chunks retain a render request and are not held until a hard line.
-
-The remaining `selected_model` compile guards are restricted by `builtin.is_test` inside `provider_runtime.zig`. They adapt existing fake-app fixtures that still own an `ArrayList`; production instantiations require the typed `provider_selection` runtime. They are therefore test scaffolding rather than a second production selection owner.
-
-### Unified Exec
-
-`exec_command` and `write_stdin` remain the only executable command family. ACP direct observation uses its own cursor and does not consume model output or claim model-owned cleanup. Pipe readers queue bounded owned chunks and invoke presentation callbacks outside process-control locks.
-
-### Web tools
-
-`web_search` remains one logical capability:
-
-- Codex projects it to the reserved `web.run` namespace;
-- compatible Responses routes project hosted `web_search`;
-- Grok projects hosted search only for a catalog-confirmed capable route;
-- the separately configured Responses search client is the local fallback.
-
-`web_fetch` remains a direct bounded HTTP client and bypasses fx allow, ask, deny, automatic review, and human approval. URL representability and resource bounds remain; private, local, metadata, credential-bearing, and cross-boundary redirect targets are accepted.
-
-### Bash-first
-
-The session or connection-local projection hides `glob_files` and `grep_files` and guides the model to `rg` and `rg --files`. The prompt no longer lists `list_files` or `semantic_search`, because those tools are absent globally. A running turn retains its captured projection.
-
-## Merge repair commits
-
-| Commit | Review purpose |
-| --- | --- |
-| `536f22d1` | Remove duplicate upstream runtime paths |
-| `40141b5d` | Align merged tests with the BYOK tool surface |
-| `aec38ec3` | Remove obsolete tool compatibility paths |
-| `fd2772c0` | Activate the asynchronous local usage dashboard |
-| `4d956451` | Unify turn phase presentation |
-| `0ce8472c` | Restore merged history and transcript metadata |
-| `3c9319a3` | Reconcile the fork release workflow and signing tests |
-| `e6658276` | Persist completed turn summaries |
-| `6955aad7` | Align resize tests with unified turn phases |
-| `1d251b2e` | Align E2E fixtures with unified turn phases |
-| `c43bec52` | Remove stale merged tool fixtures |
-| `0c4d91aa` | Remove stale Vercel fixture wording |
-| `a91bcc82` | Repair explicit steering tests, Windows Unified Exec coverage, and stale bash-first guidance |
-| `399cbf6d` | Restore the generic top-level MCP vertical slice, remove inert recording compatibility, repair WASM loader compilation, and fix Windows MCP child environments |
-| `d17eb51a` | Restore post-tool continuation, dynamic MCP generation binding, trace lineage, native-versus-fallback Vision policy, portable image reads, and cross-platform trace append |
-| `f3ad5781` | Merge upstream through `24ff3083`, retaining prompt-history ownership while discarding unreachable Vercel Gateway and provider-specific search-trace additions |
-| `8a0e7c90` | Restore full-transcript polling, terminal capability no-match projection, queued steering presentation, and default same-turn admission; delete the conflicting explicit-submit slice; align deterministic fixtures and bound the supervisor timeout test |
-| `867eddd7` | Merge upstream through `766e70f0`, keep the deleted prompt copy deleted, apply its verification cleanup to the typed prompt owner, and retain the zero-candidate slash-menu and portable-path fixes |
-| `30ca1e45` | Restore MCP menu completion polling and align deterministic fixtures with current Responses, transcript, replay, settings, compaction, and asynchronous page-load contracts |
-| `8431e1a4` | Replace stale transient-phase waits and make full-transcript and artifact navigation observe their asynchronous page boundaries |
-| `36f0b037` | Make full-transcript pagination, full-detail loading, resize, length-truncation lifecycle, and elapsed-time assertions observe their committed asynchronous states |
-| `0bffb9db` | Require each brutal full-transcript navigation step to commit a changed viewport offset before sending the next input |
-| `64c2f6e6` | Distinguish committed, clamped, and page-loading transcript scroll attempts; retry ignored inputs without consuming navigation progress |
-| `6a29c074` | Amortize tmux invocation cost with four-key navigation batches while retaining the committed-scroll verification boundary |
-| `352323d9` | Require verified navigation to observe the newly displayed tmux pane instead of returning an older full-transcript frame after the trace commit |
-| `8565f4f0` | Publish the terminal command-output revision so a stride-throttled full-detail page cannot retain an incomplete live snapshot |
-| `355bd3b6` | Retry a navigation batch when a delayed trace event claims completion but tmux shows no new full-detail pane within the bounded observation window |
-| `821f3d79` | Wait for restored child transcript content as well as its full-detail footer before comparing the preserved reading range |
-| `d2eac99b` | Observe the asynchronously installed tail after reopening full detail instead of sending PageDown into the prior installed page |
-| `542d43b3` | Scope installed full-transcript pages to one viewer lifetime so reopening snapshots the current tail instead of reusing a stale live-command page |
-| `b8494532` | Merge upstream through `93bfedfe`, retain generic named and redacted ACP tool metadata plus anchored dollar skill menus, and discard the deleted Gateway alias slice |
-| `6121534a` | Merge upstream through `fc50c8da`, showing only selected skill names while preserving the bound source and path internally |
-| `a78ff0a3` | Merge upstream through `1f6ebd87`, preserving rapid-exit resume handoff with a bounded POSIX SIGINT guard and no deleted relaunch state |
-| `726ce8d5` | Merge upstream through `350c6efe`, retaining the generic help cleanup while rejecting Vercel product rows |
-| `dc2c7e64` | Keep short top-level BYOK summaries separate from complete command-specific help and align the consolidated alias E2E |
-
-## CI policy for this merge
-
-The authoritative gate is `.github/workflows/full-ci.yml` on the exact review commit. It is the fork's feature-branch workflow and includes:
-
-- ReleaseSafe native build, unit tests, formatting, public-surface audit, and binary smoke on Linux x86_64, Linux arm64, macOS x86_64, and macOS arm64;
-- four isolated ReleaseSafe E2E shards on each of those platforms;
-- one `Full suite (...)` aggregate per platform that requires its native job and all four E2E shards;
-- a separate Windows native job with provider setup, OAuth callback, Unified Exec, CLI, and ACP smoke coverage.
-
-Only a run attached to the commit containing this document is acceptable. All four `Full suite (...)` aggregates must succeed. A passing upstream run, an older fork commit, or only the Windows job is not proof.
-
-An earlier run on `7629b56386572c4c38bda8a45634556e7c10efa4` was cancelled after its Linux and macOS arm64 unit jobs exposed 24 stale or regressed assertions plus one configuration crash. Those failures were audited individually. The complete 201-test `processQueuedPrompt` family now passes locally in ReleaseSafe, and focused ReleaseSafe coverage passes for every remaining failed owner. Because the fixes change the commit, that cancelled run is evidence used during repair and is not accepted as the merge gate. A new Full CI run on the final document commit is required.
-
-Run `33465449602` on `d4abc25a93d7172ae338744a0dcd0351ed6c790f` was also cancelled before qualification when a final fetch showed that upstream had advanced to `24ff3083`. It had no authority over the later merge result. The next run must be attached to the commit containing the latest-upstream merge and this updated document.
-
-Run `33466109301` on `068cc59e378c2ecc1ad76c907914ac80cd612f39` passed Windows native, Linux x86_64 native, and macOS arm64 native, then exposed one loaded-runner arm64 timeout assertion and deterministic E2E shard 2 failures. The E2E audit separated merge omissions from stale expectations: missing full-transcript polling, missing one-step capability projection, missing queued prompt preview, incomplete same-turn steering composition, stale Responses event fixtures, stale post-tool request detection, skill-order assumptions, and presentation-label drift. This run is repair evidence only; commit `8a0e7c90` and the document commit that follows it require a new exact-commit Full CI run.
-
-Run `33474328921` on `8b733899b349eb1d1562d668d1e54f2c15b742c2` passed Windows native and Linux x86_64 and arm64 E2E shard 2, then reproduced the same two file-index retry fixture failures in all three completed Linux and macOS arm64 native jobs. The loader reached `ready`, but the fixture lived beneath the parent worktree's ignored `.zig-cache`; authoritative Git discovery therefore correctly returned an empty generation. The tests now initialize their temporary roots as independent Git worktrees and track `retry.txt` or `queued.txt`, preserving the production discovery path while removing cache-location dependence. This run was cancelled after the shared cause and ext4 reproduction were proven; it is repair evidence, not the final gate.
-
-Run `33475586156` on `8c0a59b1f3275666ae5ca9c131217c4d7298179c` proved that the file-index repair was portable: all four completed Linux and macOS native jobs passed, as did every platform's E2E shard 2. The other E2E shards exposed one real composition omission and several fixtures still asserting removed or asynchronous behavior. The real omission was the MCP menu-completion poll; a focused authentication and logout lifecycle passes after restoring it. The fixture repairs cover current Responses events and function-call output, direct full-detail entry, supported environment-driven recording, asynchronous settings persistence, remote-compaction request admission, child approval takeover, and completed page loading. A native-scrollback test now waits for the initial one-copy retention invariant before resizing, then still requires exactly one copy afterward. The macOS brutal transcript case now waits until asynchronous full-detail preparation has completed before sending its next navigation input.
-
-The same run's Windows native job failed the Unified Exec cleanup test while terminating an intentionally still-running process and reported leaked allocations. The immediately preceding exact run passed that Windows job with the same production implementation, so this is treated as a possible loaded-runner timing failure, not waived. The next exact-commit Full CI must pass Windows native; a repeat will be diagnosed before review is considered qualified. Run `33475586156` was cancelled after its failures were reproduced locally and the commit was superseded.
-
-Run `33480305376` on `55a7d97344ea0c599489d750ffc61b1ab10526e1` passed every native job on Windows, Linux x86_64, Linux arm64, macOS x86_64, and macOS arm64. It also passed E2E shard 2 on all four Unix platforms and shard 3 on both Linux architectures. The prior Windows Unified Exec cleanup failure did not reproduce.
-
-The stable E2E failures in this run reduced to four test contracts. Two held-text cases waited for the transient `Thinking` frame after the unified phase owner had already entered the stable `Generating` phase. The full-transcript brutal test treated a loaded newest page as proof that its final marker was already inside the visible viewport; it now pages down until the durable tail is visible before paging up to prove that the oldest entry remains reachable. The cancelled-command artifact test sent 500 PgDn sequences in one tmux input burst; macOS could discard part of that burst even though the greater-than-1-MiB artifact was intact. It now sends bounded batches, observes the viewport after each batch, and still requires the final artifact marker. All four focused scenarios pass locally after the repair.
-
-Several macOS 30-second or 90-second slow frames occurred in only one of the two file attempts while the same scenario passed in the other attempt and on other platforms. They did not share a production trigger with the stable failures. No production timeout, synchronization, or compatibility path was added for those one-attempt runner delays. Run `33480305376` is diagnostic evidence only because commit `8431e1a4` changes the tested tree; a new exact-commit Full CI run remains required.
-
-Run `33484200868` on `3966902feaa600d77ee05e5dcf35cc3222c1eac8` proved the bounded artifact navigation repair on macOS x86_64 and the stable `Generating` phase repairs on Linux arm64. Its transcript-brutal failure on both macOS architectures showed that sending even 64 PgDn events as one tmux batch could still discard input: each attempt advanced only a few visible markers. The test now sends one navigation event at a time and waits for a later render trace before issuing the next event, preserving the full oldest-to-newest reachability assertion.
-
-The same run exposed three other premature observations. A compact full-detail assertion accepted the footer while `Preparing full detail…` was still visible; the shared helper now requires preparation to finish. The remote-compaction fixture required an irrelevant exact `0s` elapsed label while still retaining exact token counts; it now accepts the committed elapsed duration. The resize and provider-length-limit tests sampled after the trigger text or debounce delay but before the final footer or failed-tool lifecycle frame; each now waits for the exact stable state it asserts. Focused WSL/tmux runs pass for these boundaries. Different single-attempt macOS slow frames passed in the adjacent attempt or on the other platforms, so they did not justify a production timeout or synchronization branch. Because commit `36f0b037` supersedes this diagnostic run, a new exact-commit Full CI run remains required.
-
-Run `33487617463` on `9e50d1e03691ea366188bac816b1e9258d61128e` passed Windows native, both Linux native jobs, all eight Linux E2E shards, macOS arm64 native, and macOS x86_64 shard 2 before the transcript-brutal test failed twice on macOS arm64 shard 3. The test sent one key at a time, but it accepted any later projection frame as completion; asynchronous page-loading frames could satisfy that condition before the requested scroll committed. Both attempts therefore exhausted 1,024 sent keys while still around live marker 310–325. The repair records the previous viewport offset and uses the existing trace contract to require a different committed offset after every PageUp or PageDown. The complete focused stress then passed locally with 118 assertions in 71.8 seconds, compared with approximately 150 seconds for each failed CI attempt. The run was cancelled after this stable cause was proven and commit `0bffb9db` superseded it.
-
-Run `33489826458` on `2d3eee8fbf3a56c13689a77b058964dc53aadedf` passed all five native jobs, all eight Linux E2E shards, macOS x86_64 shards 1, 2, and 4, and macOS arm64 shard 1. Its macOS arm64 shard 3 trace showed a legitimate page-tail clamp: the scroll state advanced from 7,332 to 7,358 rows, while the rendered window remained at the current page's 7,332-row maximum. Requiring the visible offset itself to differ was therefore too strict. The final test state machine instead requires a non-ignored scroll event followed by its committed viewport frame, permits a clamped offset, and separately recognizes `page_loading` rejection so it can wait for the loading frame and resend without consuming progress. The full focused stress passes locally with 118 assertions in 71.5 seconds. The run was cancelled after commit `64c2f6e6` superseded the failed assertion.
-
-Run `33493575103` on `e3ab35bb25525b6f1a58b89404623e7367748127` passed the other 19 underlying jobs, including all native platforms, all Linux E2E shards, and every macOS shard except shard 3 on each architecture. The final state machine correctly rejected page-loading loss and accepted committed page-tail clamps, but one tmux process invocation per Page key remained too expensive: after 1,024 verified calls, macOS x86_64 reached live marker 460–467 in roughly 162–169 seconds and macOS arm64 reached marker 305–317 in roughly 148–152 seconds. Raising the limit would exceed the test's 240-second budget once reverse navigation is included. The test now sends four Page keys per tmux invocation, then requires the same non-ignored scroll event and committed frame before proceeding. This is far below the discarded 64-key burst, retains deterministic progress verification, and reduced the complete local stress from 71.5 to 39.3 seconds with all 118 assertions retained.
-
-Run `33498165085` on `f04f4ef81bf892ab91b8dcc9d96de198cbe05d15` showed that a committed render trace still precedes visibility in tmux on slower macOS hosts. macOS x86_64 shard 3 failed twice after reaching live marker 460–473: the navigation helper had observed a non-ignored scroll and committed projection frame, but immediately returned a pane captured before tmux displayed that frame. The test now snapshots the pane before each verified batch and returns only after the full-detail pane visibly changes. Page-loading rejection and legitimate page-tail clamps retain their separate state-machine handling, and the target markers remain mandatory. The complete focused stress passes locally in 39.7 seconds with 120 assertions. This run also had a single macOS arm64 native failure in the existing cancellation-at-deadline test, which schedules cancellation only 25 ms before a two-second timeout. That native job passed on the preceding exact runs and no production deadline or synchronization branch was added for the runner scheduling tie. Because commit `352323d9` supersedes the E2E result, a fresh exact-commit Full CI run is required rather than waiving or rerunning the old tree.
-
-Run `33500805760` on `96f5f03ec833ec4335dbba46016d671273a456d3` passed Windows native, both Linux native jobs, all eight Linux E2E shards, and macOS arm64 shard 2 before macOS x86_64 shard 3 failed the brutal transcript case twice. The stricter visible-pane boundary stopped at live markers 419 and 427 for 30 seconds instead of falsely counting stale frames as progress. That stable stop exposed a production terminal-refresh gap: live command pages are intentionally rebuilt only once per revision stride, but recorded-command consolidation could close the block with no pending paint request and without publishing a final revision. If fewer than one stride of output followed the last rebuild, the installed page's request still matched current state while its snapshot lacked the final output. Atomic consolidation now queues one final content revision after closing the block. Focused ReleaseSafe tests prove both stride throttling and terminal invalidation, and the complete real tmux stress passes with 120 assertions in 39.6 seconds using the rebuilt repository binary. Commit `8565f4f0` supersedes this run, so a new exact-commit Full CI run remains required.
-
-Run `33503579220` on `7f809853c082364941827253aaefe56a6ae40016` passed Windows native, both Linux native jobs, all eight Linux E2E shards, and macOS arm64 shard 4 before macOS x86_64 shard 3 again failed twice. The terminal refresh moved the last visible output from markers 419–427 to 480 and 492, confirming that the final command snapshot now reaches the true tail page. The remaining failure was in the test observer: a delayed scroll trace from the preceding batch could appear after the next trace-size sample, be attributed to the new input, and then leave the helper waiting 30 seconds for a pane change that would never belong to that stale event. A verified batch now gets a 500 ms visible-pane observation window; no change retries the batch without consuming outer progress. Page-loading and committed or clamped attempts remain distinct, the retry count remains bounded at 256, and the newest and oldest marker assertions are unchanged. The complete real tmux stress passes locally with 120 assertions in 39.6 seconds. Commit `355bd3b6` supersedes this run, so a new exact-commit Full CI run remains required.
-
-Run `33505890390` on `4dd34c94424e619598c61e6f71d5de8a9a167e22` had 11 successful underlying jobs before a stable Linux x86_64 shard 3 failure superseded it. The persistent-child reading-position case passed through ordinary and Ctrl+X reopen paths, then reopened the saved full-detail view and accepted its footer before the asynchronous child page had installed; both file attempts therefore compared an empty marker range against the preserved range 46–53. The test now requires both the full-detail footer and a `CHILD_POSITION_` content marker before retaining the exact range comparison. Its focused real tmux case passes with all six assertions. The run also had two unrelated isolated native process failures: Windows Unified Exec cleanup leaked six allocations while terminating an intentionally live group, and macOS arm64 missed the environment-sanitized double-fork timeout assertion after 8,330 tests passed. Both owners passed on adjacent exact runs, neither intersects the transcript changes, and no production synchronization was added for them. Commit `821f3d79` supersedes this run, so a new exact-commit Full CI run remains required.
-
-Run `33507867783` on `251e4e0ad46ccf8f72e20a8c41222401b39333dc` passed 14 underlying jobs, including Windows native, both Linux native jobs, all eight Linux E2E shards, macOS arm64 shards 2 and 4, and macOS x86_64 shard 4 before macOS arm64 shard 3 failed the brutal transcript case twice. The bounded observer exhausted all 256 NPage retries in roughly 188–191 seconds because it was driving the previously installed page while the product's close-and-reopen contract was asynchronously replacing that page with the tail. Reopening full detail resets navigation to the tail, so the correct completion boundary is the new non-loading tail pane containing `LIVE_DONE`, not any number of PageDown events against the prior page. The test now waits directly for that tail contract and retains the complete bounded PageUp traversal proving the oldest entry remains reachable. The complete real tmux stress passes locally with 120 assertions in 39.6 seconds. Commit `d2eac99b` supersedes this run, so a new exact-commit Full CI run remains required.
-
-Run `33511041064` on `ed7061f55c2b392f32768e4d6c10480bd7645f5d` passed Windows native, both Linux native jobs, all eight Linux E2E shards, and 18 jobs overall. The brutal transcript case still failed twice on each macOS shard 3. Both architectures reopened a non-loading tail page that remained on mid-command live markers instead of showing the already visible and durably persisted `LIVE_DONE`. The run was cancelled after the stable cross-architecture failure proved that another observer-only retry would be inappropriate.
-
-Diagnostic run `33515082961` on `54f0e3b7f32fa438355fff90de8210943aa11b79` added failure-only cache traces without weakening an assertion. Both Linux shard 3 jobs passed. macOS x86_64 shard 3 failed twice and showed completed page builds rather than a stalled page worker: the final installed pages used revisions 529 and 534, closing reset navigation, and reopening immediately accepted the same installed tail request without scheduling a new snapshot. The page projections had been captured while the live command source was changing, so revision equality alone could not prove that a page remained current across viewer lifetimes. This evidence rejected the earlier page-worker cancellation hypothesis and placed the repair in the page lifecycle owner.
-
-The same diagnostic run had one isolated Windows native failure in `unified exec manager cleanup terminates a still-running process group`. The identical test passed on the preceding exact Windows run with the same production source, while the diagnostic commit changed only TypeScript failure reporting. It is recorded as runner evidence, not waived: the final exact-commit run must pass Windows native. The diagnostic workflow was cancelled after the macOS trace was captured and commit `542d43b3` superseded it.
-
-Run `33524687049` on `52f80cde1a151df0e3ef1e150b01f411396f4e02` passed 15 underlying jobs, including Windows native, three of four Unix native jobs, all eight Linux E2E shards, macOS arm64 shard 3, and macOS x86_64 shards 2 and 4. macOS x86_64 shard 3 failed `tui-full-transcript-brutal.test.ts` twice at two different observer boundaries. The first attempt timed out waiting for a pane predicate during live output. The retry logged a scroll transition from 4,142 to 4,168 but timed out because a subsequent installed-page window still reported 4,142. The product stayed alive and the remaining files in the shard passed. The failure was classified as a redundant harness contract only after tracing its production owner and confirming overlapping deterministic coverage. Commit `9e7c2dc2` removes that complete test slice. The run was cancelled once the new commit superseded it; it is diagnostic evidence and cannot qualify the review head.
-
-The smaller `.github/workflows/ci.yml` workflow is not used as the merge decision. Benchmark and binary-size workflows are retained because startup latency and unexplained binary growth are useful signals; neither replaces Full CI.
-
-## Local verification completed before push
-
-- `zig fmt --check src/`
-- `zig build -Doptimize=ReleaseSafe`
-- `zig build -Dwasm-surface=core -Doptimize=ReleaseSmall`
-- `zig build -Dwasm-surface=term -Doptimize=ReleaseSmall`
-- ReleaseSafe filtered Zig tests covering compaction, same-turn steering, worker/UI thought queueing, newline-free assistant display, Unified Exec observer isolation and nonblocking direct control, web-fetch policy bypass, web-search projection, provider activation cancellation, bash-first projection, and shared usage snapshots
-- Focused Zig tests covering top-level MCP parsing, one-pass status/doctor MCP inspection, and Windows wide-environment cloning for child process overrides
-- The complete 201-test ReleaseSafe `processQueuedPrompt` family, including post-tool continuation, confirmed-result recovery, same-step steering suppression, Vision routing, MCP runtime generation binding, lifecycle presentation, and trace identity
-- ReleaseSafe verified-snapshot coverage for inline bytes, ordinary files, symlinked files, and symlinked directory chains, including the Windows no-follow path
-- ReleaseSafe focused regressions for `collapse_tool_calls`, canonical multi-line trace append, current registered-tool live authority, provisional tool labels, account picker and approval rendering, resume usage, evidence-led prompts, and collapsed semantic code blocks
-- ReleaseSafe prompt-history regressions for slash-command recall suppression, plain-arrow ownership, draft restoration, and re-enabling slash completion after editing
-- ReleaseSafe focused regressions for one-step terminal capability suppression, default same-turn admission, queue-review exclusion, late FIFO fallback, and the bounded supervisor handoff deadline
-- ReleaseSafe focused regressions proving live full-transcript stride throttling and the mandatory terminal command-output revision
-- ReleaseSafe regression proving full-detail close resets the bounded page anchor and releases the installed page before reopen
-- Focused Zig tests for named and redacted ACP pending tool calls, ACP tool-call JSON encoding, and skill-menu state after merging upstream through `93bfedfe`
-- Complete ReleaseSafe Zig suite passed on an ext4 clone of exact merge commit `b8494532` with Zig available on the child-process PATH; an initial run exposed only that missing PATH prerequisite, and the exact nested-Zig regression plus the complete suite passed after matching CI's environment
-- ReleaseSafe build plus focused Zig filters for slash-completion ownership and the typed gateway system prompt after merging upstream through `766e70f0`
-- Complete `tui-slash-menu.test.ts`: 38 passed, including the zero-candidate transition, candidate restoration, Escape ownership, command arguments, and active-stream behavior
-- The same complete `tui-slash-menu.test.ts` passed again after `b8494532`, including dollar-trigger menus anchored after ordinary composer text
-- Complete `tui-render-stress.test.ts`: 1 passed, exercising unmatched slash input together with repeated resize and local transcript writes
-- Complete `acp.test.ts`: 129 passed, including the current Responses markdown stream and child function-call-output continuation
-- The same complete `acp.test.ts` passed again after `b8494532`, including named structured tool-call input, Unified Exec terminal aggregation, provider setup, Codex and Grok persistent children, and empty stderr
-- Complete `web-fetch-fake-network.test.ts`: 8 passed after `b8494532`, including ACP `fetch` kind, redacted credential-bearing local input, policy bypass, malformed input, and one completed lifecycle
-- Complete `tui-composer-edit-contracts.test.ts`: 30 passed after `6121534a`, including duplicate-skill provenance across kill/yank and history recall while the source suffix remains hidden
-- ReleaseSafe POSIX regression for bounded graceful-exit SIGINT suppression passed after `a78ff0a3`
-- Windows x86_64 ReleaseSafe cross-build passed after the SIGINT guard was made an explicit Windows and WASM no-op
-- Focused real tmux rapid-exit resume scenario passed with one handoff, empty stderr, and 45 unrelated cases filtered out
-- Complete `tui-resume.test.ts`: 45 passed, including replay-cap, full-detail spacing, session-picker, scrollback, and resume ownership cases
-- Focused live-stream `/resume` refusal passed while waiting on the current stable `Generating` phase
-- Focused active-turn image steering passed while retaining its request-order, instruction-snapshot, image-byte, and stderr assertions
-- Focused greater-than-1-MiB cancelled-command artifact navigation passed with bounded PgDn batches and 60 retained assertions
-- The now-retired full-transcript brutal stress historically passed with 120 assertions after viewer-lifetime page invalidation; its distinct production fixes remain covered by focused terminal-revision and viewer-lifetime tests
-- Focused persistent-child reading-position restoration passed with six assertions after waiting for the asynchronously restored full-detail content before comparing its exact visible range
-- Focused height-shrink footer and provider length-truncation lifecycle cases passed through the stable post-resize and failed-tool states
-- Focused MCP authentication and logout lifecycle passed after restoring menu-completion collection in the composition root
-- Focused remote native compaction and Codex Vision failure cases passed with request-level and current structured-result assertions
-- Focused asynchronous statusline persistence and native-scrollback resize retention cases passed
-- Focused automatic-recording and replay cases passed through the supported environment-driven recording contract
-- Three sensitive subagent cases passed together: reusable child file approval, approval takeover across Ctrl+X reopen, and selected-child live chat
-- The idle running-activity case passed after deletion of its trace-internal scheduler assertion; it still proves elapsed-time progression, both animation marker states, native-scrollback stability, final output, and empty stderr
-- The exact Linux E2E shard 2 selected by `tests/e2e/ci-shards.ts`: all 12 files passed with CI's isolated tmux and one-file-at-a-time execution, including 115 terminal-host tests, 55 gateway lifecycle tests, render-lab, composer editing, file paths, web fetch, prompt history, and native clear recovery
-- The four previously failing queued steering TUI scenarios passed together: post-cancel recovery, image-bearing steering, ordinary next-step steering, and paused FIFO queue review
-- The complete ReleaseSafe Zig suite passed on a WSL ext4 copy with CI-equivalent default `.zig-cache` and Zig on PATH. The initial `/mnt/d` run was discarded because DrvFS cannot represent the private mode and rename contracts tested by the suite
-- File-index allocation and queued-refresh recovery now assert that `retry.txt` and `queued.txt` are actually searchable after the successful retry
-- The two file-index retry regressions pass in an ext4 checkout with parent Git metadata and the default in-worktree `.zig-cache`, matching the directory condition that failed on Linux and macOS CI
-- Windows provider tests covering Codex CLI parsing, Grok Build parsing, setup secret redaction, OAuth fallback order, ChatGPT and Grok callback path/state validation, ephemeral ports, delayed callback bytes, and Windows AFD reset handling
-- Repository-wide `bun x tsc --noEmit` was attempted and remains blocked by pre-existing baseline errors in untouched fixtures and library targets, including unavailable `findLast` declarations, legacy fixture shapes, and nullability mismatches. Full CI compiles and runs each selected Bun test file; no TypeScript-only success is claimed for this merge.
-- Bun E2E: removed filesystem tools are absent and Unified Exec completes the flow
-- Bun E2E: removed memory is not advertised, cannot mutate the legacy store, and does not prevent a surviving tool call
-- Bun E2E: no-save ask advertises the Unified Exec surface and completes through a fake Responses gateway
-- Bun E2E: all nine focused CLI cases for removed recording input, explicit skill binding, stdin above the former 1 MiB boundary, MCP status/doctor inspection, MCP connection, profile add/remove/path/list, concurrent mutation, and invalid syntax pass on Windows
-- Fresh binary smoke with `./zig-out/bin/fx help`, `status --json`, and provider-neutral `setup --json`
-- Fresh binary MCP smoke with an isolated HOME covering `mcp path`, local `add`, passive `list`, connected discovery, `remove`, plus MCP snapshots in `status --json` and `doctor --json`
-- Fresh binary ACP interaction covering initialize, session creation, setup start, and nonblocking setup status
-- Current-tree Windows x86_64 ReleaseSafe cross-build followed by direct execution of `./zig-out/bin/fx.exe`: `help`, `status --json`, and provider-neutral `setup --json` exited cleanly; setup detected `codex_cli` and `grok_build` without access-token or API-key fields
-- Current-tree Windows ACP smoke returned initialize, session creation, provider setup start, and nonblocking setup status with empty stderr
-- PGSO manifest classification lists cleanly after removing the stale training owner; all 32 corpus unit tests pass
-- E2E shard planning passes all 8 tests after removing the stale file weight and still classifies every committed test exactly once
-- The retained deterministic `tui-resume.test.ts` Ctrl-O pressure scenario passes from commit `9e7c2dc2` in a fresh ext4 ReleaseSafe build with 62 assertions, 45 unrelated tests filtered out, and empty stderr
-- ReleaseSafe filtered Zig coverage for the top-level help passes from `dc2c7e64`, including identical visible plain and ANSI content, compact widths, provider-neutral rows, and complete command-specific setup help
-- The consolidated CLI help alias E2E passes from the same fresh ReleaseSafe build with 45 assertions, 83 unrelated cases filtered out, and no Vercel, teams, credits, upgrade, hosted documentation, or feedback rows
-
-The local setup smoke detected both `codex_cli` and `grok_build` sources without printing credential bytes. The full unfiltered Zig suite was run locally on WSL's native ext4 filesystem because the test graph requires POSIX private-mode, lock, rename, and process semantics; Windows still runs the explicit native subset in Full CI.
+| `src/tools/filesystem/semantic_search.zig` | Duplicate search surface without a distinct contract |
+| `src/tools/memory/memory.zig` | Product feature without a supported BYOK persistence contract |
+| `src/ui/catalog_screen_layout.zig` | Replaced by current typed menu presentation |
+| `src/ui/skills_screen.zig` | Replaced by skill capability retrieval and inline presentation |
+| `tests/e2e/tui-full-transcript-brutal.test.ts` | Redundant profiler, trace, RSS, and timing harness with deterministic coverage elsewhere |
+
+The inert `--record` parser, old `terminal` and `run_command` execution paths,
+duplicate orchestration state, copied tool registries, the partial Ctrl+Enter
+steering policy, old full-detail modes, stale Vercel copy, and provider-specific
+search aliases also remain removed.
+
+### Model-facing tool surface after pruning
+
+The remaining registered logical built-ins are:
+
+`glob_files`, `grep_files`, `read_file`, `write_file`, `edit_file`,
+`update_plan`, `web_fetch`, `web_search`, `exec_command`, `write_stdin`,
+`capability_search`, `skill`, `install_skill`, `subagent`,
+`ask_user_question`, `vision`, and `read_tool_result`.
+
+`vision`, `web_search`, and `read_tool_result` are projected only when their
+route and runtime contracts permit them. Bash-first can hide overlapping file
+discovery tools for the next turn. Historical removed names may remain only in
+session replay codecs or explicit non-executability tests and never become
+dispatch targets.
+
+## Protected BYOK decisions
+
+- Codex Responses remains the default ChatGPT login route with account-bound
+  endpoint behavior, encrypted reasoning replay, and native compaction.
+- Grok and Codex OAuth, deterministic stored-session fallback, refresh, durable
+  logout, TUI provider activation, and ACP provider control remain intact.
+- Semantic compaction still has one strategy owner and one ordered fallback
+  policy.
+- Worker and gateway callbacks enqueue events; transcript mutation and rendering
+  stay on the UI thread.
+- Same-turn steering remains the default interactive contract.
+- Unified Exec remains the only executable shell family and ACP observation
+  keeps its independent cursor.
+- Web Search keeps one logical capability with centralized provider projection.
+- Web Fetch retains its explicit direct bounded-client admission exception.
+- Connection-local BYOK URL and key snapshots remain bound together for parent,
+  child, review, search, and compaction requests.
+
+## Verification record
+
+Local checks for the final pruning tree:
+
+- [x] Debug Zig build completes.
+- [x] The complete Zig test graph compiles and starts under WSL on `/mnt/d`.
+- [x] That DrvFS run is classified as non-qualifying: 856 tests requiring POSIX
+  private modes, locks, rename, and durable filesystem behavior fail across
+  unrelated modules. The same suite must be rerun from native Linux storage.
+- [x] `zig fmt --check src/` and `git diff --check` pass.
+- [x] ReleaseSafe native build passes and writes the current binary to
+  `./zig-out/bin/fx`.
+- [x] Complete ReleaseSafe Zig tests pass from a native ext4 checkout: 7,727
+  executed tests passed and 24 were skipped by their declared guards.
+- [x] Focused and complete Bun owners pass: CLI 77/77, ACP 95/95, Gateway
+  48/48, TUI Gateway lifecycle 62/62, slash/skills/startup 56/56, shard planning
+  8/8, and PGSO corpus validation 32/32.
+- [x] Repository source, tests, scripts, build registration, and tracked file
+  names contain no MCP implementation or fixture.
+- [x] The freshly built binary opens the `/skills` TUI with clean stderr, its
+  top-level help has no MCP entry, and `fx mcp` is rejected as an unknown
+  subcommand with empty stdout.
+- [ ] Exact-commit Full CI passes every required Linux and macOS runner.
 
 ## Reviewer checklist
 
 - [ ] No Vercel onboarding or default product route returned.
-- [ ] Codex and Grok login, setup import, fallback, refresh, logout, and ACP provider control remain intact.
-- [ ] The 19-tool registry is intentional and no deleted compatibility tool is executable.
-- [ ] MCP additions are generic and do not create a second discovery policy.
+- [ ] Codex and Grok login, setup import, fallback, refresh, logout, and ACP
+  provider control remain intact.
+- [ ] MCP has no executable, configurable, documented-as-supported, or tested
+  product surface.
+- [ ] Skills remain the only extension mechanism.
+- [ ] Removed tests have no surviving product owner; generic contracts retain
+  focused coverage.
 - [ ] Compaction still has one strategy owner.
 - [ ] Worker callbacks do not mutate transcript state directly.
 - [ ] Same-turn steering and its completion-race fallback remain intact.
-- [ ] Unified Exec retains one model-facing command family and independent ACP observation.
+- [ ] Unified Exec retains one model-facing command family and independent ACP
+  observation.
 - [ ] Web Search projection and Web Fetch admission exceptions remain intact.
-- [ ] All four exact-commit `Full suite (...)` jobs pass before merge into `byok`.
+- [ ] Every exact-commit Full CI job passes before merge into `byok`.

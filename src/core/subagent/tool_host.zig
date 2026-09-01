@@ -19,7 +19,6 @@ const session = @import("../session/session.zig");
 const session_child_store = @import("../session/session_child_store.zig");
 const session_codec = @import("../session/session_codec.zig");
 const session_store = @import("../session/session_store.zig");
-const mcp_access = @import("../mcp/access_policy.zig");
 const mode_registry = @import("../modes/mode_registry.zig");
 const model_provider = @import("../config/model_provider.zig");
 const parent_delivery_projector = @import("parent_delivery_projector.zig");
@@ -1932,29 +1931,24 @@ pub const CapabilityPolicy = struct {
 pub fn captureHostAuthority(
     alloc: Allocator,
     policy: CapabilityPolicy,
-    integration_names: []const []const u8,
     rules: types.PermissionRuleSet,
     grants: []const types.PermissionGrant,
 ) !authority.HostAuthority {
-    return captureHostAuthorityWithMcpView(
+    return captureHostAuthorityWithPermissionState(
         alloc,
         policy,
-        integration_names,
         rules,
         grants,
         .{},
-        null,
     );
 }
 
-pub fn captureHostAuthorityWithMcpView(
+pub fn captureHostAuthorityWithPermissionState(
     alloc: Allocator,
     policy: CapabilityPolicy,
-    integration_names: []const []const u8,
     rules: types.PermissionRuleSet,
     grants: []const types.PermissionGrant,
     permission_state: session_permission_state.State,
-    mcp_view: ?*const mcp_access.View,
 ) !authority.HostAuthority {
     var tool_names: std.ArrayList([]const u8) = .empty;
     defer tool_names.deinit(alloc);
@@ -1963,14 +1957,12 @@ pub fn captureHostAuthorityWithMcpView(
         if (permissions.rulesDenyAllTargetsForTool(rules, registered_tool.name)) continue;
         try tool_names.append(alloc, registered_tool.name);
     }
-    return authority.HostAuthority.captureWithPermissionStateAndMcpView(
+    return authority.HostAuthority.captureWithPermissionState(
         alloc,
         tool_names.items,
-        integration_names,
         rules,
         grants,
         permission_state,
-        mcp_view,
     );
 }
 
@@ -2036,7 +2028,6 @@ test "host authority capture applies explicit mode and permission capability pol
     var full = try captureHostAuthority(
         std.testing.allocator,
         .{ .tool_set = tool_set, .mode = .full },
-        &.{},
         .{},
         &.{},
     );
@@ -2061,14 +2052,12 @@ test "host authority capture applies explicit mode and permission capability pol
             .tool_set = tool_set,
             .mode = .{ .active = .{ .registry = registry, .id = "inspect" } },
         },
-        &.{"mcp__example"},
         .{ .rules = rules[0..] },
         grants[0..],
     );
     defer restricted.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 1), restricted.tools.len);
     try std.testing.expectEqualStrings("inspect", restricted.tools[0]);
-    try std.testing.expectEqualStrings("mcp__example", restricted.integrations[0]);
     try std.testing.expectEqualStrings("glob", restricted.rules.rules[0].permission);
     try std.testing.expectEqualStrings("inspect", restricted.grants[0].tool_name);
 }
@@ -2425,12 +2414,7 @@ fn captureAdmission(
         .rules = snapshot.rules,
         .grants = snapshot.grants,
         .permission_state = snapshot.permission_state,
-        .integration_names = snapshot.integrations,
-        .authority_generation = if (snapshot.mcp_view) |view|
-            mcp_access.authorityGeneration(view)
-        else
-            0,
-        .mcp_view = snapshot.mcp_view,
+        .authority_generation = snapshot.generation,
     }) catch |err| switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         else => error.AdmissionFailed,
@@ -2732,7 +2716,6 @@ test "independent processes receive distinct authoritative operation identities"
 const TestAuthority = struct {
     root_id: []const u8,
     tools: []const []const u8 = &.{"subagent"},
-    integrations: []const []const u8 = &.{},
     rules: types.PermissionRuleSet = .{},
     grants: []const types.PermissionGrant = &.{},
 
@@ -2752,7 +2735,6 @@ const TestAuthority = struct {
         return authority.HostAuthority.capture(
             alloc,
             self.tools,
-            self.integrations,
             self.rules,
             self.grants,
         );
@@ -6613,7 +6595,6 @@ test "nested children resolve the same current controlling authority" {
     var test_authority = TestAuthority{
         .root_id = root_id,
         .tools = &.{ "read_file", "subagent" },
-        .integrations = &.{"mcp_old"},
         .rules = .{ .rules = &initial_rules },
         .grants = &initial_grants,
     };
@@ -6659,7 +6640,6 @@ test "nested children resolve the same current controlling authority" {
     var initial_nested = try host.authority_resolver.resolve(alloc, nested_id);
     defer initial_nested.deinit(alloc);
     try std.testing.expectEqual(types.PermissionMode.auto, initial_nested.permission_mode);
-    try std.testing.expectEqualStrings("mcp_old", initial_nested.integrations[0]);
 
     var next_rules = [_]types.PermissionRule{.{
         .permission = @constCast("edit"),
@@ -6671,7 +6651,6 @@ test "nested children resolve the same current controlling authority" {
         .target_path = @constCast("src/new.zig"),
     }};
     test_authority.tools = &.{ "write_file", "subagent" };
-    test_authority.integrations = &.{"mcp_new"};
     test_authority.rules = .{ .rules = &next_rules };
     test_authority.grants = &next_grants;
     var current_parent = try host.authority_resolver.resolve(alloc, parent_id);
@@ -6681,8 +6660,6 @@ test "nested children resolve the same current controlling authority" {
     for ([_]authority.Snapshot{ current_parent, current_nested }) |snapshot| {
         try std.testing.expectEqual(@as(usize, 2), snapshot.tools.len);
         try std.testing.expectEqualStrings("write_file", snapshot.tools[0]);
-        try std.testing.expectEqual(@as(usize, 1), snapshot.integrations.len);
-        try std.testing.expectEqualStrings("mcp_new", snapshot.integrations[0]);
         try std.testing.expectEqual(@as(usize, 1), snapshot.rules.rules.len);
         try std.testing.expectEqualStrings("src/**", snapshot.rules.rules[0].pattern);
         try std.testing.expectEqual(@as(usize, 1), snapshot.grants.len);

@@ -248,7 +248,7 @@ test "done envelope upsert is ordered and replaces duplicate indices" {
     defer freeArrayListItems(std.testing.allocator, &items);
     const later = try collectDoneEnvelope(
         std.testing.allocator,
-        "{\"type\":\"response.output_item.done\",\"output_index\":3,\"item\":{\"type\":\"mcp_call\",\"id\":\"mcp_1\"}}",
+        "{\"type\":\"response.output_item.done\",\"output_index\":3,\"item\":{\"type\":\"future_provider_call\",\"id\":\"future_1\"}}",
         0,
     );
     try upsertOwned(std.testing.allocator, &items, later);

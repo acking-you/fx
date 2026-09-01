@@ -747,7 +747,6 @@ fn semanticallyHandlesOutputItem(kind: responses_protocol.OutputItemKind) bool {
         .image_generation_call,
         .computer_call,
         .local_shell_call,
-        .mcp_call,
         .other,
         => false,
     };

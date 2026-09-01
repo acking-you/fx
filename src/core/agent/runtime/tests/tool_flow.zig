@@ -979,7 +979,6 @@ test "processQueuedPrompt keeps sampled root mode through permission and executi
             _: []const PermissionGrant,
             _: ?runtime_tool_contracts.LiveToolAuthority,
             _: ?runtime_tool_contracts.LivePermissionRevalidation,
-            _: []const []const u8,
         ) !command_admission.PermissionOutcome {
             const self: *@This() = @ptrCast(@alignCast(raw));
             try std.testing.expectEqual(types.PermissionMode.auto, permission_mode);
@@ -1197,87 +1196,6 @@ test "parallel streamed cancellation closes every concrete tool action" {
             try std.testing.expect(!std.mem.eql(u8, event.terminal.outcome.summary, "Tool cancelled"));
         }
     }
-}
-
-test "selected dynamic MCP allow returned after cancellation never executes" {
-    const alloc = std.testing.allocator;
-    const select_calls = [_]ToolCall{
-        toolCall("select", "mcp_select_tool", "{\"name\":\"mcp_fixture_echo\"}"),
-    };
-    const dynamic_calls = [_]ToolCall{
-        toolCall("dynamic", "mcp_fixture_echo", "{}"),
-    };
-    const completions = [_]FakeCompletion{
-        .{ .tool_calls = &select_calls },
-        .{ .tool_calls = &dynamic_calls },
-    };
-    var gateway = FakeGateway.init(alloc, &completions);
-    defer gateway.deinit();
-    var hooks = FakeAgentRuntimeDeps.init(alloc);
-    defer hooks.deinit();
-    hooks.permission_decisions = &.{ .once, .once };
-    hooks.exec_plans = &.{
-        .{ .result = .{
-            .model_output = "selected",
-            .selected_dynamic_tool_name = "mcp_fixture_echo",
-            .selected_dynamic_tool_schema_json = "{\"type\":\"function\",\"name\":\"mcp_fixture_echo\",\"description\":\"Echo\",\"inputSchema\":{\"type\":\"object\",\"properties\":{}}}",
-        } },
-        .{ .result = .{ .model_output = "must not execute" } },
-    };
-    var fixture = PromptFixture{};
-    hooks.cancel_on_permission = &fixture.cancel_flag;
-    hooks.cancel_on_permission_name = "mcp_fixture_echo";
-    var job = fixture.job();
-    job.permission_mode = .auto;
-
-    try runFakePrompt(&gateway, &hooks, fixture.config(), job);
-
-    try std.testing.expectEqual(@as(usize, 2), gateway.index);
-    try std.testing.expectEqual(@as(usize, 1), hooks.executed_names.items.len);
-    try std.testing.expectEqualStrings("mcp_select_tool", hooks.executed_names.items[0]);
-    try std.testing.expectEqual(types.TurnPresentationOutcome.interrupted, hooks.finalized_outcome.?);
-    try std.testing.expectEqual(@as(usize, 0), hooks.rejected_names.items.len);
-}
-
-test "selected dynamic MCP execution carries its validation generation" {
-    const alloc = std.testing.allocator;
-    const select_calls = [_]ToolCall{
-        toolCall("select", "mcp_select_tool", "{\"name\":\"mcp_fixture_echo\"}"),
-    };
-    const dynamic_calls = [_]ToolCall{
-        toolCall("dynamic", "mcp_fixture_echo", "{}"),
-    };
-    const completions = [_]FakeCompletion{
-        .{ .tool_calls = &select_calls },
-        .{ .tool_calls = &dynamic_calls },
-        .{ .content = "Final" },
-    };
-    var gateway = FakeGateway.init(alloc, &completions);
-    defer gateway.deinit();
-    var hooks = FakeAgentRuntimeDeps.init(alloc);
-    defer hooks.deinit();
-    hooks.permission_decisions = &.{ .once, .once };
-    hooks.validation_mcp_tool_name = "mcp_fixture_echo";
-    hooks.validation_mcp_runtime_generation = 41;
-    hooks.exec_plans = &.{
-        .{ .result = .{
-            .model_output = "selected",
-            .selected_dynamic_tool_name = "mcp_fixture_echo",
-            .selected_dynamic_tool_schema_json = "{\"type\":\"function\",\"name\":\"mcp_fixture_echo\",\"description\":\"Echo\",\"inputSchema\":{\"type\":\"object\",\"properties\":{}}}",
-        } },
-        .{ .result = .{ .model_output = "called" } },
-    };
-    var fixture = PromptFixture{};
-    var job = fixture.job();
-    job.permission_mode = .auto;
-
-    try runFakePrompt(&gateway, &hooks, fixture.config(), job);
-
-    try std.testing.expectEqualSlices(
-        ?u64,
-        &.{ null, 41 },
-        hooks.execution_mcp_runtime_generations.items,
-    );
 }
 
 test "resumed persistent child review rejects child-authored authority provenance" {
@@ -5322,7 +5240,6 @@ test "parallel result assembly emits context notices in call order" {
         &.{ false, false },
         &.{ false, false },
         1,
-        &.{},
         .{},
     );
 
@@ -5351,7 +5268,6 @@ test "child live authority refresh denies the next tool action before execution"
     const LiveProvider = struct {
         calls: usize = 0,
         const allowed_tools = [_][]const u8{"read_file"};
-        const integrations = [_][]const u8{"mcp_fixture"};
         var grants = [_]PermissionGrant{.{
             .tool_name = @constCast("read_file"),
             .target_path = @constCast("/tmp/workspace/first"),
@@ -5382,7 +5298,6 @@ test "child live authority refresh denies the next tool action before execution"
                     .generation = if (self.calls <= 2) 1 else 2,
                     .root_id = "root",
                     .tools = if (self.calls <= 2) &allowed_tools else &.{},
-                    .integrations = &integrations,
                     .rules = .{ .rules = if (self.calls <= 2) &allow_rules else &deny_rules },
                     .grants = &grants,
                     .permission_mode = .auto,
@@ -5471,7 +5386,6 @@ test "child live authority revalidates after permission before effect" {
                     .generation = if (self.calls == 1) 1 else 2,
                     .root_id = "root",
                     .tools = if (self.calls == 1) &tools else &.{},
-                    .integrations = &.{},
                     .rules = .{ .rules = if (self.calls == 1) &allow_rules else &deny_rules },
                     .grants = &.{},
                     .permission_mode = .auto,
@@ -5543,7 +5457,6 @@ test "child live authority allow to ask requires current approval before effect"
                     .generation = if (ask) 2 else 1,
                     .root_id = "root",
                     .tools = &tools,
-                    .integrations = &.{},
                     .rules = .{ .rules = if (ask) &ask_rules else &allow_rules },
                     .grants = &.{},
                     .permission_mode = .auto,

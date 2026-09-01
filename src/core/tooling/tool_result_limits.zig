@@ -56,7 +56,7 @@ test "model projection stability rejects sanitized and secret-bearing identities
     const scratch = scratch_state.allocator();
     const invalid_utf8 = [_]u8{0xff};
 
-    try std.testing.expect(try modelProjectionPreservesText(scratch, "mcp_datadog_list_incidents"));
+    try std.testing.expect(try modelProjectionPreservesText(scratch, "custom_list_incidents"));
     try std.testing.expect(!try modelProjectionPreservesText(scratch, &invalid_utf8));
     try std.testing.expect(!try modelProjectionPreservesText(scratch, "token=secret-value"));
 }
@@ -119,7 +119,7 @@ pub fn truncateText(arena: std.mem.Allocator, opts: TruncateOptions) ![]const u8
 
 test "prepareModelOutput masks secrets before applying cap" {
     const alloc = std.testing.allocator;
-    const output = try prepareModelOutput(alloc, "mcp__server__tool", "token=secret-value", default_max_tool_result_bytes);
+    const output = try prepareModelOutput(alloc, "custom_server_tool", "token=secret-value", default_max_tool_result_bytes);
     defer alloc.free(@constCast(output));
 
     try std.testing.expectEqualStrings("token=[redacted]", output);

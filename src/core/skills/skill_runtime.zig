@@ -1455,7 +1455,6 @@ fn orderSkillsForPrompt(alloc: Allocator, skills: []const Skill, prompt: []const
         alloc,
         .{
             .query = &query,
-            .kind = .skill,
             .limit = capability_retrieval.max_limit,
             .relevance_policy = .intent,
         },

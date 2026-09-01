@@ -27,7 +27,6 @@ const gateway_provider = @import("../core/gateway/gateway_provider.zig");
 const model_catalog = @import("../core/gateway/model_catalog.zig");
 const provider_route = @import("../core/gateway/provider_route.zig");
 const hooks = @import("../core/hooks/hooks.zig");
-const mcp_runtime = @import("../core/mcp/mcp_runtime.zig");
 const mode_registry = @import("../core/modes/mode_registry.zig");
 const skill_runtime = @import("../core/skills/skill_runtime.zig");
 const session_codec = @import("../core/session/session_codec.zig");
@@ -48,14 +47,10 @@ const context_contract = @import("../core/workspace/context_contract.zig");
 const workspace_access = @import("../core/workspace/workspace_access.zig");
 const web_fetch_runtime = @import("../core/tooling/web_fetch_runtime.zig");
 const web_search_runtime = @import("../core/tooling/web_search_runtime.zig");
-const elicitation = @import("../core/mcp/elicitation.zig");
-const tool_mcp_runtime = @import("../core/tooling/tool_mcp_runtime.zig");
-const permissions = @import("../core/permissions/permissions.zig");
 
 const Allocator = std.mem.Allocator;
 const ErrorCode = jsonrpc.ErrorCode;
 const writeJsonStr = jsonrpc.writeJsonStr;
-const legacy_url_completion_timeout_ms: i64 = 10 * 60 * 1000;
 
 const AcpMethod = enum {
     initialize,
@@ -173,7 +168,7 @@ pub const Config = acp_runner.Config;
 
 pub const OutboundKind = enum {
     permission,
-    elicitation,
+    request,
 };
 
 pub const OutboundResponse = struct {
@@ -194,26 +189,6 @@ const PendingOutbound = struct {
 };
 
 const max_pending_outbound = 32;
-
-const PendingLegacyUrl = struct {
-    server_name: []u8,
-    source_id: []u8,
-    acp_id: []u8,
-    session_id: []u8,
-    tool_call_id: []u8,
-    binding: elicitation.Binding,
-    accepted: bool = false,
-    completed: bool = false,
-
-    fn deinit(self: *PendingLegacyUrl, alloc: Allocator) void {
-        alloc.free(self.server_name);
-        alloc.free(self.source_id);
-        alloc.free(self.acp_id);
-        alloc.free(self.session_id);
-        alloc.free(self.tool_call_id);
-        self.* = undefined;
-    }
-};
 
 pub const ActiveSessionState = struct {
     session_id: []u8,
@@ -240,7 +215,6 @@ pub const ActiveSessionState = struct {
     /// profile or project configuration.
     session_grants: []types.PermissionGrant = &.{},
     session_rt: session_runtime.SessionRuntime,
-    mcp: ?*mcp_runtime.McpRuntime = null,
     cancel_flag: std.atomic.Value(bool),
     pending_prompt_id: ?jsonrpc.RequestId,
     image_snapshot_temp_dir: ?[]u8 = null,
@@ -379,7 +353,6 @@ pub const ServerState = struct {
     client_fs_read: bool = false,
     client_fs_write: bool = false,
     client_terminal: bool = false,
-    client_elicitation: elicitation.Capabilities = .{},
     workspace_root: []u8 = &.{},
     workspace_access: workspace_access.WorkspaceAccess = .{},
     api_key: []u8 = &.{},
@@ -429,8 +402,6 @@ pub const ServerState = struct {
     outbound_cond: std.Io.Condition = .init,
     next_outbound_request_id: u64 = 1,
     pending_outbound: std.AutoHashMapUnmanaged(u64, PendingOutbound) = .empty,
-    legacy_url_mutex: std.Io.Mutex = .init,
-    pending_legacy_urls: std.ArrayListUnmanaged(PendingLegacyUrl) = .empty,
 
     pub fn deinit(self: *ServerState) void {
         reapActivePrompt(self, true);
@@ -471,8 +442,6 @@ pub const ServerState = struct {
             if (entry.response) |*response| response.deinit(self.alloc);
         }
         self.pending_outbound.deinit(self.alloc);
-        clearPendingLegacyUrls(self);
-        self.pending_legacy_urls.deinit(self.alloc);
     }
 };
 
@@ -704,7 +673,6 @@ fn publishRefreshedSubscriptionToken(
 }
 
 pub fn releaseActiveSession(state: *ServerState) !void {
-    clearPendingLegacyUrls(state);
     const active = if (state.active_session) |*session| session else return;
     disableSubagentHost(state);
     if (comptime !host_target.is_wasm) {
@@ -744,13 +712,6 @@ fn destroyActiveSession(state: *ServerState) void {
     state.alloc.free(active.session_id);
     state.alloc.free(active.model);
     types.freePermissionGrantSlice(state.alloc, active.session_grants);
-    if (comptime !host_target.is_wasm) {
-        if (active.mcp) |runtime| {
-            runtime.retireAndWait();
-            runtime.deinit();
-            state.alloc.destroy(runtime);
-        }
-    }
     active.session_rt.deinit(state.alloc);
     if (active.writable) |*writable| writable.deinit(state.alloc);
     if (active.store) |*store| store.deinit(state.alloc);
@@ -806,33 +767,12 @@ fn resolveSubagentAuthority(
     }
     state.subagent_authority_mutex.lockUncancelable(io_mod.getIo());
     defer state.subagent_authority_mutex.unlock(io_mod.getIo());
-    const integrations = if (active.mcp) |mcp|
-        mcp.snapshotToolNames(alloc, active.permission_rules)
-    else
-        alloc.alloc([]u8, 0);
-    const owned_integrations = integrations catch return error.OutOfMemory;
-    defer {
-        for (owned_integrations) |name| alloc.free(name);
-        alloc.free(owned_integrations);
-    }
-    var mcp_view = if (active.mcp) |mcp|
-        try mcp.snapshotAccessView(
-            alloc,
-            root_id,
-            root_id,
-            active.permission_rules,
-            state.cfg.mode_registry.toolAllowed(builtin_tools.advertisement_set, active.mode, "mcp_features") and
-                !permissions.rulesDenyAllTargetsForTool(active.permission_rules, "mcp_features"),
-        )
-    else
-        null;
-    defer if (mcp_view) |*view| view.deinit(alloc);
     var permission_state = active.session_rt.snapshotPermissionState(alloc) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.HostAuthorityUnavailable,
     };
     defer permission_state.deinit(alloc);
-    return subagent_tool_host.captureHostAuthorityWithMcpView(
+    return subagent_tool_host.captureHostAuthorityWithPermissionState(
         alloc,
         .{
             .tool_set = builtin_tools.advertisement_set,
@@ -843,11 +783,9 @@ fn resolveSubagentAuthority(
                 },
             },
         },
-        owned_integrations,
         active.permission_rules,
         active.session_grants,
         permission_state,
-        if (mcp_view) |*view| view else null,
     );
 }
 
@@ -1099,231 +1037,6 @@ fn cancelPendingOutbound(state: *ServerState) void {
     state.outbound_cond.broadcast(io_mod.getIo());
 }
 
-pub fn reserveLegacyUrl(
-    state: *ServerState,
-    origin: tool_mcp_runtime.InputOrigin,
-    source_id: []const u8,
-    acp_id: []const u8,
-    session_id: []const u8,
-    tool_call_id: []const u8,
-) !bool {
-    state.legacy_url_mutex.lockUncancelable(io_mod.getIo());
-    defer state.legacy_url_mutex.unlock(io_mod.getIo());
-    const now_ms = serverAwakeMillis();
-    var pending_index: usize = 0;
-    while (pending_index < state.pending_legacy_urls.items.len) {
-        const pending = &state.pending_legacy_urls.items[pending_index];
-        const stale_generation = std.mem.eql(u8, pending.server_name, origin.server_name) and
-            (pending.binding.runtime_generation != origin.runtime_generation or
-                pending.binding.connection_generation != origin.connection_generation or
-                pending.binding.client_generation != origin.client_generation or
-                pending.binding.auth_generation != origin.auth_generation);
-        if (pending.binding.deadline_ms >= now_ms and !stale_generation) {
-            pending_index += 1;
-            continue;
-        }
-        var expired = state.pending_legacy_urls.swapRemove(pending_index);
-        expired.deinit(state.alloc);
-    }
-    if (state.pending_legacy_urls.items.len >= max_pending_outbound) return false;
-    for (state.pending_legacy_urls.items) |pending| {
-        if (std.mem.eql(u8, pending.server_name, origin.server_name) and
-            std.mem.eql(u8, pending.source_id, source_id)) return false;
-    }
-
-    const server_name = try state.alloc.dupe(u8, origin.server_name);
-    errdefer state.alloc.free(server_name);
-    const owned_source_id = try state.alloc.dupe(u8, source_id);
-    errdefer state.alloc.free(owned_source_id);
-    const owned_acp_id = try state.alloc.dupe(u8, acp_id);
-    errdefer state.alloc.free(owned_acp_id);
-    const owned_session_id = try state.alloc.dupe(u8, session_id);
-    errdefer state.alloc.free(owned_session_id);
-    const owned_tool_call_id = try state.alloc.dupe(u8, tool_call_id);
-    errdefer state.alloc.free(owned_tool_call_id);
-    try state.pending_legacy_urls.append(state.alloc, .{
-        .server_name = server_name,
-        .source_id = owned_source_id,
-        .acp_id = owned_acp_id,
-        .session_id = owned_session_id,
-        .tool_call_id = owned_tool_call_id,
-        .binding = .{
-            .server_name = server_name,
-            .scope = .{ .acp_session = .{
-                .session_id = owned_session_id,
-                .tool_call_id = owned_tool_call_id,
-            } },
-            .runtime_generation = origin.runtime_generation,
-            .connection_generation = origin.connection_generation,
-            .client_generation = origin.client_generation,
-            .catalog_generation = origin.catalog_generation,
-            .request_generation = origin.request_generation,
-            .auth_generation = origin.auth_generation,
-            .deadline_ms = std.math.add(i64, now_ms, legacy_url_completion_timeout_ms) catch
-                std.math.maxInt(i64),
-        },
-    });
-    return true;
-}
-
-pub fn removeLegacyUrl(
-    state: *ServerState,
-    acp_id: []const u8,
-) void {
-    state.legacy_url_mutex.lockUncancelable(io_mod.getIo());
-    defer state.legacy_url_mutex.unlock(io_mod.getIo());
-    for (state.pending_legacy_urls.items, 0..) |pending, index| {
-        if (!std.mem.eql(u8, pending.acp_id, acp_id)) continue;
-        var removed = state.pending_legacy_urls.swapRemove(index);
-        removed.deinit(state.alloc);
-        return;
-    }
-}
-
-pub fn acceptLegacyUrl(
-    state: *ServerState,
-    origin: tool_mcp_runtime.InputOrigin,
-    acp_id: []const u8,
-) tool_mcp_runtime.LegacyUrlAcceptTransition {
-    var owned_acp_id: ?[]u8 = null;
-    state.legacy_url_mutex.lockUncancelable(io_mod.getIo());
-    const result = result: for (state.pending_legacy_urls.items, 0..) |*pending, index| {
-        if (!std.mem.eql(u8, pending.acp_id, acp_id)) continue;
-        if (pending.binding.runtime_generation != origin.runtime_generation or
-            pending.binding.connection_generation != origin.connection_generation or
-            pending.binding.client_generation != origin.client_generation or
-            pending.binding.catalog_generation != origin.catalog_generation or
-            pending.binding.request_generation != origin.request_generation or
-            pending.binding.auth_generation != origin.auth_generation)
-        {
-            break :result tool_mcp_runtime.LegacyUrlAcceptTransition.missing;
-        }
-        pending.accepted = true;
-        if (!pending.completed) {
-            break :result tool_mcp_runtime.LegacyUrlAcceptTransition.awaiting_completion;
-        }
-        var removed = state.pending_legacy_urls.swapRemove(index);
-        owned_acp_id = removed.acp_id;
-        removed.acp_id = &.{};
-        removed.deinit(state.alloc);
-        break :result tool_mcp_runtime.LegacyUrlAcceptTransition{ .completed = owned_acp_id.? };
-    } else tool_mcp_runtime.LegacyUrlAcceptTransition.missing;
-    state.legacy_url_mutex.unlock(io_mod.getIo());
-    return result;
-}
-
-fn clearPendingLegacyUrls(state: *ServerState) void {
-    state.legacy_url_mutex.lockUncancelable(io_mod.getIo());
-    defer state.legacy_url_mutex.unlock(io_mod.getIo());
-    for (state.pending_legacy_urls.items) |*pending| pending.deinit(state.alloc);
-    state.pending_legacy_urls.clearRetainingCapacity();
-}
-
-pub fn legacyUrlCompletionSink(state: *ServerState) tool_mcp_runtime.LegacyUrlCompletionSink {
-    return .{
-        .context = @ptrCast(state),
-        .accept = acceptLegacyUrlFromSink,
-        .consume = consumeLegacyUrlCompletion,
-        .publish = publishLegacyUrlCompletionFromSink,
-    };
-}
-
-fn acceptLegacyUrlFromSink(
-    raw_context: *anyopaque,
-    origin: tool_mcp_runtime.InputOrigin,
-    acp_id: []const u8,
-) tool_mcp_runtime.LegacyUrlAcceptTransition {
-    const state: *ServerState = @ptrCast(@alignCast(raw_context));
-    return acceptLegacyUrl(state, origin, acp_id);
-}
-
-fn consumeLegacyUrlCompletion(
-    raw_context: *anyopaque,
-    completion: tool_mcp_runtime.LegacyUrlCompletion,
-) tool_mcp_runtime.LegacyUrlConsumeTransition {
-    const state: *ServerState = @ptrCast(@alignCast(raw_context));
-    var acp_id: ?[]u8 = null;
-    var matched = false;
-    state.legacy_url_mutex.lockUncancelable(io_mod.getIo());
-    for (state.pending_legacy_urls.items, 0..) |*pending, index| {
-        if (!std.mem.eql(u8, pending.server_name, completion.server_name) or
-            !std.mem.eql(u8, pending.source_id, completion.elicitation_id)) continue;
-        if (pending.binding.runtime_generation != completion.runtime_generation or
-            pending.binding.connection_generation != completion.connection_generation or
-            pending.binding.client_generation != completion.client_generation or
-            pending.binding.auth_generation != completion.auth_generation) break;
-        const transition = elicitation.decideTransition(
-            .pending,
-            pending.binding,
-            .{
-                .server_name = completion.server_name,
-                .scope = pending.binding.scope,
-                .runtime_generation = completion.runtime_generation,
-                .connection_generation = completion.connection_generation,
-                .client_generation = completion.client_generation,
-                .catalog_generation = pending.binding.catalog_generation,
-                .request_generation = pending.binding.request_generation,
-                .auth_generation = completion.auth_generation,
-            },
-            serverAwakeMillis(),
-            true,
-        );
-        matched = true;
-        switch (transition) {
-            .consume => {
-                if (pending.accepted) {
-                    var removed = state.pending_legacy_urls.swapRemove(index);
-                    acp_id = removed.acp_id;
-                    removed.acp_id = &.{};
-                    removed.deinit(state.alloc);
-                } else {
-                    pending.completed = true;
-                }
-            },
-            .reject => {
-                var removed = state.pending_legacy_urls.swapRemove(index);
-                removed.deinit(state.alloc);
-            },
-        }
-        break;
-    }
-    state.legacy_url_mutex.unlock(io_mod.getIo());
-
-    return if (matched)
-        .{ .consumed = acp_id }
-    else
-        .missing;
-}
-
-fn publishLegacyUrlCompletionFromSink(raw_context: *anyopaque, id: []u8) void {
-    const state: *ServerState = @ptrCast(@alignCast(raw_context));
-    publishLegacyUrlCompletion(state, id);
-}
-
-fn publishLegacyUrlCompletion(state: *ServerState, id: []u8) void {
-    defer state.alloc.free(id);
-    var params: std.Io.Writer.Allocating = .init(state.alloc);
-    defer params.deinit();
-    params.writer.writeAll("{\"elicitationId\":") catch return;
-    std.json.Stringify.value(id, .{}, &params.writer) catch return;
-    params.writer.writeByte('}') catch return;
-    state.writer.writeNotification(
-        state.alloc,
-        "elicitation/complete",
-        params.writer.buffered(),
-    ) catch {};
-}
-
-fn serverAwakeMillis() i64 {
-    const now = std.Io.Clock.Timestamp.now(io_mod.getIo(), .awake);
-    const milliseconds = @divFloor(now.raw.nanoseconds, std.time.ns_per_ms);
-    return std.math.cast(i64, milliseconds) orelse if (milliseconds < 0)
-        std.math.minInt(i64)
-    else
-        std.math.maxInt(i64);
-}
-
-/// Permission compatibility wrapper over the shared outbound registry.
 pub fn beginPermissionRequest(state: *ServerState) ?u64 {
     return beginOutboundRequest(state, .permission) catch null;
 }
@@ -1548,7 +1261,6 @@ const InitializeRequest = struct {
     client_fs_read: bool = false,
     client_fs_write: bool = false,
     client_terminal: bool = false,
-    client_elicitation: elicitation.Capabilities = .{},
 };
 
 fn parseInitializeRequest(
@@ -1584,7 +1296,6 @@ fn parseInitializeRequest(
     if (capabilities.object.get("terminal")) |value| {
         request.client_terminal = value == .bool and value.bool;
     }
-    request.client_elicitation = elicitation.parseAcpCapabilities(capabilities);
     return request;
 }
 
@@ -1743,7 +1454,6 @@ fn handleInitialize(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message
     state.client_fs_read = request.client_fs_read;
     state.client_fs_write = request.client_fs_write;
     state.client_terminal = request.client_terminal;
-    state.client_elicitation = request.client_elicitation;
     state.initialized = true;
 
     var out: std.Io.Writer.Allocating = .init(alloc);
@@ -1766,7 +1476,6 @@ fn handleCancel(state: *ServerState) void {
         session.cancel_flag.store(true, .seq_cst);
     }
     cancelPendingOutbound(state);
-    clearPendingLegacyUrls(state);
 }
 
 pub fn cancelAndReapActivePrompt(state: *ServerState) void {
@@ -3351,8 +3060,8 @@ test "ACP outbound responses correlate out of order and ignore unknown ids" {
     };
     defer state.pending_outbound.deinit(alloc);
 
-    const first = (try beginOutboundRequest(&state, .elicitation)).?;
-    const second = (try beginOutboundRequest(&state, .elicitation)).?;
+    const first = (try beginOutboundRequest(&state, .request)).?;
+    const second = (try beginOutboundRequest(&state, .request)).?;
     handleClientResponse(&state, alloc, &.{
         .id = .{ .integer = @intCast(second) },
         .result_raw = "{\"action\":\"decline\"}",
@@ -3366,202 +3075,13 @@ test "ACP outbound responses correlate out of order and ignore unknown ids" {
         .result_raw = "{\"action\":\"cancel\"}",
     });
 
-    var second_response = awaitOutboundResponse(&state, second, .elicitation).?;
+    var second_response = awaitOutboundResponse(&state, second, .request).?;
     defer second_response.deinit(alloc);
     try std.testing.expectEqualStrings("{\"action\":\"decline\"}", second_response.result_json.?);
-    var first_response = awaitOutboundResponse(&state, first, .elicitation).?;
+    var first_response = awaitOutboundResponse(&state, first, .request).?;
     defer first_response.deinit(alloc);
     try std.testing.expectEqualStrings("{\"action\":\"cancel\"}", first_response.result_json.?);
     try std.testing.expectEqual(@as(usize, 0), state.pending_outbound.count());
-}
-
-test "ACP legacy URL publication owns partial allocations" {
-    const Case = struct {
-        fn run(alloc: Allocator) !void {
-            var state = ServerState{
-                .alloc = alloc,
-                .cfg = undefined,
-                .writer = jsonrpc.Writer.init(),
-            };
-            defer {
-                clearPendingLegacyUrls(&state);
-                state.pending_legacy_urls.deinit(alloc);
-            }
-            const reserved = try reserveLegacyUrl(
-                &state,
-                .{
-                    .wire = .legacy_mcp_2025_11,
-                    .server_name = "fixture",
-                    .operation = .{ .tools_call = "echo" },
-                    .connection_generation = 1,
-                    .client_generation = 1,
-                    .catalog_generation = 1,
-                    .request_generation = 1,
-                    .auth_generation = 1,
-                    .deadline_ms = 1,
-                },
-                "legacy-id",
-                "acp-id",
-                "session-id",
-                "tool-call-id",
-            );
-            try std.testing.expect(reserved);
-        }
-    };
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, Case.run, .{});
-}
-
-test "ACP legacy URL state requires consent and completion" {
-    const alloc = std.testing.allocator;
-    var state = ServerState{
-        .alloc = alloc,
-        .cfg = undefined,
-        .writer = jsonrpc.Writer.init(),
-    };
-    defer {
-        clearPendingLegacyUrls(&state);
-        state.pending_legacy_urls.deinit(alloc);
-    }
-    const origin = tool_mcp_runtime.InputOrigin{
-        .wire = .legacy_mcp_2025_11,
-        .server_name = "fixture",
-        .operation = .{ .tools_call = "echo" },
-        .runtime_generation = 1,
-        .connection_generation = 1,
-        .client_generation = 2,
-        .catalog_generation = 3,
-        .request_generation = 4,
-        .auth_generation = 5,
-        .deadline_ms = std.math.maxInt(i64),
-    };
-    try std.testing.expect(try reserveLegacyUrl(
-        &state,
-        origin,
-        "early",
-        "acp-early",
-        "session",
-        "call",
-    ));
-    const sink = legacyUrlCompletionSink(&state);
-    _ = sink.consume(sink.context, .{
-        .server_name = "fixture",
-        .elicitation_id = "early",
-        .runtime_generation = 1,
-        .connection_generation = 0,
-        .client_generation = 1,
-        .auth_generation = 4,
-    });
-    try std.testing.expectEqual(@as(usize, 1), state.pending_legacy_urls.items.len);
-    try std.testing.expect(!state.pending_legacy_urls.items[0].completed);
-    _ = sink.consume(sink.context, .{
-        .server_name = "fixture",
-        .elicitation_id = "early",
-        .runtime_generation = 2,
-        .connection_generation = 1,
-        .client_generation = 2,
-        .auth_generation = 5,
-    });
-    try std.testing.expectEqual(@as(usize, 1), state.pending_legacy_urls.items.len);
-    try std.testing.expect(!state.pending_legacy_urls.items[0].completed);
-    _ = sink.consume(sink.context, .{
-        .server_name = "fixture",
-        .elicitation_id = "early",
-        .runtime_generation = 1,
-        .connection_generation = 1,
-        .client_generation = 2,
-        .auth_generation = 5,
-    });
-    try std.testing.expectEqual(@as(usize, 1), state.pending_legacy_urls.items.len);
-    try std.testing.expect(state.pending_legacy_urls.items[0].completed);
-    try std.testing.expect(!state.pending_legacy_urls.items[0].accepted);
-    removeLegacyUrl(&state, "acp-early");
-    try std.testing.expectEqual(@as(usize, 0), state.pending_legacy_urls.items.len);
-
-    try std.testing.expect(try reserveLegacyUrl(
-        &state,
-        origin,
-        "late",
-        "acp-late",
-        "session",
-        "call",
-    ));
-    try std.testing.expectEqual(
-        tool_mcp_runtime.LegacyUrlAcceptTransition.awaiting_completion,
-        acceptLegacyUrl(&state, origin, "acp-late"),
-    );
-    try std.testing.expect(state.pending_legacy_urls.items[0].accepted);
-    try std.testing.expect(!state.pending_legacy_urls.items[0].completed);
-    removeLegacyUrl(&state, "acp-late");
-
-    try std.testing.expect(try reserveLegacyUrl(
-        &state,
-        origin,
-        "publish",
-        "acp-publish",
-        "session",
-        "call",
-    ));
-    try std.testing.expectEqual(
-        tool_mcp_runtime.LegacyUrlAcceptTransition.awaiting_completion,
-        acceptLegacyUrl(&state, origin, "acp-publish"),
-    );
-    const publication = sink.consume(sink.context, .{
-        .server_name = "fixture",
-        .elicitation_id = "publish",
-        .runtime_generation = 1,
-        .connection_generation = 1,
-        .client_generation = 2,
-        .auth_generation = 5,
-    }).consumed.?;
-    defer alloc.free(publication);
-    try std.testing.expectEqualStrings("acp-publish", publication);
-    try std.testing.expectEqual(@as(usize, 0), state.pending_legacy_urls.items.len);
-
-    try std.testing.expect(try reserveLegacyUrl(
-        &state,
-        origin,
-        "old-a",
-        "acp-old-a",
-        "session",
-        "call",
-    ));
-    try std.testing.expect(try reserveLegacyUrl(
-        &state,
-        origin,
-        "old-b",
-        "acp-old-b",
-        "session",
-        "call",
-    ));
-    var refreshed_catalog = origin;
-    refreshed_catalog.catalog_generation = 4;
-    try std.testing.expect(!try reserveLegacyUrl(
-        &state,
-        refreshed_catalog,
-        "old-a",
-        "acp-old-a-refresh",
-        "session",
-        "call",
-    ));
-    try std.testing.expectEqual(@as(usize, 2), state.pending_legacy_urls.items.len);
-    var recovered = origin;
-    recovered.runtime_generation = 2;
-    recovered.catalog_generation = 4;
-    try std.testing.expect(try reserveLegacyUrl(
-        &state,
-        recovered,
-        "old-a",
-        "acp-new",
-        "session",
-        "call",
-    ));
-    try std.testing.expectEqual(@as(usize, 1), state.pending_legacy_urls.items.len);
-    try std.testing.expectEqual(@as(u64, 2), state.pending_legacy_urls.items[0].binding.runtime_generation);
-    try std.testing.expectEqual(@as(u64, 1), state.pending_legacy_urls.items[0].binding.connection_generation);
-    removeLegacyUrl(&state, "acp-old-a");
-    try std.testing.expectEqual(@as(usize, 1), state.pending_legacy_urls.items.len);
-    try std.testing.expectEqualStrings("acp-new", state.pending_legacy_urls.items[0].acp_id);
-    removeLegacyUrl(&state, "acp-new");
 }
 
 const AcpModelBoundaryFailure = struct {

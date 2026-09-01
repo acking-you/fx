@@ -134,7 +134,7 @@ Key rules:
 
 * `src/main.zig` is the composition root. Do not add leaf feature logic here.
 
-* `src/core/` owns contracts, runtimes, config, sessions, permissions, MCP, skills.
+* `src/core/` owns contracts, runtimes, config, sessions, permissions, and skills. MCP is intentionally unsupported in this fork; do not reintroduce its configuration, transports, tools, menus, or authentication.
 
 * `src/tools/` owns built-in tool implementations. Generic tool contracts and dispatch live in `src/core/tooling/`. Default tool specs are centralized in `src/core/tooling/tool_specs.zig` or `src/builtins/tools.zig`, not in individual tool files.
 

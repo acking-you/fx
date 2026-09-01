@@ -244,7 +244,7 @@ test "skill search ranks metadata and returns final-projection-stable JSON" {
     const query = try lexical_relevance.prepare("review fx runtime public");
     const output = try renderProjectedSearch(
         alloc,
-        .{ .query = &query, .kind = .skill, .limit = capability_retrieval.default_limit },
+        .{ .query = &query, .limit = capability_retrieval.default_limit },
         &skills,
         (context_limits.Values{}).skill_description_bytes,
         4096,
@@ -267,7 +267,7 @@ test "skill search omits projected identities and permits redacted descriptions"
     const query = try lexical_relevance.prepare("");
     const output = try renderProjectedSearch(
         alloc,
-        .{ .query = &query, .kind = .skill, .limit = capability_retrieval.default_limit },
+        .{ .query = &query, .limit = capability_retrieval.default_limit },
         &skills,
         (context_limits.Values{}).skill_description_bytes,
         4096,
@@ -296,7 +296,7 @@ test "skill search caps ranked entries and atomically omits byte overflow" {
     const query = try lexical_relevance.prepare("");
     const output = try renderProjectedSearch(
         alloc,
-        .{ .query = &query, .kind = .skill, .limit = capability_retrieval.default_limit },
+        .{ .query = &query, .limit = capability_retrieval.default_limit },
         &skills,
         (context_limits.Values{}).skill_description_bytes,
         1024,
@@ -329,7 +329,7 @@ test "skill search projection releases every allocation failure" {
             const query = try lexical_relevance.prepare("");
             const output = try renderProjectedSearch(
                 alloc,
-                .{ .query = &query, .kind = .skill, .limit = capability_retrieval.default_limit },
+                .{ .query = &query, .limit = capability_retrieval.default_limit },
                 &skills,
                 (context_limits.Values{}).skill_description_bytes,
                 1024,

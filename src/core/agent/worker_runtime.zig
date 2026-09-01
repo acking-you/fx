@@ -480,7 +480,6 @@ const OwnedQuestionEntry = struct {
 pub const QuestionPromptSource = enum {
     agent_question,
     route_recovery,
-    mcp_elicitation,
 };
 
 const OwnedQuestionBatch = struct {
@@ -1915,10 +1914,6 @@ pub const WorkerRuntime = struct {
 
     pub fn requestRouteRecoveryAnswerBlocking(self: *WorkerRuntime, alloc: std.mem.Allocator, entries: []const types.QuestionBatchEntry) !?[][]u8 {
         return self.requestQuestionBatchAnswerBlockingWithSource(alloc, entries, .route_recovery);
-    }
-
-    pub fn requestMcpElicitationAnswerBlocking(self: *WorkerRuntime, alloc: std.mem.Allocator, entries: []const types.QuestionBatchEntry) !?[][]u8 {
-        return self.requestQuestionBatchAnswerBlockingWithSource(alloc, entries, .mcp_elicitation);
     }
 
     fn requestQuestionBatchAnswerBlockingWithSource(

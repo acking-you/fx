@@ -73,7 +73,6 @@ pub fn Runtime(comptime App: type) type {
                 error.InvalidEnumTag => "invalid enum value while parsing data",
                 error.UnknownField => "unexpected field while parsing data",
                 error.ImageTooLarge => image_attachments.image_too_large_notice,
-                error.McpInputTimedOut => tool_result_errors.executionErrorMessage(err),
                 else => null,
             };
         }
@@ -84,7 +83,6 @@ pub fn Runtime(comptime App: type) type {
                 error.MissingField => "Add the required input field named by the tool schema, then retry.",
                 error.InvalidEnumTag, error.UnknownField => "Compare the input fields with the tool schema and retry with supported values.",
                 error.ImageTooLarge => "Use a smaller image or reduce the image before retrying.",
-                error.McpInputTimedOut => tool_result_errors.executionErrorSuggestion(err),
                 else => null,
             };
         }

@@ -81,7 +81,7 @@ test "owned permission request carries an independent explanation" {
 
 test "owned permission request carries an independent tool arguments preview" {
     const request: PermissionRequest = .{
-        .label = "mcp_fixture_echo",
+        .label = "custom_fixture_echo",
         .tool_arguments_preview = "{\"text\":\"sentinel\"}",
     };
     var owned = try OwnedPermissionRequest.dupe(std.testing.allocator, request);
@@ -144,7 +144,7 @@ test "permission request bounds the optional tool arguments preview" {
     try std.testing.expectError(
         error.ToolArgumentsPreviewTooLong,
         OwnedPermissionRequest.dupe(std.testing.allocator, .{
-            .label = "mcp_fixture_echo",
+            .label = "custom_fixture_echo",
             .tool_arguments_preview = preview,
         }),
     );

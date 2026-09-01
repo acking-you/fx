@@ -2834,7 +2834,6 @@ pub const LiveAuthority = struct {
     generation: u64,
     root_id: []const u8,
     tools: []const []const u8,
-    integrations: []const []const u8,
     rules: types.PermissionRuleSet,
     grants: []const types.PermissionGrant,
     permission_state: ?*const session_permission_state.State = null,
@@ -2852,9 +2851,7 @@ pub fn decideToolAuthority(
     target: []const u8,
     target_kind: permissions.PermissionTargetKind,
 ) !ToolAuthorityDecision {
-    if (!contains(authority.tools, tool_name) and
-        !contains(authority.integrations, tool_name))
-    {
+    if (!contains(authority.tools, tool_name)) {
         return .unavailable;
     }
     if (authority.permission_mode == .yolo) return .allow;
@@ -3033,7 +3030,7 @@ pub fn preparedRequestFingerprint(request: permission_request.PermissionRequest)
 
 test "prepared request fingerprint binds the live tool arguments preview" {
     const base: permission_request.PermissionRequest = .{
-        .label = "mcp_fixture_echo",
+        .label = "fixture_tool",
         .tool_arguments_preview = "{\"text\":\"one\"}",
     };
     var changed = base;
@@ -5677,7 +5674,6 @@ test "live authority applies deny revocation and sibling grant isolation" {
         .generation = 2,
         .root_id = "root",
         .tools = &tools,
-        .integrations = &.{},
         .rules = .{ .rules = &rules_buf },
         .grants = &allowed_grants,
         .permission_mode = .auto,

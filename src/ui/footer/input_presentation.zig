@@ -3,7 +3,6 @@ const question_prompt = @import("../../core/agent/question_prompt.zig");
 const auth_runtime = @import("../../core/auth/auth_runtime.zig");
 const credentials = @import("../../core/auth/credentials.zig");
 const image_attachments = @import("../../core/images/image_attachments.zig");
-const mcp_menu_state = @import("../../core/mcp/menu_state.zig");
 const command_specs = @import("../../core/slash_commands/command_specs.zig");
 const display_width = @import("../../core/shared/display_width.zig");
 const list_window = @import("../../core/shared/list_window.zig");
@@ -28,7 +27,7 @@ pub const composeDividerRow = row_text.composeDividerRow;
 pub const appendClipped = row_text.appendClipped;
 pub const appendAbsoluteColumn = row_text.appendAbsoluteColumn;
 
-pub const PickerKind = enum { model_stage, models, file, slash, skills, help, settings, sessions, mcp, auth };
+pub const PickerKind = enum { model_stage, models, file, slash, skills, help, settings, sessions, auth };
 pub const CappedInputRows = struct {
     row_limit: usize,
     total_lines: u16,
@@ -558,82 +557,6 @@ pub fn composeModelsMenuHintRow(alloc: Allocator, width: u16, ctrl_c_pending: bo
 
 pub fn composeResumeMenuHintRow(alloc: Allocator, width: u16, ctrl_c_pending: bool) !std.ArrayList(u8) {
     return composeCatalogMenuHintRow(alloc, width, ctrl_c_pending, .scope);
-}
-
-pub fn composeMcpMenuHintRow(
-    alloc: Allocator,
-    width: u16,
-    ctrl_c_pending: bool,
-    state: mcp_menu_state.State,
-) !std.ArrayList(u8) {
-    if (ctrl_c_pending) {
-        var warning: std.ArrayList(u8) = .empty;
-        errdefer warning.deinit(alloc);
-        try warning.appendSlice(alloc, ui_render.statusline_style);
-        try row_text.appendClipped(alloc, &warning, "press ctrl+c again to exit", width);
-        try warning.appendSlice(alloc, ui_render.reset_style);
-        return warning;
-    }
-
-    const root_variants = [_][]const u8{
-        "↑↓ Navigate  Tab Section  Enter Inspect  A Add  R Reload  C Config  P Approve all  Z Reset  Esc Close",
-        "↑↓ Move  Tab Section  Enter  A Add  R Reload  C Config  P All  Z Reset  Esc",
-        "Tab Enter A R C P Z Esc",
-    };
-    const catalog_variants = [_][]const u8{
-        "↑↓ Navigate     Tab Section     Enter Open     / Filter     Esc Back",
-        "↑↓ Move  Tab Section  Enter  / Filter  Esc",
-        "Tab Enter / Esc",
-    };
-    const preview_variants = [_][]const u8{
-        "↑↓ Scroll     I Insert     Esc Back",
-        "↑↓ Scroll  I Insert  Esc",
-        "↑↓ I Esc",
-    };
-    const add_variants = [_][]const u8{
-        "Type field     Enter Next/Save     Tab Transport     Esc Cancel",
-        "Type  Enter Next/Save  Tab Transport  Esc",
-        "Enter Tab Esc",
-    };
-    const argument_variants = [_][]const u8{
-        "Type value  Enter Next/Preview  Tab Complete  Esc Cancel",
-        "Type  Enter Next  Tab Complete  Esc",
-        "Enter Tab Esc",
-    };
-    const details_variants = [_][]const u8{
-        "Enter Authenticate     A Approve     X Reject     D Remove     L Logout     Esc Back",
-        "Enter Action  A Approve  X Reject  D Remove  L Logout  Esc",
-        "Enter A X D L Esc",
-    };
-    const confirm_variants = [_][]const u8{
-        "Enter Confirm     Esc Cancel",
-        "Enter Confirm  Esc",
-        "Enter Esc",
-    };
-    const info_variants = [_][]const u8{ "Esc Back", "Esc", "Esc" };
-    const variants = switch (state.screen) {
-        .browse => if (state.section == .servers) root_variants else catalog_variants,
-        .preview => preview_variants,
-        .add => add_variants,
-        .arguments => argument_variants,
-        .info => info_variants,
-        .details => details_variants,
-        .confirm => confirm_variants,
-    };
-    var hint = variants[variants.len - 1];
-    for (variants) |candidate| {
-        if (display_width.visibleWidth(candidate) <= width) {
-            hint = candidate;
-            break;
-        }
-    }
-
-    var row: std.ArrayList(u8) = .empty;
-    errdefer row.deinit(alloc);
-    try row.appendSlice(alloc, ui_render.dim_style);
-    try row_text.appendClipped(alloc, &row, hint, width);
-    try row.appendSlice(alloc, ui_render.reset_style);
-    return row;
 }
 
 pub fn composeHelpMenuHintRow(alloc: Allocator, width: u16, ctrl_c_pending: bool) !std.ArrayList(u8) {

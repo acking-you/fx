@@ -306,7 +306,6 @@ pub fn writeInitializeResponseWithOptions(
     try w.writeAll("\"promptCapabilities\":{\"image\":");
     try w.writeAll(if (options.image_capable) "true" else "false");
     try w.writeAll(",\"audio\":false,\"embeddedContext\":true},");
-    try w.writeAll("\"mcpCapabilities\":{\"http\":true,\"sse\":true},");
     try w.writeAll("\"sessionCapabilities\":{\"list\":{},\"resume\":{},\"close\":{}}");
     try w.writeAll("},\"agentInfo\":{\"name\":\"fx\",\"title\":\"fx\",\"version\":");
     try writeJsonStr(build_options.app_version, w);
@@ -520,8 +519,6 @@ test "writeInitializeResponse contains required fields" {
     var parsed = try std.json.parseFromSlice(std.json.Value, alloc, out.writer.buffered(), .{});
     defer parsed.deinit();
 
-    const agent_capabilities = parsed.value.object.get("agentCapabilities").?.object;
-    const mcp_capabilities = agent_capabilities.get("mcpCapabilities").?.object;
     try std.testing.expect(std.mem.find(u8, out.writer.buffered(), "\"protocolVersion\":1") != null);
     try std.testing.expect(std.mem.find(u8, out.writer.buffered(), "\"loadSession\":true") != null);
     try std.testing.expect(std.mem.find(u8, out.writer.buffered(), "\"name\":\"fx\"") != null);
@@ -534,8 +531,6 @@ test "writeInitializeResponse contains required fields" {
     try std.testing.expect(std.mem.find(u8, out.writer.buffered(), "\"resume\":{}") != null);
     try std.testing.expect(std.mem.find(u8, out.writer.buffered(), "\"close\":{}") != null);
     try std.testing.expect(std.mem.find(u8, out.writer.buffered(), "\"providerControl\":") != null);
-    try std.testing.expect(mcp_capabilities.get("http").?.bool);
-    try std.testing.expect(mcp_capabilities.get("sse").?.bool);
     const fx_meta = parsed.value.object.get("_meta").?.object.get("fx").?.object;
     try std.testing.expect(fx_meta.get("turnSteer").?.bool);
     try std.testing.expect(fx_meta.get("turnStatus").?.bool);

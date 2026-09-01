@@ -7729,10 +7729,6 @@ test "live authority resolver refreshes deny rules before the next child action"
             errdefer output_alloc.free(tools);
             tools[0] = try output_alloc.dupe(u8, "run_command");
             errdefer output_alloc.free(tools[0]);
-            const integrations = try output_alloc.alloc([]u8, 1);
-            errdefer output_alloc.free(integrations);
-            integrations[0] = try output_alloc.dupe(u8, "mcp:test");
-            errdefer output_alloc.free(integrations[0]);
             const rules = try output_alloc.alloc(types.PermissionRule, 1);
             errdefer output_alloc.free(rules);
             const permission = try output_alloc.dupe(u8, "bash");
@@ -7747,7 +7743,6 @@ test "live authority resolver refreshes deny rules before the next child action"
             return .{
                 .generation = self.generation,
                 .tools = tools,
-                .integrations = integrations,
                 .rules = .{ .rules = rules },
                 .grants = try output_alloc.alloc(types.PermissionGrant, 0),
             };
@@ -7788,7 +7783,6 @@ test "live authority resolver refreshes deny rules before the next child action"
     defer first.deinit(alloc);
     try std.testing.expectEqual(types.PermissionMode.auto, first.permission_mode);
     try std.testing.expectEqualStrings("run_command", first.tools[0]);
-    try std.testing.expectEqualStrings("mcp:test", first.integrations[0]);
     try std.testing.expectEqual(
         communication.ToolAuthorityDecision.allow,
         try communication.decideToolAuthority(

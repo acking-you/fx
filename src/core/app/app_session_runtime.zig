@@ -55,7 +55,6 @@ const types = @import("../shared/types.zig");
 const secret = @import("../auth/secret.zig");
 const permissions = @import("../permissions/permissions.zig");
 const session_permission_state = @import("../permissions/session_permission_state.zig");
-const mcp_access = @import("../mcp/access_policy.zig");
 const shell_runtime = @import("../../ui/shell_runtime.zig");
 const transcript_runtime = @import("../../ui/transcript/runtime.zig");
 const ui_input = @import("../../ui/input/runtime.zig");
@@ -4704,12 +4703,11 @@ pub fn Runtime(comptime App: type) type {
         ) !void {
             var action_arena = std.heap.ArenaAllocator.init(app.alloc);
             defer action_arena.deinit();
-            const action = try app.describeToolActionDeniedWithAdvertised(
+            const action = try app.describeToolActionDeniedForRuntime(
                 action_arena.allocator(),
                 call,
                 null,
                 "Cancelled",
-                &.{},
             );
             const entry_id = try writeCompletedToolStatus(sink, .cancelled, action);
             const replayed_output = try writeCommandReplay(
@@ -4821,7 +4819,7 @@ pub fn Runtime(comptime App: type) type {
                 null;
             const outcome_decision = command_decision;
             const formatted_action_base = if (deferred)
-                try app.describeToolActionDeniedWithAdvertised(
+                try app.describeToolActionDeniedForRuntime(
                     action_arena.allocator(),
                     call,
                     null,
@@ -4829,38 +4827,33 @@ pub fn Runtime(comptime App: type) type {
                         types.context_deferred_tool_status_label
                     else
                         types.deferred_tool_result_output,
-                    &.{},
                 )
             else if (permission_denial_reason) |reason|
-                try app.describeToolActionDeniedWithAdvertised(
+                try app.describeToolActionDeniedForRuntime(
                     action_arena.allocator(),
                     call,
                     null,
                     tool_admission.permissionDeniedStatusLabel(reason),
-                    &.{},
                 )
             else if (outcome_decision) |decision|
-                try app.describeToolActionDeniedWithAdvertised(
+                try app.describeToolActionDeniedForRuntime(
                     action_arena.allocator(),
                     call,
                     null,
                     decision.label,
-                    &.{},
                 )
             else if (result.status == .success)
-                try app.describeToolActionCompletedWithAdvertised(
+                try app.describeToolActionCompletedForRuntime(
                     action_arena.allocator(),
                     call,
                     null,
-                    &.{},
                 )
             else
-                try app.describeToolActionDeniedWithAdvertised(
+                try app.describeToolActionDeniedForRuntime(
                     action_arena.allocator(),
                     call,
                     null,
                     "Failed",
-                    &.{},
                 );
             const formatted_action = if (outcome_decision) |decision|
                 if (decision.detail) |detail|
@@ -5037,11 +5030,10 @@ pub fn Runtime(comptime App: type) type {
 
             var action_arena = std.heap.ArenaAllocator.init(app.alloc);
             defer action_arena.deinit();
-            const base = try app.describeToolActionCompletedWithAdvertised(
+            const base = try app.describeToolActionCompletedForRuntime(
                 action_arena.allocator(),
                 call,
                 presentation.path,
-                &.{},
             );
             const action = try tool_presentation.formatToolStatusWithStats(
                 action_arena.allocator(),
@@ -5531,41 +5523,20 @@ pub fn Runtime(comptime App: type) type {
             if (!std.mem.eql(u8, writable.active_id, root_id)) {
                 return error.HostAuthorityUnavailable;
             }
-            const integrations = if (comptime @hasDecl(App, "snapshotMcpToolNames"))
-                try app.snapshotMcpToolNames(alloc)
-            else
-                try alloc.alloc([]u8, 0);
-            defer {
-                for (integrations) |name| alloc.free(name);
-                alloc.free(integrations);
-            }
-            var mcp_view: ?mcp_access.View = if (comptime @hasDecl(App, "snapshotMcpAccessView"))
-                try app.snapshotMcpAccessView(
-                    alloc,
-                    root_id,
-                    root_id,
-                    app.permission_engine.rules,
-                    !permissions.rulesDenyAllTargetsForTool(app.permission_engine.rules, "mcp_features"),
-                )
-            else
-                null;
-            defer if (mcp_view) |*view| view.deinit(alloc);
             var permission_state = app.session.snapshotPermissionState(alloc) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => return error.HostAuthorityUnavailable,
             };
             defer permission_state.deinit(alloc);
-            return subagent_tool_host.captureHostAuthorityWithMcpView(
+            return subagent_tool_host.captureHostAuthorityWithPermissionState(
                 alloc,
                 .{
                     .tool_set = app.toolAdvertisementSet(),
                     .mode = .full,
                 },
-                integrations,
                 if (comptime @hasField(App, "permission_engine")) app.permission_engine.rules else .{},
                 if (comptime @hasField(App, "permission_engine")) app.permission_engine.grants.items else &.{},
                 permission_state,
-                if (mcp_view) |*view| view else null,
             );
         }
 
@@ -6215,7 +6186,6 @@ const TestApp = struct {
     permission_state: struct {
         authority_mutex: std.Io.Mutex = .init,
     } = .{},
-    mcp_tool_names: std.ArrayList([]u8) = .empty,
 
     fn init(alloc: Allocator, workspace_root: []const u8) !TestApp {
         return .{
@@ -6235,20 +6205,6 @@ const TestApp = struct {
 
     fn toolAdvertisementSet(_: *const TestApp) tool_set_contract.ToolSet {
         return builtin_tools.advertisement_set;
-    }
-
-    fn snapshotMcpToolNames(self: *TestApp, alloc: Allocator) ![][]u8 {
-        const names = try alloc.alloc([]u8, self.mcp_tool_names.items.len);
-        var initialized: usize = 0;
-        errdefer {
-            for (names[0..initialized]) |name| alloc.free(name);
-            alloc.free(names);
-        }
-        for (self.mcp_tool_names.items, names) |name, *owned| {
-            owned.* = try alloc.dupe(u8, name);
-            initialized += 1;
-        }
-        return names;
     }
 
     fn terminalTitle(self: *TestApp) host_capability.TerminalTitle {
@@ -6312,8 +6268,6 @@ const TestApp = struct {
         self.worker.deinit(std.heap.c_allocator);
         self.selected_model.deinit(self.alloc);
         self.permission_engine.deinit(self.alloc);
-        for (self.mcp_tool_names.items) |name| self.alloc.free(name);
-        self.mcp_tool_names.deinit(self.alloc);
         self.alloc.free(self.workspace_root);
         self.* = undefined;
     }
@@ -6462,7 +6416,7 @@ const TestApp = struct {
         try self.replay_events.append(self.alloc, .command_output_summary_flush);
     }
 
-    fn describeToolActionCompletedWithAdvertised(self: *TestApp, arena: Allocator, call: types.ToolCall, _: ?[]const u8, _: []const []const u8) ![]const u8 {
+    fn describeToolActionCompletedForRuntime(self: *TestApp, arena: Allocator, call: types.ToolCall, _: ?[]const u8) ![]const u8 {
         if (self.action_description_allocates_scratch) {
             _ = try arena.dupe(u8, "temporary parsed arguments");
         }
@@ -6472,7 +6426,7 @@ const TestApp = struct {
         return std.fmt.allocPrint(arena, "● Completed {s}", .{call.name});
     }
 
-    fn describeToolActionDeniedWithAdvertised(self: *TestApp, arena: Allocator, call: types.ToolCall, _: ?[]const u8, label: []const u8, _: []const []const u8) ![]const u8 {
+    fn describeToolActionDeniedForRuntime(self: *TestApp, arena: Allocator, call: types.ToolCall, _: ?[]const u8, label: []const u8) ![]const u8 {
         if (self.action_description_allocates_scratch) {
             _ = try arena.dupe(u8, "temporary parsed arguments");
         }
@@ -7418,7 +7372,7 @@ test "enableSessionStores replaces existing subagent host without leaking" {
     try std.testing.expect(app.session_persistence.subagent_host != null);
 }
 
-test "interactive subagent host resolves current tools rules grants and integrations" {
+test "interactive subagent host resolves current tools rules and grants" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -7444,17 +7398,13 @@ test "interactive subagent host resolves current tools rules grants and integrat
         root_id,
     );
     defer initial.deinit(alloc);
-    try std.testing.expectEqual(@as(usize, 0), initial.integrations.len);
-
     try app.permission_engine.allow(alloc, "run_command", "zig build test");
-    try app.mcp_tool_names.append(alloc, try alloc.dupe(u8, "mcp_fixture_echo"));
     var changed = try host.host_authority.resolve_fn(
         host.host_authority.context,
         alloc,
         root_id,
     );
     defer changed.deinit(alloc);
-    try std.testing.expectEqualStrings("mcp_fixture_echo", changed.integrations[0]);
     try std.testing.expectEqualStrings("zig build test", changed.grants[0].target_path);
     try std.testing.expect(initial.generation != changed.generation);
 
@@ -7468,14 +7418,12 @@ test "interactive subagent host resolves current tools rules grants and integrat
         alloc,
         try types.dupePermissionRuleSet(alloc, .{ .rules = &denied_rules }),
     );
-    alloc.free(app.mcp_tool_names.pop().?);
     var revoked = try host.host_authority.resolve_fn(
         host.host_authority.context,
         alloc,
         root_id,
     );
     defer revoked.deinit(alloc);
-    try std.testing.expectEqual(@as(usize, 0), revoked.integrations.len);
     try std.testing.expectEqual(@as(usize, 0), revoked.grants.len);
     var found_read_file = false;
     for (revoked.tools) |tool_name| {

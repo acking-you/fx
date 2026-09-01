@@ -70,7 +70,6 @@ pub const ParallelHookExecContext = struct {
     current_turn_messages: []const ChatMessage,
     session_grants: []const PermissionGrant,
     permission_mode: types.PermissionMode,
-    advertised_dynamic_tool_names: []const []const u8,
     max_tool_result_bytes: usize,
     classification_complete: []const bool = &.{},
 };
@@ -255,7 +254,6 @@ pub fn parallelHookExecute(ctx: *anyopaque, alloc: Allocator, call: ToolCall, in
         .root_user_intent_context = exec_ctx.root_user_intent_context,
         .current_turn_messages = exec_ctx.current_turn_messages,
         .session_grants = exec_ctx.session_grants,
-        .advertised_dynamic_tool_names = exec_ctx.advertised_dynamic_tool_names,
         .max_tool_result_bytes = exec_ctx.max_tool_result_bytes,
         .classification_complete = index < exec_ctx.classification_complete.len and
             exec_ctx.classification_complete[index],
@@ -276,8 +274,6 @@ fn duplicateParallelToolResult(alloc: Allocator, call: ToolCall, execution: Tool
 
     if (execution.diff_entry != null or
         execution.finish_turn or
-        execution.selected_dynamic_tool_name != null or
-        execution.selected_dynamic_tool_schema_json != null or
         execution.tool_result_memory_prepared or
         execution.committed_file_handoff != null or
         execution.deferred_tool_completion != null)
@@ -538,11 +534,10 @@ test "parallel classifier admits installed skill reads" {
     try std.testing.expect(isReadOnlyCall(registry, calls[0]));
 }
 
-test "parallel classifier rejects prompts approvals dynamic tools and mutations" {
+test "parallel classifier rejects prompts approvals unknown tools and mutations" {
     const builtin_tools = @import("../../../builtins/tools.zig");
     const tools = [_]tool_dispatch.Tool{
         builtin_tools.ask_user_question,
-        builtin_tools.mcp_select_tool,
         builtin_tools.subagent,
         builtin_tools.install_skill,
         builtin_tools.exec_command,
@@ -551,12 +546,11 @@ test "parallel classifier rejects prompts approvals dynamic tools and mutations"
     const registry = tool_dispatch.Registry{ .tools = &tools };
     const cases = [_]ToolCall{
         toolCall("ask_1", "ask_user_question", "{\"questions\":[]}"),
-        toolCall("mcp_1", "mcp_select_tool", "{\"name\":\"tool\"}"),
         toolCall("subagent_1", "subagent", "{\"command\":{\"inspect\":{\"id\":\"01J00000000000000000000000\",\"sections\":[\"status\"]}}}"),
         toolCall("skill_1", "install_skill", "{\"source\":\"repo\"}"),
         toolCall("browser_1", "browser_snapshot", "{}"),
         toolCall("command_1", "run_command", "{\"command\":\"git status --short\"}"),
-        toolCall("unknown_1", "dynamic_mcp_tool", "{}"),
+        toolCall("unknown_1", "unknown_tool", "{}"),
     };
 
     for (cases) |call| {

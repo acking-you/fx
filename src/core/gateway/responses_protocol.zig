@@ -17,12 +17,9 @@ const system_only_continuation_input =
 
 pub const PreparedTools = struct {
     base_json: []u8,
-    dynamic_json: [][]u8,
 
     pub fn deinit(self: *PreparedTools, alloc: Allocator) void {
         alloc.free(self.base_json);
-        for (self.dynamic_json) |schema| alloc.free(schema);
-        alloc.free(self.dynamic_json);
         self.* = undefined;
     }
 };
@@ -59,28 +56,7 @@ pub fn prepareTools(
     const base_json = try base.toOwnedSlice();
     errdefer alloc.free(base_json);
 
-    var dynamic: std.ArrayList([]u8) = .empty;
-    errdefer {
-        for (dynamic.items) |schema| alloc.free(schema);
-        dynamic.deinit(alloc);
-    }
-    for (selection.selected_dynamic) |tool| {
-        if (containsToolName(selection.advertised_names, tool.name)) continue;
-        var schema: std.Io.Writer.Allocating = .init(alloc);
-        defer schema.deinit();
-        try std.json.Stringify.value(tool.input_schema, .{}, &schema.writer);
-        const encoded = try gateway_schema.dynamicFunctionSchemaJsonAlloc(
-            alloc,
-            tool.name,
-            tool.description,
-            schema.written(),
-        );
-        try dynamic.append(alloc, encoded);
-    }
-    return .{
-        .base_json = base_json,
-        .dynamic_json = try dynamic.toOwnedSlice(alloc),
-    };
+    return .{ .base_json = base_json };
 }
 
 // Request codec
@@ -1086,25 +1062,6 @@ fn writeTools(
             try writeComma(writer, &wrote);
             try writeResponseTool(writer, tool, strict_default);
         }
-
-        for (request.selected_dynamic_tool_schemas) |schema_json| {
-            var selected = std.json.parseFromSlice(JsonValue, alloc, schema_json, .{}) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                else => return error.InvalidResponsesTools,
-            };
-            defer selected.deinit();
-            switch (selected.value) {
-                .array => |array| for (array.items) |tool| {
-                    try writeComma(writer, &wrote);
-                    try writeResponseTool(writer, tool, strict_default);
-                },
-                .object => {
-                    try writeComma(writer, &wrote);
-                    try writeResponseTool(writer, selected.value, strict_default);
-                },
-                else => return error.InvalidResponsesTools,
-            }
-        }
     }
 
     if (request.vision_mode != .unavailable) {
@@ -1358,7 +1315,6 @@ pub const OutputItemKind = enum {
     image_generation_call,
     computer_call,
     local_shell_call,
-    mcp_call,
     other,
 };
 
@@ -1725,7 +1681,6 @@ fn outputItemKind(raw: []const u8) OutputItemKind {
         .{ "image_generation_call", .image_generation_call },
         .{ "computer_call", .computer_call },
         .{ "local_shell_call", .local_shell_call },
-        .{ "mcp_call", .mcp_call },
     };
     for (mappings) |mapping| {
         if (std.mem.eql(u8, raw, mapping[0])) return mapping[1];
@@ -1971,9 +1926,6 @@ test "Responses request preserves conversation semantics and controls" {
             .tool_name = "read_file",
         },
     };
-    const dynamic_tools = [_][]const u8{
-        "{\"type\":\"function\",\"name\":\"lookup\",\"description\":\"Lookup\",\"inputSchema\":{\"type\":\"object\",\"properties\":{}}}",
-    };
     const request = responses_compaction_provider.BuildRequest{
         .model = "gpt-5.4",
         .serialized_tools =
@@ -1981,7 +1933,6 @@ test "Responses request preserves conversation semantics and controls" {
         ,
         .messages = &messages,
         .tool_choice = .auto,
-        .selected_dynamic_tool_schemas = &dynamic_tools,
         .provider_options = .{
             .reasoning = types.ReasoningEffort.literal("high"),
             .parallel_tool_calls = true,
@@ -2062,15 +2013,12 @@ test "Responses request preserves conversation semantics and controls" {
     try std.testing.expect(valueField(input[4], "name") == null);
 
     const tools = (try testField(root, "tools")).array.items;
-    try std.testing.expectEqual(@as(usize, 2), tools.len);
+    try std.testing.expectEqual(@as(usize, 1), tools.len);
     try expectJsonString("function", try testField(tools[0], "type"));
     try expectJsonString("read_file", try testField(tools[0], "name"));
     try std.testing.expect(valueField(tools[0], "inputSchema") == null);
     try std.testing.expect((try testField(tools[0], "parameters")) == .object);
     try expectJsonBool(true, try testField(tools[0], "strict"));
-    try expectJsonString("lookup", try testField(tools[1], "name"));
-    try std.testing.expect(valueField(tools[1], "inputSchema") == null);
-
     const choice = try testField(root, "tool_choice");
     try expectJsonString("function", try testField(choice, "type"));
     try expectJsonString("read_file", try testField(choice, "name"));

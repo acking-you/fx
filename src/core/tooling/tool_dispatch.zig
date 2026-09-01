@@ -21,7 +21,6 @@ const web_fetch_artifacts = @import("../session/web_fetch_artifacts.zig");
 const model_tool_schema = @import("model_tool_schema.zig");
 const tool_result_errors = @import("tool_result_errors.zig");
 const tool_result_limits = @import("tool_result_limits.zig");
-const tool_mcp_runtime = @import("tool_mcp_runtime.zig");
 const web_search_contract = @import("web_search_contract.zig");
 const context_limits = @import("../config/context_limits.zig");
 const workspace_access = @import("../workspace/workspace_access.zig");
@@ -91,12 +90,6 @@ pub const VisionProvider = struct {
         return self.execute_fn(self.ctx, ctx, input);
     }
 };
-
-pub const SelectedDynamicToolSinkFn = *const fn (
-    ?*anyopaque,
-    []const u8,
-    []const u8,
-) error{OutOfMemory}!void;
 
 pub const ContextNoticeSinkFn = *const fn (?*anyopaque, []const u8) error{OutOfMemory}!void;
 pub const PlanStepStatus = enum { pending, in_progress, completed };
@@ -231,19 +224,6 @@ pub const DispatchContext = struct {
     on_web_search_progress: ?WebSearchProgressFn = null,
     web_fetch_progress_ctx: ?*anyopaque = null,
     on_web_fetch_progress: ?WebFetchProgressFn = null,
-    mcp_ctx: ?*anyopaque = null,
-    mcp_call_tool: ?tool_mcp_runtime.CallToolFn = null,
-    mcp_search_tools: ?tool_mcp_runtime.SearchToolsFn = null,
-    mcp_tool_schema: ?tool_mcp_runtime.ToolSchemaFn = null,
-    mcp_call_feature: ?tool_mcp_runtime.FeatureCallFn = null,
-    mcp_access: tool_mcp_runtime.Access = .unrestricted,
-    mcp_input_responder: ?tool_mcp_runtime.InputResponder = null,
-    mcp_call_options: tool_mcp_runtime.CallOptions = .{},
-    mcp_call_status_sink: ?*?tool_mcp_runtime.CallStatus = null,
-    mcp_execution_error_sink: ?*?anyerror = null,
-    mcp_permission_rules: core_types.PermissionRuleSet = .{},
-    selected_dynamic_tool_ctx: ?*anyopaque = null,
-    on_selected_dynamic_tool: ?SelectedDynamicToolSinkFn = null,
     context_notice_ctx: ?*anyopaque = null,
     on_context_notice: ?ContextNoticeSinkFn = null,
     plan_update_ctx: ?*anyopaque = null,
@@ -365,8 +345,6 @@ pub const ExecutorKind = enum {
     skill,
     install_skill,
     subagent,
-    mcp_select_tool,
-    mcp_features,
     ask_user_question,
     vision,
 };
@@ -838,15 +816,6 @@ pub fn reportWebFetchCompletion(ctx: DispatchContext, completion: core_types.Web
 pub fn reportToolResultMemory(ctx: DispatchContext, memory: core_types.ToolResultMemory) void {
     const sink = ctx.tool_result_memory_sink orelse return;
     sink.* = memory;
-}
-
-pub fn reportSelectedDynamicTool(
-    ctx: DispatchContext,
-    name: []const u8,
-    schema_json: []const u8,
-) error{OutOfMemory}!void {
-    const sink = ctx.on_selected_dynamic_tool orelse return;
-    try sink(ctx.selected_dynamic_tool_ctx, name, schema_json);
 }
 
 pub fn reportContextNotice(ctx: DispatchContext, notice: []const u8) error{OutOfMemory}!void {

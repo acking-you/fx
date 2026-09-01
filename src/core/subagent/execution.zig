@@ -795,7 +795,6 @@ pub const TurnContext = struct {
                 .generation = snapshot.generation,
                 .root_id = snapshot.root_id,
                 .tools = snapshot.tools,
-                .integrations = snapshot.integrations,
                 .rules = snapshot.rules,
                 .grants = snapshot.grants,
                 .permission_state = permission_state,
@@ -4062,7 +4061,6 @@ test "admission snapshot is isolated owned and preserves configured permission m
         .tool_names = &.{ "read_file", "write_file" },
         .rules = .{ .rules = &rules },
         .grants = &grants,
-        .integration_names = &.{"mcp:test"},
     });
     defer snapshot.deinit(alloc);
     try std.testing.expectEqual(types.PermissionMode.ask, snapshot.permission_mode);
@@ -4344,7 +4342,6 @@ const Observation = struct {
     tool_name: []u8,
     rule_pattern: []u8,
     grant_target: []u8,
-    integration_name: []u8,
 
     fn deinit(self: *Observation, alloc: Allocator) void {
         alloc.free(self.child_id);
@@ -4353,7 +4350,6 @@ const Observation = struct {
         alloc.free(self.tool_name);
         alloc.free(self.rule_pattern);
         alloc.free(self.grant_target);
-        alloc.free(self.integration_name);
         self.* = undefined;
     }
 };
@@ -4409,7 +4405,6 @@ const FakeExecution = struct {
             .tool_names = if (current == 0) &.{"read_file"} else &.{"write_file"},
             .rules = .{ .rules = &rules },
             .grants = &grants,
-            .integration_names = if (current == 0) &.{"mcp:old"} else &.{"mcp:new"},
         }) catch |err| return switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             else => error.AdmissionFailed,
@@ -4529,7 +4524,6 @@ const ApprovalBlockingExecution = struct {
             .tool_names = &.{"write_file"},
             .rules = .{ .rules = &.{} },
             .grants = &.{},
-            .integration_names = &.{},
         }) catch |err| return switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             else => error.AdmissionFailed,
@@ -4610,7 +4604,6 @@ fn makeObservation(
         .tool_name = tool_name,
         .rule_pattern = rule_pattern,
         .grant_target = grant_target,
-        .integration_name = try alloc.dupe(u8, admission.integration_names[0]),
     };
 }
 
@@ -5931,12 +5924,10 @@ test "authority snapshots isolate siblings and refresh only at turn admission" {
     try std.testing.expectEqualStrings("read_file", first.tool_name);
     try std.testing.expectEqualStrings("old.txt", first.rule_pattern);
     try std.testing.expectEqualStrings("/tmp/old.txt", first.grant_target);
-    try std.testing.expectEqualStrings("mcp:old", first.integration_name);
     for ([_]Observation{ second, sibling }) |observation| {
         try std.testing.expectEqualStrings("write_file", observation.tool_name);
         try std.testing.expectEqualStrings("new.txt", observation.rule_pattern);
         try std.testing.expectEqualStrings("/tmp/new.txt", observation.grant_target);
-        try std.testing.expectEqualStrings("mcp:new", observation.integration_name);
     }
     try std.testing.expectEqualStrings("read_file", first.tool_name);
 }
@@ -6692,8 +6683,6 @@ test "canonical approval wait refreshes revoked authority and races reject relat
                 tools[0] = try output_alloc.dupe(u8, "run_command");
                 errdefer output_alloc.free(tools[0]);
             }
-            const integrations = try output_alloc.alloc([]u8, 0);
-            errdefer output_alloc.free(integrations);
             const rules = try output_alloc.alloc(types.PermissionRule, 0);
             errdefer output_alloc.free(rules);
             const grants = try output_alloc.alloc(types.PermissionGrant, 0);
@@ -6701,7 +6690,6 @@ test "canonical approval wait refreshes revoked authority and races reject relat
             return .{
                 .generation = if (revoked) 2 else 1,
                 .tools = tools,
-                .integrations = integrations,
                 .rules = .{ .rules = rules },
                 .grants = grants,
             };
@@ -6805,8 +6793,6 @@ test "canonical approval wait refreshes revoked authority and races reject relat
         .worker = &turn.worker,
         .permission_prompter = turn.permissionPrompter(),
         .background = &background,
-        .advertised_dynamic_tool_names = &.{},
-        .mcp_runtime = .{},
     }, .start = &registration_start, .ready = &registration_ready };
     var detach_command = try domain.validateCommand(alloc, .{ .relationship = .{
         .action = .detach,
@@ -7146,8 +7132,6 @@ const ToolEffectAuthority = struct {
     ) !authority_mod.HostAuthority {
         const tools = try cloneTestStrings(alloc, &.{"write_file"});
         errdefer freeTestStrings(alloc, tools);
-        const integrations = try alloc.alloc([]u8, 0);
-        errdefer alloc.free(integrations);
         const rules = try alloc.alloc(types.PermissionRule, 0);
         errdefer alloc.free(rules);
         const grants = try alloc.alloc(types.PermissionGrant, 0);
@@ -7155,7 +7139,6 @@ const ToolEffectAuthority = struct {
         return .{
             .generation = 1,
             .tools = tools,
-            .integrations = integrations,
             .rules = .{ .rules = rules },
             .grants = grants,
         };
@@ -8390,12 +8373,8 @@ const GatewayExecution = struct {
         const tools = try cloneTestStrings(alloc, &.{
             "read_file",
             "grep_files",
-            "mcp_select_tool",
-            "mcp_fixture_echo",
         });
         errdefer freeTestStrings(alloc, tools);
-        const integrations = try cloneTestStrings(alloc, &.{"mcp_fixture_echo"});
-        errdefer freeTestStrings(alloc, integrations);
         const rules = try alloc.alloc(types.PermissionRule, 1);
         errdefer alloc.free(rules);
         rules[0] = .{
@@ -8416,7 +8395,6 @@ const GatewayExecution = struct {
         return .{
             .generation = 1,
             .tools = tools,
-            .integrations = integrations,
             .rules = .{ .rules = rules },
             .grants = grants,
         };
@@ -8445,10 +8423,9 @@ const GatewayExecution = struct {
             .source_id = request.source_id,
             .model = request.preferences.model,
             .effort = request.preferences.effort,
-            .tool_names = &.{ "read_file", "grep_files", "mcp_select_tool" },
+            .tool_names = &.{ "read_file", "grep_files" },
             .rules = .{ .rules = &rules },
             .grants = &grants,
-            .integration_names = &.{"mcp_fixture_echo"},
         }) catch |err| return switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             else => error.AdmissionFailed,
@@ -8480,7 +8457,7 @@ const GatewayExecution = struct {
     ) !RunOutcome {
         const self: *GatewayExecution = @ptrCast(@alignCast(raw.?));
         if (admission.permission_mode != .yolo or
-            admission.tool_names.len != 3 or admission.integration_names.len != 1 or
+            admission.tool_names.len != 2 or
             !std.mem.eql(u8, admission.parent_id, "parent") or
             !std.mem.eql(u8, admission.source_id, "parent")) return error.InvalidAdmissionSnapshot;
         const decision = try permissions.ruleDecisionFor(
@@ -8502,22 +8479,10 @@ const GatewayExecution = struct {
             .name = "grep_files",
             .arguments_json = "{\"pattern\":\"fixture\",\"path\":\".\"}",
         }};
-        const select_calls = [_]types.ToolCall{.{
-            .id = "select",
-            .name = "mcp_select_tool",
-            .arguments_json = "{\"name\":\"mcp_fixture_echo\"}",
-        }};
-        const dynamic_calls = [_]types.ToolCall{.{
-            .id = "dynamic",
-            .name = "mcp_fixture_echo",
-            .arguments_json = "{}",
-        }};
         const chunks = [_][]const u8{"gateway child reply"};
         const completions = [_]agent_test_support.FakeCompletion{
             .{ .tool_calls = &read_calls },
             .{ .tool_calls = &grep_calls },
-            .{ .tool_calls = &select_calls },
-            .{ .tool_calls = &dynamic_calls },
             .{ .chunks = &chunks, .content = "gateway child reply" },
         };
         var gateway = agent_test_support.FakeGateway.init(turn.alloc, &completions);
@@ -8527,21 +8492,14 @@ const GatewayExecution = struct {
         const inherited_tools = [_]tool_dispatch.Tool{
             test_builtin_tools.read_file,
             test_builtin_tools.grep_files,
-            test_builtin_tools.mcp_select_tool,
         };
         hooks.tool_registry = .{ .tools = &inherited_tools };
         hooks.live_tool_authority = turn.liveToolAuthorityProvider();
         hooks.tool_activity_recorder = turn.toolActivityRecorder();
-        hooks.permission_decisions = &.{ .once, .once, .once, .once };
+        hooks.permission_decisions = &.{ .once, .once };
         hooks.exec_plans = &.{
             .{ .result = .{ .model_output = "fixture contents" } },
             .{ .result = .{ .model_output = "fixture match" } },
-            .{ .result = .{
-                .model_output = "selected",
-                .selected_dynamic_tool_name = "mcp_fixture_echo",
-                .selected_dynamic_tool_schema_json = "{\"type\":\"function\",\"name\":\"mcp_fixture_echo\",\"description\":\"Echo\",\"inputSchema\":{\"type\":\"object\",\"properties\":{}}}",
-            } },
-            .{ .result = .{ .model_output = "echoed" } },
         };
         hooks.session_context = turn.sessionRuntime();
         var fixture = agent_test_support.PromptFixture{};
@@ -8564,11 +8522,9 @@ const GatewayExecution = struct {
         try turn.commit(message.id, hooks.history_turns.items[0], 1, 1, 2);
         if (!std.mem.eql(u8, admission.model, gateway.request_models.items[0]))
             return error.ModelNotInherited;
-        if (hooks.executed_names.items.len != 4) return error.ToolsNotExecuted;
+        if (hooks.executed_names.items.len != 2) return error.ToolsNotExecuted;
         if (!std.mem.eql(u8, "read_file", hooks.executed_names.items[0]) or
-            !std.mem.eql(u8, "grep_files", hooks.executed_names.items[1]) or
-            !std.mem.eql(u8, "mcp_select_tool", hooks.executed_names.items[2]) or
-            !std.mem.eql(u8, "mcp_fixture_echo", hooks.executed_names.items[3]))
+            !std.mem.eql(u8, "grep_files", hooks.executed_names.items[1]))
             return error.ToolIsolationFailed;
         if (hooks.last_execute_grants.items.len != 1 or !std.mem.eql(
             u8,
@@ -8577,8 +8533,7 @@ const GatewayExecution = struct {
         )) return error.GrantNotInherited;
         if (hooks.last_live_authority_generation == null or
             hooks.last_live_authority_generation.? == 0 or
-            hooks.last_live_authority_tool_count != 4 or
-            hooks.last_live_authority_integration_count != 1 or
+            hooks.last_live_authority_tool_count != 2 or
             hooks.last_live_authority_rule_count != 1 or
             hooks.last_live_authority_grant_count != 1)
         {
@@ -8666,15 +8621,13 @@ test "session-backed owner executes through deterministic gateway and normal age
             activity_count += 1;
             try std.testing.expect(
                 std.mem.eql(u8, activity.tool_name, "read_file") or
-                    std.mem.eql(u8, activity.tool_name, "grep_files") or
-                    std.mem.eql(u8, activity.tool_name, "mcp_select_tool") or
-                    std.mem.eql(u8, activity.tool_name, "mcp_fixture_echo"),
+                    std.mem.eql(u8, activity.tool_name, "grep_files"),
             );
         },
         .terminal => terminal_count += 1,
         else => {},
     };
-    try std.testing.expectEqual(@as(usize, 8), activity_count);
+    try std.testing.expectEqual(@as(usize, 4), activity_count);
     try std.testing.expectEqual(@as(usize, 1), terminal_count);
     var parent_boundary = try communication_query.prepareParentBoundary(
         alloc,
@@ -8889,7 +8842,6 @@ fn checkAdmissionAllocationFailures(alloc: Allocator) !void {
         .model = "model",
         .effort = types.ReasoningEffort.literal("high"),
         .tool_names = &.{ "read_file", "write_file" },
-        .integration_names = &.{"mcp:test"},
     });
     snapshot.deinit(alloc);
 }

@@ -1222,17 +1222,15 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
 
       await session.sendKeys("Down");
       await session.waitForText(
-        "manage local and remote MCP servers, resources, prompts, and project trust",
+        "browse available models",
         5_000,
       );
       const scrolledGrid = await session.capturePaneGrid();
-      const mcpRow = scrolledGrid.find((line) =>
-        line.includes("/mcp") &&
-        line.includes("manage local and remote MCP servers, resources, prompts, and project trust")
+      const modelsRow = scrolledGrid.find((line) =>
+        line.includes("/models") && line.includes("browse available models")
       );
-      expect(mcpRow).toBeDefined();
-      expect(mcpRow!.indexOf("Extensions")).toBe(metadataColumn);
-      expect(mcpRow!.indexOf("Extensions") + "Extensions".length).toBe(99);
+      expect(modelsRow).toBeDefined();
+      expect(modelsRow!.indexOf("Model")).toBe(metadataColumn);
       expect(modelRow).toContain("Model");
       expect(scrolledGrid.join("\n")).toContain("↑↓ Navigate     Enter Use     Esc Close");
       expect(session.isAlive()).toBe(true);
@@ -1288,13 +1286,11 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
       );
       grid = await session.capturePaneGrid();
       const modelRow = grid.find((line) => line.includes("/model"));
-      const mcpRow = grid.find((line) => line.includes("/mcp"));
+      const modelsRow = grid.find((line) => line.includes("/models"));
       expect(modelRow).toContain("choose what model and reasoning effort to use");
       expect(modelRow).not.toContain("Model");
-      expect(mcpRow).toContain(
-        "manage local and remote MCP servers, resources, prompts, and project trust",
-      );
-      expect(mcpRow).not.toContain("Extensions");
+      expect(modelsRow).toContain("browse available models");
+      expect(modelsRow).not.toContain("Model");
 
       await session.sendKeys("C-u");
       await session.sendLiteralText("/managed-menu");
@@ -1318,11 +1314,11 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
       );
       grid = await session.capturePaneGrid();
       const restartedModelRow = grid.find((line) => line.includes("/model"));
-      const restartedMcpRow = grid.find((line) => line.includes("/mcp"));
+      const restartedModelsRow = grid.find((line) => line.includes("/models"));
       expect(restartedModelRow).toBeDefined();
-      expect(restartedMcpRow).toBeDefined();
+      expect(restartedModelsRow).toBeDefined();
       expect(restartedModelRow).not.toContain("Model");
-      expect(restartedMcpRow).not.toContain("Extensions");
+      expect(restartedModelsRow).not.toContain("Model");
 
       await session.sendKeys("C-u");
       await session.sendText("/quit");

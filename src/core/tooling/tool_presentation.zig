@@ -22,7 +22,6 @@ pub const ToolActionInput = struct {
     call: ToolCall,
     workspace_root: []const u8 = "",
     display_target: ?[]const u8 = null,
-    is_available_dynamic_mcp_tool: bool = false,
 };
 
 pub const ActionState = enum {
@@ -145,14 +144,6 @@ pub fn formatCommandPermissionLabel(
     return std.fmt.allocPrint(alloc, "exec_command {s}{s}", .{ encoded.bytes, suffix });
 }
 
-pub fn isAdvertisedDynamicMcpName(registry: tool_dispatch.Registry, name: []const u8, advertised: []const []const u8) bool {
-    if (registry.lookup(name) != null) return false;
-    for (advertised) |advertised_name| {
-        if (std.mem.eql(u8, advertised_name, name)) return true;
-    }
-    return false;
-}
-
 /// The caller owns `detail` and must free it with `alloc`.
 pub fn formatCommandActivity(
     alloc: Allocator,
@@ -227,13 +218,8 @@ fn resolveAction(
         };
     }
 
-    const spec = input.tool_registry.lookup(call.name) orelse {
-        if (input.is_available_dynamic_mcp_tool) return .{
-            .label = lifecycleLabel("Running MCP", "Ran MCP", state, denied_label),
-            .value = call.name,
-        };
+    const spec = input.tool_registry.lookup(call.name) orelse
         return fallbackAction(state, denied_label, call.name);
-    };
     const args = tool_args.parseToolArgsObject(alloc, call.arguments_json) catch {
         return fallbackAction(state, denied_label, "tool call");
     };
@@ -462,27 +448,6 @@ const custom_presentation_tool = blk: {
     break :blk tool;
 };
 const custom_presentation_registry = tool_dispatch.Registry{ .tools = &.{custom_presentation_tool} };
-
-test "tool presentation formats dynamic MCP availability distinctly" {
-    const alloc = std.testing.allocator;
-    const call: ToolCall = .{
-        .id = "dynamic",
-        .name = "mcp_lookup",
-        .arguments_json = "{}",
-    };
-
-    const available = try formatPlainAction(alloc, .{
-        .tool_registry = test_tool_registry,
-        .call = call,
-        .is_available_dynamic_mcp_tool = true,
-    });
-    defer alloc.free(available);
-    try std.testing.expectEqualStrings("Running MCP mcp_lookup", available);
-
-    const unavailable = try formatPlainAction(alloc, .{ .tool_registry = test_tool_registry, .call = call });
-    defer alloc.free(unavailable);
-    try std.testing.expectEqualStrings("Working: mcp_lookup", unavailable);
-}
 
 test "tool presentation reads labels from the supplied registry" {
     const alloc = std.testing.allocator;

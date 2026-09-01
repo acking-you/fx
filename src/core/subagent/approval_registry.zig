@@ -646,7 +646,7 @@ fn checkLivePreviewRegistryAllocation(alloc: Allocator) !void {
         "work",
         .{
             .id = 17,
-            .label = "mcp_fixture_echo",
+            .label = "fixture_tool",
             .tool_arguments_preview = "{\"text\":\"sentinel\"}",
         },
         &.{},
