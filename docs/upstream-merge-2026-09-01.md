@@ -93,6 +93,12 @@ three supported sources: a direct Responses API key, Codex OAuth, and Grok
 OAuth. It probes stored-session presence off the TUI thread without restoring
 the upstream Vercel account, team, Keychain, or fx-login product flow.
 
+The first exact Windows Full CI compile caught a POSIX-only permission call in
+that new presence probe. It now uses the existing cross-platform private-file
+contract shared by Codex and Grok session loading. A focused native profile-file
+test is part of both Windows lanes so future setup or fallback changes compile
+and exercise this boundary on Windows rather than only Linux.
+
 ### Provider usage dashboard
 
 The local usage dashboard and aggregate provider snapshot remain wired into the

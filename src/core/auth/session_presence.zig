@@ -43,7 +43,7 @@ fn profileFileFromHome(
     const stat = file.stat(io_mod.getIo()) catch return .unavailable;
     if (stat.kind != .file or
         stat.nlink != 1 or
-        stat.permissions.toMode() & 0o077 != 0 or
+        !io_mod.permissionsPrivateFile(stat.permissions) or
         stat.size == 0 or
         stat.size > max_bytes)
     {
@@ -56,5 +56,25 @@ test "missing native profile root is unavailable" {
     try std.testing.expectEqual(
         host.SecretStorePresence.unavailable,
         profileFileFromHome(null, "auth.json", 1024),
+    );
+}
+
+test "bounded native profile file is present" {
+    if (comptime host_target.is_wasm) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io_mod.getIo(), profile_paths.root_dir_name);
+    var file = try tmp.dir.createFile(io_mod.getIo(), ".fx/auth.json", .{
+        .permissions = io_mod.private_file_permissions,
+    });
+    try file.writeStreamingAll(io_mod.getIo(), "{}\n");
+    file.close(io_mod.getIo());
+
+    const home = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
+    defer alloc.free(home);
+    try std.testing.expectEqual(
+        host.SecretStorePresence.present,
+        profileFileFromHome(home, "auth.json", 1024),
     );
 }

@@ -331,6 +331,7 @@ jobs:
             --test-filter "provider setup JSON never contains credentials" `
             --test-filter "provider setup poll does not expose the completion transition as idle" `
             --test-filter "private file permissions accept owner-only read-only mode" `
+            --test-filter "bounded native profile file is present" `
             --test-filter "Grok team refresh preserves the principal binding" `
             --test-filter "Grok team principal round trips for refresh" `
             --test-filter "recovery markers are idempotent and clear durably" `
