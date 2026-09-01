@@ -2756,7 +2756,7 @@ test "input admitted during processing steers the active turn" {
     defer initial_events.deinit(alloc);
     for (initial_events.items) |event| freeWorkerEvent(alloc, event);
 
-    try runtime.enqueuePrompt(alloc, try makePrompt(alloc, "steer now", "model"));
+    try runtime.admitPrompt(alloc, try makePrompt(alloc, "steer now", "model"), true);
     try std.testing.expectEqual(@as(usize, 1), runtime.queuedPromptCount());
     try std.testing.expectEqual(@as(?u64, active.turn_id), runtime.queued_prompts.items[0].steer_target_turn_id);
 
@@ -2786,7 +2786,7 @@ test "unconsumed steer falls back to the next queued turn" {
     freeQueuedPrompt(alloc, active);
     runtime.discardEvents(alloc);
 
-    try runtime.enqueuePrompt(alloc, try makePrompt(alloc, "late follow-up", "model"));
+    try runtime.admitPrompt(alloc, try makePrompt(alloc, "late follow-up", "model"), true);
     try std.testing.expectEqual(@as(?u64, active.turn_id), runtime.queued_prompts.items[0].steer_target_turn_id);
     runtime.finishProcessing();
     const follow_up = (try runtime.tryTakeNextPrompt(alloc)) orelse

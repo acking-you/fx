@@ -445,7 +445,7 @@ pub const EffectiveToolProjection = struct {
 };
 
 const bash_first_guidance =
-    "Bash-first mode is active. Use exec_command for workspace discovery and code search; prefer `rg` for text and `rg --files` for file lists (fall back only when rg is unavailable). The specialized list_files, glob_files, grep_files, and semantic_search tools are intentionally hidden in this mode.";
+    "Bash-first mode is active. Use exec_command for workspace discovery and code search; prefer `rg` for text and `rg --files` for file lists (fall back only when rg is unavailable). The specialized glob_files and grep_files tools are intentionally hidden in this mode.";
 
 pub fn containsName(names: []const []const u8, expected: []const u8) bool {
     for (names) |name| if (std.mem.eql(u8, name, expected)) return true;
@@ -809,10 +809,8 @@ test "bash-first projection hides overlapping discovery tools and guides rg" {
 
     try expectContainsName(projection.advertised_names, "exec_command");
     try expectContainsName(projection.advertised_names, "read_file");
-    try expectNotContainsName(projection.advertised_names, "list_files");
     try expectNotContainsName(projection.advertised_names, "glob_files");
     try expectNotContainsName(projection.advertised_names, "grep_files");
-    try expectNotContainsName(projection.advertised_names, "semantic_search");
     try std.testing.expect(std.mem.find(u8, projection.custom_guidance, "rg --files") != null);
 }
 

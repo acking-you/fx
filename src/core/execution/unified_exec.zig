@@ -1725,8 +1725,11 @@ test "unified exec direct control stays responsive during a model poll" {
     var manager = Manager.init(std.testing.allocator);
     defer manager.deinit();
     var first = try manager.exec(std.testing.allocator, .{
-        .command = "IFS= read -r first; printf 'model:%s' \"$first\"; IFS= read -r second",
-        .cwd = "/tmp",
+        .command = if (builtin.os.tag == .windows)
+            "$first = [Console]::In.ReadLine(); [Console]::Out.Write(\"model:$first\"); [void][Console]::In.ReadLine()"
+        else
+            "IFS= read -r first; printf 'model:%s' \"$first\"; IFS= read -r second",
+        .cwd = if (builtin.os.tag == .windows) "." else "/tmp",
         .yield_time_ms = 250,
     });
     const process_id = first.process_id.?;
