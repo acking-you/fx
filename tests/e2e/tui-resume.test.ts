@@ -1390,10 +1390,19 @@ while :; do :; done
 
       await active.sendKeys("C-o");
       await active.waitForText("┃ Full detail · ctrl o close", timeout);
-      await active.sendHexBytes(
-        Array.from({ length: 500 }, () => ["1b", "5b", "36", "7e"]).flat(),
-      );
-      await active.waitForText("CAP_FILL_0600_", timeout);
+      let artifactPane = await active.capturePane();
+      for (
+        let sent = 0;
+        !artifactPane.includes("CAP_FILL_0600_") && sent < 1_000;
+        sent += 25
+      ) {
+        await active.sendHexBytes(
+          Array.from({ length: 25 }, () => ["1b", "5b", "36", "7e"]).flat(),
+        );
+        await Bun.sleep(25);
+        artifactPane = await active.capturePane();
+      }
+      expect(artifactPane).toContain("CAP_FILL_0600_");
       writeFileSync(ctrlOPath, await active.capturePane());
       await active.sendKeys("C-o");
       await active.waitForPane(
@@ -5403,7 +5412,7 @@ test.skipIf(!tmuxAvailable())(
       await active.waitForComposer(TIMEOUT);
       await active.sendText("Keep this response active.");
       await waitForCondition(() => hold.started, "held gateway response");
-      await active.waitForText("Thinking", TIMEOUT);
+      await active.waitForText("Generating", TIMEOUT);
 
       await active.sendText("/resume");
       await active.waitForText("resume is unavailable until the response finishes", TIMEOUT);

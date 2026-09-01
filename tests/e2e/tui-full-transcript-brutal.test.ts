@@ -735,10 +735,24 @@ async function verifyOldestTranscriptEntrySurvives(
   config: StressConfig,
 ): Promise<void> {
   await session.sendHexBytes(CTRL_O);
-  const newest = await waitForMode(session, "full", draft);
-  expect(newest).toContain(LIVE_DONE);
+  let newest = await waitForMode(session, "full", draft);
   const pageCount = config.oldestPageCount ?? 1_024;
   const pageChunk = 64;
+  for (
+    let sent = 0;
+    !newest.includes(LIVE_DONE) && sent < pageCount;
+    sent += pageChunk
+  ) {
+    await sendRepeatedKey(
+      session,
+      "NPage",
+      Math.min(pageChunk, pageCount - sent),
+      pageChunk,
+      300,
+    );
+    newest = await waitForMode(session, "full", draft);
+  }
+  expect(newest).toContain(LIVE_DONE);
   for (let sent = 0; sent < pageCount; sent += pageChunk) {
     await sendRepeatedKey(
       session,

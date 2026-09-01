@@ -2792,7 +2792,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         () => queuedGateway.requests.length === 1 && hold.started,
         "held active Gateway request",
       );
-      await session.waitForText("Thinking", TIMEOUT);
+      await session.waitForText("Generating", TIMEOUT);
       await session.sendText(`/image ${image}`);
       await session.waitForText("attached image: queued-snapshot.png", TIMEOUT);
       await session.sendText(queuedPrompt);
