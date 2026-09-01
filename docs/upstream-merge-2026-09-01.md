@@ -18,7 +18,7 @@ The merge boundary is:
 | Final merge-regression repair | `8a0e7c90` |
 | Review branch | `merge/upstream-2026-09-01` |
 
-Compared with the pre-merge BYOK tree, the review result changes 247 files with 28,908 insertions and 17,202 deletions. The large count comes primarily from upstream MCP, transcript, rendering, and E2E work. It does not represent a new vendor product route or a large new model-facing tool surface.
+Compared with the pre-merge BYOK tree, the review result changes 247 files with 28,932 insertions and 17,202 deletions. The large count comes primarily from upstream MCP, transcript, rendering, and E2E work. It does not represent a new vendor product route or a large new model-facing tool surface.
 
 ## Reconciliation policy
 
@@ -307,6 +307,8 @@ Every semantic compaction entrypoint still delegates to `src/core/agent/runtime/
 ### Worker and UI ownership
 
 Gateway and agent callbacks enqueue worker events. Thought, assistant text, semantic notices, command output, and lifecycle mutation are applied during UI-thread drain. Newline-free assistant chunks retain a render request and are not held until a hard line.
+
+The remaining `selected_model` compile guards are restricted by `builtin.is_test` inside `provider_runtime.zig`. They adapt existing fake-app fixtures that still own an `ArrayList`; production instantiations require the typed `provider_selection` runtime. They are therefore test scaffolding rather than a second production selection owner.
 
 ### Unified Exec
 
