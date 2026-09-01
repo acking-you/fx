@@ -114,7 +114,7 @@ const submittedAt = performance.now();
 runtime.write("wait forever\r");
 await waitFor(() => fetchStarted, "stalled fetch");
 await waitFor(
-  () => grid().includes("Working") && grid().includes("wait forever"),
+  () => grid().includes("Thinking") && grid().includes("wait forever"),
   "accepted prompt presentation before network response",
 );
 const acceptanceLatencyMs = performance.now() - submittedAt;
@@ -126,7 +126,7 @@ await waitFor(
   () => terminalWriteCount >= writesAfterAcceptance + 2,
   "animated terminal frames while fetch is stalled",
 );
-await waitFor(() => grid().includes("Working (1s)"), "working counter while fetch is stalled");
+await waitFor(() => grid().includes("Thinking (1s)"), "thinking counter while fetch is stalled");
 runtime.write("\x03");
 await waitFor(() => fetchAborted, "fetch abort");
 await waitFor(() => grid().includes("Cancelled") || grid().includes("cancelled"), "cancelled turn presentation");
@@ -299,7 +299,7 @@ async function runActiveTransitionChild(scenario, command) {
   if (scenario === "streaming") {
     await waitForChild(() => streamStarted, "stream start");
   } else {
-    await waitForChild(() => childOutput.includes("Working"), "working state");
+    await waitForChild(() => childOutput.includes("Thinking"), "thinking state");
   }
 
   process.stdout.write("transition_write\n");

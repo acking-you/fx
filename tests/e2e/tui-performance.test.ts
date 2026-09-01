@@ -822,8 +822,8 @@ test.skipIf(!ENABLED || !tmuxAvailable())(
         const open = await measureAction(
           fixture.tapePath,
           () => session!.sendKeysImmediate(["Enter"]),
-          () => session!.waitForText("Connections", TIMEOUT),
-          "Connections",
+          () => session!.waitForText("Accounts", TIMEOUT),
+          "Accounts",
         );
         session.sendKeysImmediate(["Escape"]);
         await session.waitForComposer(TIMEOUT);
@@ -1127,7 +1127,7 @@ test.skipIf(!LIVE_ENABLED || !tmuxAvailable())(
       session.sendKeysImmediate(["C-u"]);
       await session.waitForComposer(TIMEOUT);
       await session.sendText("/login");
-      await session.waitForText("Connections", TIMEOUT);
+      await session.waitForText("Accounts", TIMEOUT);
       session.sendKeysImmediate(["Escape"]);
       await session.waitForComposer(TIMEOUT);
       expect(readFileSync(fixture.stderrPath, "utf8")).toBe("");

@@ -191,6 +191,13 @@ Gateway fixture variables to `OPENAI_API_KEY` and
 performance assertions remain useful; only their stale product route was
 removed.
 
+The browser, headless terminal, and performance owners still exercise active
+turn cancellation, prompt visibility, animation, and login-menu latency. Their
+upstream-only presentation markers were updated from `Working` to the fork's
+`Thinking` lifecycle and from `Connections` to the fork's `Accounts` login
+menu. No production compatibility state was added solely to satisfy those old
+labels.
+
 ## Exact new files retained
 
 The following files did not exist on the BYOK first parent and remain in the
@@ -376,6 +383,9 @@ Local checks for the final pruning tree:
   isolated `setup --json` smoke paths; `fx mcp` remains non-executable.
 - [x] Both `core` and `term` WASM surfaces compile locally in ReleaseSmall with
   the single-threaded credential-inventory path.
+- [x] The focused Node/WASM terminal lifecycle test passes with the BYOK
+  `Thinking` presentation, including stalled-fetch animation, Ctrl+C abort,
+  active `/clear`, `/new`, and `/reset` recovery.
 - [ ] Exact-commit Full CI passes the Windows, Linux, and macOS native gates,
   every deterministic E2E shard, and the portable WASM builds.
 

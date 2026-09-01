@@ -143,7 +143,7 @@
     testState.stage = "starting-active-clear";
     runtime.write("clear active turn\r");
     const activeDeadline = performance.now() + 10000;
-    while (fetchCount < 2 || !output.includes("Working")) {
+    while (fetchCount < 2 || !output.includes("Thinking")) {
       if (performance.now() >= activeDeadline) throw new Error("active clear prompt did not start");
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
