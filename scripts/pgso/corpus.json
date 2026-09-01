@@ -97,7 +97,6 @@
     {"name": "e2e-tui-resize", "argv": ["bun", "test", "--max-concurrency", "1", "./tui-resize.test.ts"], "test_file": "tui-resize.test.ts"},
     {"name": "e2e-tui-thinking-display", "argv": ["bun", "test", "--max-concurrency", "1", "./tui-thinking-display.test.ts"], "test_file": "tui-thinking-display.test.ts"},
     {"name": "e2e-tui-render-stress", "argv": ["bun", "test", "--max-concurrency", "1", "./tui-render-stress.test.ts"], "test_file": "tui-render-stress.test.ts"},
-    {"name": "e2e-tui-full-transcript-brutal", "argv": ["bun", "test", "--max-concurrency", "1", "./tui-full-transcript-brutal.test.ts"], "test_file": "tui-full-transcript-brutal.test.ts"},
     {"name": "e2e-tui-resume-brutal", "argv": ["bun", "test", "--max-concurrency", "1", "./tui-resume-brutal.test.ts"], "test_file": "tui-resume-brutal.test.ts"},
     {"name": "e2e-tui-permissions", "argv": ["bun", "test", "--max-concurrency", "1", "./tui-permissions.test.ts"], "test_file": "tui-permissions.test.ts"},
     {"name": "e2e-tui-interrupt-recovery", "argv": ["bun", "test", "--max-concurrency", "1", "./tui-interrupt-recovery.test.ts"], "test_file": "tui-interrupt-recovery.test.ts"},

@@ -41,7 +41,6 @@ TRAINING_E2E_TESTS = (
     "tui-resize.test.ts",
     "tui-thinking-display.test.ts",
     "tui-render-stress.test.ts",
-    "tui-full-transcript-brutal.test.ts",
     "tui-resume-brutal.test.ts",
     "tui-permissions.test.ts",
     "tui-interrupt-recovery.test.ts",
@@ -352,8 +351,8 @@ class PgsoCorpusTests(unittest.TestCase):
             EXCLUDED_E2E_TESTS,
             tuple(test_file for test_file, _ in corpus.intentional_exclusions),
         )
-        self.assertEqual(34, len(corpus.scenarios))
-        self.assertEqual(47, len(corpus.candidate_scenarios))
+        self.assertEqual(33, len(corpus.scenarios))
+        self.assertEqual(46, len(corpus.candidate_scenarios))
         self.assertEqual(
             {
                 "direct-help": 100,
