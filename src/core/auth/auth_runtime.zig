@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const credentials = @import("credentials.zig");
 const provider_oauth = @import("provider_oauth.zig");
 const host = @import("../hosts/host.zig");
@@ -197,6 +198,10 @@ const InventoryRefreshTask = struct {
             .action = action,
             .deps = deps,
         };
+        if (comptime builtin.single_threaded) {
+            task.workerMain();
+            return task;
+        }
         task.thread = std.Thread.spawn(.{}, workerMain, .{task}) catch |err| {
             alloc.destroy(task);
             return err;

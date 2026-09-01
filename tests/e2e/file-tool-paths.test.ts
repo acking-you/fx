@@ -245,10 +245,6 @@ function gatewayEnv(
   return {
     HOME: home,
     OPENAI_API_KEY: "fake-file-paths-key",
-    AI_GATEWAY_API_KEY: undefined,
-    VERCEL_OIDC_TOKEN: undefined,
-    FX_GATEWAY_BASE_URL: undefined,
-    FX_GATEWAY_CHAT_URL: undefined,
     FX_RESPONSES_BASE_URL: gateway.baseUrl,
     FX_MODEL: MODEL,
     ...extra,
@@ -1477,8 +1473,6 @@ describe("filesystem path handling", () => {
             env: {
               HOME: root.home,
               FX_AUTO_UPGRADE: "0",
-              FX_GATEWAY_BASE_URL: undefined,
-              FX_GATEWAY_CHAT_URL: undefined,
               FX_MODEL: process.env.FX_WORKSPACE_ACCESS_LIVE_MODEL ?? EVAL_MODEL,
             },
             timeoutMs: 120_000,

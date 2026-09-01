@@ -28,8 +28,8 @@ import {
 
 const ENABLED = process.env.FX_TUI_PERFORMANCE === "1";
 const LIVE_ENABLED = process.env.FX_E2E_REAL_API === "1" &&
-  typeof process.env.AI_GATEWAY_API_KEY === "string" &&
-  process.env.AI_GATEWAY_API_KEY.length > 0;
+  typeof process.env.OPENAI_API_KEY === "string" &&
+  process.env.OPENAI_API_KEY.length > 0;
 const WARMUPS = 5;
 const SAMPLES = 50;
 const LOCAL_BUDGETS_MS = { p50: 8, p90: 12, p95: 17 } as const;
@@ -451,8 +451,7 @@ test.skipIf(!tmuxAvailable())(
         cwd: fixture.workspace,
         env: {
           HOME: fixture.home,
-          AI_GATEWAY_API_KEY: undefined,
-          VERCEL_OIDC_TOKEN: undefined,
+          OPENAI_API_KEY: undefined,
           FX_AUTO_UPGRADE: "0",
           FX_SOUND: "0",
           NO_COLOR: "1",
@@ -494,10 +493,8 @@ test.skipIf(!tmuxAvailable())(
         cwd: fixture.workspace,
         env: {
           HOME: undefined,
-          AI_GATEWAY_API_KEY: "missing-home-key",
-          VERCEL_OIDC_TOKEN: undefined,
-          FX_GATEWAY_BASE_URL: noHomeGateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: noHomeGateway.chatUrl,
+          OPENAI_API_KEY: "missing-home-key",
+          FX_RESPONSES_BASE_URL: noHomeGateway.baseUrl,
           FX_MODEL: FAKE_GATEWAY_MODEL,
           FX_AUTO_UPGRADE: "0",
           FX_DISABLE_KEYCHAIN: "1",
@@ -542,8 +539,7 @@ test.skipIf(!tmuxAvailable())(
         cwd: fixture.workspace,
         env: {
           HOME: fixture.home,
-          AI_GATEWAY_API_KEY: undefined,
-          VERCEL_OIDC_TOKEN: undefined,
+          OPENAI_API_KEY: undefined,
           FX_AUTO_UPGRADE: "0",
           FX_SOUND: "0",
           NO_COLOR: "1",
@@ -600,10 +596,8 @@ test.skipIf(!tmuxAvailable())(
         cwd: fixture.workspace,
         env: {
           HOME: linkedHome,
-          AI_GATEWAY_API_KEY: "symlinked-home-key",
-          VERCEL_OIDC_TOKEN: undefined,
-          FX_GATEWAY_BASE_URL: linkedHomeGateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: linkedHomeGateway.chatUrl,
+          OPENAI_API_KEY: "symlinked-home-key",
+          FX_RESPONSES_BASE_URL: linkedHomeGateway.baseUrl,
           FX_MODEL: FAKE_GATEWAY_MODEL,
           FX_AUTO_UPGRADE: "0",
           FX_DISABLE_KEYCHAIN: "1",
@@ -698,10 +692,8 @@ test.skipIf(!ENABLED || !tmuxAvailable())(
         cwd: fixture.workspace,
         env: {
           HOME: fixture.home,
-          AI_GATEWAY_API_KEY: "fake-performance-key",
-          VERCEL_OIDC_TOKEN: undefined,
-          FX_GATEWAY_BASE_URL: gateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+          OPENAI_API_KEY: "fake-performance-key",
+          FX_RESPONSES_BASE_URL: gateway.baseUrl,
           FX_MODEL: FAKE_GATEWAY_MODEL,
           FX_PERMISSION_MODE: "ask",
           FX_AUTO_UPGRADE: "0",
@@ -1104,8 +1096,7 @@ test.skipIf(!LIVE_ENABLED || !tmuxAvailable())(
         cwd: fixture.workspace,
         env: {
           HOME: fixture.home,
-          AI_GATEWAY_API_KEY: process.env.AI_GATEWAY_API_KEY,
-          VERCEL_OIDC_TOKEN: process.env.VERCEL_OIDC_TOKEN,
+          OPENAI_API_KEY: process.env.OPENAI_API_KEY,
           FX_AUTO_UPGRADE: "0",
           FX_SOUND: "0",
           NO_COLOR: "1",

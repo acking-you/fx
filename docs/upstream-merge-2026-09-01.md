@@ -99,6 +99,12 @@ contract shared by Codex and Grok session loading. A focused native profile-file
 test is part of both Windows lanes so future setup or fallback changes compile
 and exercise this boundary on Windows rather than only Linux.
 
+The retained background inventory contract now also has an explicit
+single-threaded implementation: WASM runs the bounded three-source probe
+synchronously and publishes it through the same completion boundary. Native
+TUI and ACP builds continue to use the worker thread. This fixes the actual
+WASM compile regression without removing the portable SDK surface.
+
 ### Provider usage dashboard
 
 The local usage dashboard and aggregate provider snapshot remain wired into the
@@ -178,6 +184,12 @@ provider and execution subprocesses still need it.
 The PGSO corpus manifest, exact test-file classification, deterministic shard
 planning, benchmark checks, and binary-size checks remain fork-owned. The
 manifest was reduced only where a product owner was deleted.
+
+The terminal performance owner was also converted from the removed Vercel
+Gateway fixture variables to `OPENAI_API_KEY` and
+`FX_RESPONSES_BASE_URL`. Its missing-home, canonical skill refresh, and real
+performance assertions remain useful; only their stale product route was
+removed.
 
 ## Exact new files retained
 
@@ -358,7 +370,8 @@ Local checks for the final pruning tree:
   subcommand with empty stdout.
 - [x] The freshly built binary also completes `help`, `status --json`, and the
   isolated provider-neutral `setup --json` smoke path with clean stderr.
-- [ ] Exact-commit Full CI passes every required Linux and macOS runner.
+- [ ] Exact-commit Full CI passes the Windows, Linux, and macOS native gates,
+  every deterministic E2E shard, and the portable WASM builds.
 
 ## Reviewer checklist
 
@@ -376,4 +389,5 @@ Local checks for the final pruning tree:
 - [ ] Unified Exec retains one model-facing command family and independent ACP
   observation.
 - [ ] Web Search projection and Web Fetch admission exceptions remain intact.
-- [ ] Every exact-commit Full CI job passes before merge into `byok`.
+- [ ] Every exact-commit Full CI job, including the portable WASM compile gate,
+  passes before merge into `byok`.

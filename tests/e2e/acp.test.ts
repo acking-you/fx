@@ -4118,8 +4118,7 @@ describe("acp: model-independent", () => {
           cwd: root.workspace,
           env: {
             HOME: root.home,
-            AI_GATEWAY_API_KEY: "e2e-placeholder",
-            VERCEL_OIDC_TOKEN: "",
+            OPENAI_API_KEY: "e2e-placeholder",
           },
         });
         await client.request("initialize", { protocolVersion: 1 }, 1);
@@ -4153,8 +4152,7 @@ describe("acp: model-independent", () => {
           cwd: root.workspace,
           env: {
             HOME: root.home,
-            AI_GATEWAY_API_KEY: "e2e-placeholder",
-            VERCEL_OIDC_TOKEN: "",
+            OPENAI_API_KEY: "e2e-placeholder",
           },
         });
         await client.request("initialize", { protocolVersion: 1 }, 1);
@@ -4193,8 +4191,7 @@ describe("acp: model-independent", () => {
           cwd: root.workspace,
           env: {
             HOME: root.home,
-            AI_GATEWAY_API_KEY: "e2e-placeholder",
-            VERCEL_OIDC_TOKEN: "",
+            OPENAI_API_KEY: "e2e-placeholder",
           },
         });
         await client.request("initialize", { protocolVersion: 1 }, 1);

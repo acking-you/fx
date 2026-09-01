@@ -162,6 +162,12 @@ jobs:
           test -s "$status_stdout"
           test ! -s "$status_stderr"
 
+      - name: Build portable WASM surfaces
+        if: matrix.platform.name == 'linux-x86_64'
+        run: |
+          zig build -Dwasm-surface=core -Doptimize=ReleaseSmall
+          zig build -Dwasm-surface=term -Doptimize=ReleaseSmall
+
   e2e:
     name: E2E (${{ matrix.optimize }}, ${{ matrix.platform.name }}, shard ${{ matrix.shard.label }})
     runs-on: ${{ matrix.platform.runner }}
