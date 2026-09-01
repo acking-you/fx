@@ -497,6 +497,52 @@ async function waitForScrolledViewport(
   );
 }
 
+async function waitForScrollAttemptAfter(
+  tracePath: string,
+  startByte: number,
+): Promise<"committed" | "page_loading"> {
+  const deadline = Date.now() + TIMEOUT;
+  let appended = "";
+  while (Date.now() < deadline) {
+    appended = readFileSync(tracePath).subarray(startByte).toString("utf8");
+    const committedIndex = appended.indexOf("[full_transcript_cache] scroll ");
+    const loadingIndex = appended.indexOf(
+      "[full_transcript_cache] scroll_ignored reason=page_loading",
+    );
+    const eventIndex = committedIndex >= 0 ? committedIndex : loadingIndex;
+    if (eventIndex >= 0) {
+      const afterEvent = appended.slice(eventIndex);
+      if (
+        projectionWindows(afterEvent).length > 0 &&
+        afterEvent.includes("[frame_schedule] attempt_end outcome=committed")
+      ) {
+        return committedIndex >= 0 ? "committed" : "page_loading";
+      }
+    }
+    await sleep(10);
+  }
+  throw new Error(
+    `Timed out waiting for a committed Ctrl-O scroll attempt.\n` +
+      `Trace appended after action:\n${appended}`,
+  );
+}
+
+async function navigateFullTranscript(
+  session: TmuxSession,
+  key: "NPage" | "PPage",
+  draft: string,
+  tracePath: string,
+): Promise<string> {
+  for (let attempt = 0; attempt < 256; attempt += 1) {
+    const traceStart = traceSize(tracePath);
+    await session.sendKeys(key);
+    const outcome = await waitForScrollAttemptAfter(tracePath, traceStart);
+    const pane = await waitForMode(session, "full", draft);
+    if (outcome === "committed") return pane;
+  }
+  throw new Error(`Ctrl-O navigation stayed page-loading for ${key}.`);
+}
+
 async function waitForRenderedViewportAfter(
   tracePath: string,
   startByte: number,
@@ -739,19 +785,11 @@ async function verifyOldestTranscriptEntrySurvives(
   const pageCount = config.oldestPageCount ?? 1_024;
   let newest = await waitForMode(session, "full", draft);
   for (let sent = 0; !newest.includes(LIVE_DONE) && sent < pageCount; sent += 1) {
-    const scrollWindow = latestProjectionWindow(tracePath);
-    const traceStart = traceSize(tracePath);
-    await session.sendKeys("NPage");
-    await waitForScrolledViewport(tracePath, traceStart, scrollWindow.offset);
-    newest = await waitForMode(session, "full", draft);
+    newest = await navigateFullTranscript(session, "NPage", draft, tracePath);
   }
   expect(newest).toContain(LIVE_DONE);
   for (let sent = 0; sent < pageCount; sent += 1) {
-    const scrollWindow = latestProjectionWindow(tracePath);
-    const traceStart = traceSize(tracePath);
-    await session.sendKeys("PPage");
-    await waitForScrolledViewport(tracePath, traceStart, scrollWindow.offset);
-    const pane = await waitForMode(session, "full", draft);
+    const pane = await navigateFullTranscript(session, "PPage", draft, tracePath);
     if (pane.includes(firstChatMarker(config))) break;
   }
   const oldestMarker = firstChatMarker(config);
