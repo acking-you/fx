@@ -24,9 +24,10 @@ The merge boundary is:
 | Final verified navigation batching | `6a29c074` |
 | Final visible navigation observation | `352323d9` |
 | Final command-completion page refresh | `8565f4f0` |
+| Final stale-trace navigation retry | `355bd3b6` |
 | Review branch | `merge/upstream-2026-09-01` |
 
-Compared with the pre-merge BYOK tree, the review result changes 248 files with 29,268 insertions and 17,312 deletions. The large count comes primarily from upstream MCP, transcript, rendering, and E2E work. It does not represent a new vendor product route or a large new model-facing tool surface.
+Compared with the pre-merge BYOK tree, the review result changes 248 files with 29,276 insertions and 17,312 deletions. The large count comes primarily from upstream MCP, transcript, rendering, and E2E work. It does not represent a new vendor product route or a large new model-facing tool surface.
 
 ## Reconciliation policy
 
@@ -375,6 +376,7 @@ The session or connection-local projection hides `glob_files` and `grep_files` a
 | `6a29c074` | Amortize tmux invocation cost with four-key navigation batches while retaining the committed-scroll verification boundary |
 | `352323d9` | Require verified navigation to observe the newly displayed tmux pane instead of returning an older full-transcript frame after the trace commit |
 | `8565f4f0` | Publish the terminal command-output revision so a stride-throttled full-detail page cannot retain an incomplete live snapshot |
+| `355bd3b6` | Retry a navigation batch when a delayed trace event claims completion but tmux shows no new full-detail pane within the bounded observation window |
 
 ## CI policy for this merge
 
@@ -419,6 +421,8 @@ Run `33498165085` on `f04f4ef81bf892ab91b8dcc9d96de198cbe05d15` showed that a co
 
 Run `33500805760` on `96f5f03ec833ec4335dbba46016d671273a456d3` passed Windows native, both Linux native jobs, all eight Linux E2E shards, and macOS arm64 shard 2 before macOS x86_64 shard 3 failed the brutal transcript case twice. The stricter visible-pane boundary stopped at live markers 419 and 427 for 30 seconds instead of falsely counting stale frames as progress. That stable stop exposed a production terminal-refresh gap: live command pages are intentionally rebuilt only once per revision stride, but recorded-command consolidation could close the block with no pending paint request and without publishing a final revision. If fewer than one stride of output followed the last rebuild, the installed page's request still matched current state while its snapshot lacked the final output. Atomic consolidation now queues one final content revision after closing the block. Focused ReleaseSafe tests prove both stride throttling and terminal invalidation, and the complete real tmux stress passes with 120 assertions in 39.6 seconds using the rebuilt repository binary. Commit `8565f4f0` supersedes this run, so a new exact-commit Full CI run remains required.
 
+Run `33503579220` on `7f809853c082364941827253aaefe56a6ae40016` passed Windows native, both Linux native jobs, all eight Linux E2E shards, and macOS arm64 shard 4 before macOS x86_64 shard 3 again failed twice. The terminal refresh moved the last visible output from markers 419–427 to 480 and 492, confirming that the final command snapshot now reaches the true tail page. The remaining failure was in the test observer: a delayed scroll trace from the preceding batch could appear after the next trace-size sample, be attributed to the new input, and then leave the helper waiting 30 seconds for a pane change that would never belong to that stale event. A verified batch now gets a 500 ms visible-pane observation window; no change retries the batch without consuming outer progress. Page-loading and committed or clamped attempts remain distinct, the retry count remains bounded at 256, and the newest and oldest marker assertions are unchanged. The complete real tmux stress passes locally with 120 assertions in 39.6 seconds. Commit `355bd3b6` supersedes this run, so a new exact-commit Full CI run remains required.
+
 The smaller `.github/workflows/ci.yml` workflow is not used as the merge decision. Benchmark and binary-size workflows are retained because startup latency and unexplained binary growth are useful signals; neither replaces Full CI.
 
 ## Local verification completed before push
@@ -443,7 +447,7 @@ The smaller `.github/workflows/ci.yml` workflow is not used as the merge decisio
 - Focused live-stream `/resume` refusal passed while waiting on the current stable `Generating` phase
 - Focused active-turn image steering passed while retaining its request-order, instruction-snapshot, image-byte, and stderr assertions
 - Focused greater-than-1-MiB cancelled-command artifact navigation passed with bounded PgDn batches and 60 retained assertions
-- Focused full-transcript brutal stress passed with 120 assertions after the command-completion refresh, four-key verified batches distinguished committed or clamped scroll frames from page-loading rejection, the test waited for the newly visible tmux pane, and both the newest tail and oldest entry remained reachable
+- Focused full-transcript brutal stress passed with 120 assertions after the command-completion refresh; four-key verified batches distinguished committed or clamped scroll frames from page-loading rejection, retried delayed trace observations that produced no new pane within 500 ms, and still proved both the newest tail and oldest entry are reachable
 - Focused height-shrink footer and provider length-truncation lifecycle cases passed through the stable post-resize and failed-tool states
 - Focused MCP authentication and logout lifecycle passed after restoring menu-completion collection in the composition root
 - Focused remote native compaction and Codex Vision failure cases passed with request-level and current structured-result assertions
