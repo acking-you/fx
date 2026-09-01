@@ -18,7 +18,7 @@ The merge boundary is:
 | Final merge-regression repair | `8a0e7c90` |
 | Review branch | `merge/upstream-2026-09-01` |
 
-Compared with the pre-merge BYOK tree, the review result changes 247 files with 28,932 insertions and 17,202 deletions. The large count comes primarily from upstream MCP, transcript, rendering, and E2E work. It does not represent a new vendor product route or a large new model-facing tool surface.
+Compared with the pre-merge BYOK tree, the review result changes 247 files with 28,939 insertions and 17,202 deletions. The large count comes primarily from upstream MCP, transcript, rendering, and E2E work. It does not represent a new vendor product route or a large new model-facing tool surface.
 
 ## Reconciliation policy
 
@@ -164,7 +164,7 @@ The final regression audit added four more repairs:
 - full-transcript page completion is polled for main and child conversations;
 - a terminal capability-search miss suppresses only the next step's duplicate search surface;
 - queued steering text and the fork's default same-turn admission contract are restored while upstream's conflicting explicit-submit surface is deleted;
-- file-index retry tests now verify the successfully indexed fixture filename instead of asserting the obsolete zero-file count.
+- file-index retry tests now verify the successfully indexed fixture filename instead of asserting the obsolete zero-file count. Their temporary roots are independent Git worktrees with the target file tracked, so production's authoritative Git discovery does not mistake a parent worktree's ignored `.zig-cache` for the fixture contract.
 
 The arm64 timeout regression was a loaded-runner gap in the test, not a production deadline change. Production still permits the documented 200 ms supervisor handoff fallback. The test effect now lands after that fallback window and proves the command remains bounded rather than depending on a 100 ms scheduling gap.
 
@@ -369,6 +369,8 @@ Run `33465449602` on `d4abc25a93d7172ae338744a0dcd0351ed6c790f` was also cancell
 
 Run `33466109301` on `068cc59e378c2ecc1ad76c907914ac80cd612f39` passed Windows native, Linux x86_64 native, and macOS arm64 native, then exposed one loaded-runner arm64 timeout assertion and deterministic E2E shard 2 failures. The E2E audit separated merge omissions from stale expectations: missing full-transcript polling, missing one-step capability projection, missing queued prompt preview, incomplete same-turn steering composition, stale Responses event fixtures, stale post-tool request detection, skill-order assumptions, and presentation-label drift. This run is repair evidence only; commit `8a0e7c90` and the document commit that follows it require a new exact-commit Full CI run.
 
+Run `33474328921` on `8b733899b349eb1d1562d668d1e54f2c15b742c2` passed Windows native and Linux x86_64 and arm64 E2E shard 2, then reproduced the same two file-index retry fixture failures in all three completed Linux and macOS arm64 native jobs. The loader reached `ready`, but the fixture lived beneath the parent worktree's ignored `.zig-cache`; authoritative Git discovery therefore correctly returned an empty generation. The tests now initialize their temporary roots as independent Git worktrees and track `retry.txt` or `queued.txt`, preserving the production discovery path while removing cache-location dependence. This run was cancelled after the shared cause and ext4 reproduction were proven; it is repair evidence, not the final gate.
+
 The smaller `.github/workflows/ci.yml` workflow is not used as the merge decision. Benchmark and binary-size workflows are retained because startup latency and unexplained binary growth are useful signals; neither replaces Full CI.
 
 ## Local verification completed before push
@@ -391,6 +393,7 @@ The smaller `.github/workflows/ci.yml` workflow is not used as the merge decisio
 - The four previously failing queued steering TUI scenarios passed together: post-cancel recovery, image-bearing steering, ordinary next-step steering, and paused FIFO queue review
 - The complete ReleaseSafe Zig suite passed on a WSL ext4 copy with CI-equivalent default `.zig-cache` and Zig on PATH. The initial `/mnt/d` run was discarded because DrvFS cannot represent the private mode and rename contracts tested by the suite
 - File-index allocation and queued-refresh recovery now assert that `retry.txt` and `queued.txt` are actually searchable after the successful retry
+- The two file-index retry regressions pass in an ext4 checkout with parent Git metadata and the default in-worktree `.zig-cache`, matching the directory condition that failed on Linux and macOS CI
 - Windows provider tests covering Codex CLI parsing, Grok Build parsing, setup secret redaction, OAuth fallback order, ChatGPT and Grok callback path/state validation, ephemeral ports, delayed callback bytes, and Windows AFD reset handling
 - TypeScript checking for every E2E file changed during reconciliation
 - Bun E2E: removed filesystem tools are absent and Unified Exec completes the flow

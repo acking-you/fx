@@ -2932,6 +2932,8 @@ test "initial allocation failure reports failure and a later load retries" {
     }
     const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
     defer alloc.free(root);
+    try runGitForFileIndexTest(alloc, root, &.{ "git", "init", "--quiet" });
+    try runGitForFileIndexTest(alloc, root, &.{ "git", "add", "retry.txt" });
 
     var index = FileIndex{};
     defer index.deinit(alloc);
@@ -3022,6 +3024,8 @@ test "failed generation starts one queued refresh after reap" {
     }
     const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
     defer alloc.free(root);
+    try runGitForFileIndexTest(alloc, root, &.{ "git", "init", "--quiet" });
+    try runGitForFileIndexTest(alloc, root, &.{ "git", "add", "queued.txt" });
 
     var index = FileIndex{};
     defer index.deinit(alloc);
