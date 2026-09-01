@@ -27,9 +27,11 @@ The merge boundary is:
 | Final stale-trace navigation retry | `355bd3b6` |
 | Final child full-detail restore observation | `821f3d79` |
 | Final reopened-tail observation | `d2eac99b` |
+| Stale reopened-tail diagnostic trace | `54f0e3b7` |
+| Final viewer-lifetime page invalidation | `542d43b3` |
 | Review branch | `merge/upstream-2026-09-01` |
 
-Compared with the pre-merge BYOK tree, the review result changes 248 files with 29,289 insertions and 17,309 deletions. The large count comes primarily from upstream MCP, transcript, rendering, and E2E work. It does not represent a new vendor product route or a large new model-facing tool surface.
+Compared with the pre-merge BYOK tree, the review result changes 248 files with 29,325 insertions and 17,309 deletions. The large count comes primarily from upstream MCP, transcript, rendering, and E2E work. It does not represent a new vendor product route or a large new model-facing tool surface.
 
 ## Reconciliation policy
 
@@ -81,6 +83,8 @@ Ctrl+O full transcript support now retains richer turn metadata, paginates large
 The composition root now polls both the main and active child full-transcript page workers and requests a modal frame when a page completes. The merge had retained the worker but dropped this completion polling, leaving Ctrl+O and render-lab stuck at `Preparing full detail…`.
 
 Live command pages still refresh in bounded revision strides while output is open, but atomic command completion now always publishes one final content revision. Without that terminal revision, a last partial stride could leave an installed page permanently pinned to an incomplete live-output snapshot even after the command and compact transcript were complete. The final refresh is owned by the existing recorded-command consolidation path and uses the ordinary queued render request; it adds no callback-side transcript mutation or second page policy.
+
+An installed page is now scoped to one full-detail viewer lifetime. Closing Ctrl+O cancels its active page request, resets navigation to the tail, and releases the installed page through the same reset owner. Reopening therefore takes a current structured snapshot instead of accepting a same-request page captured while live command output was still changing. This removes the stale cross-viewer cache without changing content revisions, adding a second invalidation policy, or disabling pagination inside one viewer session.
 
 Primary paths:
 
@@ -381,6 +385,7 @@ The session or connection-local projection hides `glob_files` and `grep_files` a
 | `355bd3b6` | Retry a navigation batch when a delayed trace event claims completion but tmux shows no new full-detail pane within the bounded observation window |
 | `821f3d79` | Wait for restored child transcript content as well as its full-detail footer before comparing the preserved reading range |
 | `d2eac99b` | Observe the asynchronously installed tail after reopening full detail instead of sending PageDown into the prior installed page |
+| `542d43b3` | Scope installed full-transcript pages to one viewer lifetime so reopening snapshots the current tail instead of reusing a stale live-command page |
 
 ## CI policy for this merge
 
@@ -431,6 +436,12 @@ Run `33505890390` on `4dd34c94424e619598c61e6f71d5de8a9a167e22` had 11 successfu
 
 Run `33507867783` on `251e4e0ad46ccf8f72e20a8c41222401b39333dc` passed 14 underlying jobs, including Windows native, both Linux native jobs, all eight Linux E2E shards, macOS arm64 shards 2 and 4, and macOS x86_64 shard 4 before macOS arm64 shard 3 failed the brutal transcript case twice. The bounded observer exhausted all 256 NPage retries in roughly 188–191 seconds because it was driving the previously installed page while the product's close-and-reopen contract was asynchronously replacing that page with the tail. Reopening full detail resets navigation to the tail, so the correct completion boundary is the new non-loading tail pane containing `LIVE_DONE`, not any number of PageDown events against the prior page. The test now waits directly for that tail contract and retains the complete bounded PageUp traversal proving the oldest entry remains reachable. The complete real tmux stress passes locally with 120 assertions in 39.6 seconds. Commit `d2eac99b` supersedes this run, so a new exact-commit Full CI run remains required.
 
+Run `33511041064` on `ed7061f55c2b392f32768e4d6c10480bd7645f5d` passed Windows native, both Linux native jobs, all eight Linux E2E shards, and 18 jobs overall. The brutal transcript case still failed twice on each macOS shard 3. Both architectures reopened a non-loading tail page that remained on mid-command live markers instead of showing the already visible and durably persisted `LIVE_DONE`. The run was cancelled after the stable cross-architecture failure proved that another observer-only retry would be inappropriate.
+
+Diagnostic run `33515082961` on `54f0e3b7f32fa438355fff90de8210943aa11b79` added failure-only cache traces without weakening an assertion. Both Linux shard 3 jobs passed. macOS x86_64 shard 3 failed twice and showed completed page builds rather than a stalled page worker: the final installed pages used revisions 529 and 534, closing reset navigation, and reopening immediately accepted the same installed tail request without scheduling a new snapshot. The page projections had been captured while the live command source was changing, so revision equality alone could not prove that a page remained current across viewer lifetimes. This evidence rejected the earlier page-worker cancellation hypothesis and placed the repair in the page lifecycle owner.
+
+The same diagnostic run had one isolated Windows native failure in `unified exec manager cleanup terminates a still-running process group`. The identical test passed on the preceding exact Windows run with the same production source, while the diagnostic commit changed only TypeScript failure reporting. It is recorded as runner evidence, not waived: the final exact-commit run must pass Windows native. The diagnostic workflow was cancelled after the macOS trace was captured and commit `542d43b3` superseded it.
+
 The smaller `.github/workflows/ci.yml` workflow is not used as the merge decision. Benchmark and binary-size workflows are retained because startup latency and unexplained binary growth are useful signals; neither replaces Full CI.
 
 ## Local verification completed before push
@@ -447,6 +458,7 @@ The smaller `.github/workflows/ci.yml` workflow is not used as the merge decisio
 - ReleaseSafe prompt-history regressions for slash-command recall suppression, plain-arrow ownership, draft restoration, and re-enabling slash completion after editing
 - ReleaseSafe focused regressions for one-step terminal capability suppression, default same-turn admission, queue-review exclusion, late FIFO fallback, and the bounded supervisor handoff deadline
 - ReleaseSafe focused regressions proving live full-transcript stride throttling and the mandatory terminal command-output revision
+- ReleaseSafe regression proving full-detail close resets the bounded page anchor and releases the installed page before reopen
 - ReleaseSafe build plus focused Zig filters for slash-completion ownership and the typed gateway system prompt after merging upstream through `766e70f0`
 - Complete `tui-slash-menu.test.ts`: 38 passed, including the zero-candidate transition, candidate restoration, Escape ownership, command arguments, and active-stream behavior
 - Complete `tui-render-stress.test.ts`: 1 passed, exercising unmatched slash input together with repeated resize and local transcript writes
@@ -455,7 +467,7 @@ The smaller `.github/workflows/ci.yml` workflow is not used as the merge decisio
 - Focused live-stream `/resume` refusal passed while waiting on the current stable `Generating` phase
 - Focused active-turn image steering passed while retaining its request-order, instruction-snapshot, image-byte, and stderr assertions
 - Focused greater-than-1-MiB cancelled-command artifact navigation passed with bounded PgDn batches and 60 retained assertions
-- Focused full-transcript brutal stress passed with 120 assertions after the command-completion refresh; reopening waited for the asynchronously installed non-loading tail containing `LIVE_DONE`, and four-key verified PageUp batches still distinguished committed or clamped frames from page-loading rejection while proving the oldest entry is reachable
+- Focused full-transcript brutal stress passed with 120 assertions in 41.7 seconds after viewer-lifetime page invalidation; reopening installed a current non-loading tail containing `LIVE_DONE`, and four-key verified PageUp batches still distinguished committed or clamped frames from page-loading rejection while proving the oldest entry is reachable
 - Focused persistent-child reading-position restoration passed with six assertions after waiting for the asynchronously restored full-detail content before comparing its exact visible range
 - Focused height-shrink footer and provider length-truncation lifecycle cases passed through the stable post-resize and failed-tool states
 - Focused MCP authentication and logout lifecycle passed after restoring menu-completion collection in the composition root
