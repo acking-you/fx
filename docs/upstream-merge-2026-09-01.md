@@ -370,6 +370,12 @@ Local checks for the final pruning tree:
   subcommand with empty stdout.
 - [x] The freshly built binary also completes `help`, `status --json`, and the
   isolated provider-neutral `setup --json` smoke path with clean stderr.
+- [x] On the current review tree, native Windows ReleaseSafe builds and the
+  focused credential-inventory plus native-profile presence tests pass. The
+  freshly built Windows binary repeats the clean `help`, `status --json`, and
+  isolated `setup --json` smoke paths; `fx mcp` remains non-executable.
+- [x] Both `core` and `term` WASM surfaces compile locally in ReleaseSmall with
+  the single-threaded credential-inventory path.
 - [ ] Exact-commit Full CI passes the Windows, Linux, and macOS native gates,
   every deterministic E2E shard, and the portable WASM builds.
 
