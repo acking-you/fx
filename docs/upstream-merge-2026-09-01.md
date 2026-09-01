@@ -21,9 +21,10 @@ The merge boundary is:
 | Final asynchronous completion-boundary repair | `36f0b037` |
 | Final committed transcript-navigation repair | `0bffb9db` |
 | Final committed scroll-attempt repair | `64c2f6e6` |
+| Final verified navigation batching | `6a29c074` |
 | Review branch | `merge/upstream-2026-09-01` |
 
-Compared with the pre-merge BYOK tree, the review result changes 248 files with 29,130 insertions and 17,262 deletions. The large count comes primarily from upstream MCP, transcript, rendering, and E2E work. It does not represent a new vendor product route or a large new model-facing tool surface.
+Compared with the pre-merge BYOK tree, the review result changes 248 files with 29,140 insertions and 17,262 deletions. The large count comes primarily from upstream MCP, transcript, rendering, and E2E work. It does not represent a new vendor product route or a large new model-facing tool surface.
 
 ## Reconciliation policy
 
@@ -367,6 +368,7 @@ The session or connection-local projection hides `glob_files` and `grep_files` a
 | `36f0b037` | Make full-transcript pagination, full-detail loading, resize, length-truncation lifecycle, and elapsed-time assertions observe their committed asynchronous states |
 | `0bffb9db` | Require each brutal full-transcript navigation step to commit a changed viewport offset before sending the next input |
 | `64c2f6e6` | Distinguish committed, clamped, and page-loading transcript scroll attempts; retry ignored inputs without consuming navigation progress |
+| `6a29c074` | Amortize tmux invocation cost with four-key navigation batches while retaining the committed-scroll verification boundary |
 
 ## CI policy for this merge
 
@@ -405,6 +407,8 @@ Run `33487617463` on `9e50d1e03691ea366188bac816b1e9258d61128e` passed Windows n
 
 Run `33489826458` on `2d3eee8fbf3a56c13689a77b058964dc53aadedf` passed all five native jobs, all eight Linux E2E shards, macOS x86_64 shards 1, 2, and 4, and macOS arm64 shard 1. Its macOS arm64 shard 3 trace showed a legitimate page-tail clamp: the scroll state advanced from 7,332 to 7,358 rows, while the rendered window remained at the current page's 7,332-row maximum. Requiring the visible offset itself to differ was therefore too strict. The final test state machine instead requires a non-ignored scroll event followed by its committed viewport frame, permits a clamped offset, and separately recognizes `page_loading` rejection so it can wait for the loading frame and resend without consuming progress. The full focused stress passes locally with 118 assertions in 71.5 seconds. The run was cancelled after commit `64c2f6e6` superseded the failed assertion.
 
+Run `33493575103` on `e3ab35bb25525b6f1a58b89404623e7367748127` passed the other 19 underlying jobs, including all native platforms, all Linux E2E shards, and every macOS shard except shard 3 on each architecture. The final state machine correctly rejected page-loading loss and accepted committed page-tail clamps, but one tmux process invocation per Page key remained too expensive: after 1,024 verified calls, macOS x86_64 reached live marker 460–467 in roughly 162–169 seconds and macOS arm64 reached marker 305–317 in roughly 148–152 seconds. Raising the limit would exceed the test's 240-second budget once reverse navigation is included. The test now sends four Page keys per tmux invocation, then requires the same non-ignored scroll event and committed frame before proceeding. This is far below the discarded 64-key burst, retains deterministic progress verification, and reduced the complete local stress from 71.5 to 39.3 seconds with all 118 assertions retained.
+
 The smaller `.github/workflows/ci.yml` workflow is not used as the merge decision. Benchmark and binary-size workflows are retained because startup latency and unexplained binary growth are useful signals; neither replaces Full CI.
 
 ## Local verification completed before push
@@ -428,7 +432,7 @@ The smaller `.github/workflows/ci.yml` workflow is not used as the merge decisio
 - Focused live-stream `/resume` refusal passed while waiting on the current stable `Generating` phase
 - Focused active-turn image steering passed while retaining its request-order, instruction-snapshot, image-byte, and stderr assertions
 - Focused greater-than-1-MiB cancelled-command artifact navigation passed with bounded PgDn batches and 60 retained assertions
-- Focused full-transcript brutal stress passed with 118 assertions after distinguishing committed or clamped scroll frames from page-loading rejection and explicitly proving both the newest tail and oldest entry are reachable
+- Focused full-transcript brutal stress passed with 118 assertions after four-key verified batches distinguished committed or clamped scroll frames from page-loading rejection and explicitly proved both the newest tail and oldest entry are reachable
 - Focused height-shrink footer and provider length-truncation lifecycle cases passed through the stable post-resize and failed-tool states
 - Focused MCP authentication and logout lifecycle passed after restoring menu-completion collection in the composition root
 - Focused remote native compaction and Codex Vision failure cases passed with request-level and current structured-result assertions
