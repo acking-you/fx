@@ -3331,7 +3331,7 @@ test "inline picker dismissal follows the active trigger kind" {
 
     runtime.inputResetState().clearCurrent(alloc);
     try runtime.insertionState().insertSlice(alloc, "/", .preserve);
-    try std.testing.expect(runtime.picker.dismissed_inline_picker == null);
+    try std.testing.expect(runtime.picker.inline_picker_suppression == null);
 }
 
 test "registered paste skill and image spans are atomic editor boundaries" {

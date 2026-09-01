@@ -17,6 +17,18 @@ pub const InlinePickerKind = enum {
     skill,
 };
 
+const InlinePickerSuppression = union(enum) {
+    dismissed_until_trigger_change: InlinePickerKind,
+    history_slash_recall_until_edit,
+
+    fn kind(self: InlinePickerSuppression) InlinePickerKind {
+        return switch (self) {
+            .dismissed_until_trigger_change => |suppressed_kind| suppressed_kind,
+            .history_slash_recall_until_edit => .slash,
+        };
+    }
+};
+
 pub const model_picker_fast_options = [_][]const u8{ "normal", "fast" };
 
 pub const ModelPickerQuery = struct {
@@ -55,7 +67,7 @@ pub const InlineSlashQuery = struct {
 pub const State = struct {
     slash_completion_index: usize = 0,
     slash_completion_window_start: usize = 0,
-    dismissed_inline_picker: ?InlinePickerKind = null,
+    inline_picker_suppression: ?InlinePickerSuppression = null,
     model_completion_index: usize = 0,
     model_completion_window_start: usize = 0,
     model_completion_anchor_current: bool = false,
@@ -77,22 +89,40 @@ pub const State = struct {
     pub fn resetInlinePickerEpisode(self: *State) void {
         self.slash_completion_index = 0;
         self.slash_completion_window_start = 0;
-        self.dismissed_inline_picker = null;
+        self.inline_picker_suppression = null;
+    }
+
+    pub fn resetInlinePickerForHistoryRecall(self: *State, editor: *const editor_state.State) void {
+        self.resetInlinePickerEpisode();
+        self.inline_picker_suppression = suppressionForHistoryRecall(
+            self.inlinePickerTriggerKind(editor),
+        );
     }
 
     pub fn dismissInlinePicker(self: *State, kind: InlinePickerKind) void {
-        self.dismissed_inline_picker = kind;
+        self.inline_picker_suppression = .{ .dismissed_until_trigger_change = kind };
     }
 
     pub fn isInlinePickerDismissed(self: *const State, kind: InlinePickerKind) bool {
-        return self.dismissed_inline_picker == kind;
+        const suppression = self.inline_picker_suppression orelse return false;
+        return switch (suppression) {
+            .dismissed_until_trigger_change => |dismissed| dismissed == kind,
+            .history_slash_recall_until_edit => false,
+        };
+    }
+
+    pub fn isInlinePickerSuppressed(self: *const State, kind: InlinePickerKind) bool {
+        const suppression = self.inline_picker_suppression orelse return false;
+        return suppression.kind() == kind;
     }
 
     pub fn reconcileInlinePickerAfterEdit(self: *State, editor: *const editor_state.State) void {
         self.slash_completion_index = 0;
         self.slash_completion_window_start = 0;
-        const dismissed = self.dismissed_inline_picker orelse return;
-        if (self.inlinePickerTriggerKind(editor) != dismissed) self.dismissed_inline_picker = null;
+        self.inline_picker_suppression = suppressionAfterEdit(
+            self.inline_picker_suppression,
+            self.inlinePickerTriggerKind(editor),
+        );
     }
 
     pub fn resetFilePickerIndex(self: *State) void {
@@ -101,22 +131,22 @@ pub const State = struct {
     }
 
     pub fn activeFilePickerQuery(self: *const State, editor: *const editor_state.State) ?FilePickerQuery {
-        if (self.isInlinePickerDismissed(.file)) return null;
+        if (self.isInlinePickerSuppressed(.file)) return null;
         return self.rawFilePickerQuery(editor);
     }
 
     pub fn activeModelPickerQuery(self: *const State, editor: *const editor_state.State) ?ModelPickerQuery {
-        if (self.isInlinePickerDismissed(.model)) return null;
+        if (self.isInlinePickerSuppressed(.model)) return null;
         return self.rawModelPickerQuery(editor);
     }
 
     pub fn activeInlineSkillQuery(self: *const State, editor: *const editor_state.State) ?InlineSkillQuery {
-        if (self.isInlinePickerDismissed(.skill)) return null;
+        if (self.isInlinePickerSuppressed(.skill)) return null;
         return findInlineSkillQuery(editor.input.items, editor.cursor);
     }
 
     pub fn activeInlineSlashQuery(self: *const State, editor: *const editor_state.State) ?InlineSlashQuery {
-        if (self.isInlinePickerDismissed(.slash)) return null;
+        if (self.isInlinePickerSuppressed(.slash)) return null;
         return findInlineSlashQuery(editor.input.items, editor.cursor);
     }
 
@@ -234,6 +264,25 @@ pub const State = struct {
         return self.model_picker_fast_index % model_picker_fast_options.len == 1;
     }
 };
+
+fn suppressionForHistoryRecall(trigger: ?InlinePickerKind) ?InlinePickerSuppression {
+    if (trigger != .slash) return null;
+    return .history_slash_recall_until_edit;
+}
+
+fn suppressionAfterEdit(
+    current: ?InlinePickerSuppression,
+    trigger: ?InlinePickerKind,
+) ?InlinePickerSuppression {
+    const suppression = current orelse return null;
+    return switch (suppression) {
+        .dismissed_until_trigger_change => |dismissed| if (trigger == dismissed)
+            suppression
+        else
+            null,
+        .history_slash_recall_until_edit => null,
+    };
+}
 
 pub fn isBareModelCommandAtCursor(editor: *const editor_state.State) bool {
     if (editor.cursor != editor.input.items.len) return false;

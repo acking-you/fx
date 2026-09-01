@@ -91,7 +91,7 @@ pub fn CompletionRuntime(comptime App: type) type {
         }
 
         fn slashCompletionQueryActive(app: *App) bool {
-            if (app.input_runtime.picker.isInlinePickerDismissed(.slash)) return false;
+            if (app.input_runtime.picker.isInlinePickerSuppressed(.slash)) return false;
             if (app.input_runtime.picker.inlinePickerTriggerKind(&app.input_runtime.edit_state) != .slash) return false;
             // Model query always owns this slot. Mid-turn bare `/model` does too
             // (list stays hidden); idle bare `/model` still surfaces slash rows.

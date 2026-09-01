@@ -8450,6 +8450,38 @@ test "app_input_runtime ctrl+p and ctrl+n navigate prompt history directly" {
     try std.testing.expectEqualStrings("draft", app.input_runtime.edit_state.input.items);
 }
 
+test "app_input_runtime plain arrows keep history ownership across recalled slash commands" {
+    const alloc = std.testing.allocator;
+    var app = try RoutingFakeApp.init(alloc);
+    defer app.deinit();
+    try app.input_runtime.composer_history.installTextEntries(alloc, &.{ "older", "/help" });
+
+    try input_completion_runtime.CompletionRuntime(RoutingFakeApp).navigatePromptHistory(&app, -1);
+    try std.testing.expectEqualStrings("/help", app.input_runtime.edit_state.input.items);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        input_completion_runtime.CompletionRuntime(RoutingFakeApp).visibleSlashCompletionCount(&app),
+    );
+
+    try feedRoutingBytes(&app, "\x1b[A");
+    try feedRoutingBytes(&app, "\x1b[A");
+    try std.testing.expectEqualStrings("older", app.input_runtime.edit_state.input.items);
+
+    try feedRoutingBytes(&app, "\x1b[B");
+    try std.testing.expectEqualStrings("/help", app.input_runtime.edit_state.input.items);
+    try feedRoutingBytes(&app, "\x7f");
+    try std.testing.expectEqualStrings("/hel", app.input_runtime.edit_state.input.items);
+    try std.testing.expect(
+        input_completion_runtime.CompletionRuntime(RoutingFakeApp).visibleSlashCompletionCount(&app) > 0,
+    );
+
+    app.input_runtime.inputResetState().clearCurrent(alloc);
+    try Runtime(RoutingFakeApp).handleByte(&app, '/', 4096, 100);
+    try std.testing.expect(
+        input_completion_runtime.CompletionRuntime(RoutingFakeApp).visibleSlashCompletionCount(&app) > 0,
+    );
+}
+
 test "app_input_runtime decoded history recall disarms pending Ctrl-C exit" {
     const alloc = std.testing.allocator;
     var app = try RoutingFakeApp.init(alloc);
