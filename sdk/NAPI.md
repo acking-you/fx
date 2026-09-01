@@ -121,13 +121,12 @@ These cases have dedicated tests. Any lifecycle change must preserve all four.
 The native core is intentionally more restricted than the native `fx` CLI. Its ACP server configuration sets:
 
 - `allow_native_tools = false`;
-- `allow_acp_mcp = false`;
 - the background process provider to unavailable;
 - the secret store to unavailable;
 - file listing and reading limits to zero;
 - command output limits to zero.
 
-As a result, the model receives no native tool advertisement, cannot launch commands, cannot read workspace files through fx tools, cannot start ACP-provided MCP servers, and cannot access the native secret store. `home` and `workspaceRoot` still provide identity and session context to shared ACP code, but they do not grant a tool capability by themselves.
+As a result, the model receives no native tool advertisement, cannot launch commands, cannot read workspace files through fx tools, and cannot access the native secret store. `home` and `workspaceRoot` still provide identity and session context to shared ACP code, but they do not grant a tool capability by themselves.
 
 This restriction is a security boundary. New tools or host effects must not be enabled merely because the code is running natively. Every new capability needs a typed boundary, permission analysis, explicit configuration, and native security coverage.
 
@@ -275,7 +274,7 @@ The lane covers:
 - malformed arguments, oversized values, fake handles, and use after close;
 - input backpressure and the process-wide runtime cap;
 - repeated failed construction without file descriptor leakage;
-- blocked ACP MCP servers and absent native tool advertisement;
+- absent native tool advertisement;
 - same-environment concurrency and Node worker isolation;
 - finalization of abandoned handles and active worker termination;
 - ACP initialization, sessions, streaming, cancellation, and graceful shutdown;
@@ -288,7 +287,7 @@ When changing the transport or lifecycle, run the individual failing test direct
 For changes to this surface, verify that:
 
 1. The addon remains a narrow ACP transport rather than a second agent implementation.
-2. Native tools, ACP MCP, background processes, and secret-store access remain disabled unless a separately reviewed capability is introduced.
+2. Native tools, background processes, and secret-store access remain disabled unless a separately reviewed capability is introduced.
 3. Gateway validation remains enforced in both JavaScript and native code.
 4. Every allocation and runtime slot has cleanup on partial failure.
 5. Handles remain type-tagged, wrapped, finalizable, and safe after explicit destruction.

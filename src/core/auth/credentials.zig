@@ -1,5 +1,7 @@
 const std = @import("std");
 const provider_oauth = @import("provider_oauth.zig");
+const chatgpt_session = @import("chatgpt_session.zig");
+const grok_session = @import("grok_session.zig");
 const debug_trace = @import("../shared/debug_trace.zig");
 const host = @import("../hosts/host.zig");
 const io_mod = @import("../shared/io.zig");
@@ -280,6 +282,20 @@ pub fn sourceExists(
         .openai_api_key => nonEmptyEnvValue("OPENAI_API_KEY") != null,
         .chatgpt_subscription => provider_oauth.sourceExists(.codex, alloc),
         .grok_subscription => provider_oauth.sourceExists(.grok, alloc),
+    };
+}
+
+pub fn sourcePresence(
+    _: host.SecretStore,
+    source: Source,
+) host.SecretStorePresence {
+    return switch (source) {
+        .openai_api_key => if (nonEmptyEnvValue("OPENAI_API_KEY") != null)
+            .present
+        else
+            .missing,
+        .chatgpt_subscription => chatgpt_session.presence(),
+        .grok_subscription => grok_session.presence(),
     };
 }
 

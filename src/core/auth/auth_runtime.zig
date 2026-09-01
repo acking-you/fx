@@ -157,6 +157,78 @@ pub const PickerStage = enum {
     switch_credential,
 };
 
+pub const InventoryRefreshAction = struct {
+    provider: model_provider.ProviderId,
+};
+
+pub const InventoryRefreshStart = enum {
+    started,
+    busy,
+    failed,
+};
+
+pub const InventoryRefreshResult = union(enum) {
+    ready: InventoryRefreshAction,
+    failed: InventoryRefreshAction,
+};
+
+const InventoryRefreshDeps = struct {
+    ctx: ?*anyopaque,
+    probe: SourceProbeFn,
+};
+
+const InventoryRefreshTask = struct {
+    alloc: Allocator,
+    thread: ?std.Thread = null,
+    done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    action: InventoryRefreshAction,
+    deps: InventoryRefreshDeps,
+    inventory: ?SourceSet = null,
+    failure: ?anyerror = null,
+
+    fn start(
+        alloc: Allocator,
+        action: InventoryRefreshAction,
+        deps: InventoryRefreshDeps,
+    ) !*InventoryRefreshTask {
+        const task = try alloc.create(InventoryRefreshTask);
+        task.* = .{
+            .alloc = alloc,
+            .action = action,
+            .deps = deps,
+        };
+        task.thread = std.Thread.spawn(.{}, workerMain, .{task}) catch |err| {
+            alloc.destroy(task);
+            return err;
+        };
+        return task;
+    }
+
+    fn workerMain(self: *InventoryRefreshTask) void {
+        var detected: SourceSet = .empty;
+        for (credential_source_order) |source| {
+            const present = self.deps.probe(
+                self.deps.ctx,
+                self.alloc,
+                source,
+            ) catch |err| {
+                self.failure = err;
+                self.done.store(true, .release);
+                return;
+            };
+            if (present) detected.insert(source);
+        }
+        self.inventory = detected;
+        self.done.store(true, .release);
+    }
+
+    fn deinit(self: *InventoryRefreshTask) void {
+        if (self.thread) |thread| thread.join();
+        const alloc = self.alloc;
+        alloc.destroy(self);
+    }
+};
+
 pub const Choice = union(enum) {
     provider: model_provider.ProviderId,
     source: credentials.Source,
@@ -488,6 +560,7 @@ pub const Runtime = struct {
     sign_in_returns_to_root: bool = false,
     sign_in_code_visible: bool = false,
     sign_in_code_input: std.ArrayList(u8) = .empty,
+    inventory_refresh_task: ?*InventoryRefreshTask = null,
 
     pub fn init(
         transport: oauth_transport.Provider,
@@ -500,6 +573,8 @@ pub const Runtime = struct {
     }
 
     pub fn deinit(self: *Self, alloc: Allocator) void {
+        if (self.inventory_refresh_task) |task| task.deinit();
+        self.inventory_refresh_task = null;
         self.sign_in_flow.deinit(alloc);
         self.clearSignInCodeInput(alloc, .runtime_deinit);
         if (self.selected_credential) |*credential| credential.deinit(alloc);
@@ -612,6 +687,54 @@ pub const Runtime = struct {
 
     pub fn refreshSourceInventory(self: *Self, alloc: Allocator) !void {
         try self.refreshSourceInventoryWithProbe(alloc, self, probeCredentialSource);
+    }
+
+    pub fn beginSourceInventoryRefresh(
+        self: *Self,
+        alloc: Allocator,
+        action: InventoryRefreshAction,
+    ) InventoryRefreshStart {
+        return self.beginSourceInventoryRefreshWithDeps(alloc, action, .{
+            .ctx = self,
+            .probe = probeCredentialPresence,
+        });
+    }
+
+    fn beginSourceInventoryRefreshWithDeps(
+        self: *Self,
+        alloc: Allocator,
+        action: InventoryRefreshAction,
+        deps: InventoryRefreshDeps,
+    ) InventoryRefreshStart {
+        if (self.inventory_refresh_task != null) return .busy;
+        self.inventory_refresh_task = InventoryRefreshTask.start(
+            alloc,
+            action,
+            deps,
+        ) catch return .failed;
+        return .started;
+    }
+
+    pub fn takeSourceInventoryRefresh(self: *Self) ?InventoryRefreshResult {
+        const task = self.inventory_refresh_task orelse return null;
+        if (!task.done.load(.acquire)) return null;
+        if (task.thread) |thread| {
+            thread.join();
+            task.thread = null;
+        }
+        self.inventory_refresh_task = null;
+        defer task.deinit();
+        if (task.failure != null or task.inventory == null) {
+            return .{ .failed = task.action };
+        }
+        var detected = task.inventory.?;
+        if (self.credentialSource()) |source| detected.insert(source);
+        self.source_inventory = detected;
+        return .{ .ready = task.action };
+    }
+
+    pub fn sourceInventoryRefreshActive(self: *const Self) bool {
+        return self.inventory_refresh_task != null;
     }
 
     pub fn refreshChatGptSourceInventory(self: *Self, alloc: Allocator) !void {
@@ -1121,6 +1244,15 @@ fn probeCredentialSource(raw_context: ?*anyopaque, alloc: Allocator, source: cre
     return credentials.sourceExists(alloc, self.secret_store, source);
 }
 
+fn probeCredentialPresence(raw_context: ?*anyopaque, _: Allocator, source: credentials.Source) !bool {
+    const self: *Runtime = @ptrCast(@alignCast(raw_context.?));
+    return switch (credentials.sourcePresence(self.secret_store, source)) {
+        .present => true,
+        .missing => false,
+        .unavailable => error.CredentialSourceUnavailable,
+    };
+}
+
 fn loadCredentialSource(_: ?*anyopaque, alloc: Allocator, source: credentials.Source) !?credentials.Credential {
     return credentials.loadSource(
         alloc,
@@ -1439,6 +1571,55 @@ test "auth runtime detects only credential sources that exist" {
     try std.testing.expect(inventory.contains(.openai_api_key));
     try std.testing.expect(inventory.contains(.chatgpt_subscription));
     try std.testing.expect(!inventory.contains(.grok_subscription));
+}
+
+test "auth inventory worker publishes only a completed refresh" {
+    const Probe = struct {
+        existing: SourceSet,
+
+        fn exists(ctx: ?*anyopaque, _: Allocator, source: credentials.Source) !bool {
+            const self: *@This() = @ptrCast(@alignCast(ctx.?));
+            return self.existing.contains(source);
+        }
+    };
+
+    const alloc = std.testing.allocator;
+    var runtime: Runtime = .{};
+    defer runtime.deinit(alloc);
+    var probe = Probe{
+        .existing = SourceSet.initMany(&.{ .openai_api_key, .grok_subscription }),
+    };
+    const action = InventoryRefreshAction{ .provider = .grok };
+
+    try std.testing.expectEqual(
+        InventoryRefreshStart.started,
+        runtime.beginSourceInventoryRefreshWithDeps(alloc, action, .{
+            .ctx = &probe,
+            .probe = Probe.exists,
+        }),
+    );
+    try std.testing.expectEqual(
+        InventoryRefreshStart.busy,
+        runtime.beginSourceInventoryRefreshWithDeps(alloc, action, .{
+            .ctx = &probe,
+            .probe = Probe.exists,
+        }),
+    );
+
+    var result: ?InventoryRefreshResult = null;
+    for (0..100_000) |_| {
+        result = runtime.takeSourceInventoryRefresh();
+        if (result != null) break;
+        std.Thread.yield() catch std.atomic.spinLoopHint();
+    }
+    const completed = result orelse return error.InventoryRefreshDidNotComplete;
+    switch (completed) {
+        .ready => |ready| try std.testing.expectEqual(model_provider.ProviderId.grok, ready.provider),
+        .failed => return error.UnexpectedInventoryRefreshFailure,
+    }
+    try std.testing.expect(runtime.source_inventory.contains(.openai_api_key));
+    try std.testing.expect(runtime.source_inventory.contains(.grok_subscription));
+    try std.testing.expect(!runtime.source_inventory.contains(.chatgpt_subscription));
 }
 
 test "auth runtime owns onboarding skip state" {

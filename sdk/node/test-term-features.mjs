@@ -97,7 +97,6 @@ await waitFor(() => grid().includes("Accounts") && grid().includes("Switch crede
 runtime.write("\x1b");
 await waitFor(() => !grid().includes("Switch credential"), "credential hub close");
 await command("/resume", "Session resume is owned by the embedding SDK");
-await command("/mcp list", "No MCP servers configured");
 await command("/skills list", "Skills are unavailable in this host");
 
 runtime.write("/model\r");

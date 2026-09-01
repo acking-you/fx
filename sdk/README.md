@@ -323,7 +323,6 @@ The WebAssembly runtime intentionally does not provide:
 
 - Native processes
 - OS sandboxing
-- Native MCP servers
 - Subagents or skills
 - Automatic upgrades
 - Clipboard integration

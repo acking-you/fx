@@ -1143,7 +1143,7 @@ function deferred<T>() {
 
 async function startCodeSession(client: AcpClient) {
   await client.request("initialize", { protocolVersion: 1 }, 1);
-  const created = await client.request("session/new", { mcpServers: [] }, 2) as any;
+  const created = await client.request("session/new", {}, 2) as any;
   await client.readLine(); // consume session/update notification
   await client.request("session/set_mode", { modeId: "code" }, 3);
   return created.result.sessionId as string;
@@ -1580,7 +1580,7 @@ describe("acp: model-independent", () => {
           2,
         ) as any;
         expect(configuredA.result.provider).toBe("gateway");
-        await client.request("session/new", { mcpServers: [] }, 3);
+        await client.request("session/new", {}, 3);
         await client.readLine();
         await client.request("session/set_mode", { modeId: "code" }, 4);
 
@@ -2173,7 +2173,7 @@ describe("acp: model-independent", () => {
           jsonrpc: "2.0",
           id: 11,
           method: "session/load",
-          params: { sessionId, mcpServers: [] },
+          params: { sessionId },
         });
         const loadMessages: any[] = [];
         let loadResponse: any = null;
@@ -2218,7 +2218,7 @@ describe("acp: model-independent", () => {
           jsonrpc: "2.0",
           id: 21,
           method: "session/load",
-          params: { sessionId, mcpServers: [] },
+          params: { sessionId },
         });
         const completedLoadMessages: any[] = [];
         let completedLoadResponse: any = null;
@@ -3737,7 +3737,7 @@ describe("acp: model-independent", () => {
           ) as any).result,
         ).toBeDefined();
         expect(
-          (await client.request("session/new", { mcpServers: [] }, 2) as any).result,
+          (await client.request("session/new", {}, 2) as any).result,
         ).toBeDefined();
         expect((await client.readLine() as any).method).toBe("session/update");
 
@@ -4019,7 +4019,7 @@ describe("acp: model-independent", () => {
 
         const loaded = await client.request(
           "session/load",
-          { sessionId: "workspace-b-session", mcpServers: [] },
+          { sessionId: "workspace-b-session" },
           4,
         ) as any;
         expect(loaded.error).toBeUndefined();
@@ -4232,7 +4232,7 @@ describe("acp: model-independent", () => {
         await owner.request("initialize", { protocolVersion: 1 }, 1);
         const ownerLoad = await owner.request(
           "session/load",
-          { sessionId, mcpServers: [] },
+          { sessionId },
           2,
         ) as any;
         expect(ownerLoad.error).toBeUndefined();
@@ -4244,7 +4244,7 @@ describe("acp: model-independent", () => {
         await client.request("initialize", { protocolVersion: 1 }, 3);
         const contendedLoad = await client.request(
           "session/load",
-          { sessionId, mcpServers: [] },
+          { sessionId },
           4,
         ) as any;
         expect(contendedLoad.error).toEqual({
@@ -4254,7 +4254,7 @@ describe("acp: model-independent", () => {
 
         const missingLoad = await client.request(
           "session/load",
-          { sessionId: "missing-session", mcpServers: [] },
+          { sessionId: "missing-session" },
           5,
         ) as any;
         expect(missingLoad.error).toEqual({
@@ -4267,7 +4267,7 @@ describe("acp: model-independent", () => {
 
         const releasedLoad = await client.request(
           "session/load",
-          { sessionId, mcpServers: [] },
+          { sessionId },
           6,
         ) as any;
         expect(releasedLoad.error).toBeUndefined();
@@ -4307,7 +4307,7 @@ describe("acp: model-independent", () => {
           jsonrpc: "2.0",
           id: 2,
           method: "session/new",
-          params: { mcpServers: [] },
+          params: {},
         });
         expect(await client.waitForExit()).toBe(86);
         expect(existsSync(join(home, ".fx"))).toBe(false);
@@ -4338,7 +4338,7 @@ describe("acp: model-independent", () => {
         (await client.request("session/list", {}, 2) as any).result,
       ).toEqual({ sessions: [] });
       expect(
-        (await client.request("session/new", { mcpServers: [] }, 3) as any).error,
+        (await client.request("session/new", {}, 3) as any).error,
       ).toEqual(expect.objectContaining({
         code: -32603,
         message: "Session store not available",
@@ -4398,7 +4398,7 @@ describe("acp: model-independent", () => {
           jsonrpc: "2.0",
           id: 2,
           method: "session/load",
-          params: { sessionId: "last", mcpServers: [] },
+          params: { sessionId: "last" },
         });
         let response: any = null;
         while (response === null) {
@@ -4434,7 +4434,7 @@ describe("acp: model-independent", () => {
           env: fakeGatewayEnv(root, gateway),
         });
         await client.request("initialize", { protocolVersion: 1 }, 1);
-        const newResponse = await client.request("session/new", { mcpServers: [] }, 2) as any;
+        const newResponse = await client.request("session/new", {}, 2) as any;
         await client.readLine();
         const sessionId = newResponse.result.sessionId;
         await client.request("session/set_mode", { modeId: "code" }, 3);
@@ -4451,7 +4451,7 @@ describe("acp: model-independent", () => {
           jsonrpc: "2.0",
           id: 5,
           method: "session/load",
-          params: { sessionId, mcpServers: [] },
+          params: { sessionId },
         });
 
         const loadMessages: any[] = [];
@@ -4517,7 +4517,7 @@ describe("acp: model-independent", () => {
             1,
           ) as any).result,
         ).toBeDefined();
-        const newResponse = await client.request("session/new", { mcpServers: [] }, 2) as any;
+        const newResponse = await client.request("session/new", {}, 2) as any;
         await client.readLine();
         const sessionId = newResponse.result.sessionId;
         await client.request("session/set_mode", { modeId: "code" }, 3);
@@ -4540,7 +4540,7 @@ describe("acp: model-independent", () => {
           jsonrpc: "2.0",
           id: 5,
           method: "session/load",
-          params: { sessionId, mcpServers: [] },
+          params: { sessionId },
         });
 
         const loadMessages: any[] = [];
@@ -5487,7 +5487,7 @@ describe("acp: model-independent", () => {
         await client.request("initialize", { protocolVersion: 1 }, 10);
         const denied = await client.request(
           "session/load",
-          { sessionId: control.id, mcpServers: [] },
+          { sessionId: control.id },
           11,
         ) as any;
         expect(denied.error).toEqual({
@@ -5501,7 +5501,7 @@ describe("acp: model-independent", () => {
           jsonrpc: "2.0",
           id: 12,
           method: "session/load",
-          params: { sessionId: parentId, mcpServers: [] },
+          params: { sessionId: parentId },
         });
         const parent = await readResponse(client, 12);
         expect(parent.error).toBeUndefined();
@@ -5542,7 +5542,7 @@ describe("acp: model-independent", () => {
         await client.request("initialize", { protocolVersion: 1 }, 20);
         const retired = await client.request(
           "session/load",
-          { sessionId: control.id, mcpServers: [] },
+          { sessionId: control.id },
           21,
         ) as any;
         expect(retired.error).toEqual({
@@ -6099,7 +6099,7 @@ describe("acp: model-independent", () => {
           },
         });
         await client.request("initialize", { protocolVersion: 1 }, 1);
-        await client.request("session/new", { mcpServers: [] }, 2);
+        await client.request("session/new", {}, 2);
         await client.readLine();
         await client.request("session/set_mode", { modeId: "code" }, 3);
         const changed = await client.request("session/set_config_option", {
@@ -6221,7 +6221,7 @@ describe("acp: model-independent", () => {
           },
         });
         await client.request("initialize", { protocolVersion: 1 }, 1);
-        await client.request("session/new", { mcpServers: [] }, 2);
+        await client.request("session/new", {}, 2);
         await client.readLine();
         await client.request("session/set_mode", { modeId: "code" }, 3);
         const changed = await client.request("session/set_config_option", {
@@ -6401,7 +6401,7 @@ describe("acp: model catalog credentials", () => {
           env: { ...fakeGatewayEnv(root, gateway), FX_MODEL: undefined },
         });
         await client.request("initialize", { protocolVersion: 1 }, 1);
-        const resp = await client.request("session/new", { mcpServers: [] }, 2) as any;
+        const resp = await client.request("session/new", {}, 2) as any;
         const modelOpt = resp.result.configOptions.find((o: any) => o.id === "model");
         expect(modelOpt).toBeDefined();
         expect(modelOpt.currentValue).toBe("provider/fast-override");
@@ -6433,7 +6433,7 @@ describe.skipIf(!HAS_API_KEY)("acp: model-backed protocol", () => {
     "method before initialize returns error -32600",
     async () => {
       client = await AcpClient.create();
-      const resp = await client.request("session/new", { mcpServers: [] }, 1) as any;
+      const resp = await client.request("session/new", {}, 1) as any;
       expect(resp.error).toBeDefined();
       expect(resp.error.code).toBe(-32600);
       expect(resp.error.message).toContain("Not initialized");
@@ -6477,7 +6477,7 @@ describe.skipIf(!HAS_API_KEY)("acp: model-backed protocol", () => {
           env: fakeGatewayEnv(root, gateway),
         });
         await client.request("initialize", { protocolVersion: 1 }, 1);
-        const resp = await client.request("session/new", { mcpServers: [] }, 2) as any;
+        const resp = await client.request("session/new", {}, 2) as any;
         expect(resp.result).toBeDefined();
         expect(typeof resp.result.sessionId).toBe("string");
         expect(resp.result.sessionId.length).toBeGreaterThan(0);
@@ -6552,7 +6552,7 @@ describe.skipIf(!HAS_API_KEY)("acp: model-backed protocol", () => {
           env: fakeGatewayEnv(root, gateway),
         });
         await client.request("initialize", { protocolVersion: 1 }, 1);
-        await client.request("session/new", { mcpServers: [] }, 2);
+        await client.request("session/new", {}, 2);
         await client.readLine(); // consume session/update notification
         const resp = await client.request("session/set_mode", { modeId: "code" }, 3) as any;
         expect(resp.result).toBeDefined();
@@ -6576,13 +6576,13 @@ describe.skipIf(!HAS_API_KEY)("acp: model-backed protocol", () => {
           env: fakeGatewayEnv(root, gateway),
         });
         await client.request("initialize", { protocolVersion: 1 }, 1);
-        const newResp = await client.request("session/new", { mcpServers: [] }, 2) as any;
+        const newResp = await client.request("session/new", {}, 2) as any;
         await client.readLine(); // consume session/update notification
         const sessionId = newResp.result.sessionId;
 
         const loadResp = await client.request(
           "session/load",
-          { sessionId, mcpServers: [] },
+          { sessionId },
           3,
         ) as any;
         expect(loadResp.result).toBeDefined();
@@ -6614,7 +6614,7 @@ describe.skipIf(!HAS_API_KEY)("acp: model-backed protocol", () => {
           env: fakeGatewayEnv(root, gateway),
         });
         await client.request("initialize", { protocolVersion: 1 }, 1);
-        await client.request("session/new", { mcpServers: [] }, 2);
+        await client.request("session/new", {}, 2);
         await client.readLine(); // consume session/update notification
 
         const resp = await client.request("session/set_config_option", {
@@ -6654,7 +6654,7 @@ describe.skipIf(!HAS_API_KEY)("acp: model-backed protocol", () => {
           },
         });
         await client.request("initialize", { protocolVersion: 1 }, 1);
-        await client.request("session/new", { mcpServers: [] }, 2);
+        await client.request("session/new", {}, 2);
         await client.readLine(); // consume session/update notification
 
         const changed = await client.request(
@@ -6709,7 +6709,7 @@ describe.skipIf(!HAS_API_KEY)("acp: model-backed protocol", () => {
         });
         const initialized = await client.request("initialize", { protocolVersion: 1 }, 1) as any;
         expect(initialized.result.agentCapabilities.promptCapabilities.image).toBe(true);
-        await client.request("session/new", { mcpServers: [] }, 2);
+        await client.request("session/new", {}, 2);
         await client.readLine();
         await client.request("session/set_mode", { modeId: "code" }, 3);
         const changed = await client.request("session/set_config_option", {
@@ -6761,7 +6761,7 @@ describe.skipIf(!HAS_API_KEY)("acp: model-backed protocol", () => {
           },
         });
         await client.request("initialize", { protocolVersion: 1 }, 1);
-        await client.request("session/new", { mcpServers: [] }, 2);
+        await client.request("session/new", {}, 2);
         await client.readLine();
 
         const changed = await client.request("session/set_config_option", {
@@ -6823,7 +6823,7 @@ describe.skipIf(!HAS_API_KEY)("acp: model-backed protocol", () => {
           env: fakeGatewayEnv(root, gateway),
         });
         await client.request("initialize", { protocolVersion: 1 }, 1);
-        await client.request("session/new", { mcpServers: [] }, 2);
+        await client.request("session/new", {}, 2);
         await client.readLine(); // consume session/update notification
 
         const promptId = 10;
@@ -6868,7 +6868,7 @@ describe.skipIf(!HAS_API_KEY)("acp: model-backed protocol", () => {
           env: fakeGatewayEnv(root, gateway),
         });
         await client.request("initialize", { protocolVersion: 1 }, 1);
-        await client.request("session/new", { mcpServers: [] }, 2);
+        await client.request("session/new", {}, 2);
         await client.readLine(); // consume session/update notification
 
         client.send({ jsonrpc: "2.0", method: "session/cancel", params: {} });
@@ -6902,7 +6902,7 @@ describe.skipIf(!HAS_API_KEY)("acp: model-backed protocol", () => {
           env: fakeGatewayEnv(root, gateway),
         });
         await client.request("initialize", { protocolVersion: 1 }, 1);
-        const resp = await client.request("session/new", { mcpServers: [] }, 2) as any;
+        const resp = await client.request("session/new", {}, 2) as any;
         const modelOpt = resp.result.configOptions.find((o: any) => o.id === "model");
         expect(modelOpt).toBeDefined();
         expect(modelOpt.options.length).toBeGreaterThan(1);
@@ -6926,7 +6926,7 @@ describe.skipIf(!HAS_API_KEY)("acp: model-backed protocol", () => {
           env: fakeGatewayEnv(root, gateway),
         });
         await client.request("initialize", { protocolVersion: 1 }, 1);
-        await client.request("session/new", { mcpServers: [] }, 2);
+        await client.request("session/new", {}, 2);
         await client.readLine(); // consume session/update notification
         await client.request("session/list", {}, 3);
         expect(client.stderr).toBe("");

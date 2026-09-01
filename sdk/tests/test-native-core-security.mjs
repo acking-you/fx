@@ -38,47 +38,4 @@ assert.throws(
 for (const handle of runtimeLimitProbe) addon.closeCore(handle);
 for (const handle of runtimeLimitProbe) addon.destroyCore(handle);
 
-const core = addon.createCore({ apiKey: "security-test-key", home: process.cwd(), workspaceRoot: process.cwd() });
-let nextId = 1;
-function send(method, params) {
-  const id = nextId++;
-  addon.writeCore(core, Buffer.from(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`));
-  const deadline = Date.now() + 5000;
-  const pause = new Int32Array(new SharedArrayBuffer(4));
-  let buffered = "";
-  while (Date.now() < deadline) {
-    const fetchBytes = addon.takeCoreFetch(core);
-    if (fetchBytes) {
-      const fetch = JSON.parse(fetchBytes.toString("utf8"));
-      assert.match(fetch.url, /\/v1\/models$/);
-      assert.equal(addon.startCoreFetchResponse(core, fetch.handle, 200), 1);
-      assert.equal(addon.pushCoreFetchResponse(core, fetch.handle, Buffer.from(JSON.stringify({
-        object: "list",
-        data: [{ id: "gpt-5.4", object: "model", created: 1, owned_by: "test" }],
-      }))), 1);
-      assert.equal(addon.finishCoreFetch(core, fetch.handle), 1);
-    }
-    buffered += addon.drainCore(core).toString("utf8");
-    const lines = buffered.split("\n");
-    buffered = lines.pop();
-    for (const line of lines) {
-      if (!line) continue;
-      const message = JSON.parse(line);
-      if (message.id === id) return message;
-    }
-    Atomics.wait(pause, 0, 0, 2);
-  }
-  throw new Error(`timed out waiting for ${method}`);
-}
-
-assert.ok(send("initialize", { protocolVersion: 1, clientCapabilities: {} }).result);
-const response = send("session/new", {
-  cwd: process.cwd(),
-  mcpServers: [{ name: "blocked", command: "/bin/sh", args: ["-c", "exit 0"], env: [] }],
-});
-assert.equal(response.error?.code, -32602);
-assert.match(response.error?.message ?? "", /MCP servers are unavailable/);
-
-addon.closeCore(core);
-addon.destroyCore(core);
-console.log("native core security passed: malformed creation is stable and ACP stdio MCP is blocked");
+console.log("native core security passed: malformed creation is stable and runtime limits are enforced");

@@ -101,7 +101,7 @@ async function createSession(cwd: string, home: string): Promise<string> {
   try {
     client.send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: 1 } });
     expect((await client.read()).result).toBeDefined();
-    client.send({ jsonrpc: "2.0", id: 2, method: "session/new", params: { mcpServers: [] } });
+    client.send({ jsonrpc: "2.0", id: 2, method: "session/new", params: {} });
     const response = await client.read();
     expect(response.result?.sessionId).toBeDefined();
     return response.result.sessionId;
@@ -141,7 +141,7 @@ describe("session recovery", () => {
           });
           first.send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: 1 } });
           expect((await first.read()).result).toBeDefined();
-          first.send({ jsonrpc: "2.0", id: 2, method: "session/new", params: { mcpServers: [] } });
+          first.send({ jsonrpc: "2.0", id: 2, method: "session/new", params: {} });
           await waitForPath(ready);
           first.kill();
           await Bun.sleep(100);
@@ -196,7 +196,7 @@ describe("session recovery", () => {
           });
           first.send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: 1 } });
           expect((await first.read()).result).toBeDefined();
-          first.send({ jsonrpc: "2.0", id: 2, method: "session/new", params: { mcpServers: [] } });
+          first.send({ jsonrpc: "2.0", id: 2, method: "session/new", params: {} });
           await waitForPath(ready);
           first.kill();
           await Bun.sleep(100);
@@ -212,7 +212,7 @@ describe("session recovery", () => {
           const resolver = startAcp(workspaceRoot, home);
           resolver.send({ jsonrpc: "2.0", id: 3, method: "initialize", params: { protocolVersion: 1 } });
           expect((await resolver.read()).result).toBeDefined();
-          resolver.send({ jsonrpc: "2.0", id: 4, method: "session/load", params: { sessionId, mcpServers: [] } });
+          resolver.send({ jsonrpc: "2.0", id: 4, method: "session/load", params: { sessionId } });
           expect((await resolver.read()).result).toBeDefined();
           resolver.kill();
 
@@ -283,7 +283,7 @@ describe("session recovery", () => {
         jsonrpc: "2.0",
         id: 11,
         method: "session/load",
-        params: { sessionId, mcpServers: [] },
+        params: { sessionId },
       });
       expect((await writer.read()).result).toBeDefined();
       writer.send({
@@ -477,7 +477,7 @@ describe("session recovery", () => {
         });
         first.send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: 1 } });
         expect((await first.read()).result).toBeDefined();
-        first.send({ jsonrpc: "2.0", id: 2, method: "session/new", params: { mcpServers: [] } });
+        first.send({ jsonrpc: "2.0", id: 2, method: "session/new", params: {} });
         await waitForPath(ready);
         first.kill();
         await Bun.sleep(100);
@@ -517,7 +517,7 @@ describe("session recovery", () => {
         });
         resolver.send({ jsonrpc: "2.0", id: 3, method: "initialize", params: { protocolVersion: 1 } });
         expect((await resolver.read()).result).toBeDefined();
-        resolver.send({ jsonrpc: "2.0", id: 4, method: "session/load", params: { sessionId, mcpServers: [] } });
+        resolver.send({ jsonrpc: "2.0", id: 4, method: "session/load", params: { sessionId } });
         const loadResponse = await resolver.read();
         resolver.kill();
         expect(readFileSync(resolverTrace, "utf8")).toContain(
@@ -581,7 +581,7 @@ describe("session recovery", () => {
           });
           writer.send({ jsonrpc: "2.0", id: 10, method: "initialize", params: { protocolVersion: 1 } });
           expect((await writer.read()).result).toBeDefined();
-          writer.send({ jsonrpc: "2.0", id: 11, method: "session/load", params: { sessionId, mcpServers: [] } });
+          writer.send({ jsonrpc: "2.0", id: 11, method: "session/load", params: { sessionId } });
           expect((await writer.read()).result).toBeDefined();
           writer.send({
             jsonrpc: "2.0",
@@ -611,7 +611,7 @@ describe("session recovery", () => {
           const resolver = startAcp(workspaceRoot, home);
           resolver.send({ jsonrpc: "2.0", id: 20, method: "initialize", params: { protocolVersion: 1 } });
           expect((await resolver.read()).result).toBeDefined();
-          resolver.send({ jsonrpc: "2.0", id: 21, method: "session/load", params: { sessionId, mcpServers: [] } });
+          resolver.send({ jsonrpc: "2.0", id: 21, method: "session/load", params: { sessionId } });
           const loaded = await resolver.read();
           expect(loaded.result).toBeDefined();
           const loadedModel = loaded.result.configOptions.find(

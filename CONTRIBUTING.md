@@ -77,7 +77,7 @@ If you cannot manage labels, a maintainer or repository agent will apply the lab
 
 * `src/main.zig`: composition root only
 
-* `src/core/`: contracts, runtimes, config, sessions, permissions, MCP, skills
+* `src/core/`: contracts, runtimes, config, sessions, permissions, skills
 
 * `src/tools/`: built-in tool implementations
 
@@ -143,6 +143,9 @@ Subagent children are ordinary sessions with their own `~/.fx/sessions/<child-id
 
 ## Skills
 
+Skills are the only extension mechanism supported by this fork. Do not add MCP
+configuration, transports, tools, menus, authentication, or protocol bridges.
+
 There are two distinct skill categories in `fx`:
 
 * `fx` roots that belong to the product itself: `.fx/skills`, `skills/`, `~/.fx/skills`
@@ -154,164 +157,6 @@ There are two distinct skill categories in `fx`:
 `/skills add` and `/skills install` install full skill directories into the profile-owned `~/.fx/skills` managed root, not just `SKILL.md`. Workspace `.fx/skills` and `skills/` remain discoverable project-local instructions, not managed install targets.
 
 The interactive agent can also install skills via the `install_skill` tool when the user asks to install one in conversation, including pasted `npx skills add ...` syntax.
-
-## MCP
-
-fx negotiates MCP `2026-07-28` over local stdio and stateless Streamable HTTP.
-Version-scoped adapters retain legacy stdio,
-`2025-11-25`/`2025-06-18`/`2025-03-26` Streamable HTTP, and deprecated
-`2024-11-05` HTTP+SSE. Native sessions load trusted MCP configuration from the
-profile:
-
-* `~/.fx/mcp.json`
-
-They also read Claude-compatible workspace configuration from:
-
-* `<workspace>/.mcp.json`
-
-Project `.fx.json` does not define runnable MCP commands, URLs, env, or secrets.
-The profile file reads top-level `mcp` and accepts `mcpServers` as a
-compatibility alias; `mcp` wins when both exist, and every write uses `mcp`.
-Suspicious server-like unsupported keys produce a bounded warning and block
-profile mutation instead of being overwritten. The workspace file reads only
-top-level `mcpServers`, accepts `command` plus `args`, and is opened as a
-bounded no-follow regular file. Profile entries win native name collisions;
-ACP request entries win ACP name collisions without deduplicating the request
-array. Workspace entries are always optional and never load stored credentials.
-Approved workspace `command`, `args`, `env`, and HTTP header values expand
-`${VAR}` and `${VAR:-default}` from the fx process environment. Pending and
-rejected entries do not read environment values. Missing required variables
-leave an approved server unloaded and appear in `/mcp list` without exposing
-values.
-
-Interactive sessions keep pending workspace servers disconnected and request
-project trust before any project-defined process or network effect. Pending
-resource, prompt, completion, and authentication commands require explicit
-`/mcp trust approve <name>` and a retry. Rejected servers remain disconnected.
-Choices live only in profile `settings.json` under the canonical workspace key,
-using `enabledMcpjsonServers`, `disabledMcpjsonServers`, and
-`enableAllProjectMcpServers`. Repository files cannot persist their own
-approval. `fx ask` and ACP skip pending workspace servers. Noninteractive users
-approve them first with `fx mcp trust approve <name>`; rejected servers remain
-disabled.
-
-The core feature surface is Tools, Resources and Resource Templates, Prompts,
-Completion, pagination, cache-aware discovery, subscriptions, progress,
-cancellation, and form or URL elicitation. Keep modern and legacy protocol
-behavior in their existing version-scoped modules.
-
-Tool schemas without `$schema` use JSON Schema 2020-12. fx also accepts the
-canonical 2020-12 declaration and the canonical Draft 7 declaration used by
-legacy SDKs, evaluates each with dialect-specific semantics, and rejects other
-dialects or references that would require network fetching before publication.
-
-The interactive surface supports:
-
-* `/mcp list`
-
-* `/mcp resource list <server>`
-
-* `/mcp resource templates <server>`
-
-* `/mcp resource read <server> <uri>`
-
-* `/mcp resource complete <server> <uri-template> <variable> [value]`
-
-* `/mcp prompt list <server>`
-
-* `/mcp prompt get <server> <name> [arguments-json]`
-
-* `/mcp prompt complete <server> <name> <argument> [value]`
-
-* `/mcp add <name> <command> [args...]`
-
-* `/mcp add --transport http <name> <url>`
-
-* `/mcp remove <name>`
-
-* `/mcp reload`
-
-* `/mcp auth <name> --open`
-
-* `/mcp logout <name>`
-
-* `/mcp trust approve <name>`
-
-* `/mcp trust reject <name>`
-
-* `/mcp trust approve-all`
-
-* `/mcp trust reset`
-
-* `/mcp path`
-
-The noninteractive MCP surface supports:
-
-* `fx mcp add <name> <command> [args...]`
-
-* `fx mcp add --transport http <name> <url>`
-
-* `fx mcp auth <name>`
-
-* `fx mcp list`
-
-* `fx mcp logout <name>`
-
-* `fx mcp path`
-
-* `fx mcp remove <name>`
-
-* `fx mcp trust approve <name>`
-
-* `fx mcp trust reject <name>`
-
-* `fx mcp trust approve-all`
-
-* `fx mcp trust reset`
-
-The local form saves a stdio command. The HTTP form saves a remote Streamable
-HTTP endpoint. List reads effective profile and workspace configuration plus
-stored authentication state without connecting servers. Path prints the profile
-configuration path. Remove uses the same locked canonical profile writer as
-add. Trust updates the canonical workspace entry in profile settings. Auth and
-logout run the existing remote credential lifecycle. None of these commands
-constructs the TUI or contacts the Gateway.
-
-The default MCP startup timeout is 30 seconds and remains overridable per
-server with `startup_timeout_ms`. Exact direct `docker run` stdio commands
-without `--cidfile` receive a private cidfile so fx can remove the container
-after shutdown or startup failure. An explicit cidfile remains user-owned.
-
-MongoDB Atlas Managed MCP configuration service accounts use the OAuth
-client-credentials grant. fx does not implement that grant directly. Use
-MongoDB's `mongodb-atlas-mcp-remote` stdio wrapper with inherited
-`MDB_MCP_API_CLIENT_ID` and `MDB_MCP_API_CLIENT_SECRET` environment variables.
-The Atlas App Connection browser flow is user-delegated access and must not be
-treated as equivalent to configuration service-account credentials.
-
-Remote authentication supports configured bearer tokens and OAuth credential
-discovery, persistence, refresh, scope challenges, and logout. Credential and
-private-cache identity changes invalidate prior private state. macOS persists
-OAuth credentials in Keychain and migrates the private profile credential file
-only after verified publication. If the user account has no default Keychain,
-macOS falls back to the same `0600` credential file used on other platforms
-under the `0700` profile directory. `FX_DISABLE_KEYCHAIN=1` selects that portable
-backend explicitly for deterministic tests and local troubleshooting.
-
-Servers are optional by default. Required startup failures block the first TUI
-or `fx ask` model request; optional failures publish a reduced, degraded
-capability set. Terminal `fx ask` completes admitted MCP discovery before its
-first model request. JSON and other headless asks start required servers first
-and defer optional servers until the turn performs an MCP operation or delegates
-MCP capability to a child. `/mcp list` renders a bounded, secret-free health
-snapshot.
-`/mcp reload` evaluates a replacement before publication, so invalid config or
-a required-server failure leaves the prior runtime callable.
-
-ACP-provided servers are isolated to their owning ACP session. One-off and
-persistent subagents receive an immutable, permission-filtered view of the
-parent or ACP session's admitted MCP tools, resources, prompts, and completion
-capability. Missing, revoked, stale, or closed authority fails before transport.
 
 ## Permissions and Auto Mode
 

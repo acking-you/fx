@@ -9,10 +9,11 @@ not been merged into `byok`.
 | Boundary | Commit |
 | --- | --- |
 | BYOK first parent before this merge series | `fe2ec9e05250ccc789d6a3d939fcd0b72cd6157c` |
-| Latest upstream main included | `5fabddd7` |
-| Merge commit for that upstream head | `821634d5` |
+| Earlier upstream merge checkpoint | `5fabddd7` via `821634d5` |
+| Latest upstream main included | `d424f1a8` |
 | Tree before the final product pruning | `ccf8680a` |
-| Final pruning and audit | This review change |
+| MCP pruning checkpoint | `32a8e6f6` |
+| Final upstream merge and audit | This review merge commit |
 
 The final product decision is explicit: this fork does not support MCP. Skills
 are the extension mechanism. No MCP configuration, transport, authentication,
@@ -63,6 +64,19 @@ Owners:
 - `src/ui/transcript/full_transcript_worker.zig`
 - `src/ui/full_transcript_screen.zig`
 
+The latest upstream terminal-performance series is retained where it improves
+bounded preparation, viewport stability, installed-page ownership, focused
+polling, and large transcript snapshots. Closing the full transcript may keep a
+safe prepared page cached, so the stale test assertion that required the cache
+to become null was removed. Tail anchoring and viewer invalidation remain the
+product contracts.
+
+The reconciliation also fixed a real presentation regression exposed by those
+lower incidental repaint rates: a completed turn summary was appended only to
+the structured store and could remain invisible indefinitely. Turn-summary
+insertion now updates the transcript cache, cursor, retention state, and repaint
+request through the same full transcript append boundary.
+
 ### Provider-neutral help and authentication
 
 The consolidated help aliases, compact command summaries, generic setup import,
@@ -73,6 +87,11 @@ hosted product links remain removed.
 The Windows OAuth callback repair remains part of the provider-neutral Codex and
 Grok login path. Setup still detects stored Codex first and Grok second, and the
 automatic fallback remains independent of the removed extension stack.
+
+The latest asynchronous credential-inventory worker is retained only for the
+three supported sources: a direct Responses API key, Codex OAuth, and Grok
+OAuth. It probes stored-session presence off the TUI thread without restoring
+the upstream Vercel account, team, Keychain, or fx-login product flow.
 
 ### Provider usage dashboard
 
@@ -97,6 +116,19 @@ and editing can repopulate candidates without reopening a second picker owner.
 Dollar-trigger skill completion works after ordinary composer text. Selected
 skills use the compact name-only display while their instructions continue to
 load only through the typed skill invocation boundary.
+
+Upstream's canonical-home skill refresh and overlap-safe catalog generations
+are retained. Its refresh regression used a fixed count of tight thread yields,
+which could finish before the worker was scheduled and then report the prior
+completion value. The test now clears each phase result and waits with a bounded
+one-millisecond polling interval. This preserves meaningful hot-refresh and
+coalescing coverage instead of deleting it as a flaky test.
+
+### Short session identifiers
+
+New session IDs use the shorter upstream form while existing IDs and resume
+lookups remain readable. This reduces routine CLI and TUI identifier noise
+without changing session ownership or recovery semantics.
 
 ### ACP tool-call metadata
 
@@ -150,10 +182,12 @@ review tree:
 | --- | --- |
 | `docs/upstream-merge-2026-09-01.md` | Final merge additions, deletions, decisions, and verification record |
 | `src/core/app/usage_dashboard_runtime.zig` | Asynchronous provider usage runtime |
+| `src/core/auth/session_presence.zig` | Provider-neutral stored-session presence probe for Codex and Grok |
 | `src/core/output/full_transcript_metadata.zig` | Full transcript metadata contract |
 | `src/core/output/full_transcript_page.zig` | Paged full transcript output contract |
 | `src/core/tooling/capability_retrieval.zig` | Skill capability retrieval owner |
 | `src/ui/transcript/full_transcript_worker.zig` | Off-UI-thread transcript page loading |
+| `tests/e2e/tui-performance.test.ts` | Terminal performance lifecycle benchmark and regression owner, without removed extension actions |
 | `tests/evals/vision-capability-routing.test.ts` | Live vision route evaluation owner |
 
 ## Deletions
@@ -175,9 +209,11 @@ Production removal:
 - `src/core/tooling/tool_mcp_dispatch.zig`,
   `tool_mcp_feature_dispatch.zig`, `tool_mcp_registry.zig`, and
   `tool_mcp_runtime.zig`;
-- `src/core/hosts/native_keychain.zig`, whose only remaining owner was removed
-  server authentication. Codex and Grok credentials continue through the
-  provider-neutral OAuth and credential-store owners;
+- `src/core/auth/oauth_session.zig`, `src/core/hosts/native_keychain.zig`, and
+  `src/core/hosts/native_secret_store.zig`, whose latest upstream owners were
+  the removed Vercel/fx login flow or removed extension authentication. Codex
+  and Grok continue through `provider_oauth.zig`, their provider session
+  owners, and the provider-neutral stored-session probe;
 - build registrations, composition-root imports, NAPI and WASM adapters, ACP
   initialization capabilities, provider host fields, and background menu
   polling for the removed runtime;
@@ -200,6 +236,8 @@ Test and release removal:
   removed dynamic-tool schema validator;
 - pure MCP blocks embedded in CLI, ACP, gateway, startup, slash-menu, and TUI
   lifecycle suites;
+- obsolete `mcpServers` placeholders in unrelated ACP and recovery requests,
+  plus SDK tests and documentation that described a disabled extension bridge;
 - stale E2E shard weights, PGSO training scenarios, corpus expectations, and
   Keychain exceptions that belonged only to those deleted files.
 
@@ -214,6 +252,12 @@ but returned no usage. That number cannot be proven. Retry behavior remains
 covered by the Gateway suite, and the adjacent TUI route-recovery test still
 requires the visible retry state, final response, normal summary, two requests,
 and clean stderr.
+
+One upstream transcript test assertion was also deleted after tracing its live
+owner. It required the installed full-transcript page cache to be null after
+closing the viewer, but the new bounded paging design intentionally retains a
+safe prepared page. The test still requires the real contract: returning to the
+tail anchor without reviving stale viewer state.
 
 README and repository instructions now state that skills are the extension
 mechanism and that legacy MCP profile files are ignored.
@@ -289,8 +333,9 @@ Local checks for the final pruning tree:
 - [x] `zig fmt --check src/` and `git diff --check` pass.
 - [x] ReleaseSafe native build passes and writes the current binary to
   `./zig-out/bin/fx`.
-- [x] Complete ReleaseSafe Zig tests pass from a native ext4 checkout: 7,727
-  executed tests passed and 24 were skipped by their declared guards.
+- [ ] Complete ReleaseSafe Zig tests pass from a native ext4 checkout for the
+  final `d424f1a8` reconciliation tree. The earlier pruning checkpoint passed
+  7,727 tests with 24 declared skips; the final rerun is pending below.
 - [x] Focused and complete Bun owners pass: CLI 77/77, ACP 95/95, Gateway
   48/48, TUI Gateway lifecycle 62/62, slash/skills/startup 56/56, shard planning
   8/8, and PGSO corpus validation 32/32.

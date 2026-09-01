@@ -9,6 +9,7 @@
 ### Breaking Changes
 
 - **Vercel product surface**: The BYOK distribution no longer includes Vercel setup, account onboarding, login, gateway defaults, hosted upgrade channels, CDN backfill, or development-release flows. Generic provider contracts remain where they serve direct API-key, Codex, Grok, ACP, or SDK use.
+- **Extension surface**: MCP support has been removed completely. Skills are the only supported extension mechanism.
 - **Terminal presentation**: `/appearance`, `/input`, and `/maxxing` have been removed along with their saved settings. fx now uses the same input and transcript layout everywhere.
 - **Model execution tools**: The old model-facing `terminal` action is removed. Use `exec_command` for shell commands and `write_stdin` to poll or provide input to a long-running session.
 
@@ -23,7 +24,6 @@
 - **ACP provider control:** Native ACP clients can start and monitor Codex or Grok login, switch providers, and configure a connection-scoped Responses base URL and API key without restarting fx.
 - **ACP image prompts:** Native ACP sessions accept standard base64 image blocks for vision-capable models and persist the verified bounded snapshot with the session.
 
-- **Remote MCP servers**: `/mcp add --transport http <name> <url>` now saves or replaces a remote Streamable HTTP server and reloads MCP immediately. The existing local stdio form is unchanged.
 - **Retained command output**: Captured command output can now be read later with `read_tool_result`, including after a saved session resumes. With `--no-save`, output remains available until fx exits.
 
 ### Improvements
@@ -41,8 +41,6 @@
 - **Responsive provider switching**: Provider credential refresh and catalog loading no longer block TUI input or ACP control messages. `/provider` is now the direct interactive provider command, while `/login` remains focused on authentication.
 - **Subscription session longevity**: Codex and Grok sessions remain usable beyond 64 consecutive requests.
 - **Usage tracking**: Rejected completions no longer appear in usage tracking, and duplicate completion callbacks are recorded once.
-- **MCP discovery**: MCP searches still find the selected tool when a request includes surrounding context, and another server's authentication failure no longer replaces an empty search result.
-- **MCP authentication**: MCP authentication stays responsive while configuration reloads or logout is in progress, and pending authentication stops when MCP reloads or fx exits.
 - **Linked skill errors**: Linked skill errors now distinguish an unavailable linked directory from an unreadable `SKILL.md` and explain whether to repair, remove, or authorize the link.
 - **Live permission modes**: `Shift+Tab` permission-mode changes now apply to later tool calls in the current turn. Actions already in progress keep the mode under which they were admitted.
 - **Tool action summaries**: Denied and deferred tool rows now show the actual command or target, and those details and denial labels survive session resume.
@@ -61,15 +59,12 @@
 - **Escaped command descendants:** Captured commands and subagent-owned processes track and reap descendants that escape the original process group, including shutdown and cancellation paths.
 - **Terminal recovery**: fx recovery no longer pauses commands already running in tmux.
 - **Terminal cancellation**: Terminal cancellation no longer reports failure when the command exits during cancellation.
-- **MCP resource compatibility**: MCP resources and prompts no longer fail on servers that require their configured name.
-- **MCP credential recovery**: MCP credentials with no advertised scopes remain usable after restart. Malformed stored entries no longer prevent valid servers from loading and are removed on the next successful credential write.
-- **MCP stdio environments**: Configured MCP stdio environment variables now override inherited values without discarding the rest of the child environment.
 - **Captured command failures**: Captured command output remains readable after timeout or cancellation. Output-capture failures now fail the tool call instead of returning an incomplete result.
 - **Resumed review labels**: The `Safety caution` and `Review unavailable` labels now survive session resume.
 
 ### Fork and Release Maintenance
 
-- **Smaller supported surface:** Removed Vercel-only runtime, setup, account, updater, telemetry, gateway protocol, credential storage, SDK login, release-channel, and obsolete test/eval code that conflicted with the BYOK product direction. Generic Responses, provider, MCP, ACP, image, SDK, and permission boundaries remain supported.
+- **Smaller supported surface:** Removed Vercel-only runtime, setup, account, updater, telemetry, gateway protocol, credential storage, SDK login, release-channel, MCP, and obsolete test/eval code that conflicted with the BYOK product direction. Generic Responses, provider, ACP, image, SDK, and permission boundaries remain supported.
 - **Focused regression ownership:** Kept deterministic coverage for real crashes, recovery, resource limits, security boundaries, provider routing, streaming, TUI rendering, ACP, and process lifecycle while removing brittle layout counts, duplicate scenarios, and tests owned only by removed features.
 - **Release workflow:** Full CI runs once on the exact feature commit and is not repeated after the squash merge. Stable releases only compile, sign, checksum, and package the four native ReleaseSafe binaries; PGSO qualification remains an independently dispatchable size-optimization workflow rather than a release blocker.
 - **Download integrity:** Stable releases provide stripped ReleaseSafe archives for Linux and macOS on x86_64 and arm64, with a SHA-256 file beside every downloadable package. macOS binaries use Developer ID signing and notarization when Apple credentials are configured; fork releases without those credentials use a verified ad-hoc signature and state that notarization was skipped.
@@ -83,7 +78,6 @@
 - **Provider recovery authority**: After restart, fx continues unfinished Codex or Grok work only for the account that started it. If that account cannot be verified, fx preserves completed work and sends nothing.
 - **Sensitive command output**: Command output flagged as sensitive is not saved with the session, including secrets split across output chunks or oversized lines.
 - **OAuth callback validation**: OAuth authorization denials and successes apply only when the callback state matches the active sign-in attempt, and Grok browser callbacks accept only the expected xAI origin.
-- **MCP issuer validation**: MCP sign-in stops before exchanging a token or saving credentials when the authorization response comes from a different issuer than the server advertised.
 
 ## 0.0.5
 
@@ -113,7 +107,6 @@
 - **One-off subagents:** Keep active one-off subagents visible, deliver one final result, and retire them after completion while leaving persistent subagents reusable
 - **Startup preferences:** Show saved reasoning effort and Fast mode immediately while model capabilities load
 - **Dev build identity:** Add the commit and `[dev]` marker to dev-channel welcome headers without changing stable release headers
-- **MCP reload feedback:** Replace internal health details with concise server availability and recovery guidance
 - **Help layout:** Keep command descriptions close to command names on wide terminals
 - **Native binary size:** Reduce the macOS arm64 release footprint while preserving existing behavior
 - **Stable upgrades:** Restore forward-only version ordering across manual, automatic, and Ctrl+G upgrades
@@ -137,8 +130,6 @@
 
 - **Command approval patterns:** Restrict wildcard command allows to static shell words and keep destructive shell commands and file deletion outside automatic review
 - **macOS login storage:** Store native `fx login` sessions in Keychain with verified migration, refresh, restart, and logout behavior
-- **MCP configuration writes:** Save `~/.fx/mcp.json` atomically with private permissions, reject linked targets, and preserve the previous configuration when a write fails
-- **MCP session retirement:** Keep retired HTTP session IDs alive until in-flight requests drain
 - **Provider response limits:** Reject oversized Codex and Grok catalogs, streams, tool data, and replay state while keeping later input usable
 - **ACP permission validation:** Validate permission input before writing JSON-RPC frames
 
@@ -191,14 +182,11 @@
 
 - **Unified terminal execution:** Run captured foreground commands and durable interactive sessions through the `terminal` tool, with the user's shell profile loaded by default and `clean` as an explicit opt-out
 - **Saved session permissions:** Store exact allow or deny rules with `/permissions remember`, list them by stable ID, and remove them with `/permissions revoke`
-- **MCP server awareness:** Show the agent the configured server aliases, availability, and visible tool counts so it can find and use MCP capabilities
 
 ### Improvements
 
 - **Auto mode recovery:** Let the agent revise its plan after denied, timed-out, or invalid reviews and return a tools-disabled response after repeated blocks instead of stalling for approval
 - **Trusted auto mode actions:** Allow bounded reads, hardened read-only Git commands, and prepared workspace edits to proceed without extra review while keeping ambiguous or sensitive actions gated
-- **MCP connection reliability:** Connect to legacy stdio servers, cancel stalled reloads, and report the required `oauth.issuer` override when issuers do not match
-- **MCP failure handling:** Show concise server errors and stop a third matching failed call before it runs
 - **Terminal action recovery:** Reject invalid terminal fields before running anything and return one complete correction without repeating the same repair loop
 - **Fast mode defaults:** Start new sessions with `zai/glm-5.2` without enabling Fast mode while preserving explicit preferences and `/fast`
 

@@ -186,6 +186,10 @@ fn entryRetainedBytes(entry: TranscriptEntry) usize {
     };
 }
 
+pub fn entrySnapshotRetainedBytes(entry: TranscriptEntry) usize {
+    return @sizeOf(TranscriptEntry) +| entryRetainedBytes(entry);
+}
+
 fn dupeSkillTokenSpans(alloc: Allocator, skill_tokens: []const SkillTokenSpan) ![]SkillTokenSpan {
     if (skill_tokens.len == 0) return &.{};
     const copy = try alloc.alloc(SkillTokenSpan, skill_tokens.len);
@@ -2328,6 +2332,22 @@ pub fn appendRawTranscriptEntryClassified(
     text: []const u8,
     class: RawEntryClass,
 ) !u32 {
+    return appendRawTranscriptEntryClassifiedAt(
+        self,
+        alloc,
+        text,
+        class,
+        io_mod.milliTimestamp(),
+    );
+}
+
+pub fn appendRawTranscriptEntryClassifiedAt(
+    self: anytype,
+    alloc: Allocator,
+    text: []const u8,
+    class: RawEntryClass,
+    created_at_ms: i64,
+) !u32 {
     std.debug.assert(text.len > 0);
 
     const dup = try alloc.dupe(u8, text);
@@ -2336,7 +2356,7 @@ pub fn appendRawTranscriptEntryClassified(
 
     const entry_id = self.next_entry_id;
     self.next_entry_id +%= 1;
-    try self.entries.append(alloc, .{ .raw_bytes = .{ .id = entry_id, .created_at_ms = io_mod.milliTimestamp(), .bytes = dup, .class = class } });
+    try self.entries.append(alloc, .{ .raw_bytes = .{ .id = entry_id, .created_at_ms = created_at_ms, .bytes = dup, .class = class } });
     entry_owns_dup = true;
     var rollback_entry = true;
     errdefer if (rollback_entry) {
