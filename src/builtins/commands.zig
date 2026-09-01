@@ -300,13 +300,15 @@ pub const top_level_help_groups = [_]TopLevelHelpGroup{
         .{ .kind = .login, .usage = "login <codex|grok>" },
         .{ .kind = .logout, .usage = "logout <codex|grok>" },
         .{ .kind = .provider, .usage = "provider <gateway|codex|grok>" },
+        .{ .kind = .models, .usage = "models" },
+    } },
+    .{ .entries = &.{
         .{ .kind = .usage, .usage = "usage [--period <24h|7d|30d>|--codex]" },
     } },
     .{ .entries = &.{
         .{ .kind = .status, .usage = "status" },
         .{ .kind = .doctor, .usage = "doctor" },
         .{ .kind = .mcp, .usage = "mcp <command> ..." },
-        .{ .kind = .models, .usage = "models" },
         .{ .kind = .permissions, .usage = "permissions" },
         .{ .kind = .workspace, .usage = "workspace" },
         .{ .kind = .acp, .usage = "acp" },
@@ -353,7 +355,7 @@ pub const top_level_flags = [_]TopLevelFlag{
     },
     .{
         .usage = "-v, --version",
-        .description = "Print the 𝒇x version and exit",
+        .description = "Print the fx version and exit",
     },
 };
 
@@ -365,7 +367,7 @@ pub const top_level_examples = [_]TopLevelExample{
 };
 
 pub const top_level_notes = [_][]const u8{
-    "Run `fx <command> --help` for command-specific options and examples.",
+    "Run `fx <command> --help` for command-specific usage and options.",
     "Run `/help` inside an interactive session for slash commands.",
 };
 
@@ -376,7 +378,7 @@ pub const top_level_resources = [_]TopLevelResource{
 pub const top_level_registry = TopLevelRegistry{
     .specs = top_level_specs[0..],
     .description = "Fast, native coding agent for the terminal.",
-    .interactive_hint = "𝒇x starts an interactive session by default. Use `fx ask` to run one noninteractive request.",
+    .interactive_hint = "fx starts an interactive session by default. Use `fx ask` to run one noninteractive request.",
     .help_groups = top_level_help_groups[0..],
     .flags = top_level_flags[0..],
     .examples = top_level_examples[0..],

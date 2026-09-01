@@ -1577,12 +1577,21 @@ test "rendered top-level help is a complete CLI navigation page" {
     defer std.testing.allocator.free(text);
 
     try std.testing.expect(std.mem.startsWith(u8, text, "𝒇x v9.8.7\nFast, native coding agent for the terminal."));
-    try std.testing.expect(std.mem.find(u8, text, "𝒇x starts an interactive session by default.") != null);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, "𝒇x"));
+    try std.testing.expect(std.mem.find(u8, text, "fx starts an interactive session by default.") != null);
     try std.testing.expect(std.mem.find(u8, text, "fx <command> [...flags] [...args]") != null);
     try std.testing.expect(std.mem.find(u8, text, "Commands:") != null);
     try std.testing.expect(std.mem.find(u8, text, "ask <prompt>") != null);
     try std.testing.expect(std.mem.find(u8, text, "Run one noninteractive request") != null);
     try std.testing.expect(std.mem.find(u8, text, "Draft or publish a GitHub issue") != null);
+    try std.testing.expect(std.mem.find(u8, text, "setup [--json]") != null);
+    try std.testing.expect(std.mem.find(u8, text, "Import reusable third-party provider logins") != null);
+    try std.testing.expect(std.mem.find(u8, text, "Sign in to Codex or Grok") != null);
+    try std.testing.expect(std.mem.find(u8, text, "Sign out of a Codex or Grok session") != null);
+    try std.testing.expect(std.mem.find(u8, text, "Choose the model provider used by fx") != null);
+    try std.testing.expect(std.mem.find(u8, text, "Show local fx usage or Codex account limits") != null);
+    try std.testing.expect(std.mem.find(u8, text, "Vercel") == null);
+    try std.testing.expect(std.mem.find(u8, text, "credits|balance") == null);
     try std.testing.expect(std.mem.find(u8, text, "Flags:") != null);
     try std.testing.expect(std.mem.find(u8, text, "--context-limit <spec>") != null);
     try std.testing.expect(std.mem.find(u8, text, "Set name=bytes|off; repeatable") != null);
@@ -1602,6 +1611,8 @@ test "rendered top-level help is a complete CLI navigation page" {
     try std.testing.expect(std.mem.find(u8, text, "fx session resume last") != null);
     try std.testing.expect(std.mem.find(u8, text, "session resume [last|id]") != null);
     try std.testing.expect(std.mem.find(u8, text, "fx status --json") != null);
+    try std.testing.expect(std.mem.find(u8, text, "Run `fx <command> --help` for command-specific usage and options.") != null);
+    try std.testing.expect(std.mem.find(u8, text, "command-specific options and examples") == null);
     try std.testing.expect(std.mem.find(u8, text, "Run `/help` inside an interactive session for slash commands.") != null);
     try std.testing.expect(std.mem.find(u8, text, "Source and documentation:  https://github.com/acking-you/fx") != null);
     try std.testing.expect(std.mem.find(u8, text, "\n\n\nRun `fx <command> --help`") == null);
@@ -1643,7 +1654,8 @@ test "top-level help renders flags as compact aligned rows" {
     try std.testing.expect(lineContainsBoth(wide, "-r", "Open the saved-session picker"));
     try std.testing.expect(lineContainsBoth(wide, "--resume [last|<id>]", "Resume the latest workspace session or an exact ID"));
     try std.testing.expect(lineContainsBoth(wide, "--resume-last", "Resume the latest workspace session"));
-    try std.testing.expect(std.mem.find(u8, wide, "Print the 𝒇x version and exit\n\nExamples:") != null);
+    try std.testing.expect(std.mem.find(u8, wide, "Print the fx version and exit\n\nExamples:") != null);
+    try std.testing.expect(std.mem.find(u8, wide, "List available models\n\n  usage") != null);
     try expectAllLinesFit(narrow, 60);
 }
 
