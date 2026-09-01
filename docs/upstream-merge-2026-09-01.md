@@ -13,7 +13,7 @@ The merge boundary is:
 | Merge commit | `d7d3f8f2d471cb1c6a6c8cb306b19d312ba64ab0` |
 | Review branch | `merge/upstream-2026-09-01` |
 
-Compared with the pre-merge BYOK tree, the review result changes 246 files with 28,195 insertions and 17,068 deletions. The large count comes primarily from upstream MCP, transcript, rendering, and E2E work. It does not represent a new vendor product route or a large new model-facing tool surface.
+Compared with the pre-merge BYOK tree, the review result changes 246 files with 28,521 insertions and 17,194 deletions. The large count comes primarily from upstream MCP, transcript, rendering, and E2E work. It does not represent a new vendor product route or a large new model-facing tool surface.
 
 ## Reconciliation policy
 
@@ -121,12 +121,35 @@ The final CI reconciliation also fixed two merge regressions and one Windows pro
 - the top-level MCP help, parser, runtime dispatch, profile mutation providers, and status/doctor inspection now form one complete vertical slice instead of a help-only stub;
 - Windows child processes that need environment overrides clone the native wide environment into WTF-8, avoiding `InvalidWtf8` when MCP stdio servers are launched from a localized environment.
 
+### Agent step integrity and dynamic MCP execution
+
+The merge now retains the upstream action-oriented decision boundary after every completed tool batch and after confirmed-result recovery. The decision instruction is appended as one no-cache user message, is suppressed when same-step steering already supplies the next instruction, and cannot end a turn with only a progress update while executable work remains.
+
+Subagent turns receive one stable trace and lifecycle identity before finalization. Dynamic MCP calls are validated against the last live runtime generation immediately before execution, so a tool advertised by an earlier generation cannot be redirected into a replacement runtime. Tool errors emit one canonical pair of final trace events after output preparation instead of an early error record plus a second contradictory result record.
+
+### Vision routing and verified image snapshots
+
+Image routing is owned by one `image_input_support` policy:
+
+- native-image models receive verified native image inputs and do not see the `vision` fallback tool;
+- non-native models receive the text-only authorized image catalog and see `vision` only when the provider and registry both support the fallback;
+- unknown or unavailable capability states fail closed instead of guessing a route.
+
+The same decision source is used for native and fallback message projection. Windows path-backed Vision reads now align native handle flags before positional reads. Verified snapshot loading reuses the shared no-follow regular-file opener, rejects symlinked or reparse-point directory chains, and normalizes the Windows no-follow error into the typed unsafe-path result.
+
+### Portable trace append and profile settings
+
+Debug trace files now append through Zig's file writer at the current stat size. The prior C `lseek` call treated a Windows `HANDLE` as a C file descriptor and could overwrite earlier trace lines. A regression verifies that multiple records survive in order.
+
+The existing `collapse_tool_calls` profile setting is now parsed and merged by the profile configuration owner. This completes an already-present setting rather than adding a second presentation switch.
+
 ## Exact new files retained
 
 These files did not exist on the BYOK first parent and are present in the review result:
 
 | File | Purpose |
 | --- | --- |
+| `docs/upstream-merge-2026-09-01.md` | This exact additions, deletions, conflict-decision, and verification record |
 | `src/core/app/app_mcp_menu_runtime.zig` | App-owned MCP menu coordination |
 | `src/core/app/usage_dashboard_runtime.zig` | Asynchronous provider usage runtime |
 | `src/core/mcp/docker_run.zig` | MCP Docker command representation |
@@ -204,6 +227,8 @@ The reconciliation commits also removed code inside surviving files:
 
 The final reconciliation also removed the inert `--record` launch parser, its unused intent field, its early-startup special case, and tests for behavior that no longer had a runtime owner. `--record` is now ordinary unknown input. A stale `credits` early-I/O predicate was removed with it because the fork has no top-level credits command. Two E2E assertions that required a model catalog request even when `FX_MODEL` already selects a direct Responses route were also deleted; they tested an unnecessary network side effect rather than the ask contract.
 
+One permission test for searching outside the workspace was deleted because it depended on the removed semantic-search era target classifier and no longer exercised the registered `grep_files` contract. The live-authority regression was rewritten around the current registered `skill` tool, preserving the authority refresh assertion without resurrecting the deleted `create_folder` implementation. Other failing expectations were updated only where the retained runtime contract had deliberately changed: account picker wording, Unified Exec labels, collapsed code-block borders, action-oriented post-tool messages, and removal of `--record` from resume usage.
+
 Historical `run_command`, `list_files`, and `memory` strings remain only where a saved session codec, replay renderer, migration test, redaction test, or explicit non-executability test needs them. Internal terminal-session state is unrelated to the removed model-facing `terminal` tool.
 
 ## Protected BYOK conflict decisions
@@ -267,6 +292,7 @@ The session or connection-local projection hides `glob_files` and `grep_files` a
 | `0c4d91aa` | Remove stale Vercel fixture wording |
 | `a91bcc82` | Repair explicit steering tests, Windows Unified Exec coverage, and stale bash-first guidance |
 | `399cbf6d` | Restore the generic top-level MCP vertical slice, remove inert recording compatibility, repair WASM loader compilation, and fix Windows MCP child environments |
+| `d17eb51a` | Restore post-tool continuation, dynamic MCP generation binding, trace lineage, native-versus-fallback Vision policy, portable image reads, and cross-platform trace append |
 
 ## CI policy for this merge
 
@@ -279,6 +305,8 @@ The authoritative gate is `.github/workflows/full-ci.yml` on the exact review co
 
 Only a run attached to the commit containing this document is acceptable. All four `Full suite (...)` aggregates must succeed. A passing upstream run, an older fork commit, or only the Windows job is not proof.
 
+An earlier run on `7629b56386572c4c38bda8a45634556e7c10efa4` was cancelled after its Linux and macOS arm64 unit jobs exposed 24 stale or regressed assertions plus one configuration crash. Those failures were audited individually. The complete 201-test `processQueuedPrompt` family now passes locally in ReleaseSafe, and focused ReleaseSafe coverage passes for every remaining failed owner. Because the fixes change the commit, that cancelled run is evidence used during repair and is not accepted as the merge gate. A new Full CI run on the final document commit is required.
+
 The smaller `.github/workflows/ci.yml` workflow is not used as the merge decision. Benchmark and binary-size workflows are retained because startup latency and unexplained binary growth are useful signals; neither replaces Full CI.
 
 ## Local verification completed before push
@@ -289,6 +317,9 @@ The smaller `.github/workflows/ci.yml` workflow is not used as the merge decisio
 - `zig build -Dwasm-surface=term -Doptimize=ReleaseSmall`
 - ReleaseSafe filtered Zig tests covering compaction, same-turn steering, worker/UI thought queueing, newline-free assistant display, Unified Exec observer isolation and nonblocking direct control, web-fetch policy bypass, web-search projection, provider activation cancellation, bash-first projection, and shared usage snapshots
 - Focused Zig tests covering top-level MCP parsing, one-pass status/doctor MCP inspection, and Windows wide-environment cloning for child process overrides
+- The complete 201-test ReleaseSafe `processQueuedPrompt` family, including post-tool continuation, confirmed-result recovery, same-step steering suppression, Vision routing, MCP runtime generation binding, lifecycle presentation, and trace identity
+- ReleaseSafe verified-snapshot coverage for inline bytes, ordinary files, symlinked files, and symlinked directory chains, including the Windows no-follow path
+- ReleaseSafe focused regressions for `collapse_tool_calls`, canonical multi-line trace append, current registered-tool live authority, provisional tool labels, account picker and approval rendering, resume usage, evidence-led prompts, and collapsed semantic code blocks
 - Windows provider tests covering Codex CLI parsing, Grok Build parsing, setup secret redaction, OAuth fallback order, ChatGPT and Grok callback path/state validation, ephemeral ports, delayed callback bytes, and Windows AFD reset handling
 - TypeScript checking for every E2E file changed during reconciliation
 - Bun E2E: removed filesystem tools are absent and Unified Exec completes the flow
