@@ -238,7 +238,7 @@ function createFixture() {
   return { home, workspace: realpathSync(workspace), stderrPath };
 }
 
-type TestGateway = { baseUrl: string; chatUrl: string };
+type TestGateway = { baseUrl: string };
 type SeededChat = { exit_code: number; session_id: string };
 type RelationshipControl = {
   configuration: { name: string };
@@ -1424,7 +1424,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
   );
 
   test(
-    "persistent auto child keeps a terminal removal held after review caution",
+    "persistent auto child keeps a Unified Exec removal held after review caution",
     async () => {
       const fixture = createFixture();
       writeFileSync(
@@ -1438,20 +1438,20 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         if (body.includes('"call_id":"auto_delete_create"')) {
           return fakeGatewayFinalText("AUTO_DELETE_PARENT_READY");
         }
-        if (body.includes('"call_id":"auto_delete_file"')) {
+        if (body.includes('"call_id":"auto_exec_remove"')) {
           return fakeGatewayFinalText("AUTO_DELETE_CHILD_COMPLETE");
         }
         if (body.includes(childPrompt)) {
-          return fakeGatewayToolCall("auto_terminal_remove", "terminal", {
-            action: "exec",
-            command: `rm ${JSON.stringify(marker)}`,
-            timeout_ms: 600_000,
+          return fakeGatewayToolCall("auto_exec_remove", "exec_command", {
+            cmd: `rm ${JSON.stringify(marker)}`,
+            yield_time_ms: 10_000,
+            max_output_tokens: 10_000,
           });
         }
-        return fakeGatewayToolCall("auto_terminal_create", "subagent", {
+        return fakeGatewayToolCall("auto_delete_create", "subagent", {
           command: {
             create: {
-              name: "auto-terminal-child",
+              name: "auto-delete-child",
               mode: "persistent",
               prompt: childPrompt,
               permission_mode: "auto",
@@ -1469,7 +1469,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
           env: {
             HOME: fixture.home,
             OPENAI_API_KEY: "auto-delete-child-key",
-                        FX_RESPONSES_BASE_URL: gateway.baseUrl,
+            FX_RESPONSES_BASE_URL: gateway.baseUrl,
             FX_MODEL: FAKE_GATEWAY_MODEL,
             FX_DISABLE_KEYCHAIN: "1",
             FX_SKIP_ONBOARDING: "1",
@@ -1482,7 +1482,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         });
         const active = session;
         await active.waitForComposer(TIMEOUT);
-        await active.sendText("Create the auto terminal child.");
+        await active.sendText("Create the auto-delete child.");
         await active.waitForText("AUTO_DELETE_PARENT_READY", TIMEOUT);
         const denialDeadline = Date.now() + TIMEOUT;
         while (
@@ -6440,7 +6440,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         if (body.includes('"call_id":"manager_archive_1"')) {
           return fakeGatewayFinalText("MANAGER_PARENT_COMPLETE");
         }
-        if (body.includes('"call_id":"manager_create_1"')) return parentCompletion;
+        if (body.includes('"call_id":"manager_create_1"')) return parentStream.response;
         if (body.includes('"call_id":"manager_child_read_1"')) {
           return humanTwoStream.response;
         }

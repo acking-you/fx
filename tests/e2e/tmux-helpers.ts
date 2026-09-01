@@ -567,7 +567,7 @@ export class TmuxSession {
       stderrPath,
       exitStatusPath,
     );
-    const processEnv = {
+    const processEnv: NodeJS.ProcessEnv = {
       ...process.env,
       FX_DISABLE_KEYCHAIN: "1",
       FX_SKIP_ONBOARDING: "1",

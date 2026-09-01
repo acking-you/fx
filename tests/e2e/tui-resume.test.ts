@@ -1312,7 +1312,7 @@ while :; do :; done
     );
     const historicalLines = (text: string): string[] =>
       text.split("\n").filter((line) => line.includes(rowPrefix));
-    let releaseNextResponse: (() => void) | null = null;
+    let releaseNextResponse!: () => void;
     const nextResponse = new Promise<Response>((resolve) => {
       releaseNextResponse = () => resolve(
         fakeGatewayFinalText(`${nextMarker}\n${"N".repeat(8 * 1024)}`),
@@ -1414,7 +1414,6 @@ while :; do :; done
         timeout,
       );
       releaseNextResponse();
-      releaseNextResponse = null;
       await waitForScrollback(active, nextMarker, timeout);
       expect(gateway.requests).toHaveLength(2);
       const after = await active.captureFullScrollback();
@@ -1483,7 +1482,7 @@ while :; do :; done
       expect(readFileSync(stderrPath, "utf8")).toBe("");
       passed = true;
     } finally {
-      releaseNextResponse?.();
+      releaseNextResponse();
       if (active) {
         if (!passed) {
           try {
@@ -2470,6 +2469,9 @@ test.skipIf(!tmuxAvailable())(
       const output = grid.findIndex((line) =>
         /^│\s+CTRL_O_SPACING_OUTPUT\s*$/.test(line),
       );
+      const afterTimestamp = grid.findIndex(
+        (line, index) => index > output && line.includes("UTC · Response"),
+      );
       const after = grid.findIndex((line) => line.includes(afterMarker));
       if (
         before < 0 || toolTimestamp < 0 || header < 0 || tool < 0 ||
@@ -2484,7 +2486,7 @@ test.skipIf(!tmuxAvailable())(
       expect(toolTimestamp).toBe(before + 2);
       expect(header).toBe(toolTimestamp + 1);
       expect(tool).toBe(header + 1);
-      expect(grid[tool + 1]).toContain("timeout_ms: 600000");
+      expect(grid[tool + 1]).toContain(`cmd: ${command}`);
       expect(output).toBe(tool + 2);
       expect(grid[output + 1]).toBe("");
       expect(afterTimestamp).toBe(output + 2);
@@ -2661,7 +2663,7 @@ test.skipIf(!tmuxAvailable())(
 
     const gateway = startFakeGateway([
       fakeGatewaySse([
-        ...responseFunctionCall("parallel-list", "list_files", { path: "." }),
+        ...responseFunctionCall("parallel-glob", "glob_files", { pattern: "*" }),
         ...responseFunctionCall("parallel-read", "read_file", { path: "README.md" }, 1),
         responseCompleted(),
       ]),

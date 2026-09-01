@@ -153,7 +153,7 @@ function firstCallToolResponses(args: {
       const resultOutput = toolResultOutput(body, args.id);
       expect(resultOutput).not.toContain("Not executed");
       for (const expected of args.expectedResultRequest) {
-        expect(body).toContain(expected);
+        expect(body).toContain(JSON.stringify(expected).slice(1, -1));
       }
       for (const expected of args.expectedResultOutput) {
         expect(resultOutput).toContain(expected);
@@ -234,6 +234,10 @@ function gatewayEnv(
   return {
     HOME: home,
     OPENAI_API_KEY: "fake-file-paths-key",
+    AI_GATEWAY_API_KEY: undefined,
+    VERCEL_OIDC_TOKEN: undefined,
+    FX_GATEWAY_BASE_URL: undefined,
+    FX_GATEWAY_CHAT_URL: undefined,
     FX_RESPONSES_BASE_URL: gateway.baseUrl,
     FX_MODEL: MODEL,
     ...extra,
@@ -389,7 +393,7 @@ async function runFirstCallToolScenario(args: {
   }
 }
 
-async function runTerminalToolScenario(args: {
+async function runFailingToolScenario(args: {
   root: ReturnType<typeof createIsolatedRoot>;
   id: string;
   name: string;
@@ -423,7 +427,9 @@ async function runTerminalToolScenario(args: {
       "Not executed",
     );
     for (const expected of args.expectedResultRequest) {
-      expect(gateway.requests[1].body).toContain(expected);
+      expect(gateway.requests[1].body).toContain(
+        JSON.stringify(expected).slice(1, -1),
+      );
     }
     expect(json.tool_calls).toEqual([{ name: args.name, status: "error" }]);
   } finally {
@@ -458,7 +464,7 @@ describe("filesystem path handling", () => {
             id: "added_cwd_1",
             name: "exec_command",
             input: { cmd: "pwd", workdir: root.external },
-            expected: root.external,
+            expected: "external",
           },
         ];
 
@@ -571,8 +577,7 @@ describe("filesystem path handling", () => {
           ],
           {
             cwd: root.workspace,
-            env: gatewayEnv(root, gateway, root.home, {
-            }),
+            env: gatewayEnv(root, gateway, root.home),
             timeoutMs: TIMEOUT,
           },
         );
@@ -697,13 +702,13 @@ describe("filesystem path handling", () => {
             "--auto",
             "--json",
             "--no-save",
-            `Use read_file to read exactly ${target}, then reply with its exact content. Do not use terminal.`,
+            `Use read_file to read exactly ${target}, then reply with its exact content. Do not use shell tools.`,
           ],
           {
             cwd: root.workspace,
             env: {
               HOME: root.home,
-                            FX_RESPONSES_BASE_URL: undefined,
+              FX_RESPONSES_BASE_URL: undefined,
               FX_MODEL: process.env.FX_WORKSPACE_ACCESS_LIVE_MODEL ?? EVAL_MODEL,
             },
             timeoutMs: 120_000,
@@ -995,7 +1000,7 @@ describe("filesystem path handling", () => {
           content,
         }),
         (body) => {
-          const resultOutput = toolResultReason(body, "write_large_review");
+          const resultOutput = toolResultOutput(body, "write_large_review");
           expect(resultOutput).toContain('"reason":"review_caution"');
           expect(resultOutput).toContain("Action held after safety review");
           return finalText("large reviewed write blocked");
@@ -1233,7 +1238,7 @@ describe("filesystem path handling", () => {
       const root = createIsolatedRoot();
       try {
         writeFileSync(join(root.external, "outside.txt"), "OUTSIDE\n");
-        await runTerminalToolScenario({
+        await runFailingToolScenario({
           root,
           id: "glob_escape_1",
           name: "glob_files",
@@ -1331,7 +1336,7 @@ describe("filesystem path handling", () => {
     TIMEOUT,
   );
 
-  test(
+  test.skipIf(process.platform === "win32")(
     "missing HOME returns HomeNotSet without treating tilde as workspace-relative",
     async () => {
       const root = createIsolatedRoot();
@@ -1341,7 +1346,7 @@ describe("filesystem path handling", () => {
           "~",
           "fx-path-fixture.txt",
         );
-        await runTerminalToolScenario({
+        await runFailingToolScenario({
           root,
           id: "read_missing_home_1",
           name: "read_file",
@@ -1359,7 +1364,7 @@ describe("filesystem path handling", () => {
   );
 
   test(
-    "removed filesystem tools are absent and terminal completes the fallback flow",
+    "removed filesystem tools are absent and Unified Exec completes the fallback flow",
     async () => {
       const root = createIsolatedRoot();
       const command =
@@ -1387,22 +1392,22 @@ describe("filesystem path handling", () => {
             "edit_file",
             "glob_files",
             "grep_files",
-            "terminal",
+            "exec_command",
           ]));
-          return toolCall("terminal_fallback_1", "terminal", {
-            action: "exec",
-            command,
-            timeout_ms: 600_000,
+          return toolCall("exec_fallback_1", "exec_command", {
+            cmd: command,
+            yield_time_ms: 10_000,
+            max_output_tokens: 10_000,
           });
         },
         (body) => {
-          const output = toolResultOutput(body, "terminal_fallback_1");
+          const output = toolResultOutput(body, "exec_fallback_1");
           expect(output).toContain("renamed.txt");
           expect(output).toContain("fallback");
           expect(output).toContain("fallback-complete");
           expect(existsSync(join(root.workspace, "fallback-dir"))).toBe(false);
           expect(existsSync(join(root.workspace, "fallback-source.txt"))).toBe(false);
-          return finalText("terminal fallback complete");
+          return finalText("Unified Exec fallback complete");
         },
       ], { classifierDecision: "clear" });
 
@@ -1413,7 +1418,7 @@ describe("filesystem path handling", () => {
             "--auto",
             "--json",
             "--no-save",
-            "Use the terminal to create, inspect, search, copy, rename, and remove disposable files.",
+            "Use exec_command to create, inspect, search, copy, rename, and remove disposable files.",
           ],
           {
             cwd: root.workspace,
@@ -1426,7 +1431,7 @@ describe("filesystem path handling", () => {
         expect(gateway.classifierRequests).toHaveLength(1);
         expect(gateway.remainingResponseCount()).toBe(0);
         expect(json.tool_calls).toEqual([
-          expect.objectContaining({ name: "terminal", status: "success" }),
+          expect.objectContaining({ name: "exec_command", status: "success" }),
         ]);
       } finally {
         gateway.stop();
@@ -1437,7 +1442,7 @@ describe("filesystem path handling", () => {
   );
 
   liveTest(
-    "live Gateway uses terminal for removed filesystem operations",
+    "live Gateway uses Unified Exec for removed filesystem operations",
     async () => {
       const root = createIsolatedRoot();
       const completion = `LIVE_FILESYSTEM_FALLBACK_COMPLETE_${Date.now()}`;
@@ -1449,7 +1454,7 @@ describe("filesystem path handling", () => {
             "--json",
             "--no-save",
             [
-              "Use terminal for this exact disposable filesystem task in the current workspace.",
+              "Use exec_command for this exact disposable filesystem task in the current workspace.",
               "In one command, create live-fallback/source.txt containing live-fallback-data,",
               "copy it to copied.txt, rename that file to renamed.txt, list the directory,",
               "stat and grep the renamed file, then remove the live-fallback directory.",
@@ -1471,7 +1476,7 @@ describe("filesystem path handling", () => {
         const json = parseFxJson(result);
         expect(json.output).toContain(completion);
         expect(json.tool_calls.some(({ name, status }) =>
-          name === "terminal" && status === "success"
+          name === "exec_command" && status === "success"
         )).toBe(true);
         for (const removed of REMOVED_FILESYSTEM_TOOLS) {
           expect(json.tool_calls.some(({ name }) => name === removed)).toBe(false);

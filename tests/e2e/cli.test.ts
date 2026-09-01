@@ -38,6 +38,11 @@ const NO_GATEWAY_AUTH = {
 };
 const MISSING_AUTH_MESSAGE =
   "Fx needs a model credential. Set OPENAI_API_KEY for a Responses API, use fx login codex for ChatGPT Codex, or use fx login grok for Grok.";
+const MODERN_MCP_FIXTURE = join(
+  import.meta.dirname,
+  "fixtures",
+  "mcp-modern-stdio.mjs",
+);
 
 function maxLineWidth(text: string): number {
   return Math.max(...text.split(/\r?\n/).map((line) => Bun.stringWidth(line)));

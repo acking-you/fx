@@ -4,10 +4,6 @@ export const CANONICAL_BUILTIN_NAMES = [
   "grep_files",
   "edit_file",
   "write_file",
-  "delete_file",
-  "rename_file",
-  "copy_file",
-  "create_folder",
   "exec_command",
   "write_stdin",
   "subagent",
@@ -16,7 +12,6 @@ export const CANONICAL_BUILTIN_NAMES = [
   "install_skill",
   "mcp_select_tool",
   "mcp_features",
-  "memory",
   "update_plan",
   "ask_user_question",
   "web_fetch",
@@ -189,7 +184,7 @@ export function findUnavailableCapabilityReferences(
     }
   }
 
-  for (const name of ["exec_command", "subagent", "skill", "memory"] as const) {
+  for (const name of ["exec_command", "subagent", "skill"] as const) {
     if (advertised.has(name)) continue;
     for (const clause of AMBIGUOUS_CAPABILITY_CLAUSES[name]) {
       for (const fragment of fragments) {
