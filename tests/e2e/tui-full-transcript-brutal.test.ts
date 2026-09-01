@@ -801,10 +801,13 @@ async function verifyOldestTranscriptEntrySurvives(
 ): Promise<void> {
   await session.sendHexBytes(CTRL_O);
   const pageCount = config.oldestPageCount ?? 1_024;
-  let newest = await waitForMode(session, "full", draft);
-  for (let sent = 0; !newest.includes(LIVE_DONE) && sent < pageCount; sent += 1) {
-    newest = await navigateFullTranscript(session, "NPage", draft, tracePath);
-  }
+  const newest = await session.waitForPane(
+    (pane) =>
+      pane.includes(FULL_FOOTER) &&
+      !pane.includes("Preparing full detail…") &&
+      pane.includes(LIVE_DONE),
+    TIMEOUT,
+  );
   expect(newest).toContain(LIVE_DONE);
   for (let sent = 0; sent < pageCount; sent += 1) {
     const pane = await navigateFullTranscript(session, "PPage", draft, tracePath);
