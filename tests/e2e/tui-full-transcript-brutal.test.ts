@@ -739,16 +739,18 @@ async function verifyOldestTranscriptEntrySurvives(
   const pageCount = config.oldestPageCount ?? 1_024;
   let newest = await waitForMode(session, "full", draft);
   for (let sent = 0; !newest.includes(LIVE_DONE) && sent < pageCount; sent += 1) {
+    const scrollWindow = latestProjectionWindow(tracePath);
     const traceStart = traceSize(tracePath);
     await session.sendKeys("NPage");
-    await waitForRenderedViewportAfter(tracePath, traceStart);
+    await waitForScrolledViewport(tracePath, traceStart, scrollWindow.offset);
     newest = await waitForMode(session, "full", draft);
   }
   expect(newest).toContain(LIVE_DONE);
   for (let sent = 0; sent < pageCount; sent += 1) {
+    const scrollWindow = latestProjectionWindow(tracePath);
     const traceStart = traceSize(tracePath);
     await session.sendKeys("PPage");
-    await waitForRenderedViewportAfter(tracePath, traceStart);
+    await waitForScrolledViewport(tracePath, traceStart, scrollWindow.offset);
     const pane = await waitForMode(session, "full", draft);
     if (pane.includes(firstChatMarker(config))) break;
   }
