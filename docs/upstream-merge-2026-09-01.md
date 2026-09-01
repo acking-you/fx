@@ -22,9 +22,10 @@ The merge boundary is:
 | Final committed transcript-navigation repair | `0bffb9db` |
 | Final committed scroll-attempt repair | `64c2f6e6` |
 | Final verified navigation batching | `6a29c074` |
+| Final visible navigation observation | `352323d9` |
 | Review branch | `merge/upstream-2026-09-01` |
 
-Compared with the pre-merge BYOK tree, the review result changes 248 files with 29,140 insertions and 17,262 deletions. The large count comes primarily from upstream MCP, transcript, rendering, and E2E work. It does not represent a new vendor product route or a large new model-facing tool surface.
+Compared with the pre-merge BYOK tree, the review result changes 248 files with 29,152 insertions and 17,262 deletions. The large count comes primarily from upstream MCP, transcript, rendering, and E2E work. It does not represent a new vendor product route or a large new model-facing tool surface.
 
 ## Reconciliation policy
 
@@ -369,6 +370,7 @@ The session or connection-local projection hides `glob_files` and `grep_files` a
 | `0bffb9db` | Require each brutal full-transcript navigation step to commit a changed viewport offset before sending the next input |
 | `64c2f6e6` | Distinguish committed, clamped, and page-loading transcript scroll attempts; retry ignored inputs without consuming navigation progress |
 | `6a29c074` | Amortize tmux invocation cost with four-key navigation batches while retaining the committed-scroll verification boundary |
+| `352323d9` | Require verified navigation to observe the newly displayed tmux pane instead of returning an older full-transcript frame after the trace commit |
 
 ## CI policy for this merge
 
@@ -409,6 +411,8 @@ Run `33489826458` on `2d3eee8fbf3a56c13689a77b058964dc53aadedf` passed all five 
 
 Run `33493575103` on `e3ab35bb25525b6f1a58b89404623e7367748127` passed the other 19 underlying jobs, including all native platforms, all Linux E2E shards, and every macOS shard except shard 3 on each architecture. The final state machine correctly rejected page-loading loss and accepted committed page-tail clamps, but one tmux process invocation per Page key remained too expensive: after 1,024 verified calls, macOS x86_64 reached live marker 460–467 in roughly 162–169 seconds and macOS arm64 reached marker 305–317 in roughly 148–152 seconds. Raising the limit would exceed the test's 240-second budget once reverse navigation is included. The test now sends four Page keys per tmux invocation, then requires the same non-ignored scroll event and committed frame before proceeding. This is far below the discarded 64-key burst, retains deterministic progress verification, and reduced the complete local stress from 71.5 to 39.3 seconds with all 118 assertions retained.
 
+Run `33498165085` on `f04f4ef81bf892ab91b8dcc9d96de198cbe05d15` showed that a committed render trace still precedes visibility in tmux on slower macOS hosts. macOS x86_64 shard 3 failed twice after reaching live marker 460–473: the navigation helper had observed a non-ignored scroll and committed projection frame, but immediately returned a pane captured before tmux displayed that frame. The test now snapshots the pane before each verified batch and returns only after the full-detail pane visibly changes. Page-loading rejection and legitimate page-tail clamps retain their separate state-machine handling, and the target markers remain mandatory. The complete focused stress passes locally in 39.7 seconds with 120 assertions. This run also had a single macOS arm64 native failure in the existing cancellation-at-deadline test, which schedules cancellation only 25 ms before a two-second timeout. That native job passed on the preceding exact runs and no production deadline or synchronization branch was added for the runner scheduling tie. Because commit `352323d9` supersedes the E2E result, a fresh exact-commit Full CI run is required rather than waiving or rerunning the old tree.
+
 The smaller `.github/workflows/ci.yml` workflow is not used as the merge decision. Benchmark and binary-size workflows are retained because startup latency and unexplained binary growth are useful signals; neither replaces Full CI.
 
 ## Local verification completed before push
@@ -432,7 +436,7 @@ The smaller `.github/workflows/ci.yml` workflow is not used as the merge decisio
 - Focused live-stream `/resume` refusal passed while waiting on the current stable `Generating` phase
 - Focused active-turn image steering passed while retaining its request-order, instruction-snapshot, image-byte, and stderr assertions
 - Focused greater-than-1-MiB cancelled-command artifact navigation passed with bounded PgDn batches and 60 retained assertions
-- Focused full-transcript brutal stress passed with 118 assertions after four-key verified batches distinguished committed or clamped scroll frames from page-loading rejection and explicitly proved both the newest tail and oldest entry are reachable
+- Focused full-transcript brutal stress passed with 120 assertions after four-key verified batches distinguished committed or clamped scroll frames from page-loading rejection, waited for the newly visible tmux pane, and explicitly proved both the newest tail and oldest entry are reachable
 - Focused height-shrink footer and provider length-truncation lifecycle cases passed through the stable post-resize and failed-tool states
 - Focused MCP authentication and logout lifecycle passed after restoring menu-completion collection in the composition root
 - Focused remote native compaction and Codex Vision failure cases passed with request-level and current structured-result assertions
