@@ -333,17 +333,22 @@ Local checks for the final pruning tree:
 - [x] `zig fmt --check src/` and `git diff --check` pass.
 - [x] ReleaseSafe native build passes and writes the current binary to
   `./zig-out/bin/fx`.
-- [ ] Complete ReleaseSafe Zig tests pass from a native ext4 checkout for the
-  final `d424f1a8` reconciliation tree. The earlier pruning checkpoint passed
-  7,727 tests with 24 declared skips; the final rerun is pending below.
-- [x] Focused and complete Bun owners pass: CLI 77/77, ACP 95/95, Gateway
-  48/48, TUI Gateway lifecycle 62/62, slash/skills/startup 56/56, shard planning
-  8/8, and PGSO corpus validation 32/32.
+- [x] Complete ReleaseSafe Zig tests pass from a clean native ext4 clone of
+  merge commit `deac46be`: 7,750 tests passed and 24 were skipped by their
+  declared guards.
+- [x] Final affected Bun owners pass: ACP, session recovery, and Web Fetch
+  119/119; the real `/skills` TUI happy path 1/1; shard planning 8/8; and PGSO
+  corpus validation 32/32. Earlier reconciliation owners also passed: CLI
+  77/77, Gateway 48/48, TUI Gateway lifecycle 62/62, and
+  slash/skills/startup 56/56.
+- [x] The three simplified SDK JavaScript test owners pass syntax validation.
 - [x] Repository source, tests, scripts, build registration, and tracked file
   names contain no MCP implementation or fixture.
 - [x] The freshly built binary opens the `/skills` TUI with clean stderr, its
   top-level help has no MCP entry, and `fx mcp` is rejected as an unknown
   subcommand with empty stdout.
+- [x] The freshly built binary also completes `help`, `status --json`, and the
+  isolated provider-neutral `setup --json` smoke path with clean stderr.
 - [ ] Exact-commit Full CI passes every required Linux and macOS runner.
 
 ## Reviewer checklist
