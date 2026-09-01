@@ -170,10 +170,6 @@ jobs:
         run: bun install
         working-directory: tests/e2e
 
-      - name: Install isolated MCP conformance package
-        run: npm ci
-        working-directory: tests/e2e/conformance
-
       - name: Install tmux
         run: |
           if ! command -v tmux >/dev/null 2>&1; then
@@ -188,28 +184,6 @@ jobs:
       - name: Run ACP tests (no-key subset)
         run: bun test acp.test.ts
         working-directory: tests/e2e
-
-      - name: Run legacy stdio MCP tool lifecycle test
-        run: bun test gateway-stream-lifecycle.test.ts --test-name-pattern "selected dynamic MCP review cautions with zero sends and clears exactly once"
-        working-directory: tests/e2e
-
-      - name: Run stdio MCP dispatcher lifecycle tests
-        run: bun test mcp-stdio.test.ts
-        working-directory: tests/e2e
-
-      - name: Run modern MCP Streamable HTTP tests
-        run: bun test mcp-http.test.ts
-        working-directory: tests/e2e
-
-      - name: Run legacy MCP remote compatibility tests
-        run: bun test mcp-legacy-remote.test.ts
-        working-directory: tests/e2e
-
-      - name: Run isolated MCP conformance baseline
-        run: npm test
-        working-directory: tests/e2e/conformance
-        env:
-          FX_SOUND: "0"
 
       - name: Run persistence tests
         run: bun test config-persistence.test.ts session-recovery.test.ts prompt-history.test.ts
@@ -377,7 +351,7 @@ jobs:
           }
           $requests = @(
             '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}'
-            '{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"mcpServers":[]}}'
+            '{"jsonrpc":"2.0","id":2,"method":"session/new","params":{}}'
             '{"jsonrpc":"2.0","id":3,"method":"fx/provider/setup/start","params":{}}'
             '{"jsonrpc":"2.0","id":4,"method":"fx/provider/setup/status","params":{}}'
           )

@@ -239,7 +239,10 @@ Test and release removal:
 - obsolete `mcpServers` placeholders in unrelated ACP and recovery requests,
   plus SDK tests and documentation that described a disabled extension bridge;
 - stale E2E shard weights, PGSO training scenarios, corpus expectations, and
-  Keychain exceptions that belonged only to those deleted files.
+  Keychain exceptions that belonged only to those deleted files;
+- stale normal-CI package installation, deleted-suite invocations, and ACP
+  request placeholders. The fork-owned exact-commit Full CI remains the merge
+  gate.
 
 Generic tests were not discarded with those blocks. Unknown-tool rendering,
 slash-menu metadata layout, response output ordering, permission presentation,
