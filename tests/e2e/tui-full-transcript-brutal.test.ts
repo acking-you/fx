@@ -535,6 +535,7 @@ async function navigateFullTranscript(
   tracePath: string,
 ): Promise<string> {
   for (let attempt = 0; attempt < 256; attempt += 1) {
+    const before = await waitForMode(session, "full", draft);
     const traceStart = traceSize(tracePath);
     await sendRepeatedKey(
       session,
@@ -543,8 +544,15 @@ async function navigateFullTranscript(
       VERIFIED_NAVIGATION_KEYS,
     );
     const outcome = await waitForScrollAttemptAfter(tracePath, traceStart);
-    const pane = await waitForMode(session, "full", draft);
-    if (outcome === "committed") return pane;
+    if (outcome === "committed") {
+      return session.waitForPane(
+        (pane) =>
+          pane.includes(FULL_FOOTER) &&
+          !pane.includes("Preparing full detail…") &&
+          pane !== before,
+        TIMEOUT,
+      );
+    }
   }
   throw new Error(`Ctrl-O navigation stayed page-loading for ${key}.`);
 }
