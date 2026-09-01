@@ -785,6 +785,60 @@ test "live full transcript content requests one frame per revision stride" {
     try std.testing.expect(runtime.render_requests.hasReason(.transcript));
 }
 
+test "command completion forces the final live full transcript revision" {
+    const alloc = std.testing.allocator;
+    var runtime = TranscriptRuntime{
+        .layout = .{
+            .rows = 24,
+            .cols = 80,
+            .content_bottom = 20,
+            .divider_top_row = 21,
+            .input_row = 22,
+            .divider_bottom_row = 23,
+            .hint_row = 24,
+        },
+        .full_transcript = .{ .depth = .full },
+    };
+    defer runtime.deinit(alloc);
+
+    var metrics: Metrics = .{};
+    try runtime.writeCommandOutputChunk(
+        alloc,
+        &metrics,
+        .{},
+        .stdout,
+        "partial output\n",
+        true,
+    );
+    runtime.render_requests.clearReason(.transcript);
+    const partial_revision = runtime.full_transcript_content_revision;
+    runtime.full_transcript_installed_page = .{
+        .source = .{
+            .request = .{
+                .content_revision = partial_revision,
+                .cols = runtime.layout.cols,
+                .anchor = .tail,
+            },
+            .range = .{ .start = 0, .end = runtime.entries.items.len },
+            .styles = .{},
+        },
+        .projection = .{ .styles = .{} },
+    };
+
+    try runtime.flushCommandOutputSummary(alloc, &metrics, .{}, true);
+
+    try std.testing.expect(runtime.command_output_display.open_command_block == null);
+    try std.testing.expectEqual(
+        partial_revision +% 1,
+        runtime.full_transcript_content_revision,
+    );
+    try std.testing.expect(runtime.render_requests.hasReason(.transcript));
+    try std.testing.expect(!full_transcript_page.sameRequest(
+        runtime.desiredFullTranscriptPageRequest(),
+        runtime.full_transcript_installed_page.?.source.request,
+    ));
+}
+
 test "full transcript viewport snapshot restores reading position" {
     var source = TranscriptRuntime{
         .full_transcript = .{

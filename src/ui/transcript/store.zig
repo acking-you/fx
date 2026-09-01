@@ -1398,6 +1398,11 @@ pub fn flushRecordedCommandOutputSummaryAtomic(
         alloc,
         "command output consolidation",
     );
+    // Streaming full-detail pages refresh in bounded revision strides while a
+    // command is open. Completion must always publish one final revision even
+    // when the last partial stride had no pending paint request, otherwise an
+    // installed page can permanently retain a pre-completion snapshot.
+    requestTranscriptPaint(&shadow);
 
     try commitAuthoritativeRecordedMutationStateFromEntry(
         self,
