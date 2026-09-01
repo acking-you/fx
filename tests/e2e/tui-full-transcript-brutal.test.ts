@@ -807,7 +807,13 @@ async function verifyOldestTranscriptEntrySurvives(
       !pane.includes("Preparing full detail…") &&
       pane.includes(LIVE_DONE),
     TIMEOUT,
-  );
+  ).catch((error) => {
+    const trace = readFileSync(tracePath, "utf8").trimEnd().split("\n");
+    console.error(
+      `Ctrl-O tail refresh trace:\n${trace.slice(-240).join("\n")}`,
+    );
+    throw error;
+  });
   expect(newest).toContain(LIVE_DONE);
   for (let sent = 0; sent < pageCount; sent += 1) {
     const pane = await navigateFullTranscript(session, "PPage", draft, tracePath);
