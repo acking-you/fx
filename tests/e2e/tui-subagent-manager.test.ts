@@ -5218,8 +5218,12 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         await active.sendKeys("C-x");
         await active.waitForText("Agents & processes", TIMEOUT);
         await active.sendKeys("Enter");
-        await active.waitForText("Full detail · ctrl o close", TIMEOUT);
-        const afterFullRoundTrip = await active.capturePane();
+        const afterFullRoundTrip = await active.waitForPane(
+          (pane) =>
+            pane.includes("Full detail · ctrl o close") &&
+            pane.includes("CHILD_POSITION_"),
+          TIMEOUT,
+        );
         expect(visibleRange(afterFullRoundTrip)).toEqual(beforeFullRoundTrip);
         expect(readFileSync(fixture.stderrPath, "utf8")).toBe("");
       } finally {
