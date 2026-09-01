@@ -413,7 +413,9 @@ async function waitForMode(
   draft: string,
 ): Promise<string> {
   return session.waitForPane((pane) => {
-    if (mode === "full") return pane.includes(FULL_FOOTER);
+    if (mode === "full") {
+      return pane.includes(FULL_FOOTER) && !pane.includes("Preparing full detail…");
+    }
     return composerContains(pane, draft) &&
       !pane.includes(FULL_FOOTER);
   }, TIMEOUT);

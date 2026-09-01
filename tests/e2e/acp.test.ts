@@ -2314,16 +2314,21 @@ describe("acp: model-independent", () => {
       const gateway = startFakeGateway([
         fakeGatewaySse([
           ...markdown.map((delta) => ({
-            type: "text-delta",
-            id: "answer_1",
+            type: "response.output_text.delta",
+            item_id: "answer_1",
+            output_index: 0,
+            content_index: 0,
             delta,
           })),
           {
-            type: "finish",
-            finishReason: { unified: "stop", raw: "stop" },
-            usage: {
-              inputTokens: { total: 3 },
-              outputTokens: { total: 5 },
+            type: "response.completed",
+            response: {
+              status: "completed",
+              usage: {
+                input_tokens: 3,
+                output_tokens: 5,
+                total_tokens: 8,
+              },
             },
           },
         ]),
@@ -3723,14 +3728,14 @@ describe("acp: model-independent", () => {
       let childId = "";
       const gateway = startDynamicFakeGateway((body) => {
         if (
-          body.includes(`"toolCallId":"${selectId}"`) &&
-          body.includes('"type":"tool-result"')
+          body.includes(`"call_id":"${selectId}"`) &&
+          body.includes('"type":"function_call_output"')
         ) {
           return fakeGatewayToolCall(callId, MCP_TOOL_NAME, { text: "stall" });
         }
         if (
-          body.includes(`"toolCallId":"${createId}"`) &&
-          body.includes('"type":"tool-result"')
+          body.includes(`"call_id":"${createId}"`) &&
+          body.includes('"type":"function_call_output"')
         ) {
           const created = JSON.parse(acpToolResultText(body, createId)) as {
             child_id: string;

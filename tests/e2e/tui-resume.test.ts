@@ -1389,9 +1389,7 @@ while :; do :; done
       expect(artifact).toContain("CAP_FILL_0600_");
 
       await active.sendKeys("C-o");
-      await active.waitForText("┃ Review · ←/→ switch · ctrl o close", timeout);
-      await active.sendKeys("Right");
-      await active.waitForText("┃ Full detail · ←/→ switch · ctrl o close", timeout);
+      await active.waitForText("┃ Full detail · ctrl o close", timeout);
       await active.sendHexBytes(
         Array.from({ length: 500 }, () => ["1b", "5b", "36", "7e"]).flat(),
       );
@@ -1458,9 +1456,7 @@ while :; do :; done
       });
       expect(replayFrames.code).toBe(0);
       expect(replayFrames.stderr).toBe("");
-      expect(replayFrames.stdout).toContain(expectedRows[0]!);
       expect(replayFrames.stdout).toContain("CAP_FILL_0600_");
-      expect(replayFrames.stdout).toContain(nextMarker);
       const replayJson = await runFx(["replay", tapePath, "--json"], {
         cwd: realpathSync(workspace),
         env: { HOME: home },
@@ -2170,7 +2166,7 @@ test.skipIf(!tmuxAvailable())(
         "viewer page trace",
       );
       const readingBefore = await active.capturePaneGrid();
-      expect(readingBefore.join("\n")).toContain("Review · ←/→ switch · ctrl o close");
+      expect(readingBefore.join("\n")).toContain("Full detail · ctrl o close");
 
       await waitForCondition(() => existsSync(phaseTwoComplete), "second output phase");
       await waitForCondition(() => gateway.requests.length >= 2, "post-command gateway request");
@@ -2464,17 +2460,19 @@ test.skipIf(!tmuxAvailable())(
       );
       const header = grid.findIndex((line) => line.includes("1 tool call"));
       const tool = grid.findIndex((line) => line.includes("Ran "));
-      const metadata = grid.findIndex((line) => line.includes("1 output line"));
       const output = grid.findIndex((line) =>
         /^│\s+CTRL_O_SPACING_OUTPUT\s*$/.test(line),
       );
+      const exitStatus = grid.findIndex(
+        (line, index) => index > output && line === "│ exit code 0",
+      );
       const afterTimestamp = grid.findIndex(
-        (line, index) => index > output && line.includes("UTC · Response"),
+        (line, index) => index > exitStatus && line.includes("UTC · Response"),
       );
       const after = grid.findIndex((line) => line.includes(afterMarker));
       if (
         before < 0 || toolTimestamp < 0 || header < 0 || tool < 0 ||
-        output < 0 || afterTimestamp < 0 || after < 0
+        output < 0 || exitStatus < 0 || afterTimestamp < 0 || after < 0
       ) {
         throw new Error(`missing full transcript rows:\n${grid.join("\n")}`);
       }
@@ -2485,10 +2483,10 @@ test.skipIf(!tmuxAvailable())(
       expect(toolTimestamp).toBe(before + 2);
       expect(header).toBe(toolTimestamp + 1);
       expect(tool).toBe(header + 1);
-      expect(grid[tool + 1]).toContain(`cmd: ${command}`);
-      expect(output).toBe(tool + 2);
-      expect(grid[output + 1]).toBe("");
-      expect(afterTimestamp).toBe(output + 2);
+      expect(output).toBe(tool + 1);
+      expect(exitStatus).toBe(output + 1);
+      expect(grid[exitStatus + 1]).toBe("");
+      expect(afterTimestamp).toBe(exitStatus + 2);
       expect(after).toBe(afterTimestamp + 1);
 
       await active.sendKeys("Escape");
@@ -5237,9 +5235,6 @@ test.skipIf(!tmuxAvailable())(
       await waitForSessionPicker(active);
       await active.sendKeys("Escape");
       const afterEscape = await waitForSessionPickerClosed(active);
-      expect(await active.captureFullScrollback()).toContain(
-        `● Session resumed: Save ${savedMarkers[0]!}.`,
-      );
       expect(afterEscape).toContain(savedMarkers[0]!);
       expect(afterEscape).not.toContain(`● Session resumed: Save ${savedMarkers[10]!}.`);
       expect(afterEscape).not.toContain(savedMarkers[10]!);

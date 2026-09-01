@@ -114,7 +114,7 @@ async function launchAutomaticRecording(options: {
   const goldenPath = join(workDir, "grid.txt");
   const tracePath = join(workDir, "trace.log");
   const s = await TmuxSession.create({
-    cmd: `env -u OPENAI_API_KEY FX_DISABLE_KEYCHAIN=1 FX_SKIP_ONBOARDING=1 ${FX_BIN} --record`,
+    cmd: `env -u OPENAI_API_KEY FX_DISABLE_KEYCHAIN=1 FX_SKIP_ONBOARDING=1 ${FX_BIN}`,
     cwd: workDir,
     width: 180,
     height: 36,

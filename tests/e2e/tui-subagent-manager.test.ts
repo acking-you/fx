@@ -22,6 +22,7 @@ import {
   isVolatileTokenStatusRow,
   paneExitMatches,
   responseCompleted,
+  responseFunctionCall,
   responseTextDelta,
   startDynamicFakeGateway,
   TmuxSession,
@@ -157,18 +158,14 @@ function controlledTextResponse(initialText: string) {
     releaseToolCall(id: string, name: string, input: object) {
       if (released || !controller) throw new Error("controlled response already released");
       released = true;
+      const events = [
+        ...responseFunctionCall(id, name, input),
+        responseCompleted(),
+      ];
       controller.enqueue(
         encoder.encode(
-          `data: ${JSON.stringify({
-            type: "tool-call",
-            toolCallId: id,
-            toolName: name,
-            input,
-          })}\n\n` +
-            `data: ${JSON.stringify({
-              type: "finish",
-              finishReason: { unified: "tool-calls", raw: "tool-calls" },
-            })}\n\ndata: [DONE]\n\n`,
+          events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("") +
+            "data: [DONE]\n\n",
         ),
       );
       controller.close();
@@ -192,7 +189,7 @@ function providerErrorResponse(detail: string): Response {
 
 function normalizeThinkingFrame(grid: string[]) {
   return grid.map((line) =>
-    /^• (?:Thinking|Generating)(?: \([^)]*\)){1,2}$/.test(line)
+    /^(?:• |  )(?:Thinking|Generating)(?: \([^)]*\)){1,2}$/.test(line)
       ? "<animated thinking frame>"
       : line
   );
@@ -1530,7 +1527,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
             content: "EXTERNAL\n",
           });
         }
-        if (latest.includes(`"call_id":"${secondId}"`)) {
+        if (body.includes(`"call_id":"${secondId}"`)) {
           return fakeGatewayFinalText("ALWAYS_WRITE_SECOND_DONE");
         }
         if (latest.includes(secondPrompt)) {
@@ -1539,7 +1536,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
             content: "SECOND\n",
           });
         }
-        if (latest.includes(`"call_id":"${firstId}"`)) {
+        if (body.includes(`"call_id":"${firstId}"`)) {
           return fakeGatewayFinalText("ALWAYS_WRITE_FIRST_DONE");
         }
         if (latest.includes(childPrompt)) {
@@ -1548,7 +1545,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
             content: "FIRST\n",
           });
         }
-        if (latest.includes(`"call_id":"${createId}"`)) {
+        if (body.includes(`"call_id":"${createId}"`)) {
           return fakeGatewayFinalText("ALWAYS_WRITE_PARENT_READY");
         }
         return fakeGatewayToolCall(createId, "subagent", {
@@ -3779,10 +3776,6 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         }
         expect(childApprovalRequestStarted).toBe(true);
         expect(gateway.requests.some((request) => request.body.includes(childPrompt))).toBe(true);
-        await active.sendKeys("C-o");
-        await active.waitForText("Review · ←/→ switch · ctrl o close", TIMEOUT);
-        await active.sendKeys("Right");
-        await active.waitForText("Full detail · ←/→ switch · ctrl o close", TIMEOUT);
         releaseChildApproval(fakeGatewayToolCall(callId, "exec_command", {
           cmd: "printf approved > child-approval-effect.txt",
         }));

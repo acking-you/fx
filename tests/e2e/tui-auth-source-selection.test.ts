@@ -1673,7 +1673,19 @@ tmuxTest(
     await session.waitForComposer(TIMEOUT);
     await session.sendText("/compact");
     await session.waitForText("Context compaction started.", TIMEOUT);
-    await session.waitForText("Compacting context", TIMEOUT);
+    const compactionDeadline = Date.now() + TIMEOUT;
+    while (
+      !chatgptOauth.requests.some((request) =>
+        request.path === "/chatgpt/responses" &&
+        request.body?.includes('"type":"compaction_trigger"')
+      ) && Date.now() < compactionDeadline
+    ) {
+      await Bun.sleep(25);
+    }
+    expect(chatgptOauth.requests.some((request) =>
+      request.path === "/chatgpt/responses" &&
+      request.body?.includes('"type":"compaction_trigger"')
+    )).toBe(true);
     await session.sendText("BLOCKED_DURING_COMPACTION");
     const duringCompaction = await session.capturePane();
     expect(duringCompaction).toContain("BLOCKED_DURING_COMPACTION");
@@ -2504,7 +2516,7 @@ test(
         (item) => item.type === "function_call_output",
       );
       expect(toolResult?.output).toContain("Vision is unavailable for this request.");
-      expect(toolResult?.output).toContain("native image input");
+      expect(toolResult?.output).toContain("Continue without Vision.");
       for (const request of [...gateway.requests, ...gateway.modelRequests]) {
         expect(request.headers.get("authorization")).not.toBe(`Bearer ${codex.accessToken}`);
       }

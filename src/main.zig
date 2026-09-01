@@ -2877,6 +2877,16 @@ const App = struct {
         if (try app_commands.Handlers(App).collectUsageDashboardFacts(self)) {
             RenderAppRuntime.requestActiveSurfaceFrame(self, .footer);
         }
+        switch (try self.mcp.collectMenuCompletion(self.alloc)) {
+            .none => {},
+            .repaint => RenderAppRuntime.requestActiveSurfaceFrame(self, .footer),
+            .reload => |generation| {
+                self.beginMcpMenuReload(generation) catch |err| {
+                    try self.mcp.recordMenuEffectFailure(self.alloc, generation, err);
+                };
+                RenderAppRuntime.requestActiveSurfaceFrame(self, .footer);
+            },
+        }
         try app_commands.Handlers(App).collectMcpAuthenticationFacts(self);
         try app_commands.Handlers(App).collectMcpReloadFacts(self);
         if (comptime host_profile.native_auth or host_profile.js_host_auth) {

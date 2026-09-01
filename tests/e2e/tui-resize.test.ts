@@ -1790,11 +1790,18 @@ describe.skipIf(SKIP)("tui: resize", () => {
       );
 
       const assertMarkersExactlyOnce = (scrollback: string) => {
-        for (const marker of markers) {
-          expect(countOccurrences(scrollback, marker)).toBe(1);
-        }
+        const invalid = markers
+          .map((marker) => ({ marker, count: countOccurrences(scrollback, marker) }))
+          .filter(({ count }) => count !== 1);
+        expect(invalid).toEqual([]);
       };
-      const beforeResize = await session.captureFullScrollback();
+      let beforeResize = "";
+      const retentionDeadline = Date.now() + 60_000;
+      while (Date.now() < retentionDeadline) {
+        beforeResize = await session.captureFullScrollback();
+        if (markers.every((marker) => countOccurrences(beforeResize, marker) === 1)) break;
+        await Bun.sleep(25);
+      }
       assertMarkersExactlyOnce(beforeResize);
 
       await session.resizeWindow(72, 24, 700);

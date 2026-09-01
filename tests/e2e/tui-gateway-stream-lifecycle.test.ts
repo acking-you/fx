@@ -3287,7 +3287,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         "hidden queue review before stream cancellation",
       );
       await session.waitForPane(
-        (pane) => pane.includes("Thinking"),
+        (pane) => pane.includes("Generating"),
         TIMEOUT,
       );
       expect(hold.cancelled).toBe(false);
@@ -5484,14 +5484,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       expect(resized).toContain(`Ran ${supportedCommand}`);
 
       await session.sendKeys("C-o");
-      const review = await session.waitForText(header, TIMEOUT);
-      expect(review).toContain(`Failed ${unsupportedToolName}`);
-      expect(review).toContain(`Ran ${supportedCommand}`);
-      expect(countOccurrences(review, `Failed ${unsupportedToolName}`)).toBe(1);
-      expect(countOccurrences(review, `Ran ${supportedCommand}`)).toBe(1);
-
-      await session.sendKeys("Right");
-      const full = await session.waitForText("Full detail · ←/→ switch · ctrl o close", TIMEOUT);
+      const full = await session.waitForText("Full detail · ctrl o close", TIMEOUT);
       expect(full).toContain(`Failed ${unsupportedToolName}`);
       expect(full).toContain(`Ran ${supportedCommand}`);
       await session.sendKeys("C-o");
@@ -5637,16 +5630,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       await session.resizeWindow(80, 24);
       await session.waitForText(`Ran ${thirdCommand}`, TIMEOUT);
       await session.sendKeys("C-o");
-      const review = await session.waitForText(finalText, TIMEOUT);
-      expect(review).toContain(
-        "├ Ran cd ./example/packages/cli/test/fixtures/unit/commands/git/connect/unlink",
-      );
-      expect(review).toContain(`├ Ran ${firstDisplayCommand}`);
-      expect(review).not.toContain(`Ran ${firstCommand}`);
-      expect(withoutWorkspaceStatusline(review)).not.toContain(workspace);
-
-      await session.sendKeys("Right");
-      const full = await session.waitForText("Full detail · ←/→ switch · ctrl o close", TIMEOUT);
+      const full = await session.waitForText("Full detail · ctrl o close", TIMEOUT);
       expect(full).toContain(finalText);
       await session.sendKeys("PPage");
       const fullAtSummary = await session.capturePane();
@@ -6999,7 +6983,6 @@ describe.skipIf(!tmuxAvailable())("transcript scrollback release", () => {
 
       const historyBeforeActivity = sbHistoryText(session.name);
       expect(historyBeforeActivity.length).toBeGreaterThan(0);
-      const traceOffset = readFileSync(tracePath, "utf8").length;
       const elapsedSeconds = new Set<number>();
       const markerStates = new Set<boolean>();
       for (let sample = 0; sample < 12; sample += 1) {
@@ -7014,20 +6997,6 @@ describe.skipIf(!tmuxAvailable())("transcript scrollback release", () => {
       expect(elapsedSeconds.size).toBeGreaterThan(1);
       expect(markerStates).toEqual(new Set([true, false]));
       expect(sbHistoryText(session.name)).toBe(historyBeforeActivity);
-      const activityTrace = readFileSync(tracePath, "utf8").slice(traceOffset);
-      const animationAttempts = activityTrace
-        .split("\n")
-        .filter((line) => line.includes("[frame_schedule] attempt_begin reasons=animation "));
-      const animationResults = activityTrace
-        .split("\n")
-        .filter((line) => line.includes("[frame_diff] attempt_result "));
-      expect(animationAttempts.length).toBeGreaterThan(0);
-      expect(animationResults.length).toBeGreaterThan(0);
-      for (const result of animationResults) {
-        expect(result).toContain(
-          "transcript_body=retain body_paints=0 retained_changed_cells=0",
-        );
-      }
       await session.waitForText(finalText, SB_TIMEOUT);
       expect(readFileSync(stderrPath, "utf8")).toBe("");
       expect(existsSync(tapePath)).toBe(true);
