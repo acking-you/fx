@@ -8235,6 +8235,11 @@ describe("acp: model-independent", () => {
         expect(permission).toBeDefined();
         expect(permission.params.sessionId).toBeDefined();
         expect(permission.params.toolCall.toolCallId).toBe("approved_call_1");
+        expect(permission.params.toolCall.name).toBe("write_file");
+        expect(permission.params.toolCall.rawInput).toEqual({
+          path: target,
+          content: "first\n",
+        });
         expect(permission.params.options).toEqual([
           { optionId: "allow_once", name: "Allow once", kind: "allow_once" },
           { optionId: "allow_always", name: "Allow for this session", kind: "allow_always" },
@@ -8248,6 +8253,11 @@ describe("acp: model-independent", () => {
         const permissionIndex = first.messages.indexOf(permission);
         expect(pendingIndex).toBeGreaterThanOrEqual(0);
         expect(pendingIndex).toBeLessThan(permissionIndex);
+        expect(first.messages[pendingIndex]?.params.update.name).toBe("write_file");
+        expect(first.messages[pendingIndex]?.params.update.rawInput).toEqual({
+          path: target,
+          content: "first\n",
+        });
         const firstWire = JSON.stringify(first.messages);
         expect(firstWire).toContain('"toolCallId":"approved_call_1"');
         expect(firstWire).toContain('"status":"completed"');

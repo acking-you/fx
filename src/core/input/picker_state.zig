@@ -362,19 +362,19 @@ fn findFilePickerQuery(items: []const u8, cursor: usize) ?FilePickerQuery {
 fn findInlineSkillQuery(items: []const u8, cursor: usize) ?InlineSkillQuery {
     if (cursor != items.len) return null;
 
-    var token_start = cursor;
-    while (token_start > 0 and !isFilePickerTerminator(items[token_start - 1])) {
-        token_start -= 1;
+    var index = cursor;
+    while (index > 0) {
+        const byte = items[index - 1];
+        if (isFilePickerTerminator(byte)) return null;
+        index -= 1;
+        if (byte != '$') continue;
+        return .{
+            .query = items[index + 1 .. cursor],
+            .dollar_offset = index,
+            .token_start = index + 1,
+        };
     }
-    if (token_start == 0 or token_start == cursor or items[token_start] != '$') return null;
-
-    const query_start = token_start + 1;
-    if (query_start == cursor) return null;
-    return .{
-        .query = items[query_start..cursor],
-        .dollar_offset = token_start,
-        .token_start = query_start,
-    };
+    return null;
 }
 
 fn findInlineSlashQuery(items: []const u8, cursor: usize) ?InlineSlashQuery {
@@ -444,6 +444,41 @@ test "picker state resolves model file skill and slash queries" {
 
     try editor.setText(alloc, "then /help");
     try std.testing.expectEqualStrings("/help", state.activeInlineSlashQuery(&editor).?.prefix);
+}
+
+test "skill query binds the nearest dollar anywhere at the cursor" {
+    const alloc = std.testing.allocator;
+    var editor: editor_state.State = .{};
+    defer editor.deinit(alloc);
+    var state: State = .{};
+    defer state.deinit(alloc);
+
+    const cases = [_]struct {
+        input: []const u8,
+        query: []const u8,
+        dollar_offset: usize,
+    }{
+        .{ .input = "$", .query = "", .dollar_offset = 0 },
+        .{ .input = "$blue", .query = "blue", .dollar_offset = 0 },
+        .{ .input = "use $", .query = "", .dollar_offset = "use ".len },
+        .{ .input = "price$100", .query = "100", .dollar_offset = "price".len },
+        .{ .input = "one$two$three", .query = "three", .dollar_offset = "one$two".len },
+    };
+
+    for (cases) |case| {
+        try editor.setText(alloc, case.input);
+        const maybe_query = state.activeInlineSkillQuery(&editor);
+        try std.testing.expect(maybe_query != null);
+        const query = maybe_query.?;
+        try std.testing.expectEqualStrings(case.query, query.query);
+        try std.testing.expectEqual(case.dollar_offset, query.dollar_offset);
+        try std.testing.expectEqual(case.dollar_offset + 1, query.token_start);
+    }
+
+    try editor.setText(alloc, "price$100 tail");
+    try std.testing.expect(state.activeInlineSkillQuery(&editor) == null);
+    _ = editor.setCursor("price$10".len);
+    try std.testing.expect(state.activeInlineSkillQuery(&editor) == null);
 }
 
 test "model picker query takes precedence over file syntax" {

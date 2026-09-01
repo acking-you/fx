@@ -1382,6 +1382,12 @@ pub const Runtime = struct {
         return skillMenuSkillAtQuery(self.items, self.menu.source_filter, self.menu.query(), self.menu.selected_index % item_count);
     }
 
+    pub fn menuVisible(self: Runtime) bool {
+        if (!self.menu.active) return false;
+        if (!self.menu.origin.isMention()) return true;
+        return skillMenuFilterQueryCount(self.items, .all, self.menu.query()) > 0;
+    }
+
     pub fn buildRoutedSystemPromptSection(
         self: Runtime,
         alloc: Allocator,
@@ -2160,6 +2166,33 @@ test "skill menu opens focuses moves and clamps loaded items" {
     runtime.closeMenu();
     try std.testing.expect(!runtime.menu.active);
     try std.testing.expect(runtime.selectedMenuSkill() == null);
+}
+
+test "skill menu visibility hides only zero-result mention queries" {
+    const skills = [_]Skill{
+        staticSkill("managed", "managed skill", .global_fx),
+        staticSkill("workspace", "workspace skill", .workspace_shared),
+    };
+    var runtime = Runtime{ .items = @constCast(&skills) };
+
+    try std.testing.expect(!runtime.menuVisible());
+
+    runtime.openMenuWithQuery(.command, null, "missing");
+    try std.testing.expect(runtime.menuVisible());
+
+    runtime.openMenuWithQuery(.dollar, .{ .start = 4, .end = 5 }, "");
+    try std.testing.expect(runtime.menuVisible());
+
+    runtime.menu.setQuery("missing");
+    try std.testing.expect(!runtime.menuVisible());
+
+    runtime.menu.setQuery("managed");
+    runtime.menu.source_filter = .claude;
+    try std.testing.expect(runtime.selectedMenuSkill() == null);
+    try std.testing.expect(runtime.menuVisible());
+
+    runtime.closeMenu();
+    try std.testing.expect(!runtime.menuVisible());
 }
 
 test "skill menu movement uses rendered visible rows before scrolling" {

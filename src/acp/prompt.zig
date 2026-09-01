@@ -12,6 +12,7 @@ const acp_types = @import("types.zig");
 const server = @import("server.zig");
 const sessions = @import("sessions.zig");
 const agent_runtime = @import("../core/agent/agent_runtime.zig");
+const agent_execution_memory = @import("../core/agent/execution_memory.zig");
 const diff_mod = @import("../core/output/diff.zig");
 const file_mutation = @import("../core/tooling/file_mutation.zig");
 const file_mutation_contract = @import("../core/tooling/file_mutation_contract.zig");
@@ -283,15 +284,23 @@ const AcpContext = struct {
         if (self.published_tool_calls.getKey(call.id)) |published| return published;
         const registry = self.toolRegistry();
         const title = describeToolTitle(registry, arena, call) catch "Tool call";
-        const kind = mapToolKind(call.name);
+        const name = call.name;
+        const kind = mapToolKind(name);
+        const masked_arguments = try agent_execution_memory.redactToolArgumentsJson(
+            arena,
+            call.name,
+            call.arguments_json,
+        );
+        defer arena.free(masked_arguments);
         var validated_arguments: std.Io.Writer.Allocating = .init(arena);
         defer validated_arguments.deinit();
         const raw_input_json: ?[]const u8 = if (writeValidatedToolArguments(
             arena,
             &validated_arguments.writer,
-            call.arguments_json,
+            masked_arguments,
         )) |_| validated_arguments.written() else |_| null;
 
+        try self.published_tool_calls.ensureUnusedCapacity(self.alloc, 1);
         const owned_id = try self.alloc.dupe(u8, call.id);
         errdefer self.alloc.free(owned_id);
         var out: std.Io.Writer.Allocating = .init(self.alloc);
@@ -299,13 +308,17 @@ const AcpContext = struct {
         try acp_types.writeToolCall(
             &out.writer,
             owned_id,
+            name,
             title,
             kind,
             .pending,
             raw_input_json,
         );
         try self.sendUpdate(out.writer.buffered());
-        try self.published_tool_calls.put(self.alloc, owned_id, {});
+        self.published_tool_calls.putAssumeCapacity(
+            owned_id,
+            {},
+        );
         return owned_id;
     }
 
@@ -2509,6 +2522,8 @@ fn requestAcpPermission(
     try jsonrpc.writeJsonStr(ctx.session_id, &params.writer);
     try params.writer.writeAll(",\"toolCall\":{\"toolCallId\":");
     try jsonrpc.writeJsonStr(tool_call_id, &params.writer);
+    try params.writer.writeAll(",\"name\":");
+    try jsonrpc.writeJsonStr(call.name, &params.writer);
     try params.writer.writeAll(",\"title\":");
     try jsonrpc.writeJsonStr(request.label, &params.writer);
     try params.writer.writeAll(",\"kind\":");
@@ -3635,7 +3650,7 @@ pub fn mapToolKind(tool_name: []const u8) acp_types.ToolCallKind {
     if (std.mem.eql(u8, tool_name, "glob_files")) return .read;
     if (std.mem.eql(u8, tool_name, "grep_files")) return .search;
     if (std.mem.eql(u8, tool_name, "read_file")) return .read;
-    if (std.mem.eql(u8, tool_name, "web_fetch")) return .read;
+    if (std.mem.eql(u8, tool_name, "web_fetch")) return .fetch;
     if (std.mem.eql(u8, tool_name, "web_search")) return .search;
     if (std.mem.eql(u8, tool_name, "write_file")) return .edit;
     if (std.mem.eql(u8, tool_name, "edit_file")) return .edit;
@@ -3748,6 +3763,7 @@ test "mapToolKind maps common tools" {
     try std.testing.expectEqual(acp_types.ToolCallKind.search, mapToolKind("grep_files"));
     try std.testing.expectEqual(acp_types.ToolCallKind.execute, mapToolKind("exec_command"));
     try std.testing.expectEqual(acp_types.ToolCallKind.execute, mapToolKind("write_stdin"));
+    try std.testing.expectEqual(acp_types.ToolCallKind.fetch, mapToolKind("web_fetch"));
     try std.testing.expectEqual(acp_types.ToolCallKind.other, mapToolKind("unknown_tool"));
 }
 
@@ -4705,12 +4721,18 @@ test "ACP pending tool_call updates keep provider ids stable and dedupe" {
     const call = ToolCall{
         .id = "provider_call_7",
         .name = "exec_command",
-        .arguments_json = "{\"cmd\":\"ls\"}",
+        .arguments_json = "{\"cmd\":\"ls\",\"api_key\":\"secret-value\"}",
     };
     const first = try ctx.sendToolCallPending(alloc, call);
     const second = try ctx.sendToolCallPending(alloc, call);
     try std.testing.expectEqualStrings("provider_call_7", first);
     try std.testing.expect(first.ptr == second.ptr);
+    _ = try ctx.sendToolCallPending(alloc, .{
+        .id = "malformed_call",
+        .name = "read_file",
+        .arguments_json = "{",
+        .argument_integrity = .malformed_json,
+    });
     try capture.sync(io_mod.getIo());
 
     var captured_file = try tmp.dir.openFile(io_mod.getIo(), "acp-tool-call.jsonl", .{});
@@ -4718,13 +4740,27 @@ test "ACP pending tool_call updates keep provider ids stable and dedupe" {
     const captured = try io_mod.readFileToEnd(alloc, &captured_file, 64 * 1024);
     var lines = std.mem.splitScalar(u8, captured, '\n');
     var pending_count: usize = 0;
+    var malformed_count: usize = 0;
     while (lines.next()) |line| {
         if (line.len == 0) continue;
-        try std.testing.expect(std.mem.find(u8, line, "\"toolCallId\":\"provider_call_7\"") != null);
-        try std.testing.expect(std.mem.find(u8, line, "\"sessionUpdate\":\"tool_call\"") != null);
-        pending_count += 1;
+        var parsed = try std.json.parseFromSlice(std.json.Value, alloc, line, .{});
+        defer parsed.deinit();
+        const update = parsed.value.object.get("params").?.object.get("update").?.object;
+        try std.testing.expectEqualStrings("tool_call", update.get("sessionUpdate").?.string);
+        const call_id = update.get("toolCallId").?.string;
+        if (std.mem.eql(u8, call_id, "provider_call_7")) {
+            try std.testing.expectEqualStrings("exec_command", update.get("name").?.string);
+            const raw_input = update.get("rawInput").?.object;
+            try std.testing.expectEqualStrings("ls", raw_input.get("cmd").?.string);
+            try std.testing.expectEqualStrings("[REDACTED]", raw_input.get("api_key").?.string);
+            pending_count += 1;
+        } else if (std.mem.eql(u8, call_id, "malformed_call")) {
+            try std.testing.expect(update.get("rawInput") == null);
+            malformed_count += 1;
+        }
     }
     try std.testing.expectEqual(@as(usize, 1), pending_count);
+    try std.testing.expectEqual(@as(usize, 1), malformed_count);
 }
 
 test "ACP terminal lifecycle replaces Running command title with Ran" {

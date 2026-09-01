@@ -2444,16 +2444,19 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
       await session.sendKeys("C-u");
 
       await session.sendLiteralText(" $");
+      grid = await waitForSkillsMenu(session, 4);
+      expect(composerContains(grid.join("\n"), " $")).toBe(true);
+      await session.sendKeys("C-[");
       await session.waitForPane(
-        (current) =>
-          composerContains(current, " $") &&
-          current.includes("𝒇x") &&
-          !current.includes("Skills 4"),
+        (current) => composerContains(current, " $") && !current.includes("Skills 4"),
         5_000,
       );
       await session.sendKeys("C-u");
 
       await session.sendLiteralText("hello $");
+      grid = await waitForSkillsMenu(session, 4);
+      expect(composerContains(grid.join("\n"), "hello $")).toBe(true);
+      await session.sendKeys("C-[");
       await session.waitForPane(
         (current) =>
           composerContains(current, "hello $") &&
@@ -2463,52 +2466,62 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
       );
       await session.sendKeys("C-u");
 
-      await session.sendLiteralText("explain $man");
+      await session.sendLiteralText("price$");
+      grid = await waitForSkillsMenu(session, 4);
+      expect(composerContains(grid.join("\n"), "price$")).toBe(true);
+      await session.sendKeys("C-[");
       await session.waitForPane(
         (current) =>
-          composerContains(current, "explain $managed-menu") &&
+          composerContains(current, "price$") &&
           !current.includes("Skills 4"),
         5_000,
       );
-      let inlineEscapes = await session.capturePaneEscapes();
-      expect(inlineEscapes).toContain(`${DIM_SGR}aged-menu`);
+      await session.sendKeys("C-u");
+
+      await session.sendLiteralText("explain $man");
+      grid = await waitForSkillsMenu(session, 1);
+      expect(composerContains(grid.join("\n"), "explain $man")).toBe(true);
+      expect(await session.capturePaneEscapes()).not.toContain(`${DIM_SGR}aged-menu`);
+
+      await session.sendLiteralText("zzzzzz");
+      await session.waitForPane(
+        (current) =>
+          composerContains(current, "explain $manzzzzzz") &&
+          !current.includes("Skills ") &&
+          !current.includes("No skills found.") &&
+          !current.includes("Enter Use"),
+        5_000,
+      );
+
+      await session.sendKeys("BSpace BSpace BSpace BSpace BSpace BSpace");
+      grid = await waitForSkillsMenu(session, 1);
+      expect(composerContains(grid.join("\n"), "explain $man")).toBe(true);
 
       await session.sendKeys("C-[");
       await session.waitForPane(
         (current) =>
           composerContains(current, "explain $man") &&
+          !current.includes("Skills "),
+        5_000,
+      );
+      await session.sendLiteralText("x");
+      await session.waitForPane(
+        (current) =>
+          composerContains(current, "explain $manx") &&
+          !current.includes("Skills ") &&
           !current.includes("aged-menu"),
         5_000,
       );
       await session.sendKeys("C-u");
 
-      await session.sendLiteralText("explain $man");
-      await session.waitForPane(
-        (current) => composerContains(current, "explain $managed-menu"),
-        5_000,
-      );
-      await session.sendKeys("Tab");
+      await session.sendLiteralText("prefix$man");
+      grid = await waitForSkillsMenu(session, 1);
+      expect(composerContains(grid.join("\n"), "prefix$man")).toBe(true);
+      await session.sendKeys("Enter");
       await session.waitForPane(
         (current) =>
-          composerContains(current, "explain managed-menu") &&
-          !current.includes("Skills 4"),
-        5_000,
-      );
-      inlineEscapes = await session.capturePaneEscapes();
-      expect(inlineEscapes).toContain(`${SELECTED_COMPLETION_SGR}managed-menu`);
-      expect(inlineEscapes).not.toContain(`${DIM_SGR}aged-menu`);
-      await session.sendKeys("C-u");
-
-      await session.sendLiteralText("explain $man");
-      await session.waitForPane(
-        (current) => composerContains(current, "explain $managed-menu"),
-        5_000,
-      );
-      await session.sendKeys("Right");
-      await session.waitForPane(
-        (current) =>
-          composerContains(current, "explain managed-menu") &&
-          !current.includes("Skills 4"),
+          composerContains(current, "prefixmanaged-menu") &&
+          !current.includes("Skills "),
         5_000,
       );
       await session.sendKeys("C-u");
@@ -2521,7 +2534,7 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
           !current.includes("Skills 4"),
         5_000,
       );
-      inlineEscapes = await session.capturePaneEscapes();
+      let inlineEscapes = await session.capturePaneEscapes();
       expect(inlineEscapes).toContain(`${DIM_SGR}ills`);
 
       await session.sendKeys("C-[");

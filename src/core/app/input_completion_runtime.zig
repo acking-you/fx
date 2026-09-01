@@ -721,7 +721,7 @@ pub fn CompletionRuntime(comptime App: type) type {
             if (app.input_runtime.help_menu.active or app.input_runtime.settings_menu.active) return true;
             if (comptime @hasField(App, "skills")) {
                 if (comptime @hasField(@TypeOf(app.skills), "menu")) {
-                    if (app.skills.menu.active) return true;
+                    if (app.skills.menuVisible()) return true;
                 }
             }
             if (comptime @hasField(App, "model_cache")) {
@@ -1398,12 +1398,7 @@ const InlineCompletionTestApp = struct {
     input_runtime: core_input_runtime.Runtime = .{},
     pending_images: std.ArrayList(types.ImageAttachment) = .empty,
     queued_prompt_review: input_queue_runtime.State = .{},
-    skills: struct {
-        items: []const skill_runtime.Skill = &.{},
-        menu: struct {
-            active: bool = false,
-        } = .{},
-    } = .{},
+    skills: skill_runtime.Runtime = .{},
     model_cache: struct {
         menu: struct {
             active: bool = false,
@@ -1633,7 +1628,7 @@ test "root slash completion follows multiline and command argument ownership" {
     }};
     var app = InlineCompletionTestApp{
         .alloc = alloc,
-        .skills = .{ .items = &skills },
+        .skills = .{ .items = @constCast(&skills) },
     };
     defer app.deinit();
 
@@ -1656,7 +1651,7 @@ test "inline skill completion stays inactive when its suffix cannot render" {
     }};
     var app = InlineCompletionTestApp{
         .alloc = alloc,
-        .skills = .{ .items = &skills },
+        .skills = .{ .items = @constCast(&skills) },
     };
     defer app.deinit();
     try app.input_runtime.textReplacementState().replace(alloc, "x $man");
@@ -1702,7 +1697,7 @@ test "model picker ownership suppresses inline skill completion" {
     }};
     var app = InlineCompletionTestApp{
         .alloc = alloc,
-        .skills = .{ .items = &skills },
+        .skills = .{ .items = @constCast(&skills) },
     };
     defer app.deinit();
     try app.input_runtime.textReplacementState().replace(alloc, "/model anything $man");
@@ -1730,7 +1725,7 @@ test "dedicated catalog ownership suppresses inline skill completion" {
     }};
     var app = InlineCompletionTestApp{
         .alloc = alloc,
-        .skills = .{ .items = &skills },
+        .skills = .{ .items = @constCast(&skills) },
     };
     defer app.deinit();
     try app.input_runtime.textReplacementState().replace(alloc, "x $man");

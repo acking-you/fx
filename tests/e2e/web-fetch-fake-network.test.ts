@@ -562,11 +562,22 @@ describe("web_fetch Responses fixture", () => {
           (message) =>
             message.method === "session/update" &&
             message.params?.update?.sessionUpdate === "tool_call" &&
-            message.params.update.kind === "read" &&
-            message.params.update.title === "Fetching",
+            message.params.update.toolCallId === "fetch_outer_1",
         );
 
         expect(fetchStarts).toHaveLength(1);
+        expect(fetchStarts[0]?.params.update).toEqual({
+          sessionUpdate: "tool_call",
+          toolCallId: "fetch_outer_1",
+          name: "web_fetch",
+          title: "Fetching",
+          kind: "fetch",
+          status: "pending",
+          rawInput: {
+            url: "https://example.com/docs",
+            prompt: "legacy",
+          },
+        });
       } finally {
         await client.close();
         gateway.stop();

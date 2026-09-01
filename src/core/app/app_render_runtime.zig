@@ -2691,7 +2691,7 @@ pub fn Runtime(comptime App: type) type {
         }
 
         fn skillsMenuActive(app: *const App) bool {
-            if (comptime @hasField(App, "skills")) return app.skills.menu.active;
+            if (comptime @hasField(App, "skills")) return app.skills.menuVisible();
             return false;
         }
 

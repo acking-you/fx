@@ -349,7 +349,7 @@ pub fn helpMenuProjection(
 
 pub fn skillsMenuProjection(skills: *const skill_runtime.Runtime) SkillsMenuProjection {
     return .{
-        .active = skills.menu.active,
+        .active = skills.menuVisible(),
         .items = skills.items,
         .source_filter = skills.menu.source_filter,
         .selected_index = skills.menu.selected_index,
@@ -744,6 +744,22 @@ test "skillsMenuProjection mirrors runtime menu state" {
     try std.testing.expectEqual(@as(usize, 1), projection.selected_index);
     try std.testing.expectEqual(@as(usize, 1), projection.window_start);
     try std.testing.expectEqualStrings("work", projection.query);
+}
+
+test "skillsMenuProjection hides zero-result mentions and preserves command menus" {
+    var skills = [_]skill_runtime.Skill{
+        .{ .name = "managed", .description = "managed desc", .path = "/tmp/managed/SKILL.md", .source = .global_fx },
+    };
+    var runtime: skill_runtime.Runtime = .{ .items = &skills };
+
+    runtime.openMenuWithQuery(.dollar, .{ .start = 0, .end = "$missing".len }, "missing");
+    try std.testing.expect(!skillsMenuProjection(&runtime).active);
+
+    runtime.menu.setQuery("man");
+    try std.testing.expect(skillsMenuProjection(&runtime).active);
+
+    runtime.openMenuWithQuery(.command, null, "missing");
+    try std.testing.expect(skillsMenuProjection(&runtime).active);
 }
 
 test "modelMenuProjection mirrors cache-owned catalog state" {

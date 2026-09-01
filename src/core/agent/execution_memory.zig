@@ -183,7 +183,7 @@ fn responsesProviderOutputItemIsPersistenceSafe(
                 if (name == .string) name.string else ""
             else
                 "";
-            const redacted = try redactToolArgumentsJsonForTool(
+            const redacted = try redactToolArgumentsJson(
                 alloc,
                 tool_name,
                 payload.string,
@@ -762,7 +762,7 @@ pub fn dupeRedactedToolCall(alloc: Allocator, call: ToolCall) !ToolCall {
     errdefer alloc.free(id);
     const name = try alloc.dupe(u8, call.name);
     errdefer alloc.free(name);
-    const arguments_json = try redactToolArgumentsJsonForTool(
+    const arguments_json = try redactToolArgumentsJson(
         alloc,
         call.name,
         call.arguments_json,
@@ -791,7 +791,7 @@ const ArgumentRedactionPolicy = struct {
     web_fetch: bool = false,
 };
 
-fn redactToolArgumentsJsonForTool(
+pub fn redactToolArgumentsJson(
     alloc: Allocator,
     tool_name: []const u8,
     arguments_json: []const u8,

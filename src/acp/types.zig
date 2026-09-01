@@ -173,6 +173,7 @@ pub fn writePlanUpdate(
 pub fn writeToolCall(
     w: *std.Io.Writer,
     tool_call_id: []const u8,
+    name: []const u8,
     title: []const u8,
     kind: ToolCallKind,
     status: ToolCallStatus,
@@ -180,6 +181,8 @@ pub fn writeToolCall(
 ) !void {
     try w.writeAll("{\"sessionUpdate\":\"tool_call\",\"toolCallId\":");
     try writeJsonStr(tool_call_id, w);
+    try w.writeAll(",\"name\":");
+    try writeJsonStr(name, w);
     try w.writeAll(",\"title\":");
     try writeJsonStr(title, w);
     try w.writeAll(",\"kind\":");
@@ -373,12 +376,14 @@ test "writeToolCall produces valid json" {
     try writeToolCall(
         &out.writer,
         "call_001",
+        "read_file",
         "Reading file",
         .read,
         .pending,
         "{\"path\":\"src/main.zig\"}",
     );
     try std.testing.expect(std.mem.find(u8, out.writer.buffered(), "\"toolCallId\":\"call_001\"") != null);
+    try std.testing.expect(std.mem.find(u8, out.writer.buffered(), "\"name\":\"read_file\"") != null);
     try std.testing.expect(std.mem.find(u8, out.writer.buffered(), "\"kind\":\"read\"") != null);
     try std.testing.expect(std.mem.find(u8, out.writer.buffered(), "\"rawInput\":{\"path\":\"src/main.zig\"}") != null);
 }
@@ -402,6 +407,7 @@ test "ToolCallKind jsonString values" {
     try std.testing.expectEqualStrings("edit", ToolCallKind.edit.jsonString());
     try std.testing.expectEqualStrings("execute", ToolCallKind.execute.jsonString());
     try std.testing.expectEqualStrings("search", ToolCallKind.search.jsonString());
+    try std.testing.expectEqualStrings("fetch", ToolCallKind.fetch.jsonString());
     try std.testing.expectEqualStrings("other", ToolCallKind.other.jsonString());
 }
 

@@ -1697,11 +1697,12 @@ pub fn Runtime(comptime App: type) type {
                             selection.start
                         else
                             app.input_runtime.edit_state.cursor;
-                        if (byte == '$' and insertion_start == 0 and !helpMenuActive(app) and !commandSkillsMenuActive(app) and !modelMenuActive(app)) {
+                        if (byte == '$' and !helpMenuActive(app) and !commandSkillsMenuActive(app) and !modelMenuActive(app)) {
                             if ((try insertComposerSliceBounded(app, &.{byte}, max_input_len, false)) == .limit_exceeded) {
                                 try input_limit_feedback.report(App, app, .composer, 1);
                                 return;
                             }
+                            app.input_runtime.picker.resetInlinePickerEpisode();
                             if (comptime @hasField(App, "skills")) {
                                 app.skills.openMenuWithQuery(.dollar, .{ .start = insertion_start, .end = insertion_start + 1 }, "");
                             }
@@ -1893,7 +1894,7 @@ pub fn Runtime(comptime App: type) type {
 
         fn skillsMenuActive(app: *App) bool {
             if (comptime !@hasField(App, "skills")) return false;
-            return app.skills.menu.active;
+            return app.skills.menuVisible();
         }
 
         fn modelMenuActive(app: *App) bool {
@@ -2933,7 +2934,7 @@ pub fn Runtime(comptime App: type) type {
 
         fn cycleSkillsMenuSource(app: *App, delta: i32) bool {
             if (comptime !@hasField(App, "skills")) return false;
-            if (!app.skills.menu.active) return false;
+            if (!app.skills.menuVisible()) return false;
             return app.skills.moveMenuSourceFilter(delta);
         }
 
@@ -3153,9 +3154,11 @@ pub fn Runtime(comptime App: type) type {
 
         fn cancelSkillsMenu(app: *App) bool {
             if (comptime !@hasField(App, "skills")) return false;
-            if (!app.skills.menu.active) return false;
-            const clear_query = !app.skills.menu.origin.isMention();
+            if (!app.skills.menuVisible()) return false;
+            const mention = app.skills.menu.origin.isMention();
+            const clear_query = !mention;
             app.skills.closeMenu();
+            if (mention) app.input_runtime.picker.dismissInlinePicker(.skill);
             if (clear_query) {
                 app.input_runtime.inputResetState().clearCurrent(app.alloc);
                 paste_blocks.clearBlocks(app.alloc, &app.input_runtime.entities.pasted_blocks);
@@ -5410,9 +5413,19 @@ test "app_input_runtime dollar opens skills menu and Escape preserves raw text" 
     try Runtime(RoutingFakeApp).resolveEscape(&app, false, 102);
     try std.testing.expect(!app.skills.menu.active);
     try std.testing.expectEqualStrings("$s", app.input_runtime.edit_state.input.items);
+    try std.testing.expect(app.input_runtime.picker.isInlinePickerDismissed(.skill));
+
+    try Runtime(RoutingFakeApp).handleByte(&app, 'c', 4096, 103);
+    try std.testing.expect(!app.skills.menu.active);
+    try std.testing.expect(input_completion_runtime.CompletionRuntime(RoutingFakeApp).visibleInlineSkillCompletion(&app) == null);
+
+    try Runtime(RoutingFakeApp).handleByte(&app, '$', 4096, 104);
+    try std.testing.expect(app.skills.menu.active);
+    try std.testing.expect(!app.input_runtime.picker.isInlinePickerDismissed(.skill));
+    try std.testing.expectEqual(@as(usize, "$sc".len), app.skills.menu.target.?.start);
 }
 
-test "app_input_runtime non-leading dollar stays in the composer" {
+test "app_input_runtime typed dollar opens an anchored skills menu at every composer position" {
     const alloc = std.testing.allocator;
     const skills = [_]skill_runtime.Skill{.{
         .name = "scale",
@@ -5420,7 +5433,7 @@ test "app_input_runtime non-leading dollar stays in the composer" {
         .path = "/tmp/scale/SKILL.md",
         .source = .global_fx,
     }};
-    const inputs = [_][]const u8{ " $", "hello $" };
+    const inputs = [_][]const u8{ " $", "hello $", "price$" };
 
     for (inputs) |input| {
         var app = try RoutingFakeApp.init(alloc);
@@ -5430,7 +5443,11 @@ test "app_input_runtime non-leading dollar stays in the composer" {
         try feedRoutingBytes(&app, input);
 
         try std.testing.expectEqualStrings(input, app.input_runtime.edit_state.input.items);
-        try std.testing.expect(!app.skills.menu.active);
+        try std.testing.expect(app.skills.menu.active);
+        try std.testing.expectEqual(skill_runtime.SkillMenuOrigin.dollar, app.skills.menu.origin);
+        try std.testing.expectEqual(input.len - 1, app.skills.menu.target.?.start);
+        try std.testing.expectEqual(input.len, app.skills.menu.target.?.end);
+        try std.testing.expectEqualStrings("", app.skills.menu.query());
     }
 }
 
@@ -5447,7 +5464,7 @@ test "app_input_runtime Tab and Right Arrow accept visible inline skill completi
         var app = try RoutingFakeApp.init(alloc);
         defer app.deinit();
         app.skills.items = @constCast(&skills);
-        try feedRoutingBytes(&app, "explain $man");
+        try app.input_runtime.textReplacementState().replace(alloc, "explain $man");
 
         const completion = input_completion_runtime.CompletionRuntime(RoutingFakeApp).visibleInlineSkillCompletion(&app).?;
         try std.testing.expectEqualStrings("aged-menu", completion.suffix);
@@ -5512,7 +5529,7 @@ test "app_input_runtime Right Arrow collapses selection before inline completion
     var app = try RoutingFakeApp.init(alloc);
     defer app.deinit();
     app.skills.items = @constCast(&skills);
-    try feedRoutingBytes(&app, "explain $man");
+    try app.input_runtime.textReplacementState().replace(alloc, "explain $man");
     const end = app.input_runtime.edit_state.input.items.len;
     _ = app.input_runtime.selectionState().begin(end - 1);
     _ = app.input_runtime.selectionState().extend(end);
@@ -5602,7 +5619,7 @@ test "app_input_runtime inline skill acceptance preserves input on limit rejecti
         .source = .global_fx,
     }};
     app.skills.items = @constCast(&skills);
-    try feedRoutingBytes(&app, "explain $man");
+    try app.input_runtime.textReplacementState().replace(alloc, "explain $man");
     const original_len = app.input_runtime.edit_state.input.items.len;
 
     try Runtime(RoutingFakeApp).handleByte(&app, '\t', original_len, 100);
@@ -5628,7 +5645,8 @@ test "app_input_runtime no-match dollar text keeps spaces and submits raw" {
     app.skills.items = @constCast(&skills);
 
     try feedRoutingBytes(&app, "Explain echo $HOME");
-    try std.testing.expect(!app.skills.menu.active);
+    try std.testing.expect(app.skills.menu.active);
+    try std.testing.expect(!app.skills.menuVisible());
     try std.testing.expectEqualStrings("Explain echo $HOME", app.input_runtime.edit_state.input.items);
 
     try feedRoutingBytes(&app, " please");
@@ -5758,16 +5776,43 @@ test "app_input_runtime zero-match dollar query recovers matches on backspace" {
 
     try feedRoutingBytes(&app, "$mzz");
     try std.testing.expect(app.skills.menu.active);
+    try std.testing.expect(!app.skills.menuVisible());
     try std.testing.expect(app.skills.selectedMenuSkill() == null);
 
     try feedRoutingBytes(&app, "\x7f\x7f");
     try std.testing.expect(app.skills.menu.active);
+    try std.testing.expect(app.skills.menuVisible());
     try std.testing.expectEqualStrings("m", app.skills.menu.query());
     try std.testing.expect(app.skills.selectedMenuSkill() != null);
 
     try feedRoutingBytes(&app, "\r");
     try std.testing.expectEqual(@as(usize, 1), app.input_runtime.entities.skill_tokens.items.len);
     try std.testing.expectEqualStrings("managed", app.input_runtime.entities.skill_tokens.items[0].name);
+}
+
+test "app_input_runtime hidden zero-match dollar menu yields navigation to the composer" {
+    const alloc = std.testing.allocator;
+    var app = try RoutingFakeApp.init(alloc);
+    defer app.deinit();
+    const skills = [_]skill_runtime.Skill{.{
+        .name = "managed",
+        .description = "",
+        .path = "/tmp/managed/SKILL.md",
+        .source = .global_fx,
+    }};
+    app.skills.items = @constCast(&skills);
+
+    try feedRoutingBytes(&app, "$missing");
+    try std.testing.expect(app.skills.menu.active);
+    try std.testing.expect(!app.skills.menuVisible());
+    try std.testing.expectEqual("$missing".len, app.input_runtime.edit_state.cursor);
+
+    try Runtime(RoutingFakeApp).routeModifiedHistory(&app, .up, 1);
+
+    try std.testing.expectEqualStrings("$missing", app.input_runtime.edit_state.input.items);
+    try std.testing.expectEqual(@as(usize, 0), app.input_runtime.edit_state.cursor);
+    try std.testing.expect(app.skills.menu.active);
+    try std.testing.expect(!app.skills.menuVisible());
 }
 
 test "app_input_runtime Escape cancels an idle session picker before empty-composer handling" {

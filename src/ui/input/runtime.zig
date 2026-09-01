@@ -1332,19 +1332,24 @@ test "active inline skill query recognizes a later whitespace-delimited prefix" 
     try std.testing.expectEqual(picker_state.InlinePickerKind.skill, runtime.picker.inlinePickerTriggerKind(&runtime.edit_state).?);
 }
 
-test "active inline skill query rejects leading empty embedded and mid-cursor tokens" {
-    const cases = [_][]const u8{
+test "active inline skill query accepts root empty and embedded tokens" {
+    const accepted = [_][]const u8{
         "$man",
         "explain $",
         "explain$man",
-        "explain $man ",
+        "explain one$two$man",
     };
-    for (cases) |input| {
+    for (accepted) |input| {
         var runtime = InputRuntime{};
         defer runtime.deinit(std.testing.allocator);
         try runtime.textReplacementState().replace(std.testing.allocator, input);
-        try std.testing.expectEqual(@as(?picker_state.InlineSkillQuery, null), runtime.picker.activeInlineSkillQuery(&runtime.edit_state));
+        try std.testing.expect(runtime.picker.activeInlineSkillQuery(&runtime.edit_state) != null);
     }
+
+    var terminated = InputRuntime{};
+    defer terminated.deinit(std.testing.allocator);
+    try terminated.textReplacementState().replace(std.testing.allocator, "explain $man ");
+    try std.testing.expectEqual(@as(?picker_state.InlineSkillQuery, null), terminated.picker.activeInlineSkillQuery(&terminated.edit_state));
 
     var mid_cursor = InputRuntime{};
     defer mid_cursor.deinit(std.testing.allocator);
