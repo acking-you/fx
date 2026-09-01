@@ -198,6 +198,12 @@ upstream-only presentation markers were updated from `Working` to the fork's
 menu. No production compatibility state was added solely to satisfy those old
 labels.
 
+The performance fixture's last model-facing `terminal` calls and its
+informational-only hosted-input sample were deleted. They targeted the removed
+executable backend, enforced no latency budget, and duplicated dedicated
+Unified Exec TUI and ACP coverage. The useful approval-navigation benchmark now
+uses `exec_command`, the fork's single supported shell family.
+
 ## Exact new files retained
 
 The following files did not exist on the BYOK first parent and remain in the

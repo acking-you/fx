@@ -58,7 +58,6 @@ const MEASURED_ACTION_NAMES = [
   "fileQuery",
   "questionNavigate",
   "approvalNavigate",
-  "hostedTerminalInput",
   "subagentManagerOpen",
   "fullOpen",
   "fullScroll",
@@ -68,10 +67,6 @@ const MEASURED_ACTION_NAMES = [
   "loginOpen",
   ...LOCAL_MENU_ACTIONS.map((action) => action.name),
 ] as const;
-
-const INFORMATIONAL_PANE_ACTION_NAMES = new Set<string>([
-  "hostedTerminalInput",
-]);
 
 const APP_PANE_ACTION_NAMES = new Set<string>([
   "subagentManagerOpen",
@@ -88,31 +83,6 @@ type ResourceSnapshot = {
   threads: number;
   descriptors: number;
 };
-
-function findSessionId(value: unknown): string | undefined {
-  if (typeof value === "string") {
-    try {
-      return findSessionId(JSON.parse(value));
-    } catch {
-      return undefined;
-    }
-  }
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      const found = findSessionId(item);
-      if (found !== undefined) return found;
-    }
-    return undefined;
-  }
-  if (value === null || typeof value !== "object") return undefined;
-  const record = value as Record<string, unknown>;
-  if (typeof record.session_id === "string") return record.session_id;
-  for (const child of Object.values(record)) {
-    const found = findSessionId(child);
-    if (found !== undefined) return found;
-  }
-  return undefined;
-}
 
 function percentile(values: readonly number[], fraction: number): number {
   const sorted = [...values].sort((left, right) => left - right);
@@ -197,19 +167,6 @@ async function measurePaneAction(
   await waitReady();
   const elapsed = Math.ceil(performance.now() - started);
   return { firstPaint: elapsed, contentReady: elapsed };
-}
-
-async function waitForPaneChange(
-  session: TmuxSession,
-  before: string,
-  timeoutMs = TIMEOUT,
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (await session.capturePane() !== before) return;
-    await Bun.sleep(1);
-  }
-  throw new Error("terminal pane did not change after input");
 }
 
 async function waitForPaneText(
@@ -640,7 +597,6 @@ test.skipIf(!ENABLED || !tmuxAvailable())(
       "PERF_TRANSCRIPT_TAIL",
       "PERF_SECOND_TRANSCRIPT_TAIL",
     );
-    let hostedTerminalSessionId = "";
     const gateway = startFakeGateway([
       fakeGatewayFinalText(fixture.transcript),
       fakeGatewayToolCall("performance-question", "ask_user_question", {
@@ -653,36 +609,10 @@ test.skipIf(!ENABLED || !tmuxAvailable())(
         }],
       }),
       fakeGatewayFinalText("PERF_QUESTION_DONE"),
-      fakeGatewayToolCall("performance-approval", "terminal", {
-        action: "exec",
-        command: "touch performance-approval.txt",
-        timeout_ms: 600_000,
+      fakeGatewayToolCall("performance-approval", "exec_command", {
+        cmd: "touch performance-approval.txt",
       }),
       fakeGatewayFinalText("PERF_APPROVAL_DONE"),
-      fakeGatewayToolCall("performance-terminal", "terminal", {
-        action: "start",
-        cwd: fixture.workspace,
-        command:
-          "printf 'PERF_TERMINAL_READY\\n'; " +
-          "while :; do sleep 1; done",
-        backend: "native",
-        return_when: { kind: "match", pattern: "PERF_TERMINAL_READY" },
-        wait_ceiling_ms: 20_000,
-        dimensions: { rows: 24, columns: 80 },
-      }),
-      (body) => {
-        hostedTerminalSessionId = findSessionId(JSON.parse(body)) ?? "";
-        if (hostedTerminalSessionId.length === 0) {
-          throw new Error("terminal start result did not contain a session id");
-        }
-        return fakeGatewayFinalText("PERF_TERMINAL_AGENT_READY");
-      },
-      () => fakeGatewayToolCall("performance-terminal-close", "terminal", {
-        action: "close",
-        session_id: hostedTerminalSessionId,
-        close_policy: "force",
-      }),
-      fakeGatewayFinalText("PERF_TERMINAL_CLOSED"),
       fakeGatewayFinalText(secondTranscript),
     ]);
     let session: TmuxSession | null = null;
@@ -957,32 +887,6 @@ test.skipIf(!ENABLED || !tmuxAvailable())(
       await session.waitForText("PERF_APPROVAL_DONE", TIMEOUT);
       await session.waitForComposer(TIMEOUT);
 
-      await session.sendText("Start the performance terminal.");
-      await session.waitForText("PERF_TERMINAL_READY", TIMEOUT);
-      session.sendKeysImmediate(["1"]);
-      await session.waitForText("PERF_TERMINAL_AGENT_READY", TIMEOUT);
-      await session.waitForComposer(TIMEOUT);
-      session.sendKeysImmediate(["C-x"]);
-      await session.waitForText("Background processes", TIMEOUT);
-      session.sendKeysImmediate(["Enter"]);
-      await session.waitForText("PERF_TERMINAL_READY", TIMEOUT);
-      for (let cycle = 0; cycle < WARMUPS + SAMPLES; cycle += 1) {
-        const before = await session.capturePane();
-        const input = await measurePaneAction(
-          () => session!.sendLiteralImmediate(cycle % 2 === 0 ? "x" : "y"),
-          () => waitForPaneChange(session!, before),
-        );
-        if (cycle >= WARMUPS) appendMeasured(samples.hostedTerminalInput, input);
-      }
-      await session.sendHexBytes(["1d", "64"]);
-      await session.waitForText("Background processes", TIMEOUT);
-      session.sendKeysImmediate(["C-x"]);
-      await session.waitForComposer(TIMEOUT);
-      await session.sendText("Close the performance terminal.");
-      await session.waitForText("terminal close", TIMEOUT);
-      session.sendKeysImmediate(["1"]);
-      await session.waitForText("PERF_TERMINAL_CLOSED", TIMEOUT);
-      await session.waitForComposer(TIMEOUT);
       const resourcesBefore = await waitForResourceStability(pid);
       expect(resourcesBefore.threads - preFeatureResources.threads).toBeLessThanOrEqual(2);
       expect(resourcesBefore.descriptors - preFeatureResources.descriptors).toBeLessThanOrEqual(3);
@@ -998,7 +902,6 @@ test.skipIf(!ENABLED || !tmuxAvailable())(
         boundaryExceptions: {
           catalogMenus: "user input dispatch to changed exclusive catalog pane",
           subagentManagerOpen: "user input dispatch to changed manager pane",
-          hostedTerminalInput: "user input dispatch to changed hosted-terminal pane",
         },
         buildMode: "ReleaseSafe",
         warmups: WARMUPS,
@@ -1017,7 +920,7 @@ test.skipIf(!ENABLED || !tmuxAvailable())(
           externalRefresh: EXTERNAL_REFRESH_BUDGETS_MS,
           appPane: APP_PANE_BUDGETS_MS,
         },
-        informationalActions: [...INFORMATIONAL_PANE_ACTION_NAMES],
+        informationalActions: [],
         results: Object.fromEntries(
           Object.entries(samples).map(([name, values]) => [name, {
             firstPaint: summary(values.firstPaint),
@@ -1045,7 +948,6 @@ test.skipIf(!ENABLED || !tmuxAvailable())(
         for (const distribution of [values.firstPaint, values.contentReady]) {
           const measured = summary(distribution);
           expect(measured.count).toBe(SAMPLES);
-          if (INFORMATIONAL_PANE_ACTION_NAMES.has(name)) continue;
           const budget = APP_PANE_ACTION_NAMES.has(name) || name === "fullScrollCacheMiss"
             ? actionBudget
             : distribution === values.firstPaint
