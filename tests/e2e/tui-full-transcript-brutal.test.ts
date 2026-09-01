@@ -33,6 +33,7 @@ const TIMEOUT = 30_000;
 const INPUT_SANITY_BUDGET_MS = 5_000;
 const BURST_NAVIGATION_EVENTS = 2_048;
 const VERIFIED_NAVIGATION_KEYS = 4;
+const VISIBLE_NAVIGATION_TIMEOUT_MS = 500;
 const FULL_FOOTER = "Full detail · ctrl o close";
 const HISTORY_DONE = "CTRL_O_BRUTAL_HISTORY_DONE";
 const LIVE_START = "CTRL_O_BRUTAL_LIVE_0001";
@@ -545,16 +546,19 @@ async function navigateFullTranscript(
     );
     const outcome = await waitForScrollAttemptAfter(tracePath, traceStart);
     if (outcome === "committed") {
-      return session.waitForPane(
-        (pane) =>
+      const deadline = Date.now() + VISIBLE_NAVIGATION_TIMEOUT_MS;
+      while (Date.now() < deadline) {
+        const pane = await session.capturePane();
+        if (
           pane.includes(FULL_FOOTER) &&
           !pane.includes("Preparing full detail…") &&
-          pane !== before,
-        TIMEOUT,
-      );
+          pane !== before
+        ) return pane;
+        await sleep(25);
+      }
     }
   }
-  throw new Error(`Ctrl-O navigation stayed page-loading for ${key}.`);
+  throw new Error(`Ctrl-O navigation made no visible progress for ${key}.`);
 }
 
 async function waitForRenderedViewportAfter(
