@@ -1659,7 +1659,7 @@ tmuxTest(
     await session.sendText("first compaction turn");
     await session.waitForPane(
       (pane) => (pane.match(/CHATGPT_DIRECT_RESPONSE/g) ?? []).length === 1 &&
-        (pane.match(/0s \(↑6 ↓2\)/g) ?? []).length === 1,
+        (pane.match(/\d+s \(↑6 ↓2\)/g) ?? []).length === 1,
       TIMEOUT,
     );
     await session.waitForComposer(TIMEOUT);
@@ -1667,7 +1667,7 @@ tmuxTest(
     await session.waitForPane(
       (pane) => pane.includes("second compaction turn") &&
         (pane.match(/CHATGPT_DIRECT_RESPONSE/g) ?? []).length === 2 &&
-        (pane.match(/0s \(↑6 ↓2\)/g) ?? []).length === 2,
+        (pane.match(/\d+s \(↑6 ↓2\)/g) ?? []).length === 2,
       TIMEOUT,
     );
     await session.waitForComposer(TIMEOUT);

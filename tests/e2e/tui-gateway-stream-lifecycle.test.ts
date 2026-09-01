@@ -801,6 +801,18 @@ async function waitForScrollback(
   );
 }
 
+async function waitForFullDetail(
+  session: TmuxSession,
+  timeoutMs = TIMEOUT,
+): Promise<string> {
+  return session.waitForPane(
+    (pane) =>
+      pane.includes("Full detail · ctrl o close") &&
+      !pane.includes("Preparing full detail…"),
+    timeoutMs,
+  );
+}
+
 function lifecycleStage(): LifecycleStage {
   const value = process.env.FX_LIFECYCLE_STAGE ?? "corrected";
   if (
@@ -5484,7 +5496,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       expect(resized).toContain(`Ran ${supportedCommand}`);
 
       await session.sendKeys("C-o");
-      const full = await session.waitForText("Full detail · ctrl o close", TIMEOUT);
+      const full = await waitForFullDetail(session);
       expect(full).toContain(`Failed ${unsupportedToolName}`);
       expect(full).toContain(`Ran ${supportedCommand}`);
       await session.sendKeys("C-o");
@@ -5630,7 +5642,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       await session.resizeWindow(80, 24);
       await session.waitForText(`Ran ${thirdCommand}`, TIMEOUT);
       await session.sendKeys("C-o");
-      const full = await session.waitForText("Full detail · ctrl o close", TIMEOUT);
+      const full = await waitForFullDetail(session);
       expect(full).toContain(finalText);
       await session.sendKeys("PPage");
       const fullAtSummary = await session.capturePane();
@@ -6494,7 +6506,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       );
 
       await session.sendKeys("C-o");
-      await session.waitForText("Full detail · ctrl o close", TIMEOUT);
+      await waitForFullDetail(session);
       const fullTailEscapes = await session.capturePaneEscapes();
       expect(fullTailEscapes).not.toContain("\x1b[38;5;245m│");
       expect(fullTailEscapes).toContain("│\x1b[38;5;245m SECOND_CMD_LINE_30");
@@ -6560,7 +6572,13 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
 
       await session.waitForComposer(TIMEOUT);
       await session.sendText("Run the fixture command.");
-      const pane = await session.waitForText("did not execute the returned tool calls", TIMEOUT);
+      const pane = await session.waitForPane(
+        (value) =>
+          value.includes("did not execute the returned tool calls") &&
+          value.includes("● 1 tool call · 1 command · 1 failed") &&
+          value.includes("└ Tool failed"),
+        TIMEOUT,
+      );
 
       expect(pane).toContain("partial output");
       expect(pane).toContain("● 1 tool call · 1 command · 1 failed");

@@ -733,34 +733,22 @@ async function verifyOldestTranscriptEntrySurvives(
   session: TmuxSession,
   draft: string,
   config: StressConfig,
+  tracePath: string,
 ): Promise<void> {
   await session.sendHexBytes(CTRL_O);
-  let newest = await waitForMode(session, "full", draft);
   const pageCount = config.oldestPageCount ?? 1_024;
-  const pageChunk = 64;
-  for (
-    let sent = 0;
-    !newest.includes(LIVE_DONE) && sent < pageCount;
-    sent += pageChunk
-  ) {
-    await sendRepeatedKey(
-      session,
-      "NPage",
-      Math.min(pageChunk, pageCount - sent),
-      pageChunk,
-      300,
-    );
+  let newest = await waitForMode(session, "full", draft);
+  for (let sent = 0; !newest.includes(LIVE_DONE) && sent < pageCount; sent += 1) {
+    const traceStart = traceSize(tracePath);
+    await session.sendKeys("NPage");
+    await waitForRenderedViewportAfter(tracePath, traceStart);
     newest = await waitForMode(session, "full", draft);
   }
   expect(newest).toContain(LIVE_DONE);
-  for (let sent = 0; sent < pageCount; sent += pageChunk) {
-    await sendRepeatedKey(
-      session,
-      "PPage",
-      Math.min(pageChunk, pageCount - sent),
-      pageChunk,
-      300,
-    );
+  for (let sent = 0; sent < pageCount; sent += 1) {
+    const traceStart = traceSize(tracePath);
+    await session.sendKeys("PPage");
+    await waitForRenderedViewportAfter(tracePath, traceStart);
     const pane = await waitForMode(session, "full", draft);
     if (pane.includes(firstChatMarker(config))) break;
   }
@@ -1047,7 +1035,12 @@ async function runStress(config: StressConfig): Promise<StressRoot> {
         paths.tapePath,
       );
     }
-    await verifyOldestTranscriptEntrySurvives(session, DRAFT, config);
+    await verifyOldestTranscriptEntrySurvives(
+      session,
+      DRAFT,
+      config,
+      paths.tracePath,
+    );
 
     if (profiler) {
       const profileExit = await profiler.exited;

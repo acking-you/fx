@@ -1058,6 +1058,23 @@ function findFooter(grid: string[]): FooterBlock | null {
   return findFooterBlocks(grid).at(-1) ?? null;
 }
 
+async function waitForFooterBlocks(
+  s: TmuxSession,
+  count: number,
+  timeoutMs = 5_000,
+): Promise<string[]> {
+  const started = Date.now();
+  let lastGrid: string[] = [];
+  while (Date.now() - started < timeoutMs) {
+    lastGrid = await s.capturePaneGrid();
+    if (findFooterBlocks(lastGrid).length === count) return lastGrid;
+    await Bun.sleep(25);
+  }
+  throw new Error(
+    `Timed out waiting for ${count} footer block(s).\n${lastGrid.join("\n")}`,
+  );
+}
+
 function findInlineSkillsPicker(
   grid: string[],
 ): { input: number; topDivider: number; header: number; bottomDivider: number; hint: number } | null {
@@ -2871,7 +2888,7 @@ describe.skipIf(SKIP)("tui: resize", () => {
       session = await launchAt(100, 40);
       await session.resizeWindow(100, 18);
 
-      const grid = await session.capturePaneGrid();
+      const grid = await waitForFooterBlocks(session, 1);
       expect(grid.length).toBeGreaterThan(0);
       expect(findFooterBlocks(grid)).toHaveLength(1);
     },
