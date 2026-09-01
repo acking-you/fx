@@ -15,10 +15,12 @@ The merge boundary is:
 | Prior update merge | `f3ad5781` |
 | Latest upstream main merged | `766e70f0106393b551e2363526cf6a41e60587c3` |
 | Latest update merge | `867eddd7` |
-| Previous upstream main merged | `93bfedfe104dc4353442777295ac42130c840089` |
-| Previous update merge | `b8494532` |
-| Current upstream main merged | `fc50c8da53f476c0c021a6c6289c7fff5c78d7f6` |
-| Current update merge | `6121534a` |
+| Earlier upstream main merged | `93bfedfe104dc4353442777295ac42130c840089` |
+| Earlier update merge | `b8494532` |
+| Previous upstream main merged | `fc50c8da53f476c0c021a6c6289c7fff5c78d7f6` |
+| Previous update merge | `6121534a` |
+| Current upstream main merged | `1f6ebd87cae1da4bd66603fbb7281b6bd882c177` |
+| Current update merge | `a78ff0a3` |
 | Final merge-regression repair | `8a0e7c90` |
 | Final runtime and E2E contract repair | `30ca1e45` |
 | Final asynchronous E2E stabilization | `8431e1a4` |
@@ -35,7 +37,7 @@ The merge boundary is:
 | Final viewer-lifetime page invalidation | `542d43b3` |
 | Review branch | `merge/upstream-2026-09-01` |
 
-Compared with the pre-merge BYOK tree, the review result changes 253 files with 29,697 insertions and 17,451 deletions. The large count comes primarily from upstream MCP, transcript, rendering, and E2E work. It does not represent a new vendor product route or a large new model-facing tool surface.
+Compared with the pre-merge BYOK tree, the review result changes 253 files with 29,864 insertions and 17,451 deletions. The large count comes primarily from upstream MCP, transcript, rendering, and E2E work. It does not represent a new vendor product route or a large new model-facing tool surface.
 
 ## Reconciliation policy
 
@@ -217,6 +219,8 @@ Useful upstream maintenance was kept where it matches the fork:
 - deterministic PGSO corpus updates for changed E2E owners.
 
 The upstream stable-signing job that conflicted with the fork's release workflow was not restored. The local signing script and tests were reconciled instead.
+
+Rapid Ctrl-C during active-turn exit now preserves the validated resume handoff. On POSIX hosts, SIGINT is ignored only across interactive teardown and handoff publication, then the prior handler is restored. Windows and WASM use an explicit empty guard so the portable fork continues to compile there. The upstream condition tied to its automatic-upgrade relaunch state was reduced to BYOK's sole non-cooperative exit path; the removed relaunch fields and tests were not restored.
 
 The final CI reconciliation also fixed two merge regressions and one Windows process bug:
 
@@ -436,6 +440,7 @@ The session or connection-local projection hides `glob_files` and `grep_files` a
 | `542d43b3` | Scope installed full-transcript pages to one viewer lifetime so reopening snapshots the current tail instead of reusing a stale live-command page |
 | `b8494532` | Merge upstream through `93bfedfe`, retain generic named and redacted ACP tool metadata plus anchored dollar skill menus, and discard the deleted Gateway alias slice |
 | `6121534a` | Merge upstream through `fc50c8da`, showing only selected skill names while preserving the bound source and path internally |
+| `a78ff0a3` | Merge upstream through `1f6ebd87`, preserving rapid-exit resume handoff with a bounded POSIX SIGINT guard and no deleted relaunch state |
 
 ## CI policy for this merge
 
@@ -519,6 +524,9 @@ The smaller `.github/workflows/ci.yml` workflow is not used as the merge decisio
 - The same complete `acp.test.ts` passed again after `b8494532`, including named structured tool-call input, Unified Exec terminal aggregation, provider setup, Codex and Grok persistent children, and empty stderr
 - Complete `web-fetch-fake-network.test.ts`: 8 passed after `b8494532`, including ACP `fetch` kind, redacted credential-bearing local input, policy bypass, malformed input, and one completed lifecycle
 - Complete `tui-composer-edit-contracts.test.ts`: 30 passed after `6121534a`, including duplicate-skill provenance across kill/yank and history recall while the source suffix remains hidden
+- ReleaseSafe POSIX regression for bounded graceful-exit SIGINT suppression passed after `a78ff0a3`
+- Windows x86_64 ReleaseSafe cross-build passed after the SIGINT guard was made an explicit Windows and WASM no-op
+- Focused real tmux rapid-exit resume scenario passed with one handoff, empty stderr, and 45 unrelated cases filtered out
 - Complete `tui-resume.test.ts`: 45 passed, including replay-cap, full-detail spacing, session-picker, scrollback, and resume ownership cases
 - Focused live-stream `/resume` refusal passed while waiting on the current stable `Generating` phase
 - Focused active-turn image steering passed while retaining its request-order, instruction-snapshot, image-byte, and stderr assertions
