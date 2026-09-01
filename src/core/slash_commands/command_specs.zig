@@ -1585,11 +1585,11 @@ test "rendered top-level help is a complete CLI navigation page" {
     try std.testing.expect(std.mem.find(u8, text, "Run one noninteractive request") != null);
     try std.testing.expect(std.mem.find(u8, text, "Draft or publish a GitHub issue") != null);
     try std.testing.expect(std.mem.find(u8, text, "setup [--json]") != null);
-    try std.testing.expect(std.mem.find(u8, text, "Import reusable third-party provider logins") != null);
+    try std.testing.expect(std.mem.find(u8, text, "Import provider logins") != null);
     try std.testing.expect(std.mem.find(u8, text, "Sign in to Codex or Grok") != null);
-    try std.testing.expect(std.mem.find(u8, text, "Sign out of a Codex or Grok session") != null);
-    try std.testing.expect(std.mem.find(u8, text, "Choose the model provider used by fx") != null);
-    try std.testing.expect(std.mem.find(u8, text, "Show local fx usage or Codex account limits") != null);
+    try std.testing.expect(std.mem.find(u8, text, "Sign out of Codex or Grok") != null);
+    try std.testing.expect(std.mem.find(u8, text, "Choose the active model provider") != null);
+    try std.testing.expect(std.mem.find(u8, text, "Show local usage or Codex limits") != null);
     try std.testing.expect(std.mem.find(u8, text, "Vercel") == null);
     try std.testing.expect(std.mem.find(u8, text, "credits|balance") == null);
     try std.testing.expect(std.mem.find(u8, text, "Flags:") != null);
@@ -1621,6 +1621,14 @@ test "rendered top-level help is a complete CLI navigation page" {
     try std.testing.expect(std.mem.find(u8, text, "More:") == null);
     try std.testing.expect(std.mem.find(u8, text, "resume [last|<id>] [--record]") == null);
     try std.testing.expect(std.mem.find(u8, text, "session migrate <id>|--id <id>") == null);
+}
+
+test "top-level help summary overrides do not change command-specific help" {
+    const setup = try renderTopLevelCommandHelp(std.testing.allocator, testTopLevelRegistry(), .setup);
+    defer std.testing.allocator.free(setup);
+
+    try std.testing.expect(std.mem.find(u8, setup, "Import reusable third-party provider logins") != null);
+    try std.testing.expect(std.mem.find(u8, setup, "Import provider logins") == null);
 }
 
 test "terminal top-level help adds styling without changing visible content" {

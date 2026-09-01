@@ -296,14 +296,14 @@ pub const top_level_help_groups = [_]TopLevelHelpGroup{
         .{ .usage = "session recover <id>", .summary = "Copy a recoverable corrupt session" },
     } },
     .{ .entries = &.{
-        .{ .kind = .setup, .usage = "setup [--json]" },
-        .{ .kind = .login, .usage = "login <codex|grok>" },
-        .{ .kind = .logout, .usage = "logout <codex|grok>" },
-        .{ .kind = .provider, .usage = "provider <gateway|codex|grok>" },
+        .{ .kind = .setup, .usage = "setup [--json]", .summary = "Import provider logins" },
+        .{ .kind = .login, .usage = "login <codex|grok>", .summary = "Sign in to Codex or Grok" },
+        .{ .kind = .logout, .usage = "logout <codex|grok>", .summary = "Sign out of Codex or Grok" },
+        .{ .kind = .provider, .usage = "provider <gateway|codex|grok>", .summary = "Choose the active model provider" },
         .{ .kind = .models, .usage = "models" },
     } },
     .{ .entries = &.{
-        .{ .kind = .usage, .usage = "usage [--period <24h|7d|30d>|--codex]" },
+        .{ .kind = .usage, .usage = "usage [--period <24h|7d|30d>|--codex]", .summary = "Show local usage or Codex limits" },
     } },
     .{ .entries = &.{
         .{ .kind = .status, .usage = "status" },

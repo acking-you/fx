@@ -191,11 +191,11 @@ describe("cli: help", () => {
       expect(stdout).toContain("Commands:\n");
       expect(stdout).toContain("Run one noninteractive request");
       expect(stdout).toContain("setup [--json]");
-      expect(stdout).toContain("Import reusable third-party provider logins");
+      expect(stdout).toContain("Import provider logins");
       expect(stdout).toContain("Sign in to Codex or Grok");
-      expect(stdout).toContain("Sign out of a Codex or Grok session");
-      expect(stdout).toContain("Choose the model provider used by fx");
-      expect(stdout).toContain("Show local fx usage or Codex account limits");
+      expect(stdout).toContain("Sign out of Codex or Grok");
+      expect(stdout).toContain("Choose the active model provider");
+      expect(stdout).toContain("Show local usage or Codex limits");
       expect(stdout).not.toContain("Vercel");
       expect(stdout).not.toContain("credits|balance");
       expect(stdout).not.toContain("teams");
