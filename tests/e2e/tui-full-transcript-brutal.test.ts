@@ -32,6 +32,7 @@ import {
 const TIMEOUT = 30_000;
 const INPUT_SANITY_BUDGET_MS = 5_000;
 const BURST_NAVIGATION_EVENTS = 2_048;
+const VERIFIED_NAVIGATION_KEYS = 4;
 const FULL_FOOTER = "Full detail · ctrl o close";
 const HISTORY_DONE = "CTRL_O_BRUTAL_HISTORY_DONE";
 const LIVE_START = "CTRL_O_BRUTAL_LIVE_0001";
@@ -535,7 +536,12 @@ async function navigateFullTranscript(
 ): Promise<string> {
   for (let attempt = 0; attempt < 256; attempt += 1) {
     const traceStart = traceSize(tracePath);
-    await session.sendKeys(key);
+    await sendRepeatedKey(
+      session,
+      key,
+      VERIFIED_NAVIGATION_KEYS,
+      VERIFIED_NAVIGATION_KEYS,
+    );
     const outcome = await waitForScrollAttemptAfter(tracePath, traceStart);
     const pane = await waitForMode(session, "full", draft);
     if (outcome === "committed") return pane;
