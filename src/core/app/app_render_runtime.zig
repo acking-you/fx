@@ -2723,6 +2723,10 @@ pub fn Runtime(comptime App: type) type {
             activeRenderRequests(app).request(reason);
         }
 
+        pub fn activeSurfaceFramePending(app: *App) bool {
+            return activeRenderRequests(app).hasPending();
+        }
+
         pub noinline fn requestSubagentSurfaceFrame(
             app: *App,
             reason: render_request.Reason,

@@ -204,6 +204,17 @@ executable backend, enforced no latency budget, and duplicated dedicated
 Unified Exec TUI and ACP coverage. The useful approval-navigation benchmark now
 uses `exec_command`, the fork's single supported shell family.
 
+The retained benchmark then exposed a real BYOK integration regression rather
+than an obsolete assertion. Native idle polling had been relaxed to 50ms after
+the model worker gained an event-wake fd, but catalog refresh and transcript
+page workers do not publish through that fd. A completion collected at the top
+of the event loop could therefore request a frame and then wait for the full
+idle timeout before the frame was committed. Pending active-surface frames now
+force a nonblocking poll and immediate commit; the bounded one-millisecond
+cadence remains limited to workers that are still running. This removes the
+measured 50ms delay from skills, account inventory, and full-transcript cache
+misses without adding another wake mechanism.
+
 ## Exact new files retained
 
 The following files did not exist on the BYOK first parent and remain in the
@@ -392,6 +403,8 @@ Local checks for the final pruning tree:
 - [x] The focused Node/WASM terminal lifecycle test passes with the BYOK
   `Thinking` presentation, including stalled-fetch animation, Ctrl+C abort,
   active `/clear`, `/new`, and `/reset` recovery.
+- [x] The complete ReleaseSafe Zig test graph passes on the current Windows
+  review tree after the pending-frame scheduling repair.
 - [ ] Exact-commit Full CI passes the Windows, Linux, and macOS native gates,
   every deterministic E2E shard, and the portable WASM builds.
 

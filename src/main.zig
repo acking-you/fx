@@ -193,10 +193,12 @@ const input_escape_timeout_ms: i64 = 30;
 
 fn nativeLoopPollTimeoutMs(
     default_timeout_ms: i32,
+    frame_pending: bool,
     auth_refresh_active: bool,
     skills_refresh_active: bool,
     transcript_page_work_active: bool,
 ) i32 {
+    if (frame_pending) return 0;
     return if (auth_refresh_active or
         skills_refresh_active or
         transcript_page_work_active)
@@ -1006,6 +1008,7 @@ const App = struct {
         if (comptime !host_target.is_wasm) {
             return nativeLoopPollTimeoutMs(
                 presentation_timeout_ms,
+                RenderAppRuntime.activeSurfaceFramePending(self),
                 self.auth.sourceInventoryRefreshActive(),
                 self.skills.refreshActive(),
                 self.fullTranscriptFocusedWorkActive(),
@@ -3378,11 +3381,12 @@ test "lightweight local commands do not request early threaded io" {
 }
 
 test "focused UI workers retain a bounded native poll timeout" {
-    try std.testing.expectEqual(@as(i32, 8), nativeLoopPollTimeoutMs(8, false, false, false));
-    try std.testing.expectEqual(@as(i32, 1), nativeLoopPollTimeoutMs(8, true, false, false));
-    try std.testing.expectEqual(@as(i32, 1), nativeLoopPollTimeoutMs(8, false, true, false));
-    try std.testing.expectEqual(@as(i32, 1), nativeLoopPollTimeoutMs(8, false, false, true));
-    try std.testing.expectEqual(@as(i32, 1), nativeLoopPollTimeoutMs(8, true, true, true));
+    try std.testing.expectEqual(@as(i32, 8), nativeLoopPollTimeoutMs(8, false, false, false, false));
+    try std.testing.expectEqual(@as(i32, 0), nativeLoopPollTimeoutMs(8, true, false, false, false));
+    try std.testing.expectEqual(@as(i32, 1), nativeLoopPollTimeoutMs(8, false, true, false, false));
+    try std.testing.expectEqual(@as(i32, 1), nativeLoopPollTimeoutMs(8, false, false, true, false));
+    try std.testing.expectEqual(@as(i32, 1), nativeLoopPollTimeoutMs(8, false, false, false, true));
+    try std.testing.expectEqual(@as(i32, 0), nativeLoopPollTimeoutMs(8, true, true, true, true));
 }
 
 test "footer runtime compatibility facade exports composeFooterFrame" {
