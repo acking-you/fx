@@ -3917,6 +3917,77 @@ test.skipIf(!tmuxAvailable())(
 );
 
 test.skipIf(!tmuxAvailable())(
+  "rapid Ctrl-C during active-turn exit preserves the resume handoff",
+  async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "fx-tui-exit-sigint-race-")));
+    const home = join(root, "home");
+    const workspace = join(root, "workspace");
+    const stderrPath = join(root, "stderr.log");
+    const tracePath = join(root, "trace.log");
+    mkdirSync(home);
+    mkdirSync(workspace);
+    writeFileSync(stderrPath, "");
+    const hold: HoldState = { started: false, cancelled: false };
+    const initialGateway = startFakeGateway([() => heldGatewayResponse(hold)]);
+    let active: TmuxSession | null = null;
+    let passed = false;
+
+    try {
+      active = await TmuxSession.create({
+        cmd: FX_BIN,
+        cwd: workspace,
+        env: {
+          ...gatewayEnv(home, initialGateway),
+          FX_TRACE_LOG: tracePath,
+          FX_TRACE_SCOPES: "input,worker,gateway,session",
+        },
+        stderrPath,
+        width: 120,
+        height: 32,
+        remainOnExit: true,
+      });
+      await active.waitForComposer(TIMEOUT);
+      await active.sendText("Save and cancel this active session.");
+      await waitForCondition(() => hold.started, "held gateway response");
+      const sessionId = sessionIdFromHome(home);
+
+      active.sendKeysImmediate(["C-c"]);
+      await waitForCondition(
+        () =>
+          existsSync(tracePath) &&
+          readFileSync(tracePath, "utf8").includes(
+            "cancel requested processing=true",
+          ),
+        "active-turn Ctrl-C cancellation",
+      );
+      active.sendKeysImmediate(["C-c"]);
+      active.sendKeysImmediate(["C-c"]);
+
+      await waitForCondition(
+        () => active?.paneStatus().dead === true,
+        "the rapid Ctrl-C exit pane to stop",
+      );
+      const scrollback = stripAnsi(await active.captureFullScrollback());
+      const expected = `Continue session with: fx --resume ${sessionId}`;
+      expect(countOccurrences(scrollback, expected)).toBe(1);
+      expect(readFileSync(stderrPath, "utf8")).toBe("");
+      await active.kill();
+      active = null;
+      passed = true;
+    } finally {
+      if (active) await active.kill();
+      initialGateway.stop();
+      if (passed) {
+        rmSync(root, { recursive: true, force: true });
+      } else {
+        console.error(`retained rapid exit artifacts at ${root}`);
+      }
+    }
+  },
+  TIMEOUT * 2,
+);
+
+test.skipIf(!tmuxAvailable())(
   "closing the startup resume picker starts a writable fresh session",
   async () => {
     const root = realpathSync(

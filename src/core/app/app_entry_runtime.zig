@@ -33,6 +33,37 @@ else
 
 const Allocator = std.mem.Allocator;
 
+const supports_graceful_exit_sigint_guard = !host_target.is_wasm and builtin.os.tag != .windows;
+
+const GracefulExitSigintGuard = if (!supports_graceful_exit_sigint_guard) struct {
+    fn install(_: bool) @This() {
+        return .{};
+    }
+
+    fn deinit(_: *@This()) void {}
+} else struct {
+    saved_action: ?std.posix.Sigaction = null,
+
+    fn install(enabled: bool) @This() {
+        if (!enabled) return .{};
+
+        const ignore_action: std.posix.Sigaction = .{
+            .handler = .{ .handler = std.posix.SIG.IGN },
+            .mask = std.posix.sigemptyset(),
+            .flags = 0,
+        };
+        var saved_action: std.posix.Sigaction = undefined;
+        std.posix.sigaction(std.posix.SIG.INT, &ignore_action, &saved_action);
+        return .{ .saved_action = saved_action };
+    }
+
+    fn deinit(self: *@This()) void {
+        const saved_action = self.saved_action orelse return;
+        std.posix.sigaction(std.posix.SIG.INT, &saved_action, null);
+        self.saved_action = null;
+    }
+};
+
 pub const Config = struct {
     version: []const u8 = "",
     revision: []const u8 = "",
@@ -287,6 +318,8 @@ fn runInteractiveWithDeps(comptime App: type, comptime cooperative: bool, alloc:
         app.resumeHandoffColumns()
     else
         0;
+    var graceful_exit_sigint_guard = GracefulExitSigintGuard.install(!cooperative);
+    defer graceful_exit_sigint_guard.deinit();
     app_needs_deinit = false;
     const handoff_value = if (comptime cooperative) blk: {
         app.deinit();
@@ -471,6 +504,13 @@ var test_events: [16][]const u8 = undefined;
 var test_event_count: usize = 0;
 var test_init_event_buf: [128]u8 = undefined;
 var active_capture: ?*TestCapture = null;
+const TestSigintCapture = if (supports_graceful_exit_sigint_guard) struct {
+    var count = std.atomic.Value(usize).init(0);
+
+    fn handler(_: std.posix.SIG) callconv(.c) void {
+        _ = count.fetchAdd(1, .seq_cst);
+    }
+} else struct {};
 
 fn resetTestEvents() void {
     test_event_count = 0;
@@ -517,6 +557,7 @@ const TestCapture = struct {
     record_stderr_event: bool = false,
     record_stdout_event: bool = false,
     resume_handoff_id: ?[]const u8 = null,
+    raise_sigint_during_deinit: bool = false,
     fail_unexpected_format: bool = false,
 
     fn init(run_result: cli_surface.RunResult) TestCapture {
@@ -625,6 +666,11 @@ const TestApp = struct {
             };
             break :blk .{ .session_id = session_id };
         } else null;
+        if (comptime supports_graceful_exit_sigint_guard) {
+            if (active_capture.?.raise_sigint_during_deinit) {
+                _ = std.c.raise(std.posix.SIG.INT);
+            }
+        }
         self.deinit();
         return handoff;
     }
@@ -785,6 +831,38 @@ test "app entry writes exact resume handoff after interactive teardown" {
         "deinit",
         "stdout-attempt",
     });
+}
+
+test "app entry bounds graceful-exit SIGINT suppression to handoff lifetime" {
+    if (comptime !supports_graceful_exit_sigint_guard) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    var original_action: std.posix.Sigaction = undefined;
+    const test_action: std.posix.Sigaction = .{
+        .handler = .{ .handler = TestSigintCapture.handler },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    std.posix.sigaction(std.posix.SIG.INT, &test_action, &original_action);
+    defer std.posix.sigaction(std.posix.SIG.INT, &original_action, null);
+    TestSigintCapture.count.store(0, .seq_cst);
+
+    var capture = TestCapture.init(.{ .interactive = .{} });
+    defer capture.deinit();
+    capture.resume_handoff_id = "session-123";
+    capture.raise_sigint_during_deinit = true;
+
+    const outcome = try runWithDeps(TestApp, alloc, &.{}, testConfig(), capture.deps());
+
+    try std.testing.expectEqual(RunOutcome.returned, outcome);
+    try std.testing.expectEqualStrings(
+        "Continue session with: fx --resume session-123\n",
+        capture.stdout.written(),
+    );
+    try std.testing.expectEqual(@as(usize, 0), TestSigintCapture.count.load(.seq_cst));
+
+    _ = std.c.raise(std.posix.SIG.INT);
+    try std.testing.expectEqual(@as(usize, 1), TestSigintCapture.count.load(.seq_cst));
 }
 
 test "app entry ignores resume handoff stdout failures" {
