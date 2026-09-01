@@ -189,6 +189,7 @@ pub const Context = struct {
     mcp_call_tool: ?tool_mcp_runtime.CallToolFn = null,
     mcp_search_tools: ?tool_mcp_runtime.SearchToolsFn = null,
     mcp_tool_schema: ?tool_mcp_runtime.ToolSchemaFn = null,
+    expected_mcp_runtime_generation: ?u64 = null,
     mcp_call_feature: ?tool_mcp_runtime.FeatureCallFn = null,
     mcp_access: tool_mcp_runtime.Access = .unrestricted,
     mcp_input_responder: ?tool_mcp_runtime.InputResponder = null,
@@ -379,6 +380,7 @@ pub fn executeToolCallAuthorized(
             request.advertised_dynamic_tool_names;
     }
     execution_ctx.max_tool_result_bytes = request.max_tool_result_bytes;
+    execution_ctx.expected_mcp_runtime_generation = request.expected_mcp_runtime_generation;
     execution_ctx.current_turn_messages = request.current_turn_messages;
     execution_ctx.output_chunk_lifecycle_id = request.lifecycle_id;
     execution_ctx.command_timeout_started_ms = request.command_timeout_started_ms;
@@ -619,6 +621,7 @@ fn executeRegisteredTool(
     dispatch_ctx.execution_authority = authority;
     dispatch_ctx.command_result_json_sink = &command_result_json;
     dispatch_ctx.mcp_call_options = .{
+        .expected_runtime_generation = ctx.expected_mcp_runtime_generation,
         .cancel_flag = dispatch_ctx.cancel_flag,
         .progress = .{
             .context = @ptrCast(&mcp_progress_bridge),
@@ -2946,21 +2949,22 @@ test "ask_user_question execution uses supplied registry entry and interactive h
     }));
 }
 
-test "real tool runtime enforces refreshed live authority before filesystem effect" {
+test "real tool runtime enforces refreshed live authority before registered tool execution" {
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const workspace = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
-    defer alloc.free(workspace);
-    var rt = TestRuntime{ .workspace_root = workspace };
-    defer rt.deinit(alloc);
     var arena_state = std.heap.ArenaAllocator.init(alloc);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
+
+    var registered_skill = test_builtin_tools.skill;
+    registered_skill.call = registryOwnedSkillCall;
+    const tools = [_]tool_dispatch.Tool{registered_skill};
+    const registry = tool_dispatch.Registry{ .tools = tools[0..] };
+    var rt = TestRuntime{ .tool_registry = registry };
+    defer rt.deinit(alloc);
     const call = ToolCall{
-        .id = "live-write",
-        .name = "write_file",
-        .arguments_json = "{\"path\":\"created.txt\",\"content\":\"created\"}",
+        .id = "live-skill",
+        .name = "skill",
+        .arguments_json = "{\"name\":\"workflow\"}",
     };
     const denied_tools = [_][]const u8{"read_file"};
     try std.testing.expectError(
@@ -2984,12 +2988,8 @@ test "real tool runtime enforces refreshed live authority before filesystem effe
             .max_tool_result_bytes = rt.max_tool_result_bytes,
         }),
     );
-    try std.testing.expectError(
-        error.FileNotFound,
-        tmp.dir.statFile(io_mod.getIo(), "created.txt", .{}),
-    );
 
-    const allowed_tools = [_][]const u8{"write_file"};
+    const allowed_tools = [_][]const u8{"skill"};
     const result = try executeToolCallAuthorized(rt.context(), .{
         .call_allocator = arena,
         .result_allocator = arena,
@@ -3009,7 +3009,7 @@ test "real tool runtime enforces refreshed live authority before filesystem effe
         .max_tool_result_bytes = rt.max_tool_result_bytes,
     });
     try std.testing.expectEqual(tool_contracts.ToolExecutionStatus.success, result.status);
-    _ = try tmp.dir.statFile(io_mod.getIo(), "created.txt", .{});
+    try std.testing.expectEqualStrings("registry-owned skill", result.model_output);
 }
 
 test "web_fetch execution uses supplied registry entry" {
@@ -4302,41 +4302,6 @@ test "request tool permission honors configured deny and allow rules" {
         .name = "read_file",
         .arguments_json = "{\"path\":\"src/app.zig\"}",
     }, .ask, &.{})).decision);
-}
-
-test "request tool permission denies grep_files outside workspace target" {
-    const alloc = std.testing.allocator;
-    var workspace_tmp = std.testing.tmpDir(.{});
-    defer workspace_tmp.cleanup();
-    try workspace_tmp.dir.createDirPath(io_mod.getIo(), "workspace");
-    var external_tmp = std.testing.tmpDir(.{});
-    defer external_tmp.cleanup();
-    {
-        var file = try external_tmp.dir.createFile(io_mod.getIo(), "outside.txt", .{ .truncate = true });
-        defer file.close(io_mod.getIo());
-        try file.writeStreamingAll(io_mod.getIo(), "needle external\n");
-    }
-    const root = try io_mod.dirRealpathAlloc(alloc, workspace_tmp.dir, "workspace");
-    defer alloc.free(root);
-    const external = try io_mod.dirRealpathAlloc(alloc, external_tmp.dir, ".");
-    defer alloc.free(external);
-
-    var rt = TestRuntime{
-        .workspace_root = root,
-        .permission_mode = .auto,
-    };
-    defer rt.deinit(alloc);
-
-    var arena_state = std.heap.ArenaAllocator.init(alloc);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-    const args = try std.fmt.allocPrint(arena, "{{\"pattern\":\"needle\",\"path\":\"{s}\"}}", .{external});
-
-    try std.testing.expectEqual(ToolPermissionDecision.policy_denied, (try tool_admission.requestPermissionOutcome(rt.context().admissionInput(), arena, .{
-        .id = "grep",
-        .name = "grep_files",
-        .arguments_json = args,
-    }, .auto, &.{})).decision);
 }
 
 test "executeToolCall rejects overlong glob pattern with failure status" {

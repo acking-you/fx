@@ -431,6 +431,7 @@ pub fn openVisionRegularFile(canonical_path: []const u8) !VisionRegularFile {
             error.IsDir, error.SymLinkLoop, error.NotDir => return error.NotRegularFile,
             else => return err,
         };
+        io_mod.alignOpenedFileFlags(&file, false);
         errdefer file.close(io_mod.getIo());
         const stat = try file.stat(io_mod.getIo());
         if (stat.kind != .file) return error.NotRegularFile;
@@ -708,7 +709,8 @@ fn streamSourceToFile(
     var header: [64]u8 = undefined;
     var header_len: usize = 0;
     var read_buffer: [8192]u8 = undefined;
-    var reader = source.readerStreaming(io_mod.getIo(), &read_buffer);
+    io_mod.refreshOpenedFileFlags(source);
+    var reader = source.reader(io_mod.getIo(), &read_buffer);
     var transfer_buffer: [transfer_buffer_bytes]u8 = undefined;
     var written: usize = 0;
     while (true) {
@@ -988,6 +990,13 @@ fn unsafeSnapshotPathError(err: anyerror) anyerror {
     };
 }
 
+fn unsafeSnapshotDirectoryPathError(err: anyerror) anyerror {
+    if (comptime builtin.os.tag == .windows) {
+        if (err == error.Unexpected) return error.ImageSnapshotPathUnsafe;
+    }
+    return unsafeSnapshotPathError(err);
+}
+
 fn validateSnapshotPathComponent(component: []const u8) !void {
     if (component.len == 0 or
         std.mem.eql(u8, component, ".") or
@@ -1005,14 +1014,14 @@ fn openDirectoryNoFollow(path: []const u8) !std.Io.Dir {
     const root = components.root() orelse return error.ImageSnapshotPathUnsafe;
     var dir = std.Io.Dir.openDirAbsolute(io_mod.getIo(), root, .{
         .follow_symlinks = false,
-    }) catch |err| return unsafeSnapshotPathError(err);
+    }) catch |err| return unsafeSnapshotDirectoryPathError(err);
     errdefer dir.close(io_mod.getIo());
 
     while (components.next()) |component| {
         try validateSnapshotPathComponent(component.name);
         const next = dir.openDir(io_mod.getIo(), component.name, .{
             .follow_symlinks = false,
-        }) catch |err| return unsafeSnapshotPathError(err);
+        }) catch |err| return unsafeSnapshotDirectoryPathError(err);
         dir.close(io_mod.getIo());
         dir = next;
     }
@@ -1067,11 +1076,14 @@ fn openSnapshotFileNoFollow(path: []const u8) !std.Io.File {
 
     var parent = try openDirectoryNoFollow(parent_path);
     defer parent.close(io_mod.getIo());
-    return parent.openFile(io_mod.getIo(), name, .{
-        .allow_directory = false,
-        .follow_symlinks = false,
-        .resolve_beneath = true,
-    }) catch |err| return unsafeSnapshotPathError(err);
+    return io_mod.openExistingReadOnlyRegularFile(
+        parent,
+        name,
+        .no_follow,
+    ) catch |err| return switch (err) {
+        error.DurablePathUnsafe => error.ImageSnapshotPathUnsafe,
+        else => unsafeSnapshotDirectoryPathError(err),
+    };
 }
 
 pub fn loadVerifiedSnapshot(
@@ -1096,7 +1108,8 @@ pub fn loadVerifiedSnapshot(
     errdefer bytes.deinit(alloc);
     try bytes.ensureTotalCapacity(alloc, size);
     var read_buf: [8192]u8 = undefined;
-    var reader = file.readerStreaming(io_mod.getIo(), &read_buf);
+    io_mod.refreshOpenedFileFlags(&file);
+    var reader = file.reader(io_mod.getIo(), &read_buf);
     var transfer_buf: [transfer_buffer_bytes]u8 = undefined;
     while (true) {
         try budget.check();

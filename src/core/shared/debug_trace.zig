@@ -431,12 +431,17 @@ fn writeLine(line: []const u8) void {
 
 fn appendLineToFile(zio: std.Io, path: []const u8, line: []const u8) void {
     var file = std.Io.Dir.createFileAbsolute(zio, path, .{
+        .read = true,
         .truncate = false,
         .lock = .exclusive,
     }) catch return;
     defer file.close(zio);
-    _ = std.c.lseek(file.handle, 0, std.posix.SEEK.END);
-    file.writeStreamingAll(zio, line) catch {};
+    const stat = file.stat(zio) catch return;
+    var buffer: [4096]u8 = undefined;
+    var writer = file.writerStreaming(zio, &buffer);
+    writer.seekTo(stat.size) catch return;
+    writer.interface.writeAll(line) catch return;
+    writer.interface.flush() catch {};
 }
 
 fn loadOptionsFromEnv(alloc: Allocator, workspace_root: []const u8) !Options {
@@ -585,10 +590,12 @@ test "trace logger writes configured file" {
     defer resetForTest();
     try configureForTest(alloc, path);
     logf("test", "hello {d}", .{42});
+    logf("test", "goodbye {d}", .{7});
 
     const trace = try readFileForTest(alloc, path);
     defer alloc.free(trace);
     try std.testing.expect(std.mem.find(u8, trace, "[test] hello 42") != null);
+    try std.testing.expect(std.mem.find(u8, trace, "[test] goodbye 7") != null);
 }
 
 test "trace logger filters scopes and writes structured events" {

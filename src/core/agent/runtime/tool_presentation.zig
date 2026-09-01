@@ -1593,7 +1593,7 @@ test "provisional lifecycle formats labeled and unlabeled eligible tools" {
         else => return error.TestExpectedEqual,
     }
     switch (capture.events.items[3]) {
-        .progress => |event| try std.testing.expectEqualStrings("● Matching\x1b[0m", event.text),
+        .progress => |event| try std.testing.expectEqualStrings("● Matching files\x1b[0m", event.text),
         else => return error.TestExpectedEqual,
     }
 }

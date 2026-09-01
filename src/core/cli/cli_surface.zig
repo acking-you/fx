@@ -4639,7 +4639,7 @@ test "runIfRequested rejects malformed resume aliases with canonical usage" {
         );
         try std.testing.expectEqual(RunResult.handled_failure, result);
         try std.testing.expectEqualStrings(
-            "usage: fx session resume [last|<id>] [--record] | session resume --id <id> [--record] | --resume [last|<id>] [--record] | resume [last|<id>] [--record] | resume --id <id> [--record] | --resume-last | --continue | -c | -r | --resume-<id>\n",
+            "usage: fx session resume [last|<id>] | session resume --id <id> | --resume [last|<id>] | resume [last|<id>] | resume --id <id> | --resume-last | --continue | -c | -r | --resume-<id>\n",
             capture.stderr.written(),
         );
     }
@@ -4670,7 +4670,7 @@ test "runIfRequested invalid resume writes usage" {
     const result = try runIfRequestedWithDeps(std.testing.allocator, &.{ @constCast("resume"), @constCast("a"), @constCast("b") }, testConfig(), capture.deps());
     try std.testing.expectEqual(RunResult.handled_failure, result);
     try std.testing.expectEqualStrings(
-        "usage: fx session resume [last|<id>] [--record] | session resume --id <id> [--record] | --resume [last|<id>] [--record] | resume [last|<id>] [--record] | resume --id <id> [--record] | --resume-last | --continue | -c | -r | --resume-<id>\n",
+        "usage: fx session resume [last|<id>] | session resume --id <id> | --resume [last|<id>] | resume [last|<id>] | resume --id <id> | --resume-last | --continue | -c | -r | --resume-<id>\n",
         capture.stderr.written(),
     );
 }

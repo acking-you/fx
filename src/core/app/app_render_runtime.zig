@@ -5785,7 +5785,7 @@ test "core.app_render_runtime width-changed queued editor keeps mention navigati
     try std.testing.expect(!app.terminal.catalogMenuScreenActive());
 }
 
-test "core.app_render_runtime active setup hub stays on the inline transcript surface" {
+test "core.app_render_runtime active BYOK account picker stays on the inline transcript surface" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -5816,18 +5816,23 @@ test "core.app_render_runtime active setup hub stays on the inline transcript su
     try app.shell.enableShadowVt(alloc);
     try app.shell.writeTranscript(alloc, &app.metrics, "setup transcript stays behind\n", true);
 
-    app.shell.render_requests.request(.footer);
+    app.shell.render_requests.consecutive_input_pending_aborts =
+        render_request.max_consecutive_input_pending_aborts;
+    app.shell.render_requests.request(.first_frame);
     try Runtime(CoordinatorTestApp).flushRequestedFrame(&app);
 
     try std.testing.expect(!app.terminal.catalogMenuScreenActive());
-    try std.testing.expect(try coordinatorGridContains(app.shell.shadow_vt.?.*, "Setup"));
-    try std.testing.expect(try coordinatorGridContains(app.shell.shadow_vt.?.*, "Connections"));
-    try std.testing.expect(try coordinatorGridContains(app.shell.shadow_vt.?.*, "Credential source"));
+    try std.testing.expect(try coordinatorGridContains(app.shell.shadow_vt.?.*, "Accounts"));
+    try std.testing.expect(try coordinatorGridContains(app.shell.shadow_vt.?.*, "Sign in with Codex"));
+    try std.testing.expect(try coordinatorGridContains(app.shell.shadow_vt.?.*, "Sign in with Grok"));
+    try std.testing.expect(try coordinatorGridContains(app.shell.shadow_vt.?.*, "Switch credential"));
     try std.testing.expect(try coordinatorGridContains(app.shell.shadow_vt.?.*, "Enter Open"));
     try std.testing.expect(!(try coordinatorGridContains(app.shell.shadow_vt.?.*, "test-model")));
     try std.testing.expect(try coordinatorGridContains(app.shell.shadow_vt.?.*, "setup transcript stays behind"));
 
     app.auth.closePicker(alloc);
+    app.shell.render_requests.consecutive_input_pending_aborts =
+        render_request.max_consecutive_input_pending_aborts;
     app.shell.render_requests.request(.footer);
     try Runtime(CoordinatorTestApp).flushRequestedFrame(&app);
 
@@ -6260,8 +6265,10 @@ test "core.app_render_runtime generic approval exits the full transcript screen 
 
     try std.testing.expect(try app.approval_prompt.syncRequest(alloc, .{
         .id = 42,
-        .label = "terminal.exec sh -c 'printf approval'",
+        .label = "exec_command sh -c 'printf approval'",
     }));
+    app.shell.render_requests.consecutive_input_pending_aborts =
+        render_request.max_consecutive_input_pending_aborts;
     app.shell.render_requests.request(.modal);
     try Runtime(CoordinatorTestApp).flushRequestedFrame(&app);
 

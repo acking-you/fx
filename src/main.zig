@@ -4119,13 +4119,13 @@ test "semantic code block preserves indentation on wrapped continuation rows" {
     const wide = try transcript_runtime.renderEntriesToBytes(alloc, entries.items, 80, .{});
     defer alloc.free(wide);
     try std.testing.expect(std.mem.find(u8, wide, "text") != null);
-    try std.testing.expect(std.mem.find(u8, wide, "┌") != null);
-    try std.testing.expect(std.mem.find(u8, wide, "└") != null);
+    try std.testing.expect(std.mem.find(u8, wide, "─") != null);
+    try std.testing.expect(std.mem.find(u8, wide, "│") == null);
     try std.testing.expect(std.mem.find(u8, wide, "  abcdefghijkl") != null);
 
     const narrow = try transcript_runtime.renderEntriesToBytes(alloc, entries.items, 12, .{});
     defer alloc.free(narrow);
-    try std.testing.expect(std.mem.find(u8, narrow, "\n  │   efgh │\n") != null);
+    try std.testing.expect(std.mem.find(u8, narrow, "\n    ijkl\n") != null);
     var lines = std.mem.splitScalar(u8, narrow, '\n');
     while (lines.next()) |line| {
         try std.testing.expect(display_width.visibleWidthIgnoringAnsi(line) <= 12);

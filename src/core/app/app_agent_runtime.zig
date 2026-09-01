@@ -1902,12 +1902,12 @@ test "app agent runtime formats active completed denied and MCP tool actions" {
     };
     const malformed_completed = try app.describeToolActionCompleted(arena, malformed_registered);
     try std.testing.expectEqualStrings(
-        "● Completed\x1b[0m \x1b[38;5;245mtool call\x1b[0m",
+        "● Completed\x1b[0m \x1b[38;5;245mgrep_files\x1b[0m",
         malformed_completed,
     );
     const malformed_denied = try app.describeToolActionDenied(arena, malformed_registered, "Denied");
     try std.testing.expectEqualStrings(
-        "● Denied\x1b[0m \x1b[38;5;245mtool call\x1b[0m",
+        "● Denied\x1b[0m \x1b[38;5;245mgrep_files\x1b[0m",
         malformed_denied,
     );
 

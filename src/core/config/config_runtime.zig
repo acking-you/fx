@@ -1415,6 +1415,12 @@ fn parseProfileOnlyFields(
         settings.slash_menu_categories = value.bool;
     }
 
+    if (root.object.get("collapse_tool_calls")) |collapse_tool_calls_value| {
+        const value = collapse_tool_calls_value;
+        if (value != .bool) return error.InvalidCollapseToolCallsType;
+        settings.collapse_tool_calls = value.bool;
+    }
+
     if (root.object.get("startup_scrollback")) |startup_scrollback_value| {
         const value = startup_scrollback_value;
         if (value != .bool) return error.InvalidStartupScrollbackType;
@@ -1519,6 +1525,7 @@ fn mergeSettings(target: *Settings, incoming: *Settings, alloc: Allocator) void 
     if (incoming.context) |value| target.context = value;
     if (incoming.fast_mode) |value| target.fast_mode = value;
     if (incoming.slash_menu_categories) |value| target.slash_menu_categories = value;
+    if (incoming.collapse_tool_calls) |value| target.collapse_tool_calls = value;
     if (incoming.startup_scrollback) |value| target.startup_scrollback = value;
     if (incoming.prompt_history_enabled) |value| target.prompt_history_enabled = value;
     if (incoming.effort) |value| target.effort = value;

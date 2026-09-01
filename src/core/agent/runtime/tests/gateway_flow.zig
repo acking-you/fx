@@ -2568,7 +2568,7 @@ test "processQueuedPrompt rejects unadvertised native-route Vision calls before 
     try std.testing.expectEqualStrings("native/test-vision", gateway.request_models.items[0]);
     try std.testing.expectEqualStrings("native/test-vision", gateway.request_models.items[1]);
     try expectBodyContains(&gateway, 0, "\"type\":\"input_image\"");
-    try expectBodyContains(&gateway, 0, "\"name\":\"vision\"");
+    try expectBodyNotContains(&gateway, 0, "\"name\":\"vision\"");
     try expectBodyNotContains(&gateway, 1, image_path);
     try std.testing.expectEqual(@as(usize, 0), hooks.permission_names.items.len);
     try std.testing.expectEqual(@as(usize, 0), hooks.executed_names.items.len);
@@ -3414,7 +3414,7 @@ test "processQueuedPrompt keeps supplied system prompt components in stable orde
 
     try std.testing.expectEqual(@as(usize, 2), gateway.request_bodies.items.len);
     const first_roles = [_]types.ChatRole{ .system, .user, .assistant, .user };
-    const second_roles = [_]types.ChatRole{ .system, .user, .assistant, .user, .assistant, .tool };
+    const second_roles = [_]types.ChatRole{ .system, .user, .assistant, .user, .assistant, .tool, .user };
     try expectGatewayPromptRoles(&gateway, 0, &first_roles);
     try expectGatewayPromptRoles(&gateway, 1, &second_roles);
     inline for (&.{ @as(usize, 0), @as(usize, 1) }) |request_index| {
@@ -3486,7 +3486,7 @@ test "processQueuedPrompt refreshes runtime overlay each step and preserves turn
     try expectBodyContains(&gateway, 1, "\"name\":\"read_file\"");
     try expectBodyContains(&gateway, 1, "\"output\":\"ok\"");
     const first_request_roles = [_]types.ChatRole{ .system, .user };
-    const second_request_roles = [_]types.ChatRole{ .system, .user, .assistant, .assistant, .tool };
+    const second_request_roles = [_]types.ChatRole{ .system, .user, .assistant, .assistant, .tool, .user };
     try expectGatewayPromptRoles(&gateway, 0, &first_request_roles);
     try expectGatewayPromptRoles(&gateway, 1, &second_request_roles);
     const second_request_order = [_][]const u8{ "runtime overlay step two", "user prompt", "Checking.", "\"output\":\"ok\"" };

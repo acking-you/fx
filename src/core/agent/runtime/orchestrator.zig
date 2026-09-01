@@ -53,6 +53,7 @@ const runtime_interruption = @import("interruption.zig");
 const runtime_parallel_execution = @import("parallel_execution.zig");
 const runtime_tool_batch = @import("tool_batch.zig");
 const model_response_recovery = @import("model_response_recovery.zig");
+const tool_mcp_runtime = @import("../../tooling/tool_mcp_runtime.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -66,6 +67,8 @@ const AgentRuntimeDeps = runtime_deps.AgentRuntimeDeps;
 const CredentialRefreshMode = runtime_deps.CredentialRefreshMode;
 
 const http_error_detail_max_bytes: usize = 4096;
+const post_tool_decision_prompt =
+    "Continue the original task. If work remains and you can proceed, briefly tell the user what you are doing next, then perform that action with the appropriate tool. Do not end the turn with only a progress update. If the task is complete, respond with the result. If a genuine blocker prevents further action, explain the blocker and what is needed to continue.";
 const assistant_prefill_recovery_prompt =
     "Continue from the preceding tool result.";
 const repeated_malformed_arguments_notice =
@@ -76,6 +79,37 @@ const PreparedToolCall = runtime_lifecycle.PreparedToolCall;
 const TurnFinalizationGuard = runtime_finalization.TurnFinalizationGuard;
 const PromptFinishTrace = runtime_finalization.PromptFinishTrace;
 const ToolExecutionResult = runtime_tool_contracts.ToolExecutionResult;
+
+fn append_post_tool_decision_prompt(
+    alloc: Allocator,
+    messages: []const ChatMessage,
+    pending: bool,
+) ![]const ChatMessage {
+    if (!pending) return messages;
+    const projected = try alloc.alloc(ChatMessage, messages.len + 1);
+    @memcpy(projected[0..messages.len], messages);
+    projected[messages.len] = .{
+        .role = .user,
+        .content = post_tool_decision_prompt,
+        .cache_policy = .no_cache,
+    };
+    return projected;
+}
+
+test "post-tool decision prompt appends one no-cache user message only when pending" {
+    const alloc = std.testing.allocator;
+    const source = [_]ChatMessage{.{ .role = .system, .content = "system" }};
+
+    const unchanged = try append_post_tool_decision_prompt(alloc, &source, false);
+    try std.testing.expectEqual(@as(usize, 1), unchanged.len);
+
+    const projected = try append_post_tool_decision_prompt(alloc, &source, true);
+    defer alloc.free(projected);
+    try std.testing.expectEqual(@as(usize, 2), projected.len);
+    try std.testing.expectEqual(types.ChatRole.user, projected[1].role);
+    try std.testing.expectEqualStrings(post_tool_decision_prompt, projected[1].content.?);
+    try std.testing.expectEqual(types.ChatCachePolicy.no_cache, projected[1].cache_policy);
+}
 
 fn completionStepReasoning(completion: types.ModelCompletion) runtime_tool_batch.StepReasoning {
     return .{
@@ -1933,14 +1967,25 @@ pub fn processQueuedPrompt(
     if (effective_job.turn_id == 0) {
         effective_job.turn_id = debug_trace.nextTurnId();
     }
+    var effective_config = config;
+    if (effective_config.origin == .subagent and effective_config.subagent_id == 0) {
+        effective_config.subagent_id = debug_trace.nextSubagentId();
+    }
+    var effective_lifecycle = lifecycle;
+    if (effective_config.origin == .subagent and
+        effective_lifecycle.scope.kind == .subagent and
+        effective_lifecycle.scope.subagent_id == null)
+    {
+        effective_lifecycle.scope.subagent_id = effective_config.subagent_id;
+    }
     var finalization = TurnFinalizationGuard.init(
         deps,
         effective_job.turn_id,
-        lifecycle,
+        effective_lifecycle,
     );
     defer finalization.deinit();
 
-    processQueuedPromptInner(deps, semantic_presentation, lifecycle, config, effective_job, &finalization) catch |err| {
+    processQueuedPromptInner(deps, semantic_presentation, effective_lifecycle, effective_config, effective_job, &finalization) catch |err| {
         if (finalization.state == .open) {
             finalization.finish(.failed, null, null) catch |finalization_err| return finalization_err;
         }
@@ -1976,13 +2021,46 @@ fn appendPermissionFeedbackAfterToolResult(
 
 fn requiresResolvedRequestCapabilities(
     has_images: bool,
+    vision_policy_needs_capabilities: bool,
     effort: types.ReasoningEffort,
     fast_mode: bool,
     available: model_capabilities.Capabilities,
 ) bool {
     return has_images or
+        (vision_policy_needs_capabilities and available.image_input_support == .unknown) or
         (!effort.isDefault() and !model_capabilities.reasoningEffortSupported(available, effort)) or
         (fast_mode and !available.supports_fast_mode);
+}
+
+test "request capabilities resolve before Vision visibility when image support is unknown" {
+    try std.testing.expect(requiresResolvedRequestCapabilities(
+        false,
+        true,
+        .auto,
+        false,
+        .{},
+    ));
+    try std.testing.expect(!requiresResolvedRequestCapabilities(
+        false,
+        true,
+        .auto,
+        false,
+        .{ .image_input_support = .non_native },
+    ));
+    try std.testing.expect(!requiresResolvedRequestCapabilities(
+        false,
+        true,
+        .auto,
+        false,
+        .{ .image_input_support = .native },
+    ));
+    try std.testing.expect(!requiresResolvedRequestCapabilities(
+        false,
+        false,
+        .auto,
+        false,
+        .{},
+    ));
 }
 
 fn request_max_output_tokens(capabilities: model_capabilities.Capabilities) ?u32 {
@@ -2078,9 +2156,12 @@ fn processQueuedPromptInner(
     if (deps.append_static_context) |append_static_context| {
         try append_static_context(deps.ctx, arena, &stable_prefix);
     }
+    const vision_fallback_available = config.provider_capabilities.vision_fallback and
+        deps.tool_registry.lookup("vision") != null;
     var request_capabilities = deps.available_model_capabilities(deps.ctx, job.model);
     if (requiresResolvedRequestCapabilities(
         job.images.len > 0 or job.authorized_image_catalog.len > 0,
+        vision_fallback_available,
         config.effort,
         config.fast_mode,
         request_capabilities,
@@ -2259,18 +2340,6 @@ fn appendAuthorizedVisionAttemptIds(
     return true;
 }
 
-fn visionCallUsesPaths(alloc: Allocator, call: ToolCall) !bool {
-    const request = runtime_vision_contracts.parse_vision_request(
-        alloc,
-        call.arguments_json,
-    ) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return false,
-    };
-    defer request.deinit(alloc);
-    return request.paths() != null;
-}
-
 fn containsImageId(image_ids: []const usize, candidate: usize) bool {
     for (image_ids) |image_id| {
         if (image_id == candidate) return true;
@@ -2357,29 +2426,65 @@ fn buildToolExecutionRootUserContext(
     );
 }
 
-fn visionFallbackMode(
-    available: bool,
+const ImageRoute = enum {
+    native,
+    fallback,
+    unavailable,
+};
+
+const VisionPolicy = struct {
+    route: ImageRoute,
+    mode: runtime_gateway_step.VisionToolMode,
+};
+
+fn visionPolicy(
+    image_input_support: model_capabilities.ImageInputSupport,
+    fallback_available: bool,
     tool_registered: bool,
-) runtime_gateway_step.VisionToolMode {
-    if (!available or !tool_registered) {
-        return .unavailable;
-    }
-    return .optional;
+    pending_images: bool,
+) VisionPolicy {
+    return switch (image_input_support) {
+        .native => .{ .route = .native, .mode = .unavailable },
+        .unknown => .{ .route = .unavailable, .mode = .unavailable },
+        .non_native => if (!fallback_available or !tool_registered)
+            .{ .route = .unavailable, .mode = .unavailable }
+        else
+            .{
+                .route = .fallback,
+                .mode = if (pending_images) .required else .optional,
+            },
+    };
 }
 
-test "vision fallback follows the selected provider capability" {
-    try std.testing.expectEqual(
-        runtime_gateway_step.VisionToolMode.optional,
-        visionFallbackMode(true, true),
-    );
-    try std.testing.expectEqual(
-        runtime_gateway_step.VisionToolMode.unavailable,
-        visionFallbackMode(true, false),
-    );
-    try std.testing.expectEqual(
-        runtime_gateway_step.VisionToolMode.unavailable,
-        visionFallbackMode(false, true),
-    );
+test "vision policy keeps image route and tool visibility coherent" {
+    const cases = [_]struct {
+        image_input_support: model_capabilities.ImageInputSupport,
+        fallback_available: bool,
+        tool_registered: bool,
+        pending_images: bool,
+        expected_route: ImageRoute,
+        expected_mode: runtime_gateway_step.VisionToolMode,
+    }{
+        .{ .image_input_support = .native, .fallback_available = true, .tool_registered = true, .pending_images = true, .expected_route = .native, .expected_mode = .unavailable },
+        .{ .image_input_support = .native, .fallback_available = false, .tool_registered = false, .pending_images = false, .expected_route = .native, .expected_mode = .unavailable },
+        .{ .image_input_support = .non_native, .fallback_available = true, .tool_registered = true, .pending_images = true, .expected_route = .fallback, .expected_mode = .required },
+        .{ .image_input_support = .non_native, .fallback_available = true, .tool_registered = true, .pending_images = false, .expected_route = .fallback, .expected_mode = .optional },
+        .{ .image_input_support = .non_native, .fallback_available = false, .tool_registered = true, .pending_images = true, .expected_route = .unavailable, .expected_mode = .unavailable },
+        .{ .image_input_support = .non_native, .fallback_available = true, .tool_registered = false, .pending_images = false, .expected_route = .unavailable, .expected_mode = .unavailable },
+        .{ .image_input_support = .unknown, .fallback_available = true, .tool_registered = true, .pending_images = true, .expected_route = .unavailable, .expected_mode = .unavailable },
+    };
+
+    for (cases) |case| {
+        const policy = visionPolicy(
+            case.image_input_support,
+            case.fallback_available,
+            case.tool_registered,
+            case.pending_images,
+        );
+        try std.testing.expectEqual(case.expected_route, policy.route);
+        try std.testing.expectEqual(case.expected_mode, policy.mode);
+        try std.testing.expect((policy.route == .fallback) == (policy.mode != .unavailable));
+    }
 }
 
 const max_pending_steers_per_step: usize = 32;
@@ -2620,6 +2725,10 @@ fn processQueuedPromptLoop(
     else
         .none;
     var restore_recovery_source = job.recovery_checkpoint != null;
+    var post_tool_decision_pending = if (job.recovery_checkpoint) |checkpoint|
+        checkpoint.execution.tool_steps.len > 0
+    else
+        false;
     var inline_compaction: ?runtime_compaction.Result = null;
     defer if (inline_compaction) |*result| result.deinit(arena);
     var inline_compaction_suffix_start: usize = 0;
@@ -2657,7 +2766,7 @@ fn processQueuedPromptLoop(
             finish_trace.finish("interrupted");
             return;
         }
-        _ = try drainPendingSteers(
+        const applied_steer_count = try drainPendingSteers(
             deps,
             arena,
             turn_id,
@@ -2882,10 +2991,29 @@ fn processQueuedPromptLoop(
                     within_turn_suffix.items,
                 );
             debug_trace.eventf("agent", "before_provider_preflight", step_ctx, "model={s} messages={d}", .{ gateway_model, gateway_messages.items.len });
-            var vision_route: runtime_vision_contracts.VisionRoute = .native_images;
-            var vision_mode = visionFallbackMode(
+            const vision_policy = visionPolicy(
+                request_capabilities.image_input_support,
                 config.provider_capabilities.vision_fallback,
                 deps.tool_registry.lookup("vision") != null,
+                pending_image_ids.len > 0,
+            );
+            const vision_route: runtime_vision_contracts.VisionRoute = if (vision_policy.route == .fallback)
+                .text_only
+            else
+                .native_images;
+            const vision_mode = vision_policy.mode;
+            debug_trace.eventf(
+                "agent",
+                "vision_policy",
+                step_ctx,
+                "model={s} image_support={s} route={s} mode={s} pending_images={d}",
+                .{
+                    gateway_model,
+                    @tagName(request_capabilities.image_input_support),
+                    @tagName(vision_policy.route),
+                    @tagName(vision_mode),
+                    pending_image_ids.len,
+                },
             );
             const recovery_source_messages = try appendReadFailureRecoveryContext(
                 overlay_arena,
@@ -2897,35 +3025,43 @@ fn processQueuedPromptLoop(
                     stream_ctx.raw_text.items,
                 ),
             );
+            const decision_source_messages = try append_post_tool_decision_prompt(
+                overlay_arena,
+                recovery_source_messages,
+                applied_steer_count == 0 and
+                    (post_tool_decision_pending or
+                        recovery_strategy == .continue_after_confirmed_tool),
+            );
             const projected_request_messages = blk: {
                 if (job.authorized_image_catalog.len == 0 and job.images.len == 0) {
-                    break :blk recovery_source_messages;
+                    break :blk decision_source_messages;
                 }
-                if (inline_compaction != null) break :blk recovery_source_messages;
-                if (request_capabilities.supports_vision and
-                    request_capabilities.supports_file_input and
-                    current_user_message_index != null)
-                {
-                    break :blk try runtime_vision_contracts.project_native_messages(
+                if (inline_compaction != null) break :blk decision_source_messages;
+                const user_message_index = current_user_message_index orelse
+                    return error.MissingCurrentUserMessage;
+                break :blk switch (vision_policy.route) {
+                    .native => try runtime_vision_contracts.project_native_messages(
                         overlay_arena,
-                        recovery_source_messages,
-                        current_user_message_index.?,
-                    );
-                }
-                if (!config.provider_capabilities.vision_fallback) {
-                    return error.SubscriptionNativeImageUnavailable;
-                }
-                if (job.authorized_image_catalog.len == 0) {
-                    return error.MissingAuthorizedImageCatalog;
-                }
-                vision_route = .text_only;
-                vision_mode = if (pending_image_ids.len > 0) .required else .optional;
-                break :blk try runtime_vision_contracts.project_text_only_messages(
-                    overlay_arena,
-                    recovery_source_messages,
-                    current_user_message_index.?,
-                    job.authorized_image_catalog,
-                );
+                        decision_source_messages,
+                        user_message_index,
+                    ),
+                    .fallback => fallback: {
+                        if (job.authorized_image_catalog.len == 0) {
+                            return error.MissingAuthorizedImageCatalog;
+                        }
+                        break :fallback try runtime_vision_contracts.project_text_only_messages(
+                            overlay_arena,
+                            decision_source_messages,
+                            user_message_index,
+                            job.authorized_image_catalog,
+                        );
+                    },
+                    .unavailable => switch (request_capabilities.image_input_support) {
+                        .unknown => return error.ModelImageCapabilityUnavailable,
+                        .non_native => return error.SubscriptionNativeImageUnavailable,
+                        .native => unreachable,
+                    },
+                };
             };
             const request_messages = projected_request_messages;
             last_gateway_message_count = request_messages.len;
@@ -2996,7 +3132,7 @@ fn processQueuedPromptLoop(
                 .auto;
             var verified_images: std.ArrayList(image_attachments.VerifiedSnapshot) = .empty;
             if (job.provider != .gateway and job.images.len > 0 and
-                request_capabilities.supports_vision and request_capabilities.supports_file_input)
+                vision_policy.route == .native)
             {
                 try verified_images.ensureTotalCapacity(overlay_arena, job.images.len);
                 for (job.images) |attachment| {
@@ -4132,6 +4268,7 @@ fn processQueuedPromptLoop(
             if (vision_mode != .required) configured_first_tool_choice_pending = false;
             break;
         }
+        post_tool_decision_pending = false;
         defer if (stream_result_set) stream_result.deinit(arena);
 
         var completion = streamCompletion(stream_result);
@@ -4165,6 +4302,7 @@ fn processQueuedPromptLoop(
                     recovery_strategy = null;
                     recovery_cause = .transport_interrupted;
                     preserved_tool_evidence = .none;
+                    post_tool_decision_pending = true;
                     continue;
                 }
                 completion.finish_reason = .stop;
@@ -4686,8 +4824,7 @@ fn processQueuedPromptLoop(
                 continue;
             }
             if (std.mem.eql(u8, tool_call.name, "vision") and
-                successful_vision_route != .text_only and
-                !try visionCallUsesPaths(arena, tool_call))
+                successful_vision_mode == .unavailable)
             {
                 const owned_call = try types.dupeToolCall(arena, tool_call);
                 errdefer types.freeToolCall(arena, owned_call);
@@ -4698,7 +4835,7 @@ fn processQueuedPromptLoop(
                         .{
                             .tool_name = "vision",
                             .message = runtime_vision_contracts.native_route_unavailable_message,
-                            .suggestion = "Continue using the model's native image input without Vision.",
+                            .suggestion = "Continue without Vision.",
                         },
                     ),
                     .kind = .route_unavailable,
@@ -5880,8 +6017,25 @@ fn processQueuedPromptLoop(
                 }
             else
                 true;
-            if (requires_legacy_classification) {
-                if (try runtime_tool_admission.registeredToolValidationFailure(deps, arena, tool_call)) |execution| {
+            var expected_mcp_runtime_generation: ?u64 = null;
+            const requires_action_validation = requires_legacy_classification or
+                tool_mcp_runtime.isAdvertisedDynamicToolName(
+                    advertised_dynamic_tool_names,
+                    tool_call.name,
+                );
+            if (requires_action_validation) {
+                const validation_failure: ?ToolExecutionResult = switch (try runtime_tool_admission.toolCallValidation(deps, arena, tool_call)) {
+                    .not_registered => null,
+                    .valid => |witness| valid: {
+                        expected_mcp_runtime_generation = witness.mcp_runtime_generation;
+                        break :valid null;
+                    },
+                    .failure => |reason| .{
+                        .model_output = reason,
+                        .status = .failure,
+                    },
+                };
+                if (validation_failure) |execution| {
                     const prepared = try runtime_execution_memory.prepareToolModelOutput(arena, config, tool_call, execution.model_output);
                     const safe_tool_output = prepared.model_output;
                     _ = try stream_ctx.provisional_statuses.finishExecutedCall(
@@ -5918,6 +6072,8 @@ fn processQueuedPromptLoop(
                     );
                     continue;
                 }
+            }
+            if (requires_legacy_classification) {
                 if (try runtime_tool_admission.toolAvailabilityFailure(deps, arena, tool_call)) |execution| {
                     const prepared = try runtime_execution_memory.prepareToolModelOutput(arena, config, tool_call, execution.model_output);
                     const safe_tool_output = prepared.model_output;
@@ -6680,6 +6836,7 @@ fn processQueuedPromptLoop(
             }
             const execution_lifecycle_id = types.ToolLifecycleId{ .turn_id = turn_id, .call_id = execution_call.id };
             const execution_is_command = runtime_tool_presentation.activityKindForCall(arena, deps.tool_registry, tool_call) == .command;
+            var execution_error: ?anyerror = null;
             var execution = deps.execute_tool_call(deps.ctx, .{
                 .call_allocator = call_allocator,
                 .result_allocator = arena,
@@ -6695,6 +6852,7 @@ fn processQueuedPromptLoop(
                 .live_authority = if (live_authority) |resolved| resolved.authority else null,
                 .advertised_dynamic_tool_names = advertised_dynamic_tool_names,
                 .max_tool_result_bytes = config.max_tool_result_bytes,
+                .expected_mcp_runtime_generation = expected_mcp_runtime_generation,
                 .classification_complete = if (preparation_batch.preparations[tool_call_index]) |preparation|
                     switch (preparation) {
                         .candidate => |candidate| preparedCandidateClassificationComplete(candidate),
@@ -6712,8 +6870,7 @@ fn processQueuedPromptLoop(
                         .model_output = "command cancelled\n",
                     };
                 }
-                debug_trace.eventf("tool", "after_tool_execution", step_ctx, "call_id={s} name={s} result_kind=error err={s}", .{ tool_call.id, tool_call.name, @errorName(err) });
-                debug_trace.eventf("tool", "execution_result", step_ctx, "call_id={s} name={s} result_kind=error err={s}", .{ tool_call.id, tool_call.name, @errorName(err) });
+                execution_error = err;
                 break :blk ToolExecutionResult{ .status = .failure, .model_output = try deps.format_tool_execution_error(deps.ctx, arena, tool_call.name, err) };
             };
 
@@ -6998,8 +7155,13 @@ fn processQueuedPromptLoop(
                 return;
             }
 
-            debug_trace.eventf("tool", "after_tool_execution", step_ctx, "call_id={s} name={s} result_kind={s} model_output_bytes={d}", .{ tool_call.id, tool_call.name, runtime_telemetry.toolExecutionResultKind(execution), safe_tool_output.len });
-            debug_trace.eventf("tool", "execution_result", step_ctx, "call_id={s} name={s} result_kind={s} model_output_bytes={d}", .{ tool_call.id, tool_call.name, runtime_telemetry.toolExecutionResultKind(execution), safe_tool_output.len });
+            if (execution_error) |err| {
+                debug_trace.eventf("tool", "after_tool_execution", step_ctx, "call_id={s} name={s} result_kind={s} err={s} model_output_bytes={d}", .{ tool_call.id, tool_call.name, runtime_telemetry.toolExecutionResultKind(execution), @errorName(err), safe_tool_output.len });
+                debug_trace.eventf("tool", "execution_result", step_ctx, "call_id={s} name={s} result_kind={s} err={s} model_output_bytes={d}", .{ tool_call.id, tool_call.name, runtime_telemetry.toolExecutionResultKind(execution), @errorName(err), safe_tool_output.len });
+            } else {
+                debug_trace.eventf("tool", "after_tool_execution", step_ctx, "call_id={s} name={s} result_kind={s} model_output_bytes={d}", .{ tool_call.id, tool_call.name, runtime_telemetry.toolExecutionResultKind(execution), safe_tool_output.len });
+                debug_trace.eventf("tool", "execution_result", step_ctx, "call_id={s} name={s} result_kind={s} model_output_bytes={d}", .{ tool_call.id, tool_call.name, runtime_telemetry.toolExecutionResultKind(execution), safe_tool_output.len });
+            }
             try runtime_gateway_step.recordSelectedDynamicTool(arena, &selected_dynamic_tool_names, &selected_dynamic_tools, execution);
             try runtime_tool_batch.appendOrdinaryExecutedResult(
                 deps.tool_registry,
@@ -7063,6 +7225,7 @@ fn processQueuedPromptLoop(
             &within_turn_suffix,
             &step_batch,
         );
+        post_tool_decision_pending = true;
         if (malformed_arguments_retry.finishBatch()) {
             debug_trace.eventf(
                 "agent",

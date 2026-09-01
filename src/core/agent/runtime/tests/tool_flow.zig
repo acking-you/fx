@@ -3895,6 +3895,13 @@ test "post-tool provider retry retains exactly one action-oriented decision prom
 
 test "processQueuedPrompt normal always permission retains suggested session grants before execution" {
     const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io_mod.getIo(), "workspace/app");
+    const workspace = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "workspace");
+    defer alloc.free(workspace);
+    const permission_target = try std.fs.path.join(alloc, &.{ workspace, "app", "page.tsx" });
+    defer alloc.free(permission_target);
     const calls = [_]ToolCall{toolCall("call_1", "write_file", "{\"path\":\"app/page.tsx\",\"content\":\"x\"}")};
     const completions = [_]FakeCompletion{
         .{ .tool_calls = &calls },
@@ -3904,9 +3911,10 @@ test "processQueuedPrompt normal always permission retains suggested session gra
     defer gateway.deinit();
     var hooks = FakeAgentRuntimeDeps.init(alloc);
     hooks.permission_decisions = &.{.always};
-    hooks.permission_target = "/tmp/workspace/app/page.tsx";
+    hooks.workspace_root = workspace;
+    hooks.permission_target = permission_target;
     defer hooks.deinit();
-    var fixture = PromptFixture{};
+    var fixture = PromptFixture{ .workspace_root = workspace };
 
     try runFakePrompt(&gateway, &hooks, fixture.config(), fixture.job());
 
