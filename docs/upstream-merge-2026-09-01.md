@@ -35,9 +35,10 @@ The merge boundary is:
 | Final reopened-tail observation | `d2eac99b` |
 | Stale reopened-tail diagnostic trace | `54f0e3b7` |
 | Final viewer-lifetime page invalidation | `542d43b3` |
+| Redundant transcript stress harness removal | `9e7c2dc2` |
 | Review branch | `merge/upstream-2026-09-01` |
 
-Compared with the pre-merge BYOK tree, the review result changes 253 files with 29,864 insertions and 17,451 deletions. The large count comes primarily from upstream MCP, transcript, rendering, and E2E work. It does not represent a new vendor product route or a large new model-facing tool surface.
+At review commit `9e7c2dc2`, the result changes 254 files with 29,663 insertions and 18,581 deletions compared with the pre-merge BYOK tree. The large count comes primarily from upstream MCP, transcript, rendering, and E2E work. It does not represent a new vendor product route or a large new model-facing tool surface.
 
 ## Reconciliation policy
 
@@ -98,6 +99,22 @@ Primary paths:
 - `src/core/output/full_transcript_page.zig`
 - `src/ui/transcript/full_transcript_worker.zig`
 - `src/ui/full_transcript_screen.zig`
+
+### Redundant full-transcript stress harness removed
+
+The 1,336-line `tests/e2e/tui-full-transcript-brutal.test.ts` owner was removed after exact-commit Full CI failed its only default scenario twice at different observer timeouts. One attempt waited for a pane predicate while live output was still moving; the other recorded a scroll transition from offset 4,142 to 4,168, then rejected the following frame because its installed page still reported offset 4,142. Neither attempt crashed fx, produced stderr, lost a committed turn, or showed transcript corruption.
+
+The file combined one always-on soak with three opt-in profiler and large-load harnesses. It asserted internal trace ordering, process RSS, terminal byte counts, and millisecond budgets while duplicating user-visible Ctrl+O behavior already owned by deterministic E2E and Zig lifecycle tests. Repeated repairs had accumulated more observer state without making the scenario portable on macOS x86_64. Keeping it would add merge and CI cost without a distinct supported-product contract.
+
+The complete slice was removed:
+
+- the test file and its process, metrics, profiler, trace, fake-gateway, and retained-artifact helpers;
+- its PGSO training scenario;
+- its E2E shard weight;
+- the production-manifest expectation and scenario totals that named it;
+- the PGSO documentation count, reduced from twenty-eight to twenty-seven deterministic training files.
+
+No production Ctrl+O code was removed. The retained `tui-resume.test.ts` pressure scenario still drives mixed assistant history and live Unified Exec output through open, PageUp, PageDown, close, repeated entry, final persistence, and replay. It also requires a single alternate-screen owner, unchanged compact scrollback, empty stderr, and clean exit. Focused Ctrl+O resume, streaming, approval, subagent, render-replay, input, resize, page, and lifecycle tests retain the narrower failure owners.
 
 ### Provider usage dashboard
 
@@ -497,6 +514,8 @@ Diagnostic run `33515082961` on `54f0e3b7f32fa438355fff90de8210943aa11b79` added
 
 The same diagnostic run had one isolated Windows native failure in `unified exec manager cleanup terminates a still-running process group`. The identical test passed on the preceding exact Windows run with the same production source, while the diagnostic commit changed only TypeScript failure reporting. It is recorded as runner evidence, not waived: the final exact-commit run must pass Windows native. The diagnostic workflow was cancelled after the macOS trace was captured and commit `542d43b3` superseded it.
 
+Run `33524687049` on `52f80cde1a151df0e3ef1e150b01f411396f4e02` passed 15 underlying jobs, including Windows native, three of four Unix native jobs, all eight Linux E2E shards, macOS arm64 shard 3, and macOS x86_64 shards 2 and 4. macOS x86_64 shard 3 failed `tui-full-transcript-brutal.test.ts` twice at two different observer boundaries. The first attempt timed out waiting for a pane predicate during live output. The retry logged a scroll transition from 4,142 to 4,168 but timed out because a subsequent installed-page window still reported 4,142. The product stayed alive and the remaining files in the shard passed. The failure was classified as a redundant harness contract only after tracing its production owner and confirming overlapping deterministic coverage. Commit `9e7c2dc2` removes that complete test slice. The run was cancelled once the new commit superseded it; it is diagnostic evidence and cannot qualify the review head.
+
 The smaller `.github/workflows/ci.yml` workflow is not used as the merge decision. Benchmark and binary-size workflows are retained because startup latency and unexplained binary growth are useful signals; neither replaces Full CI.
 
 ## Local verification completed before push
@@ -531,12 +550,12 @@ The smaller `.github/workflows/ci.yml` workflow is not used as the merge decisio
 - Focused live-stream `/resume` refusal passed while waiting on the current stable `Generating` phase
 - Focused active-turn image steering passed while retaining its request-order, instruction-snapshot, image-byte, and stderr assertions
 - Focused greater-than-1-MiB cancelled-command artifact navigation passed with bounded PgDn batches and 60 retained assertions
-- Focused full-transcript brutal stress passed with 120 assertions in 41.7 seconds after viewer-lifetime page invalidation; reopening installed a current non-loading tail containing `LIVE_DONE`, and four-key verified PageUp batches still distinguished committed or clamped frames from page-loading rejection while proving the oldest entry is reachable
+- The now-retired full-transcript brutal stress historically passed with 120 assertions after viewer-lifetime page invalidation; its distinct production fixes remain covered by focused terminal-revision and viewer-lifetime tests
 - Focused persistent-child reading-position restoration passed with six assertions after waiting for the asynchronously restored full-detail content before comparing its exact visible range
 - Focused height-shrink footer and provider length-truncation lifecycle cases passed through the stable post-resize and failed-tool states
 - Focused MCP authentication and logout lifecycle passed after restoring menu-completion collection in the composition root
 - Focused remote native compaction and Codex Vision failure cases passed with request-level and current structured-result assertions
-- Focused asynchronous statusline persistence, native-scrollback resize retention, and brutal full-transcript page-load cases passed
+- Focused asynchronous statusline persistence and native-scrollback resize retention cases passed
 - Focused automatic-recording and replay cases passed through the supported environment-driven recording contract
 - Three sensitive subagent cases passed together: reusable child file approval, approval takeover across Ctrl+X reopen, and selected-child live chat
 - The idle running-activity case passed after deletion of its trace-internal scheduler assertion; it still proves elapsed-time progression, both animation marker states, native-scrollback stability, final output, and empty stderr
@@ -556,6 +575,9 @@ The smaller `.github/workflows/ci.yml` workflow is not used as the merge decisio
 - Fresh binary ACP interaction covering initialize, session creation, setup start, and nonblocking setup status
 - Current-tree Windows x86_64 ReleaseSafe cross-build followed by direct execution of `./zig-out/bin/fx.exe`: `help`, `status --json`, and provider-neutral `setup --json` exited cleanly; setup detected `codex_cli` and `grok_build` without access-token or API-key fields
 - Current-tree Windows ACP smoke returned initialize, session creation, provider setup start, and nonblocking setup status with empty stderr
+- PGSO manifest classification lists cleanly after removing the stale training owner; all 32 corpus unit tests pass
+- E2E shard planning passes all 8 tests after removing the stale file weight and still classifies every committed test exactly once
+- The retained deterministic `tui-resume.test.ts` Ctrl-O pressure scenario passes from commit `9e7c2dc2` in a fresh ext4 ReleaseSafe build with 62 assertions, 45 unrelated tests filtered out, and empty stderr
 
 The local setup smoke detected both `codex_cli` and `grok_build` sources without printing credential bytes. The full unfiltered Zig suite was run locally on WSL's native ext4 filesystem because the test graph requires POSIX private-mode, lock, rename, and process semantics; Windows still runs the explicit native subset in Full CI.
 
