@@ -734,7 +734,20 @@ test "full transcript projection opens without folded command output" {
 
 test "closing the full transcript resets bounded paging to the tail" {
     const alloc = std.testing.allocator;
-    var runtime = TranscriptRuntime{};
+    var runtime = TranscriptRuntime{
+        .full_transcript_installed_page = .{
+            .source = .{
+                .request = .{
+                    .content_revision = 7,
+                    .cols = 80,
+                    .anchor = .tail,
+                },
+                .range = .{ .start = 0, .end = 0 },
+                .styles = .{},
+            },
+            .projection = .{ .styles = .{} },
+        },
+    };
     defer runtime.deinit(alloc);
 
     try std.testing.expect(try runtime.setTranscriptPresentationDepth(alloc, .full));
@@ -745,6 +758,7 @@ test "closing the full transcript resets bounded paging to the tail" {
         @as(full_transcript_page.Anchor, .tail),
         runtime.full_transcript_page_anchor,
     ));
+    try std.testing.expect(runtime.full_transcript_installed_page == null);
 }
 
 test "live full transcript content requests one frame per revision stride" {
@@ -5476,8 +5490,6 @@ pub const TranscriptRuntime = struct {
     pub fn clearFullTranscriptDetails(self: *TranscriptRuntime, alloc: Allocator) void {
         self.compact_transcript_source_cache.deinit(alloc);
         self.resetFullTranscriptPageNavigation();
-        if (self.full_transcript_installed_page) |*page| page.deinit();
-        self.full_transcript_installed_page = null;
         self.clearToolDetails(alloc);
         self.full_transcript = self.full_transcript.closed();
     }
@@ -5997,6 +6009,12 @@ pub const TranscriptRuntime = struct {
     fn resetFullTranscriptPageNavigation(self: *TranscriptRuntime) void {
         self.full_transcript_page_anchor = .tail;
         self.full_transcript_page_load.cancelActive();
+        // A page captured while live command output is changing is only valid
+        // for that viewer lifetime. Reusing it after close can preserve a
+        // stale tail when the source changed between a bounded live refresh
+        // and the terminal command/assistant events.
+        if (self.full_transcript_installed_page) |*page| page.deinit();
+        self.full_transcript_installed_page = null;
     }
 
     pub fn fullTranscriptAnchorEntryId(self: *const TranscriptRuntime) ?u32 {
