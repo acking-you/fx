@@ -19,9 +19,10 @@ The merge boundary is:
 | Final runtime and E2E contract repair | `30ca1e45` |
 | Final asynchronous E2E stabilization | `8431e1a4` |
 | Final asynchronous completion-boundary repair | `36f0b037` |
+| Final committed transcript-navigation repair | `0bffb9db` |
 | Review branch | `merge/upstream-2026-09-01` |
 
-Compared with the pre-merge BYOK tree, the review result changes 248 files with 29,082 insertions and 17,262 deletions. The large count comes primarily from upstream MCP, transcript, rendering, and E2E work. It does not represent a new vendor product route or a large new model-facing tool surface.
+Compared with the pre-merge BYOK tree, the review result changes 248 files with 29,088 insertions and 17,262 deletions. The large count comes primarily from upstream MCP, transcript, rendering, and E2E work. It does not represent a new vendor product route or a large new model-facing tool surface.
 
 ## Reconciliation policy
 
@@ -363,6 +364,7 @@ The session or connection-local projection hides `glob_files` and `grep_files` a
 | `30ca1e45` | Restore MCP menu completion polling and align deterministic fixtures with current Responses, transcript, replay, settings, compaction, and asynchronous page-load contracts |
 | `8431e1a4` | Replace stale transient-phase waits and make full-transcript and artifact navigation observe their asynchronous page boundaries |
 | `36f0b037` | Make full-transcript pagination, full-detail loading, resize, length-truncation lifecycle, and elapsed-time assertions observe their committed asynchronous states |
+| `0bffb9db` | Require each brutal full-transcript navigation step to commit a changed viewport offset before sending the next input |
 
 ## CI policy for this merge
 
@@ -397,6 +399,8 @@ Run `33484200868` on `3966902feaa600d77ee05e5dcf35cc3222c1eac8` proved the bound
 
 The same run exposed three other premature observations. A compact full-detail assertion accepted the footer while `Preparing full detail…` was still visible; the shared helper now requires preparation to finish. The remote-compaction fixture required an irrelevant exact `0s` elapsed label while still retaining exact token counts; it now accepts the committed elapsed duration. The resize and provider-length-limit tests sampled after the trigger text or debounce delay but before the final footer or failed-tool lifecycle frame; each now waits for the exact stable state it asserts. Focused WSL/tmux runs pass for these boundaries. Different single-attempt macOS slow frames passed in the adjacent attempt or on the other platforms, so they did not justify a production timeout or synchronization branch. Because commit `36f0b037` supersedes this diagnostic run, a new exact-commit Full CI run remains required.
 
+Run `33487617463` on `9e50d1e03691ea366188bac816b1e9258d61128e` passed Windows native, both Linux native jobs, all eight Linux E2E shards, macOS arm64 native, and macOS x86_64 shard 2 before the transcript-brutal test failed twice on macOS arm64 shard 3. The test sent one key at a time, but it accepted any later projection frame as completion; asynchronous page-loading frames could satisfy that condition before the requested scroll committed. Both attempts therefore exhausted 1,024 sent keys while still around live marker 310–325. The repair records the previous viewport offset and uses the existing trace contract to require a different committed offset after every PageUp or PageDown. The complete focused stress then passed locally with 118 assertions in 71.8 seconds, compared with approximately 150 seconds for each failed CI attempt. The run was cancelled after this stable cause was proven and commit `0bffb9db` superseded it.
+
 The smaller `.github/workflows/ci.yml` workflow is not used as the merge decision. Benchmark and binary-size workflows are retained because startup latency and unexplained binary growth are useful signals; neither replaces Full CI.
 
 ## Local verification completed before push
@@ -420,7 +424,7 @@ The smaller `.github/workflows/ci.yml` workflow is not used as the merge decisio
 - Focused live-stream `/resume` refusal passed while waiting on the current stable `Generating` phase
 - Focused active-turn image steering passed while retaining its request-order, instruction-snapshot, image-byte, and stderr assertions
 - Focused greater-than-1-MiB cancelled-command artifact navigation passed with bounded PgDn batches and 60 retained assertions
-- Focused full-transcript brutal stress passed with 118 assertions after paging one event per observed render and explicitly proving both the newest tail and oldest entry are reachable
+- Focused full-transcript brutal stress passed with 118 assertions after paging one event per committed viewport-offset change and explicitly proving both the newest tail and oldest entry are reachable
 - Focused height-shrink footer and provider length-truncation lifecycle cases passed through the stable post-resize and failed-tool states
 - Focused MCP authentication and logout lifecycle passed after restoring menu-completion collection in the composition root
 - Focused remote native compaction and Codex Vision failure cases passed with request-level and current structured-result assertions
