@@ -23,9 +23,10 @@ The merge boundary is:
 | Final committed scroll-attempt repair | `64c2f6e6` |
 | Final verified navigation batching | `6a29c074` |
 | Final visible navigation observation | `352323d9` |
+| Final command-completion page refresh | `8565f4f0` |
 | Review branch | `merge/upstream-2026-09-01` |
 
-Compared with the pre-merge BYOK tree, the review result changes 248 files with 29,152 insertions and 17,262 deletions. The large count comes primarily from upstream MCP, transcript, rendering, and E2E work. It does not represent a new vendor product route or a large new model-facing tool surface.
+Compared with the pre-merge BYOK tree, the review result changes 248 files with 29,268 insertions and 17,312 deletions. The large count comes primarily from upstream MCP, transcript, rendering, and E2E work. It does not represent a new vendor product route or a large new model-facing tool surface.
 
 ## Reconciliation policy
 
@@ -75,6 +76,8 @@ The final merge audit found that upstream's menu worker and state machine had be
 Ctrl+O full transcript support now retains richer turn metadata, paginates large histories, and loads detailed pages away from the UI loop. This was kept because it improves observability without changing provider policy.
 
 The composition root now polls both the main and active child full-transcript page workers and requests a modal frame when a page completes. The merge had retained the worker but dropped this completion polling, leaving Ctrl+O and render-lab stuck at `Preparing full detail…`.
+
+Live command pages still refresh in bounded revision strides while output is open, but atomic command completion now always publishes one final content revision. Without that terminal revision, a last partial stride could leave an installed page permanently pinned to an incomplete live-output snapshot even after the command and compact transcript were complete. The final refresh is owned by the existing recorded-command consolidation path and uses the ordinary queued render request; it adds no callback-side transcript mutation or second page policy.
 
 Primary paths:
 
@@ -371,6 +374,7 @@ The session or connection-local projection hides `glob_files` and `grep_files` a
 | `64c2f6e6` | Distinguish committed, clamped, and page-loading transcript scroll attempts; retry ignored inputs without consuming navigation progress |
 | `6a29c074` | Amortize tmux invocation cost with four-key navigation batches while retaining the committed-scroll verification boundary |
 | `352323d9` | Require verified navigation to observe the newly displayed tmux pane instead of returning an older full-transcript frame after the trace commit |
+| `8565f4f0` | Publish the terminal command-output revision so a stride-throttled full-detail page cannot retain an incomplete live snapshot |
 
 ## CI policy for this merge
 
@@ -413,6 +417,8 @@ Run `33493575103` on `e3ab35bb25525b6f1a58b89404623e7367748127` passed the other
 
 Run `33498165085` on `f04f4ef81bf892ab91b8dcc9d96de198cbe05d15` showed that a committed render trace still precedes visibility in tmux on slower macOS hosts. macOS x86_64 shard 3 failed twice after reaching live marker 460–473: the navigation helper had observed a non-ignored scroll and committed projection frame, but immediately returned a pane captured before tmux displayed that frame. The test now snapshots the pane before each verified batch and returns only after the full-detail pane visibly changes. Page-loading rejection and legitimate page-tail clamps retain their separate state-machine handling, and the target markers remain mandatory. The complete focused stress passes locally in 39.7 seconds with 120 assertions. This run also had a single macOS arm64 native failure in the existing cancellation-at-deadline test, which schedules cancellation only 25 ms before a two-second timeout. That native job passed on the preceding exact runs and no production deadline or synchronization branch was added for the runner scheduling tie. Because commit `352323d9` supersedes the E2E result, a fresh exact-commit Full CI run is required rather than waiving or rerunning the old tree.
 
+Run `33500805760` on `96f5f03ec833ec4335dbba46016d671273a456d3` passed Windows native, both Linux native jobs, all eight Linux E2E shards, and macOS arm64 shard 2 before macOS x86_64 shard 3 failed the brutal transcript case twice. The stricter visible-pane boundary stopped at live markers 419 and 427 for 30 seconds instead of falsely counting stale frames as progress. That stable stop exposed a production terminal-refresh gap: live command pages are intentionally rebuilt only once per revision stride, but recorded-command consolidation could close the block with no pending paint request and without publishing a final revision. If fewer than one stride of output followed the last rebuild, the installed page's request still matched current state while its snapshot lacked the final output. Atomic consolidation now queues one final content revision after closing the block. Focused ReleaseSafe tests prove both stride throttling and terminal invalidation, and the complete real tmux stress passes with 120 assertions in 39.6 seconds using the rebuilt repository binary. Commit `8565f4f0` supersedes this run, so a new exact-commit Full CI run remains required.
+
 The smaller `.github/workflows/ci.yml` workflow is not used as the merge decision. Benchmark and binary-size workflows are retained because startup latency and unexplained binary growth are useful signals; neither replaces Full CI.
 
 ## Local verification completed before push
@@ -428,6 +434,7 @@ The smaller `.github/workflows/ci.yml` workflow is not used as the merge decisio
 - ReleaseSafe focused regressions for `collapse_tool_calls`, canonical multi-line trace append, current registered-tool live authority, provisional tool labels, account picker and approval rendering, resume usage, evidence-led prompts, and collapsed semantic code blocks
 - ReleaseSafe prompt-history regressions for slash-command recall suppression, plain-arrow ownership, draft restoration, and re-enabling slash completion after editing
 - ReleaseSafe focused regressions for one-step terminal capability suppression, default same-turn admission, queue-review exclusion, late FIFO fallback, and the bounded supervisor handoff deadline
+- ReleaseSafe focused regressions proving live full-transcript stride throttling and the mandatory terminal command-output revision
 - ReleaseSafe build plus focused Zig filters for slash-completion ownership and the typed gateway system prompt after merging upstream through `766e70f0`
 - Complete `tui-slash-menu.test.ts`: 38 passed, including the zero-candidate transition, candidate restoration, Escape ownership, command arguments, and active-stream behavior
 - Complete `tui-render-stress.test.ts`: 1 passed, exercising unmatched slash input together with repeated resize and local transcript writes
@@ -436,7 +443,7 @@ The smaller `.github/workflows/ci.yml` workflow is not used as the merge decisio
 - Focused live-stream `/resume` refusal passed while waiting on the current stable `Generating` phase
 - Focused active-turn image steering passed while retaining its request-order, instruction-snapshot, image-byte, and stderr assertions
 - Focused greater-than-1-MiB cancelled-command artifact navigation passed with bounded PgDn batches and 60 retained assertions
-- Focused full-transcript brutal stress passed with 120 assertions after four-key verified batches distinguished committed or clamped scroll frames from page-loading rejection, waited for the newly visible tmux pane, and explicitly proved both the newest tail and oldest entry are reachable
+- Focused full-transcript brutal stress passed with 120 assertions after the command-completion refresh, four-key verified batches distinguished committed or clamped scroll frames from page-loading rejection, the test waited for the newly visible tmux pane, and both the newest tail and oldest entry remained reachable
 - Focused height-shrink footer and provider length-truncation lifecycle cases passed through the stable post-resize and failed-tool states
 - Focused MCP authentication and logout lifecycle passed after restoring menu-completion collection in the composition root
 - Focused remote native compaction and Codex Vision failure cases passed with request-level and current structured-result assertions
