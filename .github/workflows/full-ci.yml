@@ -70,6 +70,7 @@ jobs:
             --test-filter "Grok team refresh preserves the principal binding" `
             --test-filter "Grok team principal round trips for refresh" `
             --test-filter "recovery markers are idempotent and clear durably" `
+            --test-filter "cloneEnvironMap converts the native Windows environment to WTF-8" `
             --test-filter "native hosts still load project instruction files"
 
       - name: Smoke test CLI and ACP

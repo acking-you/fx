@@ -486,6 +486,13 @@ pub fn cloneEnvironMap(
         return std.process.Environ.createMap(.{ .block = block }, alloc);
     }
     if (global_raw_environ) |raw| {
+        if (comptime builtin.os.tag == .windows) {
+            // The CRT exposes `envp` through the active narrow code page, not
+            // WTF-8. Reinterpreting those bytes corrupts non-ASCII values and
+            // later makes CreateProcess reject the child environment. Read the
+            // native wide environment block instead.
+            return std.process.Environ.createMap(.{ .block = .global }, alloc);
+        }
         var len: usize = 0;
         while (raw[len] != null) : (len += 1) {}
         const entries: []const [*:0]const u8 = @ptrCast(raw[0..len]);
@@ -1253,6 +1260,8 @@ test "cloneEnvironMap copies installed block environment state" {
 }
 
 test "cloneEnvironMap copies installed raw environment state" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
     const previous_map = global_environ;
     const previous_block = global_environ_block;
     const previous_raw = global_raw_environ;
@@ -1272,6 +1281,31 @@ test "cloneEnvironMap copies installed raw environment state" {
     defer cloned.deinit();
     try std.testing.expectEqualStrings("/raw/bin", cloned.get("PATH").?);
     try std.testing.expectEqualStrings("/raw/home", cloned.get("HOME").?);
+}
+
+test "cloneEnvironMap converts the native Windows environment to WTF-8" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const previous_map = global_environ;
+    const previous_block = global_environ_block;
+    const previous_raw = global_raw_environ;
+    defer {
+        global_environ = previous_map;
+        global_environ_block = previous_block;
+        global_raw_environ = previous_raw;
+    }
+
+    const raw_entries = [_:null]?[*:0]const u8{
+        "FX_INVALID_NARROW_VALUE=\xff",
+    };
+    setRawEnviron(@ptrCast(&raw_entries));
+
+    var cloned = try cloneEnvironMap(std.testing.allocator);
+    defer cloned.deinit();
+    try cloned.put("FX_MCP_OVERRIDE", "present");
+    const block = try cloned.createWindowsBlock(std.testing.allocator, .{});
+    defer block.deinit(std.testing.allocator);
+    try std.testing.expect(!block.isEmpty());
 }
 
 test "readFileToEnd: file under cap returns full content" {

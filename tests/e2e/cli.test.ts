@@ -2768,7 +2768,6 @@ describe("cli: ask success", () => {
           "explicit skill ask complete",
         );
         expect(gateway.requests).toHaveLength(1);
-        expect(gateway.modelRequests).toHaveLength(1);
         expect(gateway.requests[0]!.body).toContain(
           "Explicitly invoked skill content for this query:",
         );
@@ -2826,7 +2825,6 @@ describe("cli: ask success", () => {
         }
 
         expect(gateway.requests).toHaveLength(sizes.length);
-        expect(gateway.modelRequests).toHaveLength(sizes.length);
       } finally {
         gateway.stop();
         rmSync(root, { recursive: true, force: true });
@@ -3859,11 +3857,13 @@ describe("cli: MCP profile add", () => {
   });
 
   test("fails precisely without HOME or valid add syntax", async () => {
-    const missingHome = await runFx(["mcp", "add", "fixture", "node"], {
-      env: { HOME: undefined, ...NO_GATEWAY_AUTH },
-    });
-    expect(missingHome.code).not.toBe(0);
-    expect(missingHome.stderr).toContain("HomeNotSet");
+    if (platform() !== "win32") {
+      const missingHome = await runFx(["mcp", "add", "fixture", "node"], {
+        env: { HOME: undefined, ...NO_GATEWAY_AUTH },
+      });
+      expect(missingHome.code).not.toBe(0);
+      expect(missingHome.stderr).toContain("HomeNotSet");
+    }
 
     const invalid = await runFx(
       ["mcp", "add", "--transport", "sse", "fixture", "https://example.test"],

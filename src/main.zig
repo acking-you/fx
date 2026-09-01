@@ -621,6 +621,7 @@ const App = struct {
     metrics: Metrics = .{},
     fn loadNoMcpRuntime(
         _: Allocator,
+        _: []const u8,
         _: @import("core/mcp/elicitation.zig").Capabilities,
     ) !?*mcp_runtime_mod.McpRuntime {
         return null;
@@ -3260,10 +3261,6 @@ fn mainC(c_argc: c_int, c_argv: [*][*:0]c_char, c_envp: [*:null]?[*:0]c_char) !v
         try command_runner.runForegroundSessionBootstrap(cli_args);
         return;
     }
-    _ = cli_surface.recordRequested(cli_args) catch {
-        try writeStderrFast(cli_surface.record_modifier_usage);
-        exitFast(1);
-    };
     if (cli_args.len > 0 and isTopLevelHelp(cli_args)) {
         try writeTopLevelHelpFast(raw_env);
         exitFast(0);
@@ -3510,7 +3507,15 @@ fn needsFullEntryConfig(args: []const [:0]const u8) bool {
 
 fn needsEarlyThreadedIo(args: []const [:0]const u8) bool {
     if (needsFullEntryConfig(args)) return true;
-    const command = cli_surface.commandAfterGlobalLaunchArgs(args) orelse return false;
+    const effective_args = cli_surface.argsAfterGlobalLaunchArgs(args);
+    if (effective_args.len == 0) return false;
+    const command = effective_args[0];
+    if (std.mem.eql(u8, command, "mcp")) {
+        if (effective_args.len < 2) return false;
+        return std.mem.eql(u8, effective_args[1], "auth") or
+            std.mem.eql(u8, effective_args[1], "list") or
+            std.mem.eql(u8, effective_args[1], "logout");
+    }
     return std.mem.eql(u8, command, "login") or
         std.mem.eql(u8, command, "setup") or
         std.mem.eql(u8, command, "logout") or
@@ -3519,7 +3524,6 @@ fn needsEarlyThreadedIo(args: []const [:0]const u8) bool {
         std.mem.eql(u8, command, "status") or
         std.mem.eql(u8, command, "doctor") or
         std.mem.eql(u8, command, "models") or
-        std.mem.eql(u8, command, "credits") or
         (std.mem.eql(u8, command, "usage") and hasExactArg(args, "--codex"));
 }
 
@@ -3538,7 +3542,7 @@ test "auth commands use early threaded io without full entry config" {
 }
 
 test "credential-reading commands use early threaded io without full entry config" {
-    for ([_][:0]const u8{ "status", "doctor", "models", "credits" }) |command| {
+    for ([_][:0]const u8{ "status", "doctor", "models" }) |command| {
         const args = &.{command};
         try std.testing.expect(!needsFullEntryConfig(args));
         try std.testing.expect(needsEarlyThreadedIo(args));
@@ -3551,6 +3555,19 @@ test "credential-reading commands use early threaded io without full entry confi
         @as([:0]const u8, "usage"),
         @as([:0]const u8, "--period"),
         @as([:0]const u8, "7d"),
+    }));
+}
+
+test "MCP process commands use early threaded io" {
+    for ([_][:0]const u8{ "auth", "list", "logout" }) |operation| {
+        try std.testing.expect(needsEarlyThreadedIo(&.{
+            @as([:0]const u8, "mcp"),
+            operation,
+        }));
+    }
+    try std.testing.expect(!needsEarlyThreadedIo(&.{
+        @as([:0]const u8, "mcp"),
+        @as([:0]const u8, "path"),
     }));
 }
 
@@ -3654,7 +3671,10 @@ fn fullEntryConfig() app_entry_runtime.Config {
         .mode_registry = builtin_modes.registry,
         .tool_set = builtin_tools.advertisement_set,
         .inspect_mcp_profile_config = builtin_mcp.inspectProfileConfig,
+        .inspect_mcp_local_config = builtin_mcp.inspectLocalConfig,
         .load_mcp_runtime = builtin_mcp.loadRuntime,
+        .add_mcp_profile_server = builtin_mcp.addProfileServer,
+        .remove_mcp_profile_server = builtin_mcp.removeProfileServer,
         .acp_runner = .{ .run_fn = runAcpServer },
     };
 }
@@ -3688,7 +3708,10 @@ fn localEntryConfig() app_entry_runtime.Config {
         .mode_registry = builtin_modes.registry,
         .tool_set = builtin_tools.advertisement_set,
         .inspect_mcp_profile_config = builtin_mcp.inspectProfileConfig,
+        .inspect_mcp_local_config = builtin_mcp.inspectLocalConfig,
         .load_mcp_runtime = builtin_mcp.loadRuntime,
+        .add_mcp_profile_server = builtin_mcp.addProfileServer,
+        .remove_mcp_profile_server = builtin_mcp.removeProfileServer,
         .acp_runner = .{ .run_fn = runAcpServer },
     };
 }
@@ -3722,7 +3745,10 @@ fn emptyEntryConfig() app_entry_runtime.Config {
         .mode_registry = builtin_modes.registry,
         .tool_set = builtin_tools.advertisement_set,
         .inspect_mcp_profile_config = builtin_mcp.inspectProfileConfig,
+        .inspect_mcp_local_config = builtin_mcp.inspectLocalConfig,
         .load_mcp_runtime = builtin_mcp.loadRuntime,
+        .add_mcp_profile_server = builtin_mcp.addProfileServer,
+        .remove_mcp_profile_server = builtin_mcp.removeProfileServer,
         .acp_runner = .{ .run_fn = runAcpServer },
     };
 }
