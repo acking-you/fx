@@ -26,9 +26,10 @@ The merge boundary is:
 | Final command-completion page refresh | `8565f4f0` |
 | Final stale-trace navigation retry | `355bd3b6` |
 | Final child full-detail restore observation | `821f3d79` |
+| Final reopened-tail observation | `d2eac99b` |
 | Review branch | `merge/upstream-2026-09-01` |
 
-Compared with the pre-merge BYOK tree, the review result changes 248 files with 29,282 insertions and 17,309 deletions. The large count comes primarily from upstream MCP, transcript, rendering, and E2E work. It does not represent a new vendor product route or a large new model-facing tool surface.
+Compared with the pre-merge BYOK tree, the review result changes 248 files with 29,289 insertions and 17,309 deletions. The large count comes primarily from upstream MCP, transcript, rendering, and E2E work. It does not represent a new vendor product route or a large new model-facing tool surface.
 
 ## Reconciliation policy
 
@@ -379,6 +380,7 @@ The session or connection-local projection hides `glob_files` and `grep_files` a
 | `8565f4f0` | Publish the terminal command-output revision so a stride-throttled full-detail page cannot retain an incomplete live snapshot |
 | `355bd3b6` | Retry a navigation batch when a delayed trace event claims completion but tmux shows no new full-detail pane within the bounded observation window |
 | `821f3d79` | Wait for restored child transcript content as well as its full-detail footer before comparing the preserved reading range |
+| `d2eac99b` | Observe the asynchronously installed tail after reopening full detail instead of sending PageDown into the prior installed page |
 
 ## CI policy for this merge
 
@@ -427,6 +429,8 @@ Run `33503579220` on `7f809853c082364941827253aaefe56a6ae40016` passed Windows n
 
 Run `33505890390` on `4dd34c94424e619598c61e6f71d5de8a9a167e22` had 11 successful underlying jobs before a stable Linux x86_64 shard 3 failure superseded it. The persistent-child reading-position case passed through ordinary and Ctrl+X reopen paths, then reopened the saved full-detail view and accepted its footer before the asynchronous child page had installed; both file attempts therefore compared an empty marker range against the preserved range 46–53. The test now requires both the full-detail footer and a `CHILD_POSITION_` content marker before retaining the exact range comparison. Its focused real tmux case passes with all six assertions. The run also had two unrelated isolated native process failures: Windows Unified Exec cleanup leaked six allocations while terminating an intentionally live group, and macOS arm64 missed the environment-sanitized double-fork timeout assertion after 8,330 tests passed. Both owners passed on adjacent exact runs, neither intersects the transcript changes, and no production synchronization was added for them. Commit `821f3d79` supersedes this run, so a new exact-commit Full CI run remains required.
 
+Run `33507867783` on `251e4e0ad46ccf8f72e20a8c41222401b39333dc` passed 14 underlying jobs, including Windows native, both Linux native jobs, all eight Linux E2E shards, macOS arm64 shards 2 and 4, and macOS x86_64 shard 4 before macOS arm64 shard 3 failed the brutal transcript case twice. The bounded observer exhausted all 256 NPage retries in roughly 188–191 seconds because it was driving the previously installed page while the product's close-and-reopen contract was asynchronously replacing that page with the tail. Reopening full detail resets navigation to the tail, so the correct completion boundary is the new non-loading tail pane containing `LIVE_DONE`, not any number of PageDown events against the prior page. The test now waits directly for that tail contract and retains the complete bounded PageUp traversal proving the oldest entry remains reachable. The complete real tmux stress passes locally with 120 assertions in 39.6 seconds. Commit `d2eac99b` supersedes this run, so a new exact-commit Full CI run remains required.
+
 The smaller `.github/workflows/ci.yml` workflow is not used as the merge decision. Benchmark and binary-size workflows are retained because startup latency and unexplained binary growth are useful signals; neither replaces Full CI.
 
 ## Local verification completed before push
@@ -451,7 +455,7 @@ The smaller `.github/workflows/ci.yml` workflow is not used as the merge decisio
 - Focused live-stream `/resume` refusal passed while waiting on the current stable `Generating` phase
 - Focused active-turn image steering passed while retaining its request-order, instruction-snapshot, image-byte, and stderr assertions
 - Focused greater-than-1-MiB cancelled-command artifact navigation passed with bounded PgDn batches and 60 retained assertions
-- Focused full-transcript brutal stress passed with 120 assertions after the command-completion refresh; four-key verified batches distinguished committed or clamped scroll frames from page-loading rejection, retried delayed trace observations that produced no new pane within 500 ms, and still proved both the newest tail and oldest entry are reachable
+- Focused full-transcript brutal stress passed with 120 assertions after the command-completion refresh; reopening waited for the asynchronously installed non-loading tail containing `LIVE_DONE`, and four-key verified PageUp batches still distinguished committed or clamped frames from page-loading rejection while proving the oldest entry is reachable
 - Focused persistent-child reading-position restoration passed with six assertions after waiting for the asynchronously restored full-detail content before comparing its exact visible range
 - Focused height-shrink footer and provider length-truncation lifecycle cases passed through the stable post-resize and failed-tool states
 - Focused MCP authentication and logout lifecycle passed after restoring menu-completion collection in the composition root
