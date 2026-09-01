@@ -613,8 +613,6 @@ fn buildFooterSurfaceProjection(
         )
     else if (slash_menu_layout) |layout|
         layout.row_count
-    else if (show_slash_query and geometry.slash_completion_count == 0)
-        picker_presentation.pickerRowCount(0)
     else if (show_picker)
         list_picker_rows
     else
@@ -1765,7 +1763,7 @@ test "surface footer measurement reserves six inline skill choices" {
     try std.testing.expectEqual(@as(u16, 8), measurement.picker_rows);
 }
 
-test "surface footer reserves one non-selectable row for zero slash results" {
+test "surface footer omits the picker for zero slash results" {
     const alloc = std.testing.allocator;
     var input = InputRuntime{};
     defer input.deinit(alloc);
@@ -1780,10 +1778,10 @@ test "surface footer reserves one non-selectable row for zero slash results" {
     var measurement = try measureSurfaceFooter(alloc, &shell, approval.projection(), surfaceTestContext(&input));
     defer measurement.deinit(alloc);
 
-    try std.testing.expect(measurement.show_picker);
-    try std.testing.expectEqual(PickerKind.slash, measurement.picker_kind);
+    try std.testing.expect(!measurement.show_picker);
     try std.testing.expectEqual(@as(usize, 0), measurement.slash_completion_count);
-    try std.testing.expectEqual(@as(u16, 1), measurement.picker_rows);
+    try std.testing.expectEqual(@as(u16, 0), measurement.picker_rows);
+    try std.testing.expectEqual(@as(u16, 0), measurement.footer_extra);
     try std.testing.expect(measurement.slash_menu_layout == null);
 }
 

@@ -120,8 +120,7 @@ pub fn CompletionRuntime(comptime App: type) type {
             return slashCompletionQueryActive(app);
         }
 
-        /// Returns selectable completions projected by the footer. The active
-        /// query can remain visible at zero so dismissal still owns Escape.
+        /// Returns selectable completions projected by the footer.
         pub fn visibleSlashCompletionCount(app: *App) usize {
             if (!visibleSlashCompletionQueryActive(app)) return 0;
             return slashCompletionCandidateCount(app);
@@ -146,7 +145,7 @@ pub fn CompletionRuntime(comptime App: type) type {
                         return if (hasFileQuery(app)) .file else null;
                     }
                     if (visibleInlineSlashCompletion(app) != null) return .slash;
-                    if (visibleSlashCompletionQueryActive(app)) return .slash;
+                    if (visibleSlashCompletionCount(app) > 0) return .slash;
                     return null;
                 }
             }
@@ -158,7 +157,7 @@ pub fn CompletionRuntime(comptime App: type) type {
                     .slash => .slash,
                 };
             }
-            if (visibleSlashCompletionQueryActive(app)) return .slash;
+            if (visibleSlashCompletionCount(app) > 0) return .slash;
             return null;
         }
 
@@ -1606,7 +1605,7 @@ test "inline slash completion stays inactive when its suffix cannot render" {
     );
 }
 
-test "root slash query remains dismissible with zero candidates" {
+test "root slash query is dismissible only while candidates are visible" {
     const alloc = std.testing.allocator;
     const rt = CompletionRuntime(InlineCompletionTestApp);
     var app = InlineCompletionTestApp{ .alloc = alloc };
@@ -1614,9 +1613,13 @@ test "root slash query remains dismissible with zero candidates" {
     try app.input_runtime.textReplacementState().replace(alloc, "/hezzzzz");
 
     try std.testing.expectEqual(@as(usize, 0), rt.visibleSlashCompletionCount(&app));
+    try std.testing.expect(!rt.dismissVisibleInlinePicker(&app));
+    try std.testing.expect(!app.input_runtime.picker.isInlinePickerDismissed(.slash));
+
+    try app.input_runtime.textReplacementState().replace(alloc, "/he");
+    try std.testing.expect(rt.visibleSlashCompletionCount(&app) > 0);
     try std.testing.expect(rt.dismissVisibleInlinePicker(&app));
     try std.testing.expect(app.input_runtime.picker.isInlinePickerDismissed(.slash));
-    try std.testing.expect(!rt.dismissVisibleInlinePicker(&app));
 }
 
 test "root slash completion follows multiline and command argument ownership" {

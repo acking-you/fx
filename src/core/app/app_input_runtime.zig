@@ -4632,6 +4632,20 @@ test "app_input_runtime Escape dismisses visible slash completions without armin
     try std.testing.expect(app.shell.render_requests.hasReason(.footer));
 }
 
+test "app_input_runtime Escape leaves unmatched slash input with the composer" {
+    const alloc = std.testing.allocator;
+    var app = try RoutingFakeApp.init(alloc);
+    defer app.deinit();
+    try app.input_runtime.textReplacementState().replace(alloc, "/hezzzzz");
+
+    try Runtime(RoutingFakeApp).resolveEscape(&app, false, 1);
+
+    try std.testing.expectEqualStrings("/hezzzzz", app.input_runtime.edit_state.input.items);
+    try std.testing.expect(!app.input_runtime.picker.isInlinePickerDismissed(.slash));
+    try std.testing.expectEqual(@as(?i64, 1), app.input_runtime.gestures.escapeClearArmedAt());
+    try std.testing.expect(app.shell.render_requests.hasReason(.footer));
+}
+
 test "app_input_runtime Escape dismisses slash matches with wrapped input" {
     const alloc = std.testing.allocator;
 

@@ -699,7 +699,7 @@ pub fn composePickerStatusRow(
             "unable to index files"
         else
             "no matching files",
-        .slash => "no matching slash commands",
+        .slash => unreachable,
         .skills => "no matching skills",
         .help => "no matching commands",
         .settings => "no matching settings",

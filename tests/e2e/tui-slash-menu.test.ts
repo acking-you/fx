@@ -1420,16 +1420,33 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
       await session.sendLiteralText("/he");
       await session.waitForText("/help", 5_000);
       await session.sendLiteralText("zzzzz");
-      let pane = await session.waitForText("no matching slash commands", 5_000);
-      expect(composerContains(pane, "/hezzzzz")).toBe(true);
-      expect(pane).not.toContain("Enter Use");
-      await session.sendKeys("Escape");
       await session.waitForPane(
-        (current) =>
-          composerContains(current, "/hezzzzz") &&
-          !current.includes("no matching slash commands"),
+        (current) => composerContains(current, "/hezzzzz"),
         5_000,
       );
+      await Bun.sleep(100);
+      let pane = await session.capturePane();
+      expect(composerContains(pane, "/hezzzzz")).toBe(true);
+      expect(pane).not.toContain("Enter Use");
+      expect(pane).not.toContain("no matching slash commands");
+
+      for (let index = 0; index < 5; index++) await session.sendKeys("BSpace");
+      await session.waitForPane(
+        (current) => composerContains(current, "/he") && current.includes("Enter Use"),
+        5_000,
+      );
+
+      await session.sendKeys("C-u");
+      const absolutePath = "/opt/project/src/main.zig";
+      await session.sendLiteralText(absolutePath);
+      await session.waitForPane(
+        (current) => composerContains(current, absolutePath),
+        5_000,
+      );
+      await Bun.sleep(100);
+      pane = await session.capturePane();
+      expect(pane).not.toContain("no matching slash commands");
+      expect(pane).not.toContain("Enter Use");
 
       await session.sendKeys("C-u");
       await session.sendLiteralText("/name");
@@ -1474,8 +1491,14 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
       for (const retired of ["/appearance", "/input", "/maxxing"]) {
         await session.sendKeys("C-u");
         await session.sendLiteralText(retired);
-        pane = await session.waitForText("no matching slash commands", 5_000);
+        await session.waitForPane(
+          (current) => composerContains(current, retired),
+          5_000,
+        );
+        await Bun.sleep(100);
+        pane = await session.capturePane();
         expect(composerContains(pane, retired)).toBe(true);
+        expect(pane).not.toContain("no matching slash commands");
         expect(pane).not.toContain("minimal");
         expect(pane).not.toContain("legacy");
         expect(pane).not.toContain("resume-helper");

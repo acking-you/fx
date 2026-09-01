@@ -11,12 +11,13 @@ The merge boundary is:
 | BYOK first parent before the initial content merge | `fe2ec9e05250ccc789d6a3d939fcd0b72cd6157c` |
 | Initial upstream main merged | `1685a855868820a1b9f317dc589190c32b011684` |
 | Initial content merge | `d7d3f8f2d471cb1c6a6c8cb306b19d312ba64ab0` |
-| Latest upstream main merged | `24ff3083cb3e19cdc818403ecbc40ff14ace04c9` |
-| Latest update merge | `f3ad5781` |
+| Prior upstream main merged | `24ff3083cb3e19cdc818403ecbc40ff14ace04c9` |
+| Prior update merge | `f3ad5781` |
+| Latest upstream main merged | `766e70f0106393b551e2363526cf6a41e60587c3` |
 | Final merge-regression repair | `8a0e7c90` |
 | Review branch | `merge/upstream-2026-09-01` |
 
-Compared with the pre-merge BYOK tree, the review result changes 246 files with 28,823 insertions and 17,168 deletions. The large count comes primarily from upstream MCP, transcript, rendering, and E2E work. It does not represent a new vendor product route or a large new model-facing tool surface.
+Compared with the pre-merge BYOK tree, the review result changes 247 files with 28,908 insertions and 17,202 deletions. The large count comes primarily from upstream MCP, transcript, rendering, and E2E work. It does not represent a new vendor product route or a large new model-facing tool surface.
 
 ## Reconciliation policy
 
@@ -107,6 +108,20 @@ Primary paths:
 - `src/core/input/picker_state.zig`
 - `src/core/app/input_completion_runtime.zig`
 - `tests/e2e/prompt-history.test.ts`
+
+### Empty slash completion menus
+
+An unmatched slash prefix now remains ordinary editable composer input without reserving a non-selectable `no matching slash commands` row. Escape therefore retains its normal composer behavior when there are zero candidates, while a visible candidate menu still owns Escape. Deleting back to a matching prefix restores the menu, and command arguments retain their existing completion ownership.
+
+The change was kept because it removes a presentation-only empty state without adding product state or a second input policy. The upstream absolute-path scenario was also made host-independent so the same fixture runs on Linux and macOS. Focused Zig coverage and the complete slash-menu and render-stress TUI files exercise the transition.
+
+Primary paths:
+
+- `src/core/app/input_completion_runtime.zig`
+- `src/ui/footer/input_presentation.zig`
+- `src/ui/footer/surface_frame.zig`
+- `tests/e2e/tui-slash-menu.test.ts`
+- `tests/e2e/tui-render-stress.test.ts`
 
 ### Unified provider activity phases
 
@@ -256,6 +271,8 @@ The reconciliation commits also removed code inside surviving files:
 - E2E scenarios whose only owner was a removed memory or filesystem tool;
 - empty negative assertions that claimed bash-first hid tools already absent globally.
 
+The unreferenced `src/builtins/system_prompt.md` remains deleted. Its runtime owner is the typed prompt assembled in `src/builtins/context.zig`; the repository has no file reader or build dependency for the Markdown copy. The latest upstream removal of two redundant verification instructions was applied to that typed owner instead of resurrecting the duplicate file.
+
 The final reconciliation also removed the inert `--record` launch parser, its unused intent field, its early-startup special case, and tests for behavior that no longer had a runtime owner. `--record` is now ordinary unknown input. A stale `credits` early-I/O predicate was removed with it because the fork has no top-level credits command. Two E2E assertions that required a model catalog request even when `FX_MODEL` already selects a direct Responses route were also deleted; they tested an unnecessary network side effect rather than the ask contract.
 
 Upstream's partial Ctrl+Enter steering split was also deleted as a conflicting duplicate. Removed code includes the `steer_submit` input action, Kitty Ctrl+Enter decoder branch, secondary `Intent` dispatch, `steerPrompt` composition adapter, `enter queue` stream hint, and their dedicated fake-app fields and tests. No `/steer` command or second prompt queue remains. The model-facing and user-facing contract is the fork's single default steering path described above.
@@ -363,6 +380,9 @@ The smaller `.github/workflows/ci.yml` workflow is not used as the merge decisio
 - ReleaseSafe focused regressions for `collapse_tool_calls`, canonical multi-line trace append, current registered-tool live authority, provisional tool labels, account picker and approval rendering, resume usage, evidence-led prompts, and collapsed semantic code blocks
 - ReleaseSafe prompt-history regressions for slash-command recall suppression, plain-arrow ownership, draft restoration, and re-enabling slash completion after editing
 - ReleaseSafe focused regressions for one-step terminal capability suppression, default same-turn admission, queue-review exclusion, late FIFO fallback, and the bounded supervisor handoff deadline
+- ReleaseSafe build plus focused Zig filters for slash-completion ownership and the typed gateway system prompt after merging upstream through `766e70f0`
+- Complete `tui-slash-menu.test.ts`: 38 passed, including the zero-candidate transition, candidate restoration, Escape ownership, command arguments, and active-stream behavior
+- Complete `tui-render-stress.test.ts`: 1 passed, exercising unmatched slash input together with repeated resize and local transcript writes
 - The exact Linux E2E shard 2 selected by `tests/e2e/ci-shards.ts`: all 12 files passed with CI's isolated tmux and one-file-at-a-time execution, including 115 terminal-host tests, 55 gateway lifecycle tests, render-lab, composer editing, file paths, web fetch, prompt history, and native clear recovery
 - The four previously failing queued steering TUI scenarios passed together: post-cancel recovery, image-bearing steering, ordinary next-step steering, and paused FIFO queue review
 - The complete ReleaseSafe Zig suite passed on a WSL ext4 copy with CI-equivalent default `.zig-cache` and Zig on PATH. The initial `/mnt/d` run was discarded because DrvFS cannot represent the private mode and rename contracts tested by the suite

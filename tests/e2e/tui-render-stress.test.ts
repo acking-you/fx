@@ -121,14 +121,15 @@ describe.skipIf(SKIP)("tui: render stress", () => {
         await session.waitForText("permission_mode", 5_000);
         const unknownCommand = `/unknown-render-stress-${run} local transcript notice`;
         await session.sendLiteralText(unknownCommand);
-        await session.waitForText("no matching slash commands", 5_000);
-        await session.sendKeys("Escape");
         await session.waitForPane(
-          (pane) =>
-            composerContains(pane, unknownCommand) &&
-            !pane.includes("no matching slash commands"),
+          (pane) => composerContains(pane, unknownCommand),
           5_000,
         );
+        await Bun.sleep(100);
+        const unmatchedPane = await session.capturePane();
+        if (unmatchedPane.includes("no matching slash commands")) {
+          failures.push(`run ${run}: unmatched slash input kept an empty picker row`);
+        }
         await session.sendKeys("C-u");
         await session.waitForPane(hasEmptyComposer, 5_000);
 

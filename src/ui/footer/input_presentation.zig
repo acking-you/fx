@@ -350,12 +350,13 @@ pub fn measureRawInputGeometryPrepared(
     }, raw_anchor);
     const capped = cappedInputRows(summary.total_rows, content_bottom, input_visible);
     const window = visual_layout.visibleWindow(summary.cursor.row_index, summary.total_rows, capped.row_limit);
-    const show_slash_query = slashCompletionPickerActive(ctx, modal_active, show_model_query, show_file_query);
-    const slash_completion_count = if (show_slash_query)
+    const slash_query_active = slashCompletionPickerActive(ctx, modal_active, show_model_query, show_file_query);
+    const slash_completion_count = if (slash_query_active)
         prepared_slash_completion_count orelse
             slashCompletionPickerCount(ctx, modal_active, show_model_query, show_file_query)
     else
         0;
+    const show_slash_query = slash_query_active and slash_completion_count > 0;
     const picker_start_col = if (show_model_query or show_file_query or show_slash_query)
         visual_layout.projectedAnchorColumn(summary, terminal_cols)
     else
@@ -1469,15 +1470,31 @@ test "footer slash completion remains active across capped input rows" {
     try std.testing.expect(tiny_geometry.slash_completion_count > 0);
 }
 
-test "footer slash completion separates query activity from candidate count" {
+test "footer slash completion follows candidate visibility transitions" {
     const alloc = std.testing.allocator;
     var input = InputRuntime{};
     defer input.deinit(alloc);
 
-    try input.textReplacementState().replace(alloc, "/hezzzzz");
+    try input.textReplacementState().replace(alloc, "/mo");
+    const matching = measureRawInputGeometry(testRenderContext(&input), 80, 20, true, false, false, false);
+    try std.testing.expect(matching.show_slash_query);
+    try std.testing.expect(matching.slash_completion_count > 0);
+
+    try input.textReplacementState().replace(alloc, "/mozzzzz");
     const no_match = measureRawInputGeometry(testRenderContext(&input), 80, 20, true, false, false, false);
-    try std.testing.expect(no_match.show_slash_query);
+    try std.testing.expect(!no_match.show_slash_query);
     try std.testing.expectEqual(@as(usize, 0), no_match.slash_completion_count);
+
+    try input.textReplacementState().replace(alloc, "/mo");
+    const restored = measureRawInputGeometry(testRenderContext(&input), 80, 20, true, false, false, false);
+    try std.testing.expect(restored.show_slash_query);
+    try std.testing.expect(restored.slash_completion_count > 0);
+}
+
+test "footer slash completion preserves command argument ownership" {
+    const alloc = std.testing.allocator;
+    var input = InputRuntime{};
+    defer input.deinit(alloc);
 
     try input.textReplacementState().replace(alloc, "/resume ");
     const no_args = measureRawInputGeometry(testRenderContext(&input), 80, 20, true, false, false, false);

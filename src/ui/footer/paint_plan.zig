@@ -1009,9 +1009,6 @@ pub fn composeFooterFrame(
                         row += 1;
                     }
                 }
-            } else {
-                var status_row = try picker_presentation.composePickerStatusRow(alloc, .slash, ctx.model_picker_stage, false, false, input.picker_start_col, shell.layout.cols);
-                try pushFooterBandRow(alloc, &frame, plan, rows.picker_start, &status_row);
             }
         } else if (input.picker_kind == .file and input.file_picker_items.len > 0) {
             const selected = input.picker_selection_index % input.file_picker_items.len;
