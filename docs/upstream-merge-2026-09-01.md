@@ -13,9 +13,10 @@ The merge boundary is:
 | Initial content merge | `d7d3f8f2d471cb1c6a6c8cb306b19d312ba64ab0` |
 | Latest upstream main merged | `24ff3083cb3e19cdc818403ecbc40ff14ace04c9` |
 | Latest update merge | `f3ad5781` |
+| Final merge-regression repair | `8a0e7c90` |
 | Review branch | `merge/upstream-2026-09-01` |
 
-Compared with the pre-merge BYOK tree, the review result changes 249 files with 28,719 insertions and 17,209 deletions. The large count comes primarily from upstream MCP, transcript, rendering, and E2E work. It does not represent a new vendor product route or a large new model-facing tool surface.
+Compared with the pre-merge BYOK tree, the review result changes 246 files with 28,823 insertions and 17,168 deletions. The large count comes primarily from upstream MCP, transcript, rendering, and E2E work. It does not represent a new vendor product route or a large new model-facing tool surface.
 
 ## Reconciliation policy
 
@@ -33,6 +34,8 @@ The merge used these rules:
 ### Unified capability retrieval
 
 Upstream's capability-search work was retained as one bounded `capability_search` entrypoint. Skill and MCP discovery share that owner. The separate model-facing `skill_search` and `mcp_search_tools` compatibility tools were removed.
+
+A terminal `no_match` result now removes `capability_search` from only the immediately following model step. This prevents an empty capability search from broadening or repeating while allowing later tool groups to regain the unified discovery capability. Projection remains centralized in `tool_projection.zig`; the orchestrator does not own a second policy.
 
 Primary paths:
 
@@ -60,6 +63,8 @@ This does not add a second model-facing MCP search tool. Dynamic selection remai
 
 Ctrl+O full transcript support now retains richer turn metadata, paginates large histories, and loads detailed pages away from the UI loop. This was kept because it improves observability without changing provider policy.
 
+The composition root now polls both the main and active child full-transcript page workers and requests a modal frame when a page completes. The merge had retained the worker but dropped this completion polling, leaving Ctrl+O and render-lab stuck at `Preparing full detail…`.
+
 Primary paths:
 
 - `src/core/output/full_transcript_metadata.zig`
@@ -80,6 +85,10 @@ Primary paths:
 ### Same-turn steering
 
 Interactive input during an active turn is retained as same-turn steering. The next model-step boundary consumes it; input losing the completion race becomes an ordinary next-turn prompt without duplication. Queue review and between-turn compaction retain their separate contracts.
+
+The merge briefly carried part of upstream's newer explicit submission split: ordinary Enter queued a next turn while Ctrl+Enter used a separate steering intent. That conflicts with the fork contract and duplicated prompt admission policy. The complete product slice was removed: the `steer_submit` action, Ctrl+Enter escape decoding, the second submit intent, the composition-root `steerPrompt` adapter, the streaming `enter queue` hint, and their test-only state. One ordinary submission path again admits same-turn steering by default, including prompts with images or skill bindings. A manual queue review blocks steering consumption, and a late input retains FIFO next-turn fallback.
+
+The queued-prompt preview dropped during conflict resolution was restored. The footer again shows the terminal-safe text of the first pending steering prompt while the active response streams, but yields to explicit queue-review cards while paused so the same prompt is never painted twice.
 
 Primary paths:
 
@@ -133,6 +142,15 @@ The final CI reconciliation also fixed two merge regressions and one Windows pro
 - the WASM no-MCP loader now implements the current workspace-aware loader contract;
 - the top-level MCP help, parser, runtime dispatch, profile mutation providers, and status/doctor inspection now form one complete vertical slice instead of a help-only stub;
 - Windows child processes that need environment overrides clone the native wide environment into WTF-8, avoiding `InvalidWtf8` when MCP stdio servers are launched from a localized environment.
+
+The final regression audit added four more repairs:
+
+- full-transcript page completion is polled for main and child conversations;
+- a terminal capability-search miss suppresses only the next step's duplicate search surface;
+- queued steering text and the fork's default same-turn admission contract are restored while upstream's conflicting explicit-submit surface is deleted;
+- file-index retry tests now verify the successfully indexed fixture filename instead of asserting the obsolete zero-file count.
+
+The arm64 timeout regression was a loaded-runner gap in the test, not a production deadline change. Production still permits the documented 200 ms supervisor handoff fallback. The test effect now lands after that fallback window and proves the command remains bounded rather than depending on a 100 ms scheduling gap.
 
 ### Agent step integrity and dynamic MCP execution
 
@@ -240,6 +258,8 @@ The reconciliation commits also removed code inside surviving files:
 
 The final reconciliation also removed the inert `--record` launch parser, its unused intent field, its early-startup special case, and tests for behavior that no longer had a runtime owner. `--record` is now ordinary unknown input. A stale `credits` early-I/O predicate was removed with it because the fork has no top-level credits command. Two E2E assertions that required a model catalog request even when `FX_MODEL` already selects a direct Responses route were also deleted; they tested an unnecessary network side effect rather than the ask contract.
 
+Upstream's partial Ctrl+Enter steering split was also deleted as a conflicting duplicate. Removed code includes the `steer_submit` input action, Kitty Ctrl+Enter decoder branch, secondary `Intent` dispatch, `steerPrompt` composition adapter, `enter queue` stream hint, and their dedicated fake-app fields and tests. No `/steer` command or second prompt queue remains. The model-facing and user-facing contract is the fork's single default steering path described above.
+
 One permission test for searching outside the workspace was deleted because it depended on the removed semantic-search era target classifier and no longer exercised the registered `grep_files` contract. The live-authority regression was rewritten around the current registered `skill` tool, preserving the authority refresh assertion without resurrecting the deleted `create_folder` implementation. Other failing expectations were updated only where the retained runtime contract had deliberately changed: account picker wording, Unified Exec labels, collapsed code-block borders, action-oriented post-tool messages, and removal of `--record` from resume usage.
 
 The final upstream update also modified the deleted Vercel Gateway transport to shorten Exa highlights and added provider-specific Exa, Parallel, and Perplexity search accounting to trace reports. Those changes were intentionally not retained. After removal of `src/builtins/gateway.zig`, the fork has no production owner for the Gateway Exa provider advertisement; retaining its alias table, hard-coded provider names, fixed tool indices, `terminal` fixtures, and trace-only tests would be unreachable duplicate policy. The provider-neutral `web_search` projection and its existing TUI, ACP, CLI, child-session, Codex, Responses, and Grok lifecycle remain the sole search contract.
@@ -309,6 +329,7 @@ The session or connection-local projection hides `glob_files` and `grep_files` a
 | `399cbf6d` | Restore the generic top-level MCP vertical slice, remove inert recording compatibility, repair WASM loader compilation, and fix Windows MCP child environments |
 | `d17eb51a` | Restore post-tool continuation, dynamic MCP generation binding, trace lineage, native-versus-fallback Vision policy, portable image reads, and cross-platform trace append |
 | `f3ad5781` | Merge upstream through `24ff3083`, retaining prompt-history ownership while discarding unreachable Vercel Gateway and provider-specific search-trace additions |
+| `8a0e7c90` | Restore full-transcript polling, terminal capability no-match projection, queued steering presentation, and default same-turn admission; delete the conflicting explicit-submit slice; align deterministic fixtures and bound the supervisor timeout test |
 
 ## CI policy for this merge
 
@@ -325,6 +346,8 @@ An earlier run on `7629b56386572c4c38bda8a45634556e7c10efa4` was cancelled after
 
 Run `33465449602` on `d4abc25a93d7172ae338744a0dcd0351ed6c790f` was also cancelled before qualification when a final fetch showed that upstream had advanced to `24ff3083`. It had no authority over the later merge result. The next run must be attached to the commit containing the latest-upstream merge and this updated document.
 
+Run `33466109301` on `068cc59e378c2ecc1ad76c907914ac80cd612f39` passed Windows native, Linux x86_64 native, and macOS arm64 native, then exposed one loaded-runner arm64 timeout assertion and deterministic E2E shard 2 failures. The E2E audit separated merge omissions from stale expectations: missing full-transcript polling, missing one-step capability projection, missing queued prompt preview, incomplete same-turn steering composition, stale Responses event fixtures, stale post-tool request detection, skill-order assumptions, and presentation-label drift. This run is repair evidence only; commit `8a0e7c90` and the document commit that follows it require a new exact-commit Full CI run.
+
 The smaller `.github/workflows/ci.yml` workflow is not used as the merge decision. Benchmark and binary-size workflows are retained because startup latency and unexplained binary growth are useful signals; neither replaces Full CI.
 
 ## Local verification completed before push
@@ -339,6 +362,11 @@ The smaller `.github/workflows/ci.yml` workflow is not used as the merge decisio
 - ReleaseSafe verified-snapshot coverage for inline bytes, ordinary files, symlinked files, and symlinked directory chains, including the Windows no-follow path
 - ReleaseSafe focused regressions for `collapse_tool_calls`, canonical multi-line trace append, current registered-tool live authority, provisional tool labels, account picker and approval rendering, resume usage, evidence-led prompts, and collapsed semantic code blocks
 - ReleaseSafe prompt-history regressions for slash-command recall suppression, plain-arrow ownership, draft restoration, and re-enabling slash completion after editing
+- ReleaseSafe focused regressions for one-step terminal capability suppression, default same-turn admission, queue-review exclusion, late FIFO fallback, and the bounded supervisor handoff deadline
+- The exact Linux E2E shard 2 selected by `tests/e2e/ci-shards.ts`: all 12 files passed with CI's isolated tmux and one-file-at-a-time execution, including 115 terminal-host tests, 55 gateway lifecycle tests, render-lab, composer editing, file paths, web fetch, prompt history, and native clear recovery
+- The four previously failing queued steering TUI scenarios passed together: post-cancel recovery, image-bearing steering, ordinary next-step steering, and paused FIFO queue review
+- The complete ReleaseSafe Zig suite passed on a WSL ext4 copy with CI-equivalent default `.zig-cache` and Zig on PATH. The initial `/mnt/d` run was discarded because DrvFS cannot represent the private mode and rename contracts tested by the suite
+- File-index allocation and queued-refresh recovery now assert that `retry.txt` and `queued.txt` are actually searchable after the successful retry
 - Windows provider tests covering Codex CLI parsing, Grok Build parsing, setup secret redaction, OAuth fallback order, ChatGPT and Grok callback path/state validation, ephemeral ports, delayed callback bytes, and Windows AFD reset handling
 - TypeScript checking for every E2E file changed during reconciliation
 - Bun E2E: removed filesystem tools are absent and Unified Exec completes the flow
@@ -348,8 +376,10 @@ The smaller `.github/workflows/ci.yml` workflow is not used as the merge decisio
 - Fresh binary smoke with `./zig-out/bin/fx help`, `status --json`, and provider-neutral `setup --json`
 - Fresh binary MCP smoke with an isolated HOME covering `mcp path`, local `add`, passive `list`, connected discovery, `remove`, plus MCP snapshots in `status --json` and `doctor --json`
 - Fresh binary ACP interaction covering initialize, session creation, setup start, and nonblocking setup status
+- Current-tree Windows x86_64 ReleaseSafe cross-build followed by direct execution of `./zig-out/bin/fx.exe`: `help`, `status --json`, and provider-neutral `setup --json` exited cleanly; setup detected `codex_cli` and `grok_build` without access-token or API-key fields
+- Current-tree Windows ACP smoke returned initialize, session creation, provider setup start, and nonblocking setup status with empty stderr
 
-The local setup smoke detected both `codex_cli` and `grok_build` sources without printing credential bytes. Full unfiltered Zig tests are intentionally delegated to the Linux and macOS Full CI matrix because the complete test graph contains POSIX-only process fixtures; Windows runs the explicit native subset in Full CI.
+The local setup smoke detected both `codex_cli` and `grok_build` sources without printing credential bytes. The full unfiltered Zig suite was run locally on WSL's native ext4 filesystem because the test graph requires POSIX private-mode, lock, rename, and process semantics; Windows still runs the explicit native subset in Full CI.
 
 ## Reviewer checklist
 
