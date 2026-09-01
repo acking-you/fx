@@ -13,7 +13,7 @@ The merge boundary is:
 | Merge commit | `d7d3f8f2d471cb1c6a6c8cb306b19d312ba64ab0` |
 | Review branch | `merge/upstream-2026-09-01` |
 
-Compared with the pre-merge BYOK tree, the review result changes 242 files with 27,332 insertions and 16,893 deletions. The large count comes primarily from upstream MCP, transcript, rendering, and E2E work. It does not represent a new vendor product route or a large new model-facing tool surface.
+Compared with the pre-merge BYOK tree, the review result changes 246 files with 28,195 insertions and 17,068 deletions. The large count comes primarily from upstream MCP, transcript, rendering, and E2E work. It does not represent a new vendor product route or a large new model-facing tool surface.
 
 ## Reconciliation policy
 
@@ -46,6 +46,8 @@ The MCP work is provider-neutral and useful to BYOK, so the following were retai
 - project and workspace scoped MCP configuration;
 - project trust boundaries;
 - local and HTTP server management;
+- the complete top-level `fx mcp` surface for `add`, `remove`, `path`, `list`, `auth`, `logout`, and project `trust` operations;
+- side-effect-free MCP configuration snapshots in `status` and `doctor`, with transport discovery reserved for explicit `mcp list --connect`;
 - Docker command normalization for configured MCP servers;
 - a consolidated MCP catalog/menu instead of separate overlapping screens;
 - bounded HTTP content-length handling and runtime compatibility checks.
@@ -112,6 +114,12 @@ Useful upstream maintenance was kept where it matches the fork:
 - deterministic PGSO corpus updates for changed E2E owners.
 
 The upstream stable-signing job that conflicted with the fork's release workflow was not restored. The local signing script and tests were reconciled instead.
+
+The final CI reconciliation also fixed two merge regressions and one Windows process bug:
+
+- the WASM no-MCP loader now implements the current workspace-aware loader contract;
+- the top-level MCP help, parser, runtime dispatch, profile mutation providers, and status/doctor inspection now form one complete vertical slice instead of a help-only stub;
+- Windows child processes that need environment overrides clone the native wide environment into WTF-8, avoiding `InvalidWtf8` when MCP stdio servers are launched from a localized environment.
 
 ## Exact new files retained
 
@@ -194,6 +202,8 @@ The reconciliation commits also removed code inside surviving files:
 - E2E scenarios whose only owner was a removed memory or filesystem tool;
 - empty negative assertions that claimed bash-first hid tools already absent globally.
 
+The final reconciliation also removed the inert `--record` launch parser, its unused intent field, its early-startup special case, and tests for behavior that no longer had a runtime owner. `--record` is now ordinary unknown input. A stale `credits` early-I/O predicate was removed with it because the fork has no top-level credits command. Two E2E assertions that required a model catalog request even when `FX_MODEL` already selects a direct Responses route were also deleted; they tested an unnecessary network side effect rather than the ask contract.
+
 Historical `run_command`, `list_files`, and `memory` strings remain only where a saved session codec, replay renderer, migration test, redaction test, or explicit non-executability test needs them. Internal terminal-session state is unrelated to the removed model-facing `terminal` tool.
 
 ## Protected BYOK conflict decisions
@@ -256,6 +266,7 @@ The session or connection-local projection hides `glob_files` and `grep_files` a
 | `c43bec52` | Remove stale merged tool fixtures |
 | `0c4d91aa` | Remove stale Vercel fixture wording |
 | `a91bcc82` | Repair explicit steering tests, Windows Unified Exec coverage, and stale bash-first guidance |
+| `399cbf6d` | Restore the generic top-level MCP vertical slice, remove inert recording compatibility, repair WASM loader compilation, and fix Windows MCP child environments |
 
 ## CI policy for this merge
 
@@ -274,13 +285,18 @@ The smaller `.github/workflows/ci.yml` workflow is not used as the merge decisio
 
 - `zig fmt --check src/`
 - `zig build -Doptimize=ReleaseSafe`
+- `zig build -Dwasm-surface=core -Doptimize=ReleaseSmall`
+- `zig build -Dwasm-surface=term -Doptimize=ReleaseSmall`
 - ReleaseSafe filtered Zig tests covering compaction, same-turn steering, worker/UI thought queueing, newline-free assistant display, Unified Exec observer isolation and nonblocking direct control, web-fetch policy bypass, web-search projection, provider activation cancellation, bash-first projection, and shared usage snapshots
+- Focused Zig tests covering top-level MCP parsing, one-pass status/doctor MCP inspection, and Windows wide-environment cloning for child process overrides
 - Windows provider tests covering Codex CLI parsing, Grok Build parsing, setup secret redaction, OAuth fallback order, ChatGPT and Grok callback path/state validation, ephemeral ports, delayed callback bytes, and Windows AFD reset handling
 - TypeScript checking for every E2E file changed during reconciliation
 - Bun E2E: removed filesystem tools are absent and Unified Exec completes the flow
 - Bun E2E: removed memory is not advertised, cannot mutate the legacy store, and does not prevent a surviving tool call
 - Bun E2E: no-save ask advertises the Unified Exec surface and completes through a fake Responses gateway
+- Bun E2E: all nine focused CLI cases for removed recording input, explicit skill binding, stdin above the former 1 MiB boundary, MCP status/doctor inspection, MCP connection, profile add/remove/path/list, concurrent mutation, and invalid syntax pass on Windows
 - Fresh binary smoke with `./zig-out/bin/fx help`, `status --json`, and provider-neutral `setup --json`
+- Fresh binary MCP smoke with an isolated HOME covering `mcp path`, local `add`, passive `list`, connected discovery, `remove`, plus MCP snapshots in `status --json` and `doctor --json`
 - Fresh binary ACP interaction covering initialize, session creation, setup start, and nonblocking setup status
 
 The local setup smoke detected both `codex_cli` and `grok_build` sources without printing credential bytes. Full unfiltered Zig tests are intentionally delegated to the Linux and macOS Full CI matrix because the complete test graph contains POSIX-only process fixtures; Windows runs the explicit native subset in Full CI.
@@ -297,4 +313,3 @@ The local setup smoke detected both `codex_cli` and `grok_build` sources without
 - [ ] Unified Exec retains one model-facing command family and independent ACP observation.
 - [ ] Web Search projection and Web Fetch admission exceptions remain intact.
 - [ ] All four exact-commit `Full suite (...)` jobs pass before merge into `byok`.
-
