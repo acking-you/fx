@@ -17,9 +17,10 @@ The merge boundary is:
 | Latest update merge | `867eddd7` |
 | Final merge-regression repair | `8a0e7c90` |
 | Final runtime and E2E contract repair | `30ca1e45` |
+| Final asynchronous E2E stabilization | `8431e1a4` |
 | Review branch | `merge/upstream-2026-09-01` |
 
-Compared with the pre-merge BYOK tree, the review result changes 248 files with 28,994 insertions and 17,244 deletions. The large count comes primarily from upstream MCP, transcript, rendering, and E2E work. It does not represent a new vendor product route or a large new model-facing tool surface.
+Compared with the pre-merge BYOK tree, the review result changes 248 files with 29,034 insertions and 17,249 deletions. The large count comes primarily from upstream MCP, transcript, rendering, and E2E work. It does not represent a new vendor product route or a large new model-facing tool surface.
 
 ## Reconciliation policy
 
@@ -359,6 +360,7 @@ The session or connection-local projection hides `glob_files` and `grep_files` a
 | `8a0e7c90` | Restore full-transcript polling, terminal capability no-match projection, queued steering presentation, and default same-turn admission; delete the conflicting explicit-submit slice; align deterministic fixtures and bound the supervisor timeout test |
 | `867eddd7` | Merge upstream through `766e70f0`, keep the deleted prompt copy deleted, apply its verification cleanup to the typed prompt owner, and retain the zero-candidate slash-menu and portable-path fixes |
 | `30ca1e45` | Restore MCP menu completion polling and align deterministic fixtures with current Responses, transcript, replay, settings, compaction, and asynchronous page-load contracts |
+| `8431e1a4` | Replace stale transient-phase waits and make full-transcript and artifact navigation observe their asynchronous page boundaries |
 
 ## CI policy for this merge
 
@@ -383,6 +385,12 @@ Run `33475586156` on `8c0a59b1f3275666ae5ca9c131217c4d7298179c` proved that the 
 
 The same run's Windows native job failed the Unified Exec cleanup test while terminating an intentionally still-running process and reported leaked allocations. The immediately preceding exact run passed that Windows job with the same production implementation, so this is treated as a possible loaded-runner timing failure, not waived. The next exact-commit Full CI must pass Windows native; a repeat will be diagnosed before review is considered qualified. Run `33475586156` was cancelled after its failures were reproduced locally and the commit was superseded.
 
+Run `33480305376` on `55a7d97344ea0c599489d750ffc61b1ab10526e1` passed every native job on Windows, Linux x86_64, Linux arm64, macOS x86_64, and macOS arm64. It also passed E2E shard 2 on all four Unix platforms and shard 3 on both Linux architectures. The prior Windows Unified Exec cleanup failure did not reproduce.
+
+The stable E2E failures in this run reduced to four test contracts. Two held-text cases waited for the transient `Thinking` frame after the unified phase owner had already entered the stable `Generating` phase. The full-transcript brutal test treated a loaded newest page as proof that its final marker was already inside the visible viewport; it now pages down until the durable tail is visible before paging up to prove that the oldest entry remains reachable. The cancelled-command artifact test sent 500 PgDn sequences in one tmux input burst; macOS could discard part of that burst even though the greater-than-1-MiB artifact was intact. It now sends bounded batches, observes the viewport after each batch, and still requires the final artifact marker. All four focused scenarios pass locally after the repair.
+
+Several macOS 30-second or 90-second slow frames occurred in only one of the two file attempts while the same scenario passed in the other attempt and on other platforms. They did not share a production trigger with the stable failures. No production timeout, synchronization, or compatibility path was added for those one-attempt runner delays. Run `33480305376` is diagnostic evidence only because commit `8431e1a4` changes the tested tree; a new exact-commit Full CI run remains required.
+
 The smaller `.github/workflows/ci.yml` workflow is not used as the merge decision. Benchmark and binary-size workflows are retained because startup latency and unexplained binary growth are useful signals; neither replaces Full CI.
 
 ## Local verification completed before push
@@ -403,6 +411,10 @@ The smaller `.github/workflows/ci.yml` workflow is not used as the merge decisio
 - Complete `tui-render-stress.test.ts`: 1 passed, exercising unmatched slash input together with repeated resize and local transcript writes
 - Complete `acp.test.ts`: 129 passed, including the current Responses markdown stream and child function-call-output continuation
 - Complete `tui-resume.test.ts`: 45 passed, including replay-cap, full-detail spacing, session-picker, scrollback, and resume ownership cases
+- Focused live-stream `/resume` refusal passed while waiting on the current stable `Generating` phase
+- Focused active-turn image steering passed while retaining its request-order, instruction-snapshot, image-byte, and stderr assertions
+- Focused greater-than-1-MiB cancelled-command artifact navigation passed with bounded PgDn batches and 60 retained assertions
+- Focused full-transcript brutal stress passed with 118 assertions after explicitly proving both the newest tail and oldest entry are reachable
 - Focused MCP authentication and logout lifecycle passed after restoring menu-completion collection in the composition root
 - Focused remote native compaction and Codex Vision failure cases passed with request-level and current structured-result assertions
 - Focused asynchronous statusline persistence, native-scrollback resize retention, and brutal full-transcript page-load cases passed
