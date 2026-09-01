@@ -1038,31 +1038,6 @@ fn appendLayoutUnitContent(
             }
             try row.appendSlice(alloc, ui_render.tag_style);
             try row_text.appendClipped(alloc, row, token.name, @intCast(@min(emit_cells, std.math.maxInt(u16))));
-            if (visual_layout.skillTokenSourceLabel(token)) |source_label| {
-                const emitted_name_cells = @min(display_width.visibleWidth(token.name), emit_cells);
-                const label_cells = emit_cells - emitted_name_cells;
-                if (label_cells > 0) {
-                    try row_text.appendClipped(
-                        alloc,
-                        row,
-                        visual_layout.skill_source_separator,
-                        @intCast(@min(label_cells, std.math.maxInt(u16))),
-                    );
-                    const emitted_separator_cells = @min(
-                        display_width.visibleWidth(visual_layout.skill_source_separator),
-                        label_cells,
-                    );
-                    const source_cells = label_cells - emitted_separator_cells;
-                    if (source_cells > 0) {
-                        try row_text.appendClipped(
-                            alloc,
-                            row,
-                            source_label,
-                            @intCast(@min(source_cells, std.math.maxInt(u16))),
-                        );
-                    }
-                }
-            }
             try row.appendSlice(alloc, ui_render.reset_style);
             remaining_cells.* -= emit_cells;
             omitted_positive_unit.* = unit.cell_width > emit_cells;
@@ -1133,6 +1108,31 @@ test "composer badge labels a later-turn image with its own id" {
     try std.testing.expectEqual(@as(usize, 1), composed.rows.items.len);
     try std.testing.expect(std.mem.find(u8, composed.rows.items[0].items, "[Image 2]") != null);
     try std.testing.expect(std.mem.find(u8, composed.rows.items[0].items, "[Image 1]") == null);
+}
+
+test "composer skill token shows only its name" {
+    const alloc = std.testing.allocator;
+    const skill_tokens = [_]visual_layout.SkillTokenSpan{.{
+        .raw_start = 0,
+        .raw_end = "$review".len,
+        .name = "review",
+        .path = "/tmp/review",
+        .display_source = .workspace_codex,
+    }};
+    const source = visual_layout.Source{
+        .input = "$review",
+        .cursor = "$review".len,
+        .terminal_cols = 40,
+        .skill_tokens = &skill_tokens,
+    };
+    const summary = visual_layout.summarize(source, null);
+    const window = visual_layout.visibleWindow(summary.cursor.row_index, summary.total_rows, 1);
+    var composed = try composeVisibleInputRows(alloc, source, window);
+    defer composed.deinit(alloc);
+
+    try std.testing.expectEqual(@as(usize, 1), composed.rows.items.len);
+    try std.testing.expect(std.mem.find(u8, composed.rows.items[0].items, "review") != null);
+    try std.testing.expect(std.mem.find(u8, composed.rows.items[0].items, "workspace .codex") == null);
 }
 
 test "composeVisibleInputRows avoids clear-to-eol after full-width input" {

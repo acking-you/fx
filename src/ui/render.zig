@@ -496,10 +496,6 @@ fn copyVisualRowToBuffer(source: visual_layout.Source, target_row: usize, out: [
                     const token = source.skill_tokens[token_index];
                     if (unit.cell_width <= remaining_cells) {
                         appendBytesToBuffer(out, &len, token.name);
-                        if (visual_layout.skillTokenSourceLabel(token)) |source_label| {
-                            appendBytesToBuffer(out, &len, visual_layout.skill_source_separator);
-                            appendBytesToBuffer(out, &len, source_label);
-                        }
                         remaining_cells -= unit.cell_width;
                         omitted_positive_unit = false;
                     } else {
