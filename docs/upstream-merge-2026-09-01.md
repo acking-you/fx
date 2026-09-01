@@ -14,6 +14,7 @@ The merge boundary is:
 | Prior upstream main merged | `24ff3083cb3e19cdc818403ecbc40ff14ace04c9` |
 | Prior update merge | `f3ad5781` |
 | Latest upstream main merged | `766e70f0106393b551e2363526cf6a41e60587c3` |
+| Latest update merge | `867eddd7` |
 | Final merge-regression repair | `8a0e7c90` |
 | Review branch | `merge/upstream-2026-09-01` |
 
@@ -347,6 +348,7 @@ The session or connection-local projection hides `glob_files` and `grep_files` a
 | `d17eb51a` | Restore post-tool continuation, dynamic MCP generation binding, trace lineage, native-versus-fallback Vision policy, portable image reads, and cross-platform trace append |
 | `f3ad5781` | Merge upstream through `24ff3083`, retaining prompt-history ownership while discarding unreachable Vercel Gateway and provider-specific search-trace additions |
 | `8a0e7c90` | Restore full-transcript polling, terminal capability no-match projection, queued steering presentation, and default same-turn admission; delete the conflicting explicit-submit slice; align deterministic fixtures and bound the supervisor timeout test |
+| `867eddd7` | Merge upstream through `766e70f0`, keep the deleted prompt copy deleted, apply its verification cleanup to the typed prompt owner, and retain the zero-candidate slash-menu and portable-path fixes |
 
 ## CI policy for this merge
 
