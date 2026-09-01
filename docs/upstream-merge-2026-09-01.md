@@ -15,8 +15,10 @@ The merge boundary is:
 | Prior update merge | `f3ad5781` |
 | Latest upstream main merged | `766e70f0106393b551e2363526cf6a41e60587c3` |
 | Latest update merge | `867eddd7` |
-| Current upstream main merged | `93bfedfe104dc4353442777295ac42130c840089` |
-| Current update merge | `b8494532` |
+| Previous upstream main merged | `93bfedfe104dc4353442777295ac42130c840089` |
+| Previous update merge | `b8494532` |
+| Current upstream main merged | `fc50c8da53f476c0c021a6c6289c7fff5c78d7f6` |
+| Current update merge | `6121534a` |
 | Final merge-regression repair | `8a0e7c90` |
 | Final runtime and E2E contract repair | `30ca1e45` |
 | Final asynchronous E2E stabilization | `8431e1a4` |
@@ -33,7 +35,7 @@ The merge boundary is:
 | Final viewer-lifetime page invalidation | `542d43b3` |
 | Review branch | `merge/upstream-2026-09-01` |
 
-Compared with the pre-merge BYOK tree, the review result changes 250 files with 29,613 insertions and 17,393 deletions. The large count comes primarily from upstream MCP, transcript, rendering, and E2E work. It does not represent a new vendor product route or a large new model-facing tool surface.
+Compared with the pre-merge BYOK tree, the review result changes 253 files with 29,697 insertions and 17,451 deletions. The large count comes primarily from upstream MCP, transcript, rendering, and E2E work. It does not represent a new vendor product route or a large new model-facing tool surface.
 
 ## Reconciliation policy
 
@@ -158,6 +160,20 @@ Primary paths:
 - `src/core/app/app_input_runtime.zig`
 - `src/ui/footer/render_input.zig`
 - `tests/e2e/tui-slash-menu.test.ts`
+
+### Compact selected-skill display
+
+Selected skill entities now render only their skill name in the composer and sent user-message card. Their source and path remain attached to the typed entity, survive kill/yank and history recall, and still determine the exact bound skill; only the redundant source suffix is removed from visual width and rendering.
+
+This is a presentation simplification over the existing skill-token contract. It removes no provenance and adds no alternate skill identity.
+
+Primary paths:
+
+- `src/ui/input/visual_layout.zig`
+- `src/ui/footer/input_presentation.zig`
+- `src/ui/assistant/user_message_card.zig`
+- `src/ui/render.zig`
+- `tests/e2e/tui-composer-edit-contracts.test.ts`
 
 ### Complete provider-neutral ACP tool-call metadata
 
@@ -419,6 +435,7 @@ The session or connection-local projection hides `glob_files` and `grep_files` a
 | `d2eac99b` | Observe the asynchronously installed tail after reopening full detail instead of sending PageDown into the prior installed page |
 | `542d43b3` | Scope installed full-transcript pages to one viewer lifetime so reopening snapshots the current tail instead of reusing a stale live-command page |
 | `b8494532` | Merge upstream through `93bfedfe`, retain generic named and redacted ACP tool metadata plus anchored dollar skill menus, and discard the deleted Gateway alias slice |
+| `6121534a` | Merge upstream through `fc50c8da`, showing only selected skill names while preserving the bound source and path internally |
 
 ## CI policy for this merge
 
@@ -501,6 +518,7 @@ The smaller `.github/workflows/ci.yml` workflow is not used as the merge decisio
 - Complete `acp.test.ts`: 129 passed, including the current Responses markdown stream and child function-call-output continuation
 - The same complete `acp.test.ts` passed again after `b8494532`, including named structured tool-call input, Unified Exec terminal aggregation, provider setup, Codex and Grok persistent children, and empty stderr
 - Complete `web-fetch-fake-network.test.ts`: 8 passed after `b8494532`, including ACP `fetch` kind, redacted credential-bearing local input, policy bypass, malformed input, and one completed lifecycle
+- Complete `tui-composer-edit-contracts.test.ts`: 30 passed after `6121534a`, including duplicate-skill provenance across kill/yank and history recall while the source suffix remains hidden
 - Complete `tui-resume.test.ts`: 45 passed, including replay-cap, full-detail spacing, session-picker, scrollback, and resume ownership cases
 - Focused live-stream `/resume` refusal passed while waiting on the current stable `Generating` phase
 - Focused active-turn image steering passed while retaining its request-order, instruction-snapshot, image-byte, and stderr assertions
