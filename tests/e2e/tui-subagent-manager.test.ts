@@ -189,7 +189,7 @@ function providerErrorResponse(detail: string): Response {
 
 function normalizeThinkingFrame(grid: string[]) {
   return grid.map((line) =>
-    /^(?:• |  )(?:Thinking|Generating)(?: \([^)]*\)){1,2}$/.test(line)
+    /^(?:[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏•] |  )Working(?: \([^)]*\)){0,2}$/.test(line)
       ? "<animated thinking frame>"
       : line
   );

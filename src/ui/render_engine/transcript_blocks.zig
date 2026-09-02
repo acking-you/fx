@@ -10,6 +10,7 @@ const user_message_card = @import("../assistant/user_message_card.zig");
 const input_visual_layout = @import("../input/visual_layout.zig");
 const vt_emulator = @import("../../core/terminal/engine.zig");
 const assistant_presentation = @import("../../core/agent/assistant_presentation.zig");
+const thought_presentation = @import("../../core/output/thought_presentation.zig");
 const code_highlight = @import("code_highlight.zig");
 const code_highlight_languages = @import("code_highlight_languages.zig");
 
@@ -1443,37 +1444,6 @@ fn appendNoticeRow(
     if (active_hyperlink.* != null) try out.appendSlice(alloc, notice_osc8_close);
 }
 
-fn renderReasoningSummary(
-    alloc: Allocator,
-    body: []const u8,
-    styles: Styles,
-    cols: u16,
-) ![]u8 {
-    const trimmed = std.mem.trim(u8, body, " \t\r\n");
-    var logical: std.ArrayList(u8) = .empty;
-    defer logical.deinit(alloc);
-    try logical.appendSlice(alloc, "• ");
-    try logical.appendSlice(alloc, trimmed);
-
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(alloc);
-    var cursor: usize = 0;
-    var row: usize = 0;
-    while (cursor < logical.items.len) : (row += 1) {
-        if (row > 0) try out.append(alloc, '\n');
-        const indent: usize = if (row > 0) noticeContinuationIndent(logical.items, cursor, cols) else 0;
-        const available: usize = @max(@as(usize, cols) -| indent, 1);
-        const line = scanNoticeLine(logical.items, cursor, available);
-        try out.appendNTimes(alloc, ' ', indent);
-        try out.appendSlice(alloc, styles.reasoning_summary_style);
-        try out.appendSlice(alloc, logical.items[cursor..line.end]);
-        try out.appendSlice(alloc, styles.reset_style);
-        std.debug.assert(line.next > cursor);
-        cursor = line.next;
-    }
-    return out.toOwnedSlice(alloc);
-}
-
 /// Returns an owned semantic notice block without surrounding blank rows.
 pub fn renderSemanticNotice(
     alloc: Allocator,
@@ -1482,7 +1452,13 @@ pub fn renderSemanticNotice(
     cols: u16,
 ) ![]u8 {
     if (std.ascii.eqlIgnoreCase(notice.topic, "thinking")) {
-        return renderReasoningSummary(alloc, notice.body, styles, cols);
+        return thought_presentation.renderTranscript(
+            alloc,
+            notice.body,
+            styles.reasoning_summary_style,
+            styles.reset_style,
+            cols,
+        );
     }
     if (std.ascii.eqlIgnoreCase(notice.topic, "plan")) {
         return renderPlanNotice(alloc, notice, styles, cols);
@@ -1561,9 +1537,10 @@ fn renderPlanNotice(
             if (std.mem.startsWith(u8, line, "[x] ")) {
                 has_step = true;
                 try formatted.writer.print("✔ {s}", .{line[4..]});
-            } else if (std.mem.startsWith(u8, line, "[>] ") or
-                std.mem.startsWith(u8, line, "[ ] "))
-            {
+            } else if (std.mem.startsWith(u8, line, "[>] ")) {
+                has_step = true;
+                try formatted.writer.print("▶ {s}", .{line[4..]});
+            } else if (std.mem.startsWith(u8, line, "[ ] ")) {
                 has_step = true;
                 try formatted.writer.print("□ {s}", .{line[4..]});
             } else {
@@ -2862,7 +2839,7 @@ test "plan notice renders a Codex-style checklist" {
     defer alloc.free(rendered);
 
     try std.testing.expectEqualStrings(
-        "● Updated Plan\n  └ Keep the original request in view.\n  └ □ Inspect the source\n  └ □ Verify the result\n  └ ✔ Preserve the context",
+        "● Updated Plan\n  └ Keep the original request in view.\n  └ ▶ Inspect the source\n  └ □ Verify the result\n  └ ✔ Preserve the context",
         rendered,
     );
 }

@@ -641,7 +641,7 @@ function expectNoRawToolReplay(scrollback: string): void {
 
 function normalizeVolatileStatusRows(grid: string[]): string[] {
   return grid.map((line) =>
-    /^\s*[•▲]?\s*(?:Thinking|Generating|Running)(?: \([^)]*\))*$/.test(line) ||
+    /^\s*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏•▲]?\s*(?:Working|Thinking|Generating|Running)(?: \([^)]*\))*$/.test(line) ||
       isVolatileTokenStatusRow(line)
       ? "<status>"
       : line
@@ -649,7 +649,7 @@ function normalizeVolatileStatusRows(grid: string[]): string[] {
 }
 
 test("volatile status rows normalize before stable-grid comparison", () => {
-  expect(normalizeVolatileStatusRows(["• Generating (3s) (↑6 ↓5)"])).toEqual(["<status>"]);
+  expect(normalizeVolatileStatusRows(["⠋ Working (3s) (↑6 ↓5)"])).toEqual(["<status>"]);
   expect(normalizeVolatileStatusRows(["  (↑6 ↓5)"])).toEqual(["<status>"]);
   expect(normalizeVolatileStatusRows(["  0s (↑6 ↓5)"])).toEqual(["<status>"]);
 });
@@ -5484,7 +5484,7 @@ test.skipIf(!tmuxAvailable())(
       await active.waitForComposer(TIMEOUT);
       await active.sendText("Keep this response active.");
       await waitForCondition(() => hold.started, "held gateway response");
-      await active.waitForText("Generating", TIMEOUT);
+      await active.waitForText("Working", TIMEOUT);
 
       await active.sendText("/resume");
       await active.waitForText("resume is unavailable until the response finishes", TIMEOUT);

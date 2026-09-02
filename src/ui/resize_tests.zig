@@ -2468,7 +2468,7 @@ test "thinking shimmer reserves assistant-gap rows and clears back to stable foo
     try renderTestFooterWithContext(&h, &approval, &h.frame_redraw, ctx);
     try h.flush();
     const footer_thinking = try findFirstDividerRowAfter(&h, 1);
-    const thinking_row = try findRowContaining(&h, "Thinking");
+    const thinking_row = try findRowContaining(&h, "Working");
     try std.testing.expect(footer_thinking > footer_idle);
     try expectExactlyOneBlankRowBetween(&h, thinking_row, footer_thinking);
 
@@ -2501,7 +2501,7 @@ test "completed presentation tail keeps activity slot until turn summary" {
     try h.flush();
 
     const user_row = try findRowContaining(&h, "explain the renderer");
-    const thinking_row = try findRowContaining(&h, "Thinking");
+    const thinking_row = try findRowContaining(&h, "Working");
     try expectOnlyBlankRowsBetween(&h, user_row, thinking_row);
     const footer_during_thinking = try findFirstDividerRowAfter(&h, thinking_row);
     try expectExactlyOneBlankRowBetween(&h, thinking_row, footer_during_thinking);
@@ -2515,8 +2515,8 @@ test "completed presentation tail keeps activity slot until turn summary" {
     try h.flush();
 
     const assistant_row = try findRowContaining(&h, "assistant starts here");
-    try expectGridNotContains(&h, "Thinking");
-    try expectGridNotContains(&h, "Thinking");
+    try expectGridNotContains(&h, "Working");
+    try expectGridNotContains(&h, "Working");
     const footer_after_assistant = try findFirstDividerRowAfter(&h, assistant_row);
     try std.testing.expect(footer_after_assistant > assistant_row);
 
@@ -2531,7 +2531,7 @@ test "completed presentation tail keeps activity slot until turn summary" {
     try renderTestFooterWithContext(&h, &approval, &h.frame_redraw, ctx);
     try h.flush();
 
-    try expectGridNotContains(&h, "Thinking");
+    try expectGridNotContains(&h, "Working");
     const summary_row = try findRowContaining(&h, "  4s (↑200 ↓118)");
     const footer_after_summary = try findFirstDividerRowAfter(&h, summary_row);
     try expectExactlyOneBlankRowBetween(&h, summary_row, footer_after_summary);
@@ -2557,7 +2557,7 @@ test "thinking shimmer keeps a gap after completed tool status" {
     try h.flush();
 
     const status_row = try findRowContaining(&h, "Listed src");
-    const thinking_row = try findRowContaining(&h, "Thinking");
+    const thinking_row = try findRowContaining(&h, "Working");
     try expectExactlyOneBlankRowBetween(&h, status_row, thinking_row);
 }
 
@@ -2582,7 +2582,7 @@ test "active tool status stays above the thinking slot" {
     try h.flush();
 
     const status_row = try findRowContaining(&h, "Running read_file");
-    const thinking_row = try findRowContaining(&h, "Thinking");
+    const thinking_row = try findRowContaining(&h, "Working");
     try std.testing.expect(status_row < thinking_row);
     try expectExactlyOneBlankRowBetween(&h, status_row, thinking_row);
     const footer_row = try findFirstDividerRowAfter(&h, thinking_row);
@@ -2630,7 +2630,7 @@ test "assistant paragraph replaces thinking gap after completed tool status" {
     try h.flush();
 
     const status_row = try findRowContaining(&h, "Inspected file");
-    const thinking_row = try findRowContaining(&h, "Thinking");
+    const thinking_row = try findRowContaining(&h, "Working");
     try expectExactlyOneBlankRowBetween(&h, status_row, thinking_row);
 
     _ = try h.shell.streamAssistantChunk(h.alloc, &h.metrics, "\nassistant paragraph after inspect");
@@ -2644,7 +2644,7 @@ test "assistant paragraph replaces thinking gap after completed tool status" {
     const status_after = try findRowContaining(&h, "Inspected file");
     const assistant_row = try findRowContaining(&h, "assistant paragraph after inspect");
     try expectExactlyOneBlankRowBetween(&h, status_after, assistant_row);
-    try expectGridNotContains(&h, "Thinking");
+    try expectGridNotContains(&h, "Working");
 }
 
 test "assistant paragraph and next tool keep one gap after inspected tool" {
@@ -2667,7 +2667,7 @@ test "assistant paragraph and next tool keep one gap after inspected tool" {
     try h.flush();
 
     const inspected_row = try findRowContaining(&h, "Inspected file");
-    const thinking_row = try findRowContaining(&h, "Thinking");
+    const thinking_row = try findRowContaining(&h, "Working");
     try expectExactlyOneBlankRowBetween(&h, inspected_row, thinking_row);
 
     _ = try h.shell.streamAssistantChunk(
@@ -2691,7 +2691,7 @@ test "assistant paragraph and next tool keep one gap after inspected tool" {
     try expectRowEmpty(&h, assistant_row + 3);
     try expectRowTrimmedEquals(&h, assistant_row + 4, "● 1 tool call · 1 read");
     try std.testing.expectEqual(assistant_row + 5, creating_row);
-    try expectGridNotContains(&h, "Thinking");
+    try expectGridNotContains(&h, "Working");
 }
 
 test "thinking shimmer keeps a gap after assistant text" {
@@ -2716,7 +2716,7 @@ test "thinking shimmer keeps a gap after assistant text" {
     try h.flush();
 
     const assistant_row = try findRowContaining(&h, "assistant text");
-    const thinking_row = try findRowContaining(&h, "Thinking");
+    const thinking_row = try findRowContaining(&h, "Working");
     try expectExactlyOneBlankRowBetween(&h, assistant_row, thinking_row);
 }
 
@@ -2749,7 +2749,7 @@ test "thinking shimmer appears after bottom assistant text ending mid-row" {
     try h.flush();
 
     const final_row = try findRowContaining(&h, "final assistant tail");
-    const thinking_row = try findRowContaining(&h, "Thinking");
+    const thinking_row = try findRowContaining(&h, "Working");
     try expectOnlyBlankRowsBetween(&h, final_row, thinking_row);
     const footer_row = try findFirstDividerRowAfter(&h, thinking_row);
     try expectExactlyOneBlankRowBetween(&h, thinking_row, footer_row);
@@ -2783,7 +2783,7 @@ test "thinking shimmer does not erase user row reclaimed from stale footer" {
 
     const user_row_after = try findRowContaining(&h, "stale footer row repro");
     try std.testing.expectEqual(user_row_before, user_row_after);
-    const thinking_row = try findRowContaining(&h, "Thinking");
+    const thinking_row = try findRowContaining(&h, "Working");
     try std.testing.expect(thinking_row > user_row_after);
 }
 
@@ -2818,7 +2818,7 @@ test "thinking shimmer reserves space when submitted user card ends at viewport 
     try h.flush();
 
     const user_row_after = try findRowContaining(&h, "bottom prompt");
-    const thinking_row = try findRowContaining(&h, "Thinking");
+    const thinking_row = try findRowContaining(&h, "Working");
     try std.testing.expectEqual(user_row_after + 2, thinking_row);
     try expectRowEmpty(&h, user_row_after + 1);
 }
@@ -3803,7 +3803,7 @@ test "long live command output keeps running tool visible with stable footer" {
     try renderTestFooterWithContext(&h, &approval, &h.frame_redraw, ctx);
     try h.flush();
 
-    try expectGridContains(&h, "Thinking");
+    try expectGridContains(&h, "Working");
     try expectGridOccurrenceCount(&h, "Running python stream", 1);
     _ = try findRowContaining(&h, "Running python stream");
     try expectGridNotContains(&h, "line-2");
@@ -3819,7 +3819,7 @@ test "long live command output keeps running tool visible with stable footer" {
     try renderTestFooterWithContext(&h, &approval, &h.frame_redraw, ctx);
     try h.flush();
 
-    try expectGridContains(&h, "Thinking");
+    try expectGridContains(&h, "Working");
     try expectGridOccurrenceCount(&h, "Running python stream", 1);
     const footer_after_second_batch = try findFirstDividerRowAfter(&h, 1);
     try std.testing.expectEqual(footer_after_first_batch, footer_after_second_batch);
@@ -3864,10 +3864,10 @@ test "resize keeps transcript-owned active command above output and thinking" {
     try renderTestFooterWithContext(&h, &approval, &h.frame_redraw, ctx);
     try h.flush();
 
-    try expectGridOccurrenceCount(&h, "Thinking", 1);
+    try expectGridOccurrenceCount(&h, "Working", 1);
     try expectGridOccurrenceCount(&h, "Resize activity active", 1);
     const status_row = try findRowContaining(&h, "Resize activity active");
-    const thinking_row = try findRowContaining(&h, "Thinking");
+    const thinking_row = try findRowContaining(&h, "Working");
     try std.testing.expect(status_row < thinking_row);
     try expectGridNotContains(&h, "resize-line-2");
     try std.testing.expect(h.shell.shimmer_active);
@@ -3879,10 +3879,10 @@ test "resize keeps transcript-owned active command above output and thinking" {
     try h.flush();
 
     const resized_status_row = try findRowContaining(&h, "Resize activity active");
-    const resized_thinking_row = try findRowContaining(&h, "Thinking");
+    const resized_thinking_row = try findRowContaining(&h, "Working");
     try std.testing.expect(resized_status_row < resized_thinking_row);
     try expectGridNotContains(&h, "resize-line-1");
-    try expectGridOccurrenceCount(&h, "Thinking", 1);
+    try expectGridOccurrenceCount(&h, "Working", 1);
     try expectGridOccurrenceCount(&h, "Resize activity active", 1);
     try std.testing.expect(h.shell.shimmer_active);
     try std.testing.expect(!h.shell.shimmer_is_overlay);
@@ -4163,7 +4163,7 @@ test "render engine preserves transcript footer activity behavior" {
     h.frame_redraw = true;
     try renderTestFooterWithContext(&h, &approval, &h.frame_redraw, ctx);
     try h.flush();
-    const thinking_row = try findRowContaining(&h, "Thinking");
+    const thinking_row = try findRowContaining(&h, "Working");
     const thinking_footer_row = try findFirstDividerRowAfter(&h, thinking_row);
     try std.testing.expect(expected_thinking_footer_delta > 0);
     try std.testing.expectEqual(idle_footer_row + expected_thinking_footer_delta, thinking_footer_row);
@@ -4173,7 +4173,7 @@ test "render engine preserves transcript footer activity behavior" {
     h.frame_redraw = true;
     try renderTestFooterWithContext(&h, &approval, &h.frame_redraw, ctx);
     try h.flush();
-    try expectGridNotContains(&h, "Thinking");
+    try expectGridNotContains(&h, "Working");
     const restored_footer_row = try findFirstDividerRowAfter(&h, subagent_row);
     try std.testing.expectEqual(idle_footer_row, restored_footer_row);
 
@@ -4515,7 +4515,7 @@ test "long context notice survives full transcript growth and later compact resi
     h.frame_redraw = true;
     try renderTestFooterWithContext(&h, &approval, &h.frame_redraw, ctx);
     try h.flush();
-    try expectGridContains(&h, "Thinking");
+    try expectGridContains(&h, "Working");
 
     try std.testing.expect(try h.shell.setTranscriptPresentationDepth(alloc, .inline_mode));
     try h.shell.writeTranscriptClassified(
@@ -6192,7 +6192,7 @@ test "compact command completion keeps restored history footer stable" {
     try h.flush();
 
     const running_row = try findRowContaining(&h, "run_command");
-    const running_thinking_row = try findRowContaining(&h, "Thinking");
+    const running_thinking_row = try findRowContaining(&h, "Working");
     const running_footer_row = try findFirstDividerRowAfter(&h, running_thinking_row);
     try std.testing.expect(h.shell.transcriptCommitDiagnostic().visual_offset > 0);
     try expectExactlyOneBlankRowBetween(&h, running_row, running_thinking_row);
@@ -6208,7 +6208,7 @@ test "compact command completion keeps restored history footer stable" {
     try h.flush();
 
     const completed_row = try findRowContaining(&h, "Ran sleep 5");
-    const completed_thinking_row = try findRowContaining(&h, "Thinking");
+    const completed_thinking_row = try findRowContaining(&h, "Working");
     const completed_footer_row = try findFirstDividerRowAfter(&h, completed_thinking_row);
     try std.testing.expectEqual(running_row, completed_row);
     try std.testing.expectEqual(running_thinking_row, completed_thinking_row);

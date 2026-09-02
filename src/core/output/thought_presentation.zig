@@ -1,13 +1,18 @@
-//! Display truncation for streamed provider reasoning.
+//! Display truncation and transcript rendering for streamed provider reasoning.
 //!
 //! Reasoning is replayed to the provider in full (see `ChatMessage.reasoning`);
 //! only the transcript view is bounded. Long reasoning would otherwise push the
 //! answer off screen, so the view keeps the most recent lines: the tail is what
 //! the model is working on now.
 //!
-//! This module is pure so it can be tested without a TTY or a live stream.
+//! The visual contract is the pre-upstream dim italic bullet summary: no
+//! `Thinking:` label, first line prefixed with `• `, later lines indented two
+//! spaces. This module is pure so it can be tested without a TTY or a live stream.
 
 const std = @import("std");
+const display_width = @import("../shared/display_width.zig");
+
+const Allocator = std.mem.Allocator;
 
 /// Visual lines of reasoning kept in the transcript. Matches the tail-window
 /// size used by comparable reasoning displays; the full body still reaches the
@@ -104,6 +109,71 @@ pub fn finalizedBody(body: []const u8, visible_lines: usize) VisibleBody {
     return visibleBody(body, visible_lines);
 }
 
+/// Renders a thinking notice as a dim italic bullet summary. The returned
+/// buffer is owned by the caller.
+pub fn renderTranscript(
+    alloc: Allocator,
+    body: []const u8,
+    style: []const u8,
+    reset: []const u8,
+    cols: u16,
+) ![]u8 {
+    const trimmed = std.mem.trim(u8, body, " \t\r\n");
+    if (trimmed.len == 0) return try alloc.dupe(u8, "");
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+
+    var first_row = true;
+    var line_start: usize = 0;
+    while (true) {
+        const line_end = std.mem.findScalarPos(u8, trimmed, line_start, '\n') orelse trimmed.len;
+        try appendWrappedReasoningLine(
+            &out,
+            alloc,
+            trimmed[line_start..line_end],
+            first_row,
+            style,
+            reset,
+            cols,
+        );
+        first_row = false;
+        if (line_end == trimmed.len) break;
+        line_start = line_end + 1;
+    }
+    return out.toOwnedSlice(alloc);
+}
+
+fn appendWrappedReasoningLine(
+    out: *std.ArrayList(u8),
+    alloc: Allocator,
+    source_line: []const u8,
+    block_first: bool,
+    style: []const u8,
+    reset: []const u8,
+    cols: u16,
+) !void {
+    var rest = source_line;
+    var chunk_first = true;
+    while (true) {
+        if (out.items.len > 0) try out.append(alloc, '\n');
+        const block_start = block_first and chunk_first;
+        const indent_cells: usize = if (block_start) 0 else 2;
+        const prefix: []const u8 = if (block_start) "• " else "";
+        try out.appendNTimes(alloc, ' ', indent_cells);
+        try out.appendSlice(alloc, style);
+        try out.appendSlice(alloc, prefix);
+        const used_cells = indent_cells + if (block_start) @as(usize, 2) else 0;
+        const available = @max(@as(usize, cols) -| used_cells, 1);
+        const take = display_width.prefixByWidthIgnoringAnsi(rest, available);
+        try out.appendSlice(alloc, take);
+        try out.appendSlice(alloc, reset);
+        rest = rest[take.len..];
+        chunk_first = false;
+        if (rest.len == 0) break;
+    }
+}
+
 test "visibleBody keeps a short body whole" {
     const result = visibleBody("one\ntwo", 8);
     try std.testing.expect(!result.truncated);
@@ -183,4 +253,44 @@ test "finalizedBody retains a header-only summary" {
 test "firstBoldHeading ignores incomplete and empty spans" {
     try std.testing.expect(firstBoldHeading("**still streaming") == null);
     try std.testing.expect(firstBoldHeading("before **** after") == null);
+}
+
+test "renderTranscript uses a dim italic bullet summary without a Thinking label" {
+    const alloc = std.testing.allocator;
+    const rendered = try renderTranscript(
+        alloc,
+        "Checked the runtime path.\nThe focused test passes.",
+        "<reasoning>",
+        "</>",
+        80,
+    );
+    defer alloc.free(rendered);
+    try std.testing.expectEqualStrings(
+        "<reasoning>• Checked the runtime path.</>\n  <reasoning>The focused test passes.</>",
+        rendered,
+    );
+    try std.testing.expect(std.mem.find(u8, rendered, "Thinking:") == null);
+}
+
+test "renderTranscript wraps long reasoning onto indented continuation rows" {
+    const alloc = std.testing.allocator;
+    const rendered = try renderTranscript(
+        alloc,
+        "abcdefghijklmnop",
+        "<reasoning>",
+        "</>",
+        8,
+    );
+    defer alloc.free(rendered);
+    try std.testing.expectEqualStrings(
+        "<reasoning>• abcdef</>\n  <reasoning>ghijkl</>\n  <reasoning>mnop</>",
+        rendered,
+    );
+}
+
+test "renderTranscript returns empty for blank reasoning" {
+    const alloc = std.testing.allocator;
+    const rendered = try renderTranscript(alloc, "  \n\t", "<reasoning>", "</>", 80);
+    defer alloc.free(rendered);
+    try std.testing.expectEqualStrings("", rendered);
 }
