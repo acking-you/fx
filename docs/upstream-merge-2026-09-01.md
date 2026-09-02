@@ -3,8 +3,9 @@
 ## Review status
 
 This document records the final reconciliation of `vercel-labs/fx` into the
-BYOK fork. The result remains on `merge/upstream-2026-09-01` for review and has
-not been merged into `byok`.
+BYOK fork. The reviewed tree was fast-forwarded from
+`merge/upstream-2026-09-01` into `byok` on 2026-09-02 after every required
+check passed.
 
 | Boundary | Commit |
 | --- | --- |
@@ -14,7 +15,8 @@ not been merged into `byok`.
 | Tree before the final product pruning | `ccf8680a` |
 | MCP pruning checkpoint | `32a8e6f6` |
 | Last code-bearing review candidate | `95be8bb3` |
-| Final inventory documentation | The commit containing this document |
+| Final reviewed and merged tree | `f3c7b7bc` |
+| Pull request | [#29](https://github.com/acking-you/fx/pull/29) |
 
 The final product decision is explicit: this fork does not support MCP. Skills
 are the extension mechanism. No MCP configuration, transport, authentication,
@@ -464,10 +466,11 @@ Local checks for the final pruning tree:
   25/25 jobs across Windows, Linux, macOS, every deterministic E2E shard, and
   the portable WASM builds.
 
-The inventory-only commit containing this document must also have a successful
-exact-commit Full CI check before merge. That final evidence stays on the
-commit and pull request instead of being written back into this file, because
-editing the file after CI would create another unverified commit.
+The final inventory commit `f3c7b7bc` also passed
+[Full CI run 33591560365](https://github.com/acking-you/fx/actions/runs/33591560365)
+with 25/25 jobs before it was fast-forwarded into `byok`. Ordinary CI passed
+14/14 on its successful second attempt, the performance workflow passed, and
+the binary-size matrix passed 4/4 on the same commit.
 
 ## Reviewer checklist
 
@@ -486,5 +489,5 @@ editing the file after CI would create another unverified commit.
   observation.
 - [x] Web Search projection and Web Fetch admission exceptions remain intact.
 
-The merge operator must verify the successful exact-commit Full CI required
-check on the inventory commit before advancing `byok`.
+The reviewed commit was fast-forwarded into `byok`, so the merge did not create
+an additional unverified tree or merge commit.
