@@ -1002,7 +1002,7 @@ function assertMarkerCount(
 }
 
 function isThinkingRow(line: string): boolean {
-  return /^(?:[•▲] )?thinking(?:\s+\(\d+s\))?(?:\s+\(↑\d+(?:\.\d+)?k?\s+↓\d+(?:\.\d+)?k?\))?$/i.test(
+  return /^(?:[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏•▲]\s+)?(?:Working|Thinking)(?:\s+\(\d+(?:h\d+m\d+s|m\d+s|s)\))?(?:\s+\(↑\d+(?:\.\d+)?k?\s+↓\d+(?:\.\d+)?k?\))?$/i.test(
     semanticText(line).trim(),
   );
 }

@@ -558,8 +558,9 @@ fn turnActivityProjection(
     if (activity_status.buildTurnLabel(buf, visible_stream, ctx.now_ms)) |label| {
         return .{ .turn_thinking = .{ .label = label } };
     }
+    const frame = activity_status.spinnerFrame(ctx.now_ms, ctx.stream.turn_started_ms);
     return .{ .turn_thinking = .{
-        .label = "• Thinking",
+        .label = std.fmt.bufPrint(buf, "{s} Working", .{frame}) catch "⠋ Working",
     } };
 }
 
@@ -760,7 +761,7 @@ test "frame-owned thinking activity projects the thinking label" {
 
     var dot_buf: [128]u8 = undefined;
     switch (frameOwnedActivityProjection(&dot_buf, &shell, ctx, null)) {
-        .turn_thinking => |thinking| try std.testing.expectEqualStrings("• Thinking", thinking.label),
+        .turn_thinking => |thinking| try std.testing.expectEqualStrings("⠋ Working", thinking.label),
         .none, .tool_slot => return error.TestUnexpectedResult,
     }
 }
@@ -787,7 +788,7 @@ test "frame-owned activity renders the thinking elapsed counter from the frame c
 
     var counter_buf: [128]u8 = undefined;
     switch (frameOwnedActivityProjection(&counter_buf, &shell, ctx, null)) {
-        .turn_thinking => |thinking| try std.testing.expectEqualStrings("• Thinking (3s)", thinking.label),
+        .turn_thinking => |thinking| try std.testing.expectEqualStrings("⠹ Working (3s)", thinking.label),
         .none, .tool_slot => return error.TestUnexpectedResult,
     }
 }
@@ -823,7 +824,7 @@ test "frame-owned activity keeps active tools out of the turn status row" {
     switch (frameOwnedActivityProjection(&active_buf, &shell, ctx, null)) {
         .turn_thinking => |thinking| {
             try std.testing.expectEqual(ActivityProjection.Tone.thinking, thinking.tone);
-            try std.testing.expectEqualStrings("• Thinking", thinking.label);
+            try std.testing.expectEqualStrings("⠋ Working", thinking.label);
         },
         .none, .tool_slot => return error.TestUnexpectedResult,
     }
@@ -871,7 +872,7 @@ test "current frame-owned activity leaves the focused tool in the transcript" {
     const projection = frameOwnedActivityProjection(&active_buf, &shell, ctx, null);
     switch (projection) {
         .turn_thinking => |thinking| try std.testing.expectEqualStrings(
-            "• Running (12s) (↑50k ↓1.2k)",
+            "⠋ Working (12s) (↑50k ↓1.2k)",
             thinking.label,
         ),
         .none, .tool_slot => return error.TestUnexpectedResult,
@@ -883,7 +884,7 @@ test "current frame-owned activity leaves the focused tool in the transcript" {
     streaming_ctx.writing_response = true;
     switch (frameOwnedActivityProjection(&streaming_buf, &shell, streaming_ctx, null)) {
         .turn_thinking => |thinking| try std.testing.expectEqualStrings(
-            "• Generating (12s) (↑50k ↓1.2k)",
+            "⠋ Working (12s) (↑50k ↓1.2k)",
             thinking.label,
         ),
         .none, .tool_slot => return error.TestUnexpectedResult,
@@ -914,7 +915,7 @@ test "remote compaction owns the activity row until it settles" {
     var active_buf: [256]u8 = undefined;
     switch (frameOwnedActivityProjection(&active_buf, &shell, ctx, null)) {
         .turn_thinking => |thinking| {
-            try std.testing.expectEqualStrings("• Compacting context", thinking.label);
+            try std.testing.expectEqualStrings("⠋ Compacting context", thinking.label);
             try std.testing.expectEqual(ActivityProjection.Tone.thinking, thinking.tone);
         },
         .none, .tool_slot => return error.TestUnexpectedResult,
@@ -927,7 +928,7 @@ test "minimal connected tool label clips with an ellipsis" {
     const projection: ActivityProjection = .{ .tool_slot = .{
         .entry_id = 123,
         .fallback_label = "● Running\x1b[0m \x1b[38;5;245mzig build test with a deliberately long target\x1b[0m\n",
-        .thinking_label = "• Thinking",
+        .thinking_label = "⠋ Working",
         .active = true,
         .kind = .command,
     } };
@@ -1017,7 +1018,7 @@ test "frame-owned activity shows live streaming token progress" {
     var active_buf: [256]u8 = undefined;
     switch (frameOwnedActivityProjection(&active_buf, &shell, ctx, null)) {
         .turn_thinking => |thinking| try std.testing.expectEqualStrings(
-            "• Generating (12s) (↑50k ↓1.2k)",
+            "⠋ Working (12s) (↑50k ↓1.2k)",
             thinking.label,
         ),
         .none, .tool_slot => return error.TestUnexpectedResult,
@@ -1030,7 +1031,7 @@ test "frame-owned activity shows live streaming token progress" {
     var drained_buf: [256]u8 = undefined;
     switch (frameOwnedActivityProjection(&drained_buf, &shell, drained_ctx, null)) {
         .turn_thinking => |thinking| try std.testing.expectEqualStrings(
-            "• Generating (12s) (↑50k ↓1.2k)",
+            "⠋ Working (12s) (↑50k ↓1.2k)",
             thinking.label,
         ),
         .none, .tool_slot => return error.TestUnexpectedResult,
@@ -1045,7 +1046,7 @@ test "frame-owned activity shows live streaming token progress" {
     var stalled_buf: [256]u8 = undefined;
     switch (frameOwnedActivityProjection(&stalled_buf, &shell, composing_ctx, null)) {
         .turn_thinking => |thinking| {
-            try std.testing.expectEqualStrings("• Running (12s) (↑50k ↓1.2k)", thinking.label);
+            try std.testing.expectEqualStrings("⠋ Working (12s) (↑50k ↓1.2k)", thinking.label);
             try std.testing.expectEqual(ActivityProjection.Tone.thinking, thinking.tone);
         },
         .none, .tool_slot => return error.TestUnexpectedResult,
@@ -1127,7 +1128,7 @@ test "frame-owned activity uses clipped command activity label" {
     switch (frameOwnedActivityProjection(&active_buf, &shell, ctx, null)) {
         .turn_thinking => |thinking| {
             try std.testing.expectEqual(ActivityProjection.Tone.thinking, thinking.tone);
-            try std.testing.expectEqualStrings("• Thinking (↑10 ↓20)", thinking.label);
+            try std.testing.expectEqualStrings("⠋ Working (↑10 ↓20)", thinking.label);
         },
         .none, .tool_slot => return error.TestUnexpectedResult,
     }

@@ -137,7 +137,7 @@ function normalizeTurnStatusForStability(pane: string): string {
   return pane
     .split(/\r?\n/)
     .map((line) => {
-      const match = line.match(/^\s*[•▲]?\s*(Thinking|Generating|Running)(?: \([^)]*\))*$/);
+      const match = line.match(/^\s*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏•▲]?\s*(Working|Thinking|Generating|Running)(?: \([^)]*\))*$/);
       return match ? `• ${match[1]}` : line;
     })
     .join("\n");

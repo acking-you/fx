@@ -3,6 +3,7 @@
 const std = @import("std");
 const debug_trace = @import("../../core/shared/debug_trace.zig");
 const display_width = @import("../../core/shared/display_width.zig");
+const activity_status = @import("../../core/output/activity_status.zig");
 const render_request = @import("../render_request.zig");
 const ui_render = @import("../render.zig");
 const render_engine = @import("../render_engine.zig");
@@ -259,18 +260,30 @@ fn markerBlinkVisible(shimmer_pos: i16) bool {
     return @mod(shimmer_pos + render_request.animation_padding, 2 * half) < half;
 }
 
+fn spinnerPrefixLen(label: []const u8) ?usize {
+    for (activity_status.spinner_frames) |frame| {
+        if (std.mem.startsWith(u8, label, frame)) return frame.len;
+    }
+    return null;
+}
+
 fn writeThinkingBlinkText(out: []u8, label: []const u8, marker_visible: bool) []const u8 {
     const marker = "•";
-    if (!std.mem.startsWith(u8, label, marker)) {
+    const spinner_len = spinnerPrefixLen(label);
+    const rest_start = spinner_len orelse if (std.mem.startsWith(u8, label, marker))
+        marker.len
+    else
         return writeStaticStyledText(out, label, ui_render.dim_style);
-    }
     var w: std.Io.Writer = .fixed(out);
-    if (marker_visible) {
-        w.print("{s}{s}{s}", .{ ui_render.permission_auto_style, marker, ui_render.reset_style }) catch return label;
+    // Spinner frames are the animation. Only the legacy bullet marker blinks off;
+    // braille frames and the bullet are both 3-byte UTF-8, so length cannot tell
+    // them apart.
+    if (spinner_len != null or marker_visible) {
+        w.print("{s}{s}{s}", .{ ui_render.permission_auto_style, label[0..rest_start], ui_render.reset_style }) catch return label;
     } else {
         w.writeAll(" ") catch return label;
     }
-    const rest = label[marker.len..];
+    const rest = label[rest_start..];
     // The token suffix recedes into the muted gray; the verb and elapsed
     // counter keep the brighter label gray.
     if (std.mem.find(u8, rest, " (↑")) |token_suffix| {
@@ -293,16 +306,26 @@ fn writeThinkingBlinkText(out: []u8, label: []const u8, marker_visible: bool) []
 
 test "thinking blink keeps the counter bright and dims only the token suffix" {
     var out: [256]u8 = undefined;
-    const result = writeThinkingBlinkText(&out, "• Thinking (5s) (↑10 ↓20)", true);
+    const result = writeThinkingBlinkText(&out, "⠋ Working (5s) (↑10 ↓20)", true);
 
-    const label_idx = std.mem.find(u8, result, "Thinking (5s)") orelse return error.TestUnexpectedResult;
+    const label_idx = std.mem.find(u8, result, "Working (5s)") orelse return error.TestUnexpectedResult;
     const dim_idx = std.mem.find(u8, result, ui_render.dim_style) orelse return error.TestUnexpectedResult;
     const tokens_idx = std.mem.find(u8, result, "(↑10 ↓20)") orelse return error.TestUnexpectedResult;
     try std.testing.expect(label_idx < dim_idx);
     try std.testing.expect(dim_idx < tokens_idx);
 
-    const plain = writeThinkingBlinkText(&out, "• Thinking (5s)", true);
+    const plain = writeThinkingBlinkText(&out, "⠋ Working (5s)", true);
     try std.testing.expect(std.mem.find(u8, plain, ui_render.dim_style) == null);
+}
+
+test "thinking spinner stays visible when the blink is off" {
+    var spinner_out: [256]u8 = undefined;
+    const spinner = writeThinkingBlinkText(&spinner_out, "⠋ Working (1s)", false);
+    try std.testing.expect(std.mem.find(u8, spinner, "⠋") != null);
+
+    var bullet_out: [256]u8 = undefined;
+    const bullet = writeThinkingBlinkText(&bullet_out, "• Thinking (1s)", false);
+    try std.testing.expect(std.mem.find(u8, bullet, "•") == null);
 }
 
 test "marker blink is on and off for equal halves of the 40-frame cycle" {
@@ -628,7 +651,7 @@ test "activity surface painter falls back to the tool label when the stack canno
     defer fixtures.shadow.deinit();
 
     _ = try paintActivityIntoSurface(&fixtures.surface, .{
-        .label = "• Thinking",
+        .label = "⠋ Working",
         .tool_label = "● Running read_file",
         .shimmer_pos = 0,
     });
@@ -639,7 +662,7 @@ test "activity surface painter falls back to the tool label when the stack canno
     defer target.deinit();
     try target.rowText(4, &row);
     try std.testing.expect(std.mem.find(u8, row.items, "Running read_file") != null);
-    try std.testing.expect(std.mem.find(u8, row.items, "Thinking") == null);
+    try std.testing.expect(std.mem.find(u8, row.items, "Working") == null);
 }
 
 test "activity surface painter uses width-fitting omission markers" {
@@ -782,18 +805,18 @@ test "activity surface painter honors the thinking blink override" {
     defer visible.shadow.deinit();
 
     _ = try paintActivityIntoSurface(&hidden.surface, .{
-        .label = "• Thinking (1s)",
+        .label = "⠋ Working (1s)",
         .shimmer_pos = -render_request.animation_padding,
         .thinking_blink = false,
     });
     _ = try paintActivityIntoSurface(&visible.surface, .{
-        .label = "• Thinking (1s)",
+        .label = "⠋ Working (1s)",
         .shimmer_pos = 4,
         .thinking_blink = true,
     });
 
-    try std.testing.expectEqual(@as(u21, ' '), hidden.surface.cellAt(4, 1).?.codepoint);
-    try std.testing.expectEqual(@as(u21, '•'), visible.surface.cellAt(4, 1).?.codepoint);
+    try std.testing.expectEqual(@as(u21, '⠋'), hidden.surface.cellAt(4, 1).?.codepoint);
+    try std.testing.expectEqual(@as(u21, '⠋'), visible.surface.cellAt(4, 1).?.codepoint);
 }
 
 test "activity surface painter rejects activity over footer" {

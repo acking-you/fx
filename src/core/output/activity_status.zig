@@ -10,8 +10,8 @@ const ActivityPart = struct {
     verb: []const u8,
 };
 
-// Terminal-title animation remains independent from the footer's semantic
-// turn-phase marker. Keep its cadence here so all title writers agree.
+// Braille frames and cadence match the title-bar spinner. Footer activity
+// and terminal-title writers share this so both surfaces spin together.
 pub const spinner_interval_ms: i64 = 100;
 pub const spinner_frames = [_][]const u8{
     "⠋",
@@ -46,16 +46,15 @@ fn streamStatusVerb(stream: StreamState) []const u8 {
     };
 }
 
-fn markedTurnPhaseLabel(phase: types.TurnPhase) []const u8 {
-    return switch (phase) {
-        .thinking => "• Thinking",
-        .generating => "• Generating",
-        .running => "• Running",
-    };
-}
-
-fn buildMarkedLabel(buf: []u8, stream: StreamState, now_ms: i64, heading: []const u8) []const u8 {
+pub fn buildWorkingLabel(
+    buf: []u8,
+    stream: StreamState,
+    now_ms: i64,
+    heading: []const u8,
+) []const u8 {
     var out: std.Io.Writer = .fixed(buf);
+    out.writeAll(spinnerFrame(now_ms, stream.turn_started_ms)) catch return heading;
+    out.writeByte(' ') catch return heading;
     out.writeAll(heading) catch return out.buffered();
     appendTurnElapsedSuffix(&out, stream, now_ms) catch return out.buffered();
     appendTurnTokenSuffix(&out, stream) catch return out.buffered();
@@ -64,11 +63,11 @@ fn buildMarkedLabel(buf: []u8, stream: StreamState, now_ms: i64, heading: []cons
 
 pub fn buildTurnLabel(buf: []u8, stream: StreamState, now_ms: i64) ?[]const u8 {
     if (stream.last_activity_kind != null) return null;
-    return buildMarkedLabel(buf, stream, now_ms, markedTurnPhaseLabel(stream.phase));
+    return buildWorkingLabel(buf, stream, now_ms, "Working");
 }
 
 pub fn buildCompactionLabel(buf: []u8, stream: StreamState, now_ms: i64) []const u8 {
-    return buildMarkedLabel(buf, stream, now_ms, "• Compacting context");
+    return buildWorkingLabel(buf, stream, now_ms, "Compacting context");
 }
 
 pub const activity_blink_half_period_ms: i64 = 500;
@@ -237,10 +236,10 @@ pub fn appendTurnTokenSuffix(writer: *std.Io.Writer, stream: StreamState) !void 
     try appendTokenProgressSuffix(writer, stream.token_progress);
 }
 
-test "buildTurnLabel returns thinking when no tool activity" {
+test "buildTurnLabel returns working when no tool activity" {
     var buf: [32]u8 = undefined;
     const label = buildTurnLabel(&buf, .{ .active = true }, 0);
-    try std.testing.expectEqualStrings("• Thinking", label.?);
+    try std.testing.expectEqualStrings("⠋ Working", label.?);
 }
 
 test "buildTurnLabel renders turn token suffix with input only" {
@@ -249,7 +248,7 @@ test "buildTurnLabel renders turn token suffix with input only" {
         .active = true,
         .token_progress = .{ .input_tokens = 10 },
     }, 0);
-    try std.testing.expectEqualStrings("• Thinking (↑10 ↓0)", label.?);
+    try std.testing.expectEqualStrings("⠋ Working (↑10 ↓0)", label.?);
 }
 
 test "buildCompletedTurnLabel keeps final token progress in the marker column" {
@@ -266,7 +265,7 @@ test "buildTurnLabel renders turn token suffix with input and output" {
         .active = true,
         .token_progress = .{ .input_tokens = 10, .output_tokens = 20 },
     }, 0);
-    try std.testing.expectEqualStrings("• Thinking (↑10 ↓20)", label.?);
+    try std.testing.expectEqualStrings("⠋ Working (↑10 ↓20)", label.?);
 }
 
 test "buildTurnLabel renders elapsed seconds for the running turn" {
@@ -275,7 +274,7 @@ test "buildTurnLabel renders elapsed seconds for the running turn" {
         .active = true,
         .turn_started_ms = 1_000,
     }, 6_500);
-    try std.testing.expectEqualStrings("• Thinking (5s)", label.?);
+    try std.testing.expectEqualStrings("⠴ Working (5s)", label.?);
 }
 
 test "buildTurnLabel renders elapsed minutes and seconds for long turns" {
@@ -285,7 +284,7 @@ test "buildTurnLabel renders elapsed minutes and seconds for long turns" {
         .active = true,
         .turn_started_ms = 1_000,
     }, 1_000 + 1_080 * 1_000);
-    try std.testing.expectEqualStrings("• Thinking (18m0s)", label.?);
+    try std.testing.expectEqualStrings("⠋ Working (18m0s)", label.?);
 }
 
 test "buildTurnLabel renders elapsed hours for very long turns" {
@@ -295,7 +294,7 @@ test "buildTurnLabel renders elapsed hours for very long turns" {
         .active = true,
         .turn_started_ms = 1_000,
     }, 1_000 + 3_663 * 1_000);
-    try std.testing.expectEqualStrings("• Thinking (1h1m3s)", label.?);
+    try std.testing.expectEqualStrings("⠋ Working (1h1m3s)", label.?);
 }
 
 test "buildTurnLabel renders elapsed seconds before the token suffix" {
@@ -305,7 +304,7 @@ test "buildTurnLabel renders elapsed seconds before the token suffix" {
         .turn_started_ms = 1_000,
         .token_progress = .{ .input_tokens = 10, .output_tokens = 20 },
     }, 13_000);
-    try std.testing.expectEqualStrings("• Thinking (12s) (↑10 ↓20)", label.?);
+    try std.testing.expectEqualStrings("⠋ Working (12s) (↑10 ↓20)", label.?);
 }
 
 test "activity blink relights exactly when the seconds digit advances" {
@@ -318,7 +317,7 @@ test "activity blink relights exactly when the seconds digit advances" {
 
     var label_buf: [64]u8 = undefined;
     const at_relight = buildTurnLabel(&label_buf, stream, 2_000);
-    try std.testing.expectEqualStrings("• Thinking (1s)", at_relight.?);
+    try std.testing.expectEqualStrings("⠋ Working (1s)", at_relight.?);
 }
 
 test "activity blink has no clock without a running turn" {
@@ -336,13 +335,13 @@ test "turn clock freezes while waiting on user input and excludes the wait" {
     syncWaitingClock(&stream, true, 5_000);
     try std.testing.expectEqual(@as(i64, 5_000), stream.waiting_since_ms);
 
-    try std.testing.expectEqualStrings("• Thinking (4s)", buildTurnLabel(&buf, stream, 900_000).?);
+    try std.testing.expectEqualStrings("⠋ Working (4s)", buildTurnLabel(&buf, stream, 900_000).?);
     try std.testing.expectEqual(@as(?bool, true), activityBlinkVisible(stream, 900_000));
 
     syncWaitingClock(&stream, false, 900_000);
     try std.testing.expectEqual(@as(i64, 0), stream.waiting_since_ms);
-    try std.testing.expectEqualStrings("• Thinking (4s)", buildTurnLabel(&buf, stream, 900_000).?);
-    try std.testing.expectEqualStrings("• Thinking (7s)", buildTurnLabel(&buf, stream, 903_000).?);
+    try std.testing.expectEqualStrings("⠋ Working (4s)", buildTurnLabel(&buf, stream, 900_000).?);
+    try std.testing.expectEqualStrings("⠋ Working (7s)", buildTurnLabel(&buf, stream, 903_000).?);
 }
 
 test "waiting clock accumulates across repeated prompts in one turn" {
@@ -358,7 +357,7 @@ test "waiting clock accumulates across repeated prompts in one turn" {
     syncWaitingClock(&stream, true, 11_000);
     syncWaitingClock(&stream, false, 20_000);
     var buf: [64]u8 = undefined;
-    try std.testing.expectEqualStrings("• Thinking (2s)", buildTurnLabel(&buf, stream, 20_000).?);
+    try std.testing.expectEqualStrings("⠋ Working (2s)", buildTurnLabel(&buf, stream, 20_000).?);
 }
 
 test "waiting clock does not start without an active stream" {
@@ -373,7 +372,7 @@ test "buildTurnLabel hides elapsed seconds when the clock runs behind the mark" 
         .active = true,
         .turn_started_ms = 2_000,
     }, 1_000);
-    try std.testing.expectEqualStrings("• Thinking", label.?);
+    try std.testing.expectEqualStrings("⠋ Working", label.?);
 }
 
 test "buildThinkingLabelFull renders ordered activity counts" {
