@@ -1448,7 +1448,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         "Updated Plan",
         TIMEOUT,
       );
-      expect(planned).toContain("□ Inspect the source");
+      expect(planned).toContain("▶ Inspect the source");
       expect(planned).toContain("□ Run the focused test");
 
       await session!.waitForText(finalText, TIMEOUT);
