@@ -13,7 +13,8 @@ not been merged into `byok`.
 | Latest upstream main included | `d424f1a8` |
 | Tree before the final product pruning | `ccf8680a` |
 | MCP pruning checkpoint | `32a8e6f6` |
-| Final upstream merge and audit | This review merge commit |
+| Last code-bearing review candidate | `95be8bb3` |
+| Final inventory documentation | The commit containing this document |
 
 The final product decision is explicit: this fork does not support MCP. Skills
 are the extension mechanism. No MCP configuration, transport, authentication,
@@ -33,6 +34,49 @@ conformance suite remains executable.
    even when their old fixture happened to use a removed feature.
 6. Use the fork's exact-commit Full CI as the merge gate. Upstream CI is not
    accepted as proof for this branch.
+
+## Consolidated change inventory
+
+### Upstream additions and their disposition
+
+This table is the review index for functionality introduced by the upstream
+series included through `d424f1a8`. The detailed owner and behavior sections
+below remain authoritative.
+
+| Area | What upstream introduced or changed | BYOK disposition |
+| --- | --- | --- |
+| Capability retrieval | Bounded `capability_search`, natural-intent routing, and distinct skill-resource activity | Retained as a skill-only boundary; MCP catalogs and dynamic tools were removed |
+| Full transcript | Complete Ctrl+O metadata, background page building, bounded viewport windows, wheel and page navigation, restored viewport intent, and large snapshot support | Retained with UI-thread adoption and stale-view invalidation |
+| Terminal responsiveness | Focused polling, prepared-page reuse, stable visible pages, lifecycle performance gates, and transient resource bounds | Retained; BYOK repaired pending-frame delivery and removed only observer-noise or unsupported-backend samples |
+| Skills catalog | Canonical home resolution, generation-safe refresh, overlap handling, and hot discovery inside an existing candidate directory | Retained; the timing-sensitive regression test now uses a bounded wait |
+| Sessions and ACP | Shorter new session IDs, paginated ACP `session/list`, stable tool-call input and output metadata, and session/process lifecycle preservation | Retained without changing existing session compatibility |
+| Agent integrity | Approval ownership, child approval binding, post-tool reassessment, recovery guidance, and canonical tool-result finalization | Retained where it reinforces the fork's existing agent harness |
+| TUI presentation | Collapsible tool-call groups, live activity beside native scrollback, code-block rule refinements, and current-menu rendering | Retained with BYOK's `Thinking` wording and full detail still available in Ctrl+O |
+| Provider lifecycle | Logout recovery, asynchronous credential inventory, portable credential probes, and usage-dashboard refresh | Retained only for direct BYOK, Codex, and Grok sources; Vercel account and team flows were removed |
+| Vision | Capability-gated advertisement, native route recovery, ACP image support, and a live routing evaluation | Retained as a conditional provider capability |
+| Portable hosts | Host-owned WASM prompt admission and cross-target build repairs | Retained; the BYOK credential probe also received a single-threaded WASM path |
+| Test and release policy | Exact PGSO ownership, deterministic sharding, terminal benchmarks, binary-size gates, and cross-platform compile coverage | Retained under fork-owned CI; stale MCP, Vercel, signing-product, and removed-feature registrations were deleted |
+| MCP product surface | Interactive menus, prompts, resources, tools, authentication, transports, conformance, and compatibility paths | Removed completely; skills are the only extension mechanism |
+
+### BYOK reconciliation changes
+
+These are the fork changes applied while accepting the upstream series. They
+are not upstream features and should be reviewed as the local delta.
+
+| Change | Result |
+| --- | --- |
+| Removed the complete MCP vertical slice | Deleted production runtime, configuration, transports, menus, ACP bridge, dynamic tools, authentication, fixtures, conformance packages, CI registrations, and documentation that presented MCP as supported |
+| Restored the provider-neutral product surface | Kept generic setup import, direct Responses configuration, Codex and Grok OAuth, deterministic Codex-first fallback, provider selection, refresh, durable logout, and ACP provider control without Vercel onboarding |
+| Preserved protected agent behavior | Reconciled native compaction, reasoning replay, UI-thread event adoption, same-turn steering, Unified Exec, Web Search projection, Web Fetch admission, child route snapshots, and provider usage against upstream structure |
+| Fixed completed-summary presentation | Routed completed turn summaries through the full append boundary so cache, cursor, retention, and repaint state update together |
+| Fixed Windows stored-session detection | Replaced a POSIX-only mode conversion with the shared private-file permission contract used by Codex and Grok session loading |
+| Fixed portable credential inventory | Added a synchronous single-threaded completion path for WASM while retaining threaded native TUI and ACP behavior |
+| Fixed native asynchronous UI delivery | Pending active-surface frames now commit without the 50ms native idle delay; skills, account inventory, and full-transcript cache misses returned to one-frame latency |
+| Reconciled test fixtures with BYOK | Replaced Vercel environment variables and presentation labels, converted the approval fixture to `exec_command`, and removed obsolete `terminal` backend samples |
+| Removed tests without a surviving product contract | Deleted removed-feature owners, duplicate brittle snapshots, an unprovable retry token count, a stale cache-null assertion, the redundant brutal transcript profiler, and one host-observer subagent microbenchmark |
+| Kept meaningful regression coverage | Preserved portability, crash, recovery, concurrency, resource, security, rendering, provider, skill, subagent, and runtime behavior tests even when their old fixture originated upstream |
+| Strengthened fork CI | Kept fork-owned deterministic sharding and added exact Windows, Linux, macOS, and portable WASM gates without adopting upstream release cadence as the merge authority |
+| Updated fork documentation | README, AGENTS, CONTRIBUTING, CHANGELOG, and this audit now state the skill-only extension contract and enumerate retained and removed behavior |
 
 ## Additions retained from upstream
 
@@ -415,24 +459,32 @@ Local checks for the final pruning tree:
   active `/clear`, `/new`, and `/reset` recovery.
 - [x] The complete ReleaseSafe Zig test graph passes on the current Windows
   review tree after the pending-frame scheduling repair.
-- [ ] Exact-commit Full CI passes the Windows, Linux, and macOS native gates,
-  every deterministic E2E shard, and the portable WASM builds.
+- [x] The last code-bearing candidate `95be8bb3` passes
+  [Full CI run 33567116826](https://github.com/acking-you/fx/actions/runs/33567116826):
+  25/25 jobs across Windows, Linux, macOS, every deterministic E2E shard, and
+  the portable WASM builds.
+
+The inventory-only commit containing this document must also have a successful
+exact-commit Full CI check before merge. That final evidence stays on the
+commit and pull request instead of being written back into this file, because
+editing the file after CI would create another unverified commit.
 
 ## Reviewer checklist
 
-- [ ] No Vercel onboarding or default product route returned.
-- [ ] Codex and Grok login, setup import, fallback, refresh, logout, and ACP
+- [x] No Vercel onboarding or default product route returned.
+- [x] Codex and Grok login, setup import, fallback, refresh, logout, and ACP
   provider control remain intact.
-- [ ] MCP has no executable, configurable, documented-as-supported, or tested
+- [x] MCP has no executable, configurable, documented-as-supported, or tested
   product surface.
-- [ ] Skills remain the only extension mechanism.
-- [ ] Removed tests have no surviving product owner; generic contracts retain
+- [x] Skills remain the only extension mechanism.
+- [x] Removed tests have no surviving product owner; generic contracts retain
   focused coverage.
-- [ ] Compaction still has one strategy owner.
-- [ ] Worker callbacks do not mutate transcript state directly.
-- [ ] Same-turn steering and its completion-race fallback remain intact.
-- [ ] Unified Exec retains one model-facing command family and independent ACP
+- [x] Compaction still has one strategy owner.
+- [x] Worker callbacks do not mutate transcript state directly.
+- [x] Same-turn steering and its completion-race fallback remain intact.
+- [x] Unified Exec retains one model-facing command family and independent ACP
   observation.
-- [ ] Web Search projection and Web Fetch admission exceptions remain intact.
-- [ ] Every exact-commit Full CI job, including the portable WASM compile gate,
-  passes before merge into `byok`.
+- [x] Web Search projection and Web Fetch admission exceptions remain intact.
+
+The merge operator must verify the successful exact-commit Full CI required
+check on the inventory commit before advancing `byok`.
