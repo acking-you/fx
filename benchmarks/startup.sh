@@ -55,7 +55,7 @@ if [ ! -x "$FX_BIN" ]; then
 fi
 
 mkdir -p "$RESULTS_DIR"
-rm -f "${RESULTS_DIR}/tasks.json"
+rm -f "${RESULTS_DIR}"/*.json
 mkdir -p "$SESSION_FIXTURE_HOME" "$SESSION_FIXTURE_WORKSPACE" "$GENERAL_FIXTURE_HOME"
 mkdir -p "$GENERAL_FIXTURE_HOME/.fx"
 chmod 700 "$GENERAL_FIXTURE_HOME/.fx"
@@ -150,21 +150,6 @@ HOME="$SESSION_FIXTURE_HOME" hyperfine \
   --export-json "${RESULTS_DIR}/sessions.json" \
   --command-name "fx sessions --json" \
   "$FX_BIN sessions --json"
-
-echo ""
-
-# Benchmark 5: fx background --json (file I/O path)
-echo "--- fx background --json ---"
-(
-  cd "$SESSION_FIXTURE_WORKSPACE"
-  HOME="$SESSION_FIXTURE_HOME" hyperfine \
-    "${SHELL_OPTS[@]}" \
-    --runs "$RUNS" \
-    --warmup "$WARMUP" \
-    --export-json "${RESULTS_DIR}/background.json" \
-    --command-name "fx background --json" \
-    "$FX_BIN background --json"
-)
 
 echo ""
 
