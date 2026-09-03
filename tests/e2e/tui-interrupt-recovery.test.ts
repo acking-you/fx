@@ -84,7 +84,7 @@ describe.skipIf(SKIP)("tui: interrupt recovery", () => {
       };
       gateway = startFakeGateway([
         fakeGatewayToolCall("yielded_exec", "exec_command", {
-          cmd: "sleep 1; printf survived > unified-exec-survived.txt",
+          cmd: "sleep 3; printf survived > unified-exec-survived.txt",
           yield_time_ms: 250,
         }),
         () => heldUntilReleasedResponse(held),
@@ -121,6 +121,12 @@ describe.skipIf(SKIP)("tui: interrupt recovery", () => {
       await session.sendKeys("Escape");
       await waitForCondition(() => held.cancelled, "held response cancellation");
       await waitForTrace(tracePath, "event=interrupt_persisted", TIMEOUT);
+
+      await session.sendText("/ps");
+      const processes = await session.waitForText("#1 [running]", TIMEOUT);
+      expect(processes).toContain("sleep 3; printf survived");
+      expect(processes).toContain("mode: codex");
+
       await waitForCondition(() => existsSync(survivedPath), "yielded process completion after interrupt");
       expect(readFileSync(survivedPath, "utf8")).toBe("survived");
 

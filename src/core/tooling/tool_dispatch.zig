@@ -1,5 +1,4 @@
 const std = @import("std");
-const background_runtime = @import("../background/background_runtime.zig");
 const command_admission = @import("../permissions/command_admission.zig");
 const core_permissions = @import("../permissions/permissions.zig");
 const core_types = @import("../shared/types.zig");
@@ -25,6 +24,7 @@ const web_search_contract = @import("web_search_contract.zig");
 const context_limits = @import("../config/context_limits.zig");
 const workspace_access = @import("../workspace/workspace_access.zig");
 const unified_exec_runtime = @import("../execution/unified_exec.zig");
+const exec_mode = @import("../execution/exec_mode.zig");
 const tool_args = @import("tool_args.zig");
 
 const Allocator = std.mem.Allocator;
@@ -188,10 +188,6 @@ pub const DispatchContext = struct {
     /// Optional arena-owned metadata sink used by direct command tools to
     /// expose retained output artifacts to the presentation layer.
     command_result_json_sink: ?*?[]const u8 = null,
-    background_ctx: ?*background_runtime.BackgroundRuntime = null,
-    background_url_ctx: ?*anyopaque = null,
-    on_background_url_ready: ?*const fn (*anyopaque, []const u8, []const u8) void = null,
-    background_log_dir: ?[]const u8 = null,
     command_artifact_dir: ?[]const u8 = null,
     tool_result_dir: ?[]const u8 = null,
     session_child_capability: ?*session_child_store.SessionChildCapability = null,
@@ -199,7 +195,7 @@ pub const DispatchContext = struct {
     /// Core-owned process manager for the model-facing Unified Exec tools.
     /// It is independent from the hosted terminal engine and survives turns.
     unified_exec: ?*unified_exec_runtime.Manager = null,
-    background_lifecycle_allocator: Allocator = std.heap.c_allocator,
+    exec_mode: exec_mode.Mode = .codex,
     command_timeout_ms: ?usize = null,
     subagent_provider: ?subagent_tool_provider.Provider = null,
     vision_provider: ?VisionProvider = null,
@@ -1322,10 +1318,6 @@ test "DispatchContext command runner fields default to inactive values" {
     try std.testing.expect(ctx.cancel_flag == null);
     try std.testing.expect(ctx.output_chunk_ctx == null);
     try std.testing.expect(ctx.on_output_chunk == null);
-    try std.testing.expect(ctx.background_ctx == null);
-    try std.testing.expect(ctx.background_url_ctx == null);
-    try std.testing.expect(ctx.on_background_url_ready == null);
-    try std.testing.expect(ctx.background_log_dir == null);
     try std.testing.expect(ctx.command_artifact_dir == null);
     try std.testing.expect(ctx.command_timeout_ms == null);
     try std.testing.expect(ctx.subagent_provider == null);

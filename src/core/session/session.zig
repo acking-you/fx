@@ -1954,40 +1954,6 @@ pub const SessionRuntime = struct {
         self.advanceHistoryGeneration();
     }
 
-    pub fn appendBackgroundCommandHistoryTurn(self: *SessionRuntime, alloc: Allocator, user: []const u8, background: command_contract.BackgroundCommand) !void {
-        const user_text = try alloc.dupe(u8, user);
-        var owns_user_text = true;
-        errdefer if (owns_user_text) alloc.free(user_text);
-
-        const log_path = try alloc.dupe(u8, background.log_path);
-        var owns_log_path = true;
-        errdefer if (owns_log_path) alloc.free(log_path);
-
-        const url: ?[]u8 = if (background.url) |url_text| try alloc.dupe(u8, url_text) else null;
-        var owns_url = url != null;
-        errdefer if (owns_url) {
-            if (url) |url_text| alloc.free(url_text);
-        };
-
-        const turn = HistoryTurn{ .background_command = .{
-            .user = .{ .text = user_text, .images = &.{} },
-            .log_path = log_path,
-            .expect_url = background.expect_url,
-            .url = url,
-            .background_record_id = background.background_record_id,
-        } };
-        owns_user_text = false;
-        owns_log_path = false;
-        owns_url = false;
-
-        var owns_turn = true;
-        errdefer if (owns_turn) freeHistoryTurn(alloc, turn);
-
-        try self.history.append(alloc, turn);
-        owns_turn = false;
-        self.advanceHistoryGeneration();
-    }
-
     pub fn appendHistoryMessages(
         alloc: Allocator,
         messages: *std.ArrayList(message.Message),
@@ -3224,12 +3190,12 @@ pub fn formatCompactedContinuationMessage(alloc: Allocator, summary: []const u8)
 
 pub fn formatBackgroundHistoryContext(alloc: Allocator, entry: BackgroundCommandHistoryTurn) ![]u8 {
     if (entry.url) |url| {
-        return std.fmt.allocPrint(alloc, "Session event: a previous user request launched a background server. Log: {s}. URL observed at launch: {s}. Re-check runtime context for current liveness before reusing it.", .{ entry.log_path, url });
+        return std.fmt.allocPrint(alloc, "Historical session event: an older fx version launched a background server. Recorded log: {s}. Recorded URL: {s}. This record is not attached to a live process; do not treat it as running.", .{ entry.log_path, url });
     }
     if (entry.expect_url) {
-        return std.fmt.allocPrint(alloc, "Session event: a previous user request launched a background server. Log: {s}. Re-check runtime context for current liveness and URL state before reusing it.", .{entry.log_path});
+        return std.fmt.allocPrint(alloc, "Historical session event: an older fx version launched a background server. Recorded log: {s}. No URL was retained. This record is not attached to a live process; do not treat it as running.", .{entry.log_path});
     }
-    return std.fmt.allocPrint(alloc, "Session event: a previous user request launched a background command. Log: {s}. Re-check runtime context for current liveness before treating it as running.", .{entry.log_path});
+    return std.fmt.allocPrint(alloc, "Historical session event: an older fx version launched a background command. Recorded log: {s}. This record is not attached to a live process; do not treat it as running.", .{entry.log_path});
 }
 
 pub fn formatExecutionFileContext(alloc: Allocator, files: []const core_types.FileEvidence) ![]u8 {
@@ -4099,7 +4065,7 @@ test "resume projection emits compacted summary before background command contex
     try std.testing.expectEqualStrings("run dev", messages.items[1].content.?.asText());
     try std.testing.expectEqual(.user, messages.items[2].role);
     try std.testing.expectEqualStrings(
-        "Session event: a previous user request launched a background server. Log: /tmp/server.log. URL observed at launch: http://localhost:3000. Re-check runtime context for current liveness before reusing it.",
+        "Historical session event: an older fx version launched a background server. Recorded log: /tmp/server.log. Recorded URL: http://localhost:3000. This record is not attached to a live process; do not treat it as running.",
         messages.items[2].content.?.asText(),
     );
 }
@@ -5830,73 +5796,17 @@ test "SessionRuntime context projection preserves nine typed canonical turns" {
     );
 }
 
-test "SessionRuntime.appendBackgroundCommandHistoryTurn duplicates fields and projects context" {
-    const alloc = std.testing.allocator;
-    var runtime: SessionRuntime = .{ .max_history_turns = 8 };
-    defer runtime.deinit(alloc);
-
-    const user_text = try alloc.dupe(u8, "run dev server");
-    defer alloc.free(user_text);
-    const log_path = try alloc.dupe(u8, "/tmp/dev.log");
-    defer alloc.free(log_path);
-    const url = try alloc.dupe(u8, "http://localhost:5173");
-    defer alloc.free(url);
-
-    const background = command_contract.BackgroundCommand{
-        .pid = "123",
-        .background_record_id = .{
-            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
-            0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
-        },
-        .command = "npm run dev",
-        .cwd = "/tmp/app",
-        .log_path = log_path,
-        .url = url,
-        .expect_url = true,
-    };
-
-    try runtime.appendBackgroundCommandHistoryTurn(alloc, user_text, background);
-    user_text[0] = '!';
-    log_path[0] = '!';
-    url[0] = '!';
-
-    const entry = runtime.history.items[0].background_command;
-    try std.testing.expectEqualStrings("run dev server", entry.user.text);
-    try std.testing.expectEqualStrings("/tmp/dev.log", entry.log_path);
-    try std.testing.expectEqualStrings("http://localhost:5173", entry.url.?);
-    try std.testing.expect(entry.expect_url);
-    try std.testing.expectEqualSlices(
-        u8,
-        &background.background_record_id.?,
-        &entry.background_record_id.?,
-    );
-
-    var messages: std.ArrayList(message.Message) = .empty;
-    defer deinitMessages(alloc, &messages);
-    try SessionRuntime.appendHistoryMessages(alloc, &messages, runtime.history.items);
-    try std.testing.expectEqual(@as(usize, 2), messages.items.len);
-    try std.testing.expectEqualStrings("run dev server", messages.items[0].content.?.asText());
-    try std.testing.expectEqualStrings(
-        "Session event: a previous user request launched a background server. Log: /tmp/dev.log. URL observed at launch: http://localhost:5173. Re-check runtime context for current liveness before reusing it.",
-        messages.items[1].content.?.asText(),
-    );
-    try std.testing.expect(messages.items[1].owns_content);
-}
-
 test "SessionRuntime.snapshotHistory returns deep copy that outlives runtime history" {
     const alloc = std.testing.allocator;
     var runtime: SessionRuntime = .{ .max_history_turns = 8 };
     defer runtime.deinit(alloc);
 
     try runtime.appendAssistantHistoryTurn(alloc, "hello", "world");
-    try runtime.appendBackgroundCommandHistoryTurn(alloc, "run", .{
-        .pid = "1",
-        .command = "serve",
-        .cwd = "/tmp",
+    try runtime.appendHistoryEntry(alloc, .{ .background_command = .{
+        .user = .{ .text = @constCast("run") },
         .log_path = "/tmp/run.log",
-        .url = null,
         .expect_url = false,
-    });
+    } });
 
     const snapshot = try runtime.snapshotHistory(alloc);
     defer freeHistoryTurnSlice(alloc, snapshot);
@@ -6570,7 +6480,7 @@ test "history context formatters return exact text" {
     });
     defer alloc.free(with_url);
     try std.testing.expectEqualStrings(
-        "Session event: a previous user request launched a background server. Log: /tmp/url.log. URL observed at launch: http://localhost:3000. Re-check runtime context for current liveness before reusing it.",
+        "Historical session event: an older fx version launched a background server. Recorded log: /tmp/url.log. Recorded URL: http://localhost:3000. This record is not attached to a live process; do not treat it as running.",
         with_url,
     );
 
@@ -6581,7 +6491,7 @@ test "history context formatters return exact text" {
     });
     defer alloc.free(pending);
     try std.testing.expectEqualStrings(
-        "Session event: a previous user request launched a background server. Log: /tmp/pending.log. Re-check runtime context for current liveness and URL state before reusing it.",
+        "Historical session event: an older fx version launched a background server. Recorded log: /tmp/pending.log. No URL was retained. This record is not attached to a live process; do not treat it as running.",
         pending,
     );
 
@@ -6592,7 +6502,7 @@ test "history context formatters return exact text" {
     });
     defer alloc.free(command);
     try std.testing.expectEqualStrings(
-        "Session event: a previous user request launched a background command. Log: /tmp/command.log. Re-check runtime context for current liveness before treating it as running.",
+        "Historical session event: an older fx version launched a background command. Recorded log: /tmp/command.log. This record is not attached to a live process; do not treat it as running.",
         command,
     );
 

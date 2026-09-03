@@ -146,63 +146,58 @@ test "post-turn automatic compaction reports every settled outcome" {
     }
 }
 
-const BackgroundSessionPolicy = enum {
-    carry_forward,
-    stop_forget,
-};
-
-const LiveSessionTransitionEvent = union(enum) {
-    request: BackgroundSessionPolicy,
+const LiveSessionTransitionEvent = enum {
+    request,
     settle,
 };
 
-const LiveSessionTransitionAction = union(enum) {
-    apply_now: BackgroundSessionPolicy,
+const LiveSessionTransitionAction = enum {
+    apply_now,
     cancel_and_defer,
-    apply_pending: BackgroundSessionPolicy,
+    apply_pending,
     none,
 };
 
 const LiveSessionTransitionDecision = struct {
-    pending_policy: ?BackgroundSessionPolicy,
+    pending: bool,
     action: LiveSessionTransitionAction,
 };
 
 fn decideLiveSessionTransition(
     cooperative: bool,
     processing: bool,
-    pending_policy: ?BackgroundSessionPolicy,
+    pending: bool,
     event: LiveSessionTransitionEvent,
 ) LiveSessionTransitionDecision {
     return switch (event) {
-        .request => |policy| if (!cooperative or !processing)
+        .request => if (!cooperative or !processing)
             .{
-                .pending_policy = null,
-                .action = .{ .apply_now = policy },
+                .pending = false,
+                .action = .apply_now,
             }
-        else if (pending_policy == null)
+        else if (!pending)
             .{
-                .pending_policy = policy,
+                .pending = true,
                 .action = .cancel_and_defer,
             }
         else
             .{
-                .pending_policy = policy,
+                .pending = true,
                 .action = .none,
             },
         .settle => if (processing)
             .{
-                .pending_policy = pending_policy,
+                .pending = pending,
                 .action = .none,
             }
-        else if (pending_policy) |policy|
+        else if (pending)
             .{
-                .pending_policy = null,
-                .action = .{ .apply_pending = policy },
+                .pending = false,
+                .action = .apply_pending,
             }
         else
             .{
-                .pending_policy = null,
+                .pending = false,
                 .action = .none,
             },
     };
@@ -212,77 +207,77 @@ test "live session transition decision defers only active cooperative requests" 
     const cases = [_]struct {
         cooperative: bool,
         processing: bool,
-        pending: ?BackgroundSessionPolicy,
+        pending: bool,
         event: LiveSessionTransitionEvent,
         expected: LiveSessionTransitionDecision,
     }{
         .{
             .cooperative = false,
             .processing = true,
-            .pending = null,
-            .event = .{ .request = .carry_forward },
+            .pending = false,
+            .event = .request,
             .expected = .{
-                .pending_policy = null,
-                .action = .{ .apply_now = .carry_forward },
+                .pending = false,
+                .action = .apply_now,
             },
         },
         .{
             .cooperative = true,
             .processing = false,
-            .pending = null,
-            .event = .{ .request = .stop_forget },
+            .pending = false,
+            .event = .request,
             .expected = .{
-                .pending_policy = null,
-                .action = .{ .apply_now = .stop_forget },
+                .pending = false,
+                .action = .apply_now,
             },
         },
         .{
             .cooperative = true,
             .processing = true,
-            .pending = null,
-            .event = .{ .request = .carry_forward },
+            .pending = false,
+            .event = .request,
             .expected = .{
-                .pending_policy = .carry_forward,
+                .pending = true,
                 .action = .cancel_and_defer,
             },
         },
         .{
             .cooperative = true,
             .processing = true,
-            .pending = .carry_forward,
-            .event = .{ .request = .stop_forget },
+            .pending = true,
+            .event = .request,
             .expected = .{
-                .pending_policy = .stop_forget,
+                .pending = true,
                 .action = .none,
             },
         },
         .{
             .cooperative = true,
             .processing = true,
-            .pending = .stop_forget,
+            .pending = true,
             .event = .settle,
             .expected = .{
-                .pending_policy = .stop_forget,
+                .pending = true,
                 .action = .none,
             },
         },
         .{
             .cooperative = true,
             .processing = false,
-            .pending = .stop_forget,
+            .pending = true,
             .event = .settle,
             .expected = .{
-                .pending_policy = null,
-                .action = .{ .apply_pending = .stop_forget },
+                .pending = false,
+                .action = .apply_pending,
             },
         },
         .{
             .cooperative = true,
             .processing = false,
-            .pending = null,
+            .pending = false,
             .event = .settle,
             .expected = .{
-                .pending_policy = null,
+                .pending = false,
                 .action = .none,
             },
         },
@@ -1423,7 +1418,7 @@ pub const Persistence = struct {
     image_snapshot_temp_dir: ?[]u8 = null,
     resume_view_admission: ?session_store.ResumeViewAdmission = null,
     resume_handoff_intent: ResumeHandoffIntent = .none,
-    pending_live_session_policy: ?BackgroundSessionPolicy = null,
+    pending_live_session_transition: bool = false,
 
     /// Fieldwise initialization avoids retaining undefined optional payloads
     /// in a static release-binary template.
@@ -1453,15 +1448,15 @@ pub const Persistence = struct {
         storage.image_snapshot_temp_dir = null;
         storage.resume_view_admission = null;
         storage.resume_handoff_intent = .none;
-        storage.pending_live_session_policy = null;
+        storage.pending_live_session_transition = false;
     }
 
     pub fn deinit(self: *Persistence, alloc: Allocator) void {
-        if (self.pending_live_session_policy) |policy| {
+        if (self.pending_live_session_transition) {
             debug_trace.logf(
                 "session",
-                "event=live_session_transition_discard reason=deinit policy={s}",
-                .{@tagName(policy)},
+                "event=live_session_transition_discard reason=deinit",
+                .{},
             );
         }
         if (self.pending_cancelled_command) |*pending| pending.discard(alloc);
@@ -1719,42 +1714,9 @@ pub fn Runtime(comptime App: type) type {
         pub fn enableSessionStores(app: *App) void {
             if (comptime !runtime_profile.allows(App, .durable_sessions)) return;
             const loaded = if (app.session_persistence.writable) |*value| value else return;
-            const capability = loaded.childCapability() catch |err| {
-                debug_trace.logf(
-                    "session",
-                    "interactive child capability unavailable session={s} err={s}",
-                    .{ loaded.active_id, @errorName(err) },
-                );
-                return;
-            };
 
             configureWebFetchArtifacts(app, loaded);
             enableSubagentHost(app, loaded);
-            restoreManagedBackground(app, loaded, capability);
-        }
-
-        fn restoreManagedBackground(
-            app: *App,
-            loaded: *session_store.LoadedWritableSession,
-            capability: *session_child_store.SessionChildCapability,
-        ) void {
-            if (comptime @hasDecl(
-                @TypeOf(app.background),
-                "restoreFromManagedPersistence",
-            )) {
-                app.background.restoreFromManagedPersistence(
-                    std.heap.c_allocator,
-                    capability,
-                    loaded.active_id,
-                    app.workspace_root,
-                ) catch |err| {
-                    debug_trace.logf(
-                        "background",
-                        "interactive managed background restore failed session={s} err={s}",
-                        .{ loaded.active_id, @errorName(err) },
-                    );
-                };
-            }
         }
 
         pub fn beginFreshPersistedSession(app: *App) !void {
@@ -1809,42 +1771,27 @@ pub fn Runtime(comptime App: type) type {
         }
 
         pub fn clearSession(app: *App) !void {
-            try resetSessionWithBackgroundPolicy(app, .carry_forward);
+            try resetLiveSession(app);
         }
 
         pub fn newSession(app: *App) !void {
-            try resetSessionWithBackgroundPolicy(app, .carry_forward);
+            try resetLiveSession(app);
         }
 
         pub fn resetSession(app: *App) !void {
-            try resetSessionWithBackgroundPolicy(app, .stop_forget);
+            try resetLiveSession(app);
         }
 
-        fn resetSessionWithBackgroundPolicy(
-            app: *App,
-            background_policy: BackgroundSessionPolicy,
-        ) !void {
-            const previous_policy = app.session_persistence.pending_live_session_policy;
+        fn resetLiveSession(app: *App) !void {
             const decision = decideLiveSessionTransition(
                 runtime_profile.allows(App, .cooperative_agent),
                 app.worker.isProcessing(),
-                previous_policy,
-                .{ .request = background_policy },
+                app.session_persistence.pending_live_session_transition,
+                .request,
             );
-            if (previous_policy) |previous| {
-                if (decision.pending_policy) |next| {
-                    if (previous != next) {
-                        debug_trace.logf(
-                            "session",
-                            "event=live_session_transition_coalesced previous={s} next={s}",
-                            .{ @tagName(previous), @tagName(next) },
-                        );
-                    }
-                }
-            }
-            app.session_persistence.pending_live_session_policy = decision.pending_policy;
+            app.session_persistence.pending_live_session_transition = decision.pending;
             switch (decision.action) {
-                .apply_now => |policy| try applyLiveSessionTransition(app, policy),
+                .apply_now => try applyLiveSessionTransition(app),
                 .cancel_and_defer => beginLiveSessionCancellation(app),
                 .none => {},
                 .apply_pending => unreachable,
@@ -1855,13 +1802,13 @@ pub fn Runtime(comptime App: type) type {
             const decision = decideLiveSessionTransition(
                 runtime_profile.allows(App, .cooperative_agent),
                 app.worker.isProcessing(),
-                app.session_persistence.pending_live_session_policy,
+                app.session_persistence.pending_live_session_transition,
                 .settle,
             );
-            app.session_persistence.pending_live_session_policy = decision.pending_policy;
+            app.session_persistence.pending_live_session_transition = decision.pending;
             switch (decision.action) {
-                .apply_pending => |policy| {
-                    applyIdleLiveSessionTransition(app, policy, .{});
+                .apply_pending => {
+                    applyIdleLiveSessionTransition(app, .{});
                     try installFreshLiveSession(app);
                 },
                 .none => {},
@@ -1869,11 +1816,8 @@ pub fn Runtime(comptime App: type) type {
             }
         }
 
-        fn applyLiveSessionTransition(
-            app: *App,
-            background_policy: BackgroundSessionPolicy,
-        ) !void {
-            try prepareLiveSessionTransition(app, background_policy, .{});
+        fn applyLiveSessionTransition(app: *App) !void {
+            try prepareLiveSessionTransition(app, .{});
             try installFreshLiveSession(app);
         }
 
@@ -1888,7 +1832,7 @@ pub fn Runtime(comptime App: type) type {
             app: *App,
             log_options: session_log.Options,
         ) !void {
-            try prepareLiveSessionTransition(app, .stop_forget, log_options);
+            try prepareLiveSessionTransition(app, log_options);
         }
 
         pub fn finishLiveSessionResume(app: *App) !void {
@@ -1898,12 +1842,11 @@ pub fn Runtime(comptime App: type) type {
 
         fn prepareLiveSessionTransition(
             app: *App,
-            background_policy: BackgroundSessionPolicy,
             log_options: session_log.Options,
         ) !void {
             beginLiveSessionCancellation(app);
             app.worker.waitUntilIdle();
-            applyIdleLiveSessionTransition(app, background_policy, log_options);
+            applyIdleLiveSessionTransition(app, log_options);
         }
 
         fn beginLiveSessionCancellation(app: *App) void {
@@ -1924,7 +1867,6 @@ pub fn Runtime(comptime App: type) type {
 
         fn applyIdleLiveSessionTransition(
             app: *App,
-            background_policy: BackgroundSessionPolicy,
             log_options: session_log.Options,
         ) void {
             clearCachedSessionTitle(app);
@@ -1946,16 +1888,6 @@ pub fn Runtime(comptime App: type) type {
             app.clearPendingImages();
             app.change_tracker.clear(std.heap.c_allocator);
             diagnostics.resetSession();
-            switch (background_policy) {
-                .carry_forward => app.background.carryForwardWorkspaceState(
-                    std.heap.c_allocator,
-                    app.workspace_root,
-                ),
-                .stop_forget => app.background.stopAndForgetWorkspace(
-                    std.heap.c_allocator,
-                    app.workspace_root,
-                ),
-            }
             app.context_snapshot.deinit(app.alloc);
             app.approval_prompt.clear(app.alloc);
             if (comptime @hasField(App, "approval_screen")) {
@@ -4066,7 +3998,6 @@ pub fn Runtime(comptime App: type) type {
             defer app.worker.releaseTurnStartHold();
 
             const loaded = &app.session_persistence.writable.?;
-            detachManagedBackground(app, loaded);
             loaded.log.park();
             debug_trace.logf(
                 "session",
@@ -4098,16 +4029,6 @@ pub fn Runtime(comptime App: type) type {
                 "unparked writer lock after suspend session={s}",
                 .{loaded.active_id},
             );
-            const capability = loaded.childCapability() catch |err| {
-                debug_trace.logf(
-                    "session",
-                    "interactive child capability unavailable session={s} err={s}",
-                    .{ loaded.active_id, @errorName(err) },
-                );
-                try lifecycle_result;
-                return;
-            };
-            restoreManagedBackground(app, loaded, capability);
             try lifecycle_result;
         }
 
@@ -4119,14 +4040,12 @@ pub fn Runtime(comptime App: type) type {
         }
 
         /// Tear down a parked writable without converging or checkpointing.
-        /// Background authority must already be detached (or is detached here).
         fn abandonParkedWritableSession(app: *App) void {
             discardAnyPendingCancelledCommand(app, "writable_session_abandon");
             const loaded = if (app.session_persistence.writable) |*value|
                 value
             else
                 return;
-            detachManagedBackground(app, loaded);
             if (comptime @hasDecl(
                 @TypeOf(app.session),
                 "clearWebFetchArtifacts",
@@ -4141,20 +4060,6 @@ pub fn Runtime(comptime App: type) type {
             );
             loaded.deinit(app.alloc);
             app.session_persistence.writable = null;
-        }
-
-        fn detachManagedBackground(
-            app: *App,
-            loaded: *session_store.LoadedWritableSession,
-        ) void {
-            if (comptime @hasField(App, "background") and
-                @hasDecl(@TypeOf(app.background), "detachManagedPersistence"))
-            {
-                app.background.detachManagedPersistence(
-                    std.heap.c_allocator,
-                    loaded.active_id,
-                );
-            }
         }
 
         pub fn deinitPersistence(app: *App) void {
@@ -5270,25 +5175,7 @@ pub fn Runtime(comptime App: type) type {
         }
 
         fn formatBackgroundReplayContext(app: *App, entry: types.BackgroundCommandHistoryTurn) ![]u8 {
-            if (!@hasDecl(@TypeOf(app.background), "snapshotTaskByLogPath")) {
-                return session_runtime.formatBackgroundHistoryContext(app.alloc, entry);
-            }
-
-            const task = try app.background.snapshotTaskByLogPath(app.alloc, entry.log_path);
-            if (task) |snapshot| {
-                defer snapshot.deinit(app.alloc);
-                if (snapshot.state == .running) {
-                    if (snapshot.server_url) |url| {
-                        return std.fmt.allocPrint(app.alloc, "Session event: the previous background server is still running. Background #{d}; log: {s}; URL: {s}.", .{ snapshot.id, snapshot.log_path, url });
-                    }
-                    if (snapshot.expect_url) {
-                        return std.fmt.allocPrint(app.alloc, "Session event: the previous background server is still running. Background #{d}; log: {s}; URL is still pending.", .{ snapshot.id, snapshot.log_path });
-                    }
-                    return std.fmt.allocPrint(app.alloc, "Session event: the previous background command is still running. Background #{d}; log: {s}.", .{ snapshot.id, snapshot.log_path });
-                }
-            }
-
-            return std.fmt.allocPrint(app.alloc, "Session event: a previous background command was recorded at {s}, but it is no longer live in this workspace.", .{entry.log_path});
+            return session_runtime.formatBackgroundHistoryContext(app.alloc, entry);
         }
 
         fn AssistantHistoryMarkdownReplay(comptime Sink: type) type {
@@ -5446,14 +5333,6 @@ pub fn Runtime(comptime App: type) type {
                 };
                 break :blk .{ .session_id = session_id };
             } else null;
-            if (comptime @hasField(App, "background") and
-                @hasDecl(@TypeOf(app.background), "detachManagedPersistence"))
-            {
-                app.background.detachManagedPersistence(
-                    std.heap.c_allocator,
-                    loaded.active_id,
-                );
-            }
             if (comptime @hasDecl(
                 @TypeOf(app.session),
                 "clearWebFetchArtifacts",
@@ -5984,40 +5863,6 @@ const TestResumeTarget = union(enum) {
     }
 };
 
-const FakeBackground = struct {
-    source_session_id: []u8 = &.{},
-    detached: bool = false,
-
-    fn deinit(self: *FakeBackground) void {
-        if (self.source_session_id.len > 0) {
-            std.heap.c_allocator.free(self.source_session_id);
-        }
-        self.* = .{};
-    }
-
-    fn restoreFromManagedPersistence(
-        self: *FakeBackground,
-        alloc: Allocator,
-        _: *session_child_store.SessionChildCapability,
-        source_session_id: []const u8,
-        _: []const u8,
-    ) !void {
-        if (self.source_session_id.len > 0) alloc.free(self.source_session_id);
-        self.source_session_id = try alloc.dupe(u8, source_session_id);
-        self.detached = false;
-    }
-
-    fn detachManagedPersistence(
-        self: *FakeBackground,
-        _: Allocator,
-        source_session_id: []const u8,
-    ) void {
-        if (std.mem.eql(u8, self.source_session_id, source_session_id)) {
-            self.detached = true;
-        }
-    }
-};
-
 const FakeWorker = struct {
     model: std.ArrayList(u8) = .empty,
     effort: types.ReasoningEffort = .auto,
@@ -6153,7 +5998,6 @@ const TestApp = struct {
     requested_resume: ?TestResumeTarget = null,
     terminal: shell_runtime.TerminalState = .{},
     stream: types.StreamState = .{},
-    background: FakeBackground = .{},
     worker: FakeWorker = .{},
     selected_model: std.ArrayList(u8) = .empty,
     effort: types.ReasoningEffort = .auto,
@@ -6279,7 +6123,6 @@ const TestApp = struct {
         Runtime(TestApp).deinitPersistence(self);
         if (self.requested_resume) |*target| target.deinit(self.alloc);
         self.session.deinit(self.alloc);
-        self.background.deinit();
         self.worker.deinit(std.heap.c_allocator);
         self.selected_model.deinit(self.alloc);
         self.permission_engine.deinit(self.alloc);
@@ -7050,7 +6893,6 @@ test "beginFreshPersistedSession and enableSessionStores create per-session stor
     try std.testing.expect(app.session_persistence.writable != null);
 
     Runtime(TestApp).enableSessionStores(&app);
-    try std.testing.expect(app.background.source_session_id.len > 0);
     try std.testing.expect(app.session_persistence.subagent_host != null);
     const host = app.session_persistence.subagent_host.?;
     var host_authority = try host.host_authority.resolve_fn(
@@ -7064,10 +6906,6 @@ test "beginFreshPersistedSession and enableSessionStores create per-session stor
         if (std.mem.eql(u8, tool_name, "subagent")) found_subagent = true;
     }
     try std.testing.expect(found_subagent);
-    try std.testing.expectEqualStrings(
-        app.session_persistence.writable.?.active_id,
-        app.background.source_session_id,
-    );
 }
 
 test "resume handoff suppresses missing and pristine writable sessions" {

@@ -19,7 +19,6 @@ pub const TopLevelKind = enum {
     models,
     provider,
     doctor,
-    background,
     session,
     sessions,
     @"resume",
@@ -44,8 +43,6 @@ pub const SlashKind = enum {
     status,
     background,
     background_stop,
-    background_open,
-    background_logs,
     image,
     images,
     model,
@@ -65,6 +62,7 @@ pub const SlashKind = enum {
     paste,
     fast,
     bash_first,
+    exec_mode,
     statusline,
     notifications,
     workspace,
@@ -2086,10 +2084,11 @@ test "slash completion labels strip argument prefixes" {
 }
 
 test "slash completion descriptions follow completion matches" {
-    try std.testing.expectEqual(@as(usize, 2), slashCompletionCount(testSlashRegistry(), "/mo"));
+    try std.testing.expectEqual(@as(usize, 3), slashCompletionCount(testSlashRegistry(), "/mo"));
     try std.testing.expectEqualStrings("/model", nthSlashCompletion(testSlashRegistry(), "/mo", 0).?);
     try std.testing.expectEqualStrings("choose what model and reasoning effort to use", nthSlashCompletionDescription(testSlashRegistry(), "/mo", 0).?);
     try std.testing.expectEqualStrings("/models", nthSlashCompletion(testSlashRegistry(), "/mo", 1).?);
+    try std.testing.expectEqualStrings("/exec-mode", nthSlashCompletion(testSlashRegistry(), "/mo", 2).?);
     try std.testing.expectEqualStrings("start a fresh session and keep background processes", nthSlashCompletionDescription(testSlashRegistry(), "/cl", 0).?);
     try std.testing.expectEqualStrings("undo the latest tracked file operation", nthSlashCompletionDescription(testSlashRegistry(), "/un", 0).?);
     try std.testing.expectEqualStrings("copy a private diagnostic trace", nthSlashCompletionDescription(testSlashRegistry(), "/tr", 0).?);

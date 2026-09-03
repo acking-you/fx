@@ -122,7 +122,8 @@ pub fn validateExec(ctx: tool_dispatch.DispatchContext, erased: tool_dispatch.To
     if (std.mem.trim(u8, input.cmd, " \t\r\n").len == 0) return try ctx.allocator.dupe(u8, "exec_command field \"cmd\" must not be empty");
     if (std.mem.trim(u8, input.shell, " \t\r\n").len == 0) return try ctx.allocator.dupe(u8, "exec_command field \"shell\" must not be empty");
     if (!shell_resolver.isSupportedShell(input.shell)) return try ctx.allocator.dupe(u8, "exec_command field \"shell\" must be an absolute supported shell path");
-    if (input.tty) return try ctx.allocator.dupe(u8, "exec_command tty=true is unavailable on this host; omit tty");
+    if (input.tty and !@import("../../core/execution/pseudo_terminal.zig").supported())
+        return try ctx.allocator.dupe(u8, "exec_command tty=true is unavailable on this host");
     return null;
 }
 
@@ -172,6 +173,7 @@ pub fn callExec(ctx: tool_dispatch.DispatchContext, erased: tool_dispatch.ToolIn
         .cwd = cwd,
         .shell = input.shell,
         .login = input.login,
+        .tty = input.tty,
         .yield_time_ms = input.yield_time_ms,
         .max_output_tokens = input.max_output_tokens,
         .command_artifact_capability = ctx.session_child_capability,
@@ -179,6 +181,7 @@ pub fn callExec(ctx: tool_dispatch.DispatchContext, erased: tool_dispatch.ToolIn
         .command_artifact_threshold = ctx.max_command_output_bytes,
         .output_sink = outputSink(ctx),
         .cancel_flag = ctx.cancel_flag,
+        .mode = ctx.exec_mode,
     }) catch |err| {
         if (err == error.Cancelled) return error.Cancelled;
         return .{ .failure = try std.fmt.allocPrint(ctx.allocator, "exec_command failed: {s}", .{@errorName(err)}) };
@@ -286,6 +289,11 @@ fn formatResult(alloc: Allocator, result: unified_exec.Manager.Result) ![]u8 {
         if (combined.items.len > 0) try combined.append(alloc, '\n');
         try combined.appendSlice(alloc, result.stderr);
     }
+    if (result.chunk_id) |chunk_id| {
+        try out.writer.writeAll("\"chunk_id\":");
+        try std.json.Stringify.value(chunk_id[0..], .{}, &out.writer);
+        try out.writer.writeByte(',');
+    }
     try out.writer.print("\"wall_time_seconds\":{d:.3},\"output\":", .{result.wall_time_seconds});
     try std.json.Stringify.value(combined.items, .{}, &out.writer);
     if (result.exit_code) |code| try out.writer.print(",\"exit_code\":{d}", .{code});
@@ -305,6 +313,7 @@ pub fn irreversible(_: tool_dispatch.ToolInput) bool {
 
 test "unified exec tool formats a completed result" {
     var result: unified_exec.Manager.Result = .{
+        .chunk_id = .{ 'a', '1', 'b', '2', 'c', '3' },
         .status = .exited,
         .exit_code = 0,
         .stdout = try std.testing.allocator.dupe(u8, "ok"),
@@ -318,6 +327,7 @@ test "unified exec tool formats a completed result" {
     const body = try formatResult(std.testing.allocator, result);
     defer std.testing.allocator.free(body);
     try std.testing.expect(std.mem.find(u8, body, "\"exit_code\":0") != null);
+    try std.testing.expect(std.mem.find(u8, body, "\"chunk_id\":\"a1b2c3\"") != null);
     try std.testing.expect(std.mem.find(u8, body, "\"output\":\"ok\"") != null);
     try std.testing.expect(std.mem.find(u8, body, "\"wall_time_seconds\":0.000") != null);
     try std.testing.expect(std.mem.find(u8, body, "\"original_token_count\":1") != null);

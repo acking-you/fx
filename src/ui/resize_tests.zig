@@ -5923,7 +5923,7 @@ test "slash main page drops categories and ellipsizes descriptions when narrow" 
     try renderTestFooter(&h, &input, &approval, &h.frame_redraw);
     try h.flush();
 
-    try expectGridContains(&h, "Commands 2");
+    try expectGridContains(&h, "Commands 3");
     try expectGridContains(&h, "/model");
     try expectGridContains(&h, "…");
     try expectGridNotContains(&h, "Model");

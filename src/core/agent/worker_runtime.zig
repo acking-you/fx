@@ -19,12 +19,25 @@ const entity_spans = @import("../shared/entity_spans.zig");
 const types = @import("../shared/types.zig");
 const model_provider = @import("../config/model_provider.zig");
 const assistant_presentation = @import("assistant_presentation.zig");
+const exec_mode = @import("../execution/exec_mode.zig");
 
 pub const AgentTurnSettings = struct {
     max_tool_result_bytes: usize = tool_result_limits.default_max_tool_result_bytes,
     first_call_tool_choice: types.ToolChoice = .auto,
     fast_mode: bool = false,
     effort: types.ReasoningEffort = .auto,
+    exec_mode: exec_mode.Mode = .codex,
+};
+
+pub const PromptOrigin = enum {
+    user,
+    background_continuation,
+};
+
+pub const BackgroundContinuation = struct {
+    process_id: u64,
+    failed: bool,
+    running: bool = false,
 };
 
 pub const SkillBinding = struct {
@@ -60,6 +73,10 @@ pub const QueuedPrompt = struct {
     /// model-step boundary. If that turn finishes first, normal queue draining
     /// treats it as a follow-up turn instead of dropping user input.
     steer_target_turn_id: ?u64 = null,
+    origin: PromptOrigin = .user,
+    background_process_id: ?u64 = null,
+    background_failed: bool = false,
+    background_running: bool = false,
     prompt: []u8,
     images: []types.ImageAttachment,
     authorized_image_catalog: []types.ImageAttachment = &.{},
@@ -517,6 +534,11 @@ pub const WorkerEvent = union(enum) {
     /// prompt card without resetting stream state.
     append_prompt: types.UserTurn,
     begin_presented_prompt: u64,
+    background_continuation_begin: struct {
+        process_id: u64,
+        failed: bool,
+        running: bool,
+    },
     append_user_feedback: []u8,
     assistant_presentation: assistant_presentation.Event,
     /// Provider reasoning. Queued so the UI thread owns transcript mutation;
@@ -860,7 +882,7 @@ pub const WorkerRuntime = struct {
             return error.RecoveryBusy;
         }
         queued.agent_settings = self.agent_turn_settings;
-        if (steer_if_active and
+        if (queued.origin == .user and steer_if_active and
             self.worker_processing and
             self.active_turn_id != 0 and
             self.queue_admission == null)
@@ -1235,6 +1257,16 @@ pub const WorkerRuntime = struct {
         queued: QueuedPrompt,
     ) !void {
         if (queued.recovery_checkpoint != null) return;
+        if (queued.origin == .background_continuation) {
+            try self.worker_events.append(alloc, .{
+                .background_continuation_begin = .{
+                    .process_id = queued.background_process_id orelse 0,
+                    .failed = queued.background_failed,
+                    .running = queued.background_running,
+                },
+            });
+            return;
+        }
         if (queued.user_prompt_already_presented) {
             try self.worker_events.append(alloc, .{
                 .begin_presented_prompt = queued.turn_id,
@@ -1269,10 +1301,17 @@ pub const WorkerRuntime = struct {
     fn takeNextPromptLocked(self: *WorkerRuntime, alloc: std.mem.Allocator) !?QueuedPrompt {
         if (self.worker_stop_requested or self.queued_prompts.items.len == 0) return null;
 
-        const queued = self.queued_prompts.items[0];
+        var selected_index: usize = 0;
+        for (self.queued_prompts.items, 0..) |candidate, index| {
+            if (candidate.origin == .user) {
+                selected_index = index;
+                break;
+            }
+        }
+        const queued = self.queued_prompts.items[selected_index];
         try self.appendBeginPromptEventLocked(alloc, queued);
 
-        var job = self.queued_prompts.orderedRemove(0);
+        var job = self.queued_prompts.orderedRemove(selected_index);
         job.steer_target_turn_id = null;
         freeQueueReviewDraftOpt(alloc, job.review_draft);
         job.review_draft = null;
@@ -1495,6 +1534,13 @@ pub const WorkerRuntime = struct {
         defer self.worker_mutex.unlock(io_mod.getIo());
         self.agent_turn_settings.effort = effort;
         for (self.queued_prompts.items) |*prompt| prompt.agent_settings.effort = effort;
+    }
+
+    pub fn syncQueuedPromptExecMode(self: *WorkerRuntime, mode: exec_mode.Mode) void {
+        self.worker_mutex.lockUncancelable(io_mod.getIo());
+        defer self.worker_mutex.unlock(io_mod.getIo());
+        self.agent_turn_settings.exec_mode = mode;
+        for (self.queued_prompts.items) |*prompt| prompt.agent_settings.exec_mode = mode;
     }
 
     pub fn setActiveAgentTurnSettings(self: *WorkerRuntime, settings: AgentTurnSettings) void {
@@ -3028,6 +3074,7 @@ pub fn dupeWorkerEvent(alloc: std.mem.Allocator, event: WorkerEvent) !WorkerEven
         },
         .append_prompt => |prompt| .{ .append_prompt = try types.dupeUserTurn(alloc, prompt) },
         .begin_presented_prompt => |turn_id| .{ .begin_presented_prompt = turn_id },
+        .background_continuation_begin => |background| .{ .background_continuation_begin = background },
         .append_user_feedback => |text| .{ .append_user_feedback = try alloc.dupe(u8, text) },
         .assistant_presentation => |presentation| .{
             .assistant_presentation = try presentation.clone(alloc),
@@ -3111,6 +3158,7 @@ pub fn freeWorkerEvent(alloc: std.mem.Allocator, event: WorkerEvent) void {
         },
         .append_prompt => |prompt| types.freeUserTurn(alloc, prompt),
         .begin_presented_prompt => {},
+        .background_continuation_begin => {},
         .append_user_feedback => |text| alloc.free(text),
         .assistant_presentation => |presentation| {
             var owned = presentation;
@@ -4616,6 +4664,42 @@ test "waitAndTakeNextPrompt assigns turn id and resets cancellation for next pro
     try std.testing.expect(events.items[0] == .begin_prompt);
 }
 
+test "user prompts take priority over queued background continuations" {
+    const alloc = std.testing.allocator;
+    var runtime = WorkerRuntime{};
+    defer runtime.deinit(alloc);
+
+    var background = try makePrompt(alloc, "background event", "model");
+    background.origin = .background_continuation;
+    background.background_process_id = 17;
+    background.background_failed = true;
+    try runtime.enqueuePrompt(alloc, background);
+    try runtime.enqueuePrompt(alloc, try makePrompt(alloc, "user input", "model"));
+
+    const user = (try runtime.tryTakeNextPrompt(alloc)).?;
+    defer freeQueuedPrompt(alloc, user);
+    try std.testing.expectEqual(PromptOrigin.user, user.origin);
+    try std.testing.expectEqualStrings("user input", user.prompt);
+
+    var user_events = runtime.takeEvents();
+    defer freeEventList(alloc, &user_events);
+    try std.testing.expectEqual(@as(usize, 1), user_events.items.len);
+    try std.testing.expect(user_events.items[0] == .begin_prompt);
+
+    runtime.finishProcessing();
+    const continuation = (try runtime.tryTakeNextPrompt(alloc)).?;
+    defer freeQueuedPrompt(alloc, continuation);
+    try std.testing.expectEqual(PromptOrigin.background_continuation, continuation.origin);
+
+    var background_events = runtime.takeEvents();
+    defer freeEventList(alloc, &background_events);
+    try std.testing.expectEqual(@as(usize, 1), background_events.items.len);
+    const begin = background_events.items[0].background_continuation_begin;
+    try std.testing.expectEqual(@as(u64, 17), begin.process_id);
+    try std.testing.expect(begin.failed);
+    try std.testing.expect(!begin.running);
+}
+
 test "already-presented queued prompt emits identity without duplicating user payload" {
     const alloc = std.testing.allocator;
     var runtime = WorkerRuntime{};
@@ -4678,7 +4762,7 @@ test "enqueuePrompt stamps fast mode and effort from worker runtime" {
     try std.testing.expectEqual(types.ReasoningEffort.literal("high"), job.agent_settings.effort);
 }
 
-test "sync queued prompt fast mode and effort updates queued prompts and future defaults" {
+test "sync queued prompt settings updates queued prompts and future defaults" {
     const alloc = std.testing.allocator;
     var runtime = WorkerRuntime{};
     defer runtime.deinit(alloc);
@@ -4691,16 +4775,20 @@ test "sync queued prompt fast mode and effort updates queued prompts and future 
 
     runtime.syncQueuedPromptFastMode(true);
     runtime.syncQueuedPromptEffort(types.ReasoningEffort.literal("high"));
+    runtime.syncQueuedPromptExecMode(.claude);
 
     try std.testing.expect(runtime.queued_prompts.items[0].agent_settings.fast_mode);
     try std.testing.expectEqual(types.ReasoningEffort.literal("high"), runtime.queued_prompts.items[0].agent_settings.effort);
+    try std.testing.expectEqual(exec_mode.Mode.claude, runtime.queued_prompts.items[0].agent_settings.exec_mode);
     try std.testing.expect(runtime.agent_turn_settings.fast_mode);
     try std.testing.expectEqual(types.ReasoningEffort.literal("high"), runtime.agent_turn_settings.effort);
+    try std.testing.expectEqual(exec_mode.Mode.claude, runtime.agent_turn_settings.exec_mode);
 
     try runtime.enqueuePrompt(alloc, try makePrompt(alloc, "future", "model"));
 
     try std.testing.expect(runtime.queued_prompts.items[1].agent_settings.fast_mode);
     try std.testing.expectEqual(types.ReasoningEffort.literal("high"), runtime.queued_prompts.items[1].agent_settings.effort);
+    try std.testing.expectEqual(exec_mode.Mode.claude, runtime.queued_prompts.items[1].agent_settings.exec_mode);
 }
 
 const EnqueueThreadState = struct {

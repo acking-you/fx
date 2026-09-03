@@ -11,7 +11,6 @@ const provider_runtime = @import("provider_runtime.zig");
 const app_worker_runtime = @import("app_worker_runtime.zig");
 const auth_runtime = @import("../auth/auth_runtime.zig");
 const credentials = @import("../auth/credentials.zig");
-const background_runtime = @import("../background/background_runtime.zig");
 const change_tracker = @import("../workspace/change_tracker.zig");
 const file_mutation_contract = @import("../tooling/file_mutation_contract.zig");
 const hooks = @import("../hooks/hooks.zig");
@@ -234,6 +233,7 @@ pub fn Runtime(comptime App: type) type {
                 .fast_mode = agent_settings.fast_mode,
                 .effort = agent_settings.effort,
                 .first_call_tool_choice = agent_settings.first_call_tool_choice,
+                .exec_mode = agent_settings.exec_mode,
                 .tool_registry = if (comptime @hasDecl(App, "toolRegistry")) app.toolRegistry() else .{},
                 .subagent_host = if (comptime @hasField(App, "session_persistence"))
                     app_session_runtime.Runtime(App).subagentHost(app)
@@ -249,7 +249,6 @@ pub fn Runtime(comptime App: type) type {
                 .worker = &app.worker,
                 .permission_prompter = tool_admission.workerPrompter(&app.worker),
                 .cancel_flag = &app.worker.worker_cancel_requested,
-                .background = &app.background,
                 .session_child_capability = child_capability,
                 .unified_exec = if (comptime @hasField(App, "unified_exec"))
                     &app.unified_exec
@@ -265,8 +264,6 @@ pub fn Runtime(comptime App: type) type {
                 .context_registry = app.contextRegistry(),
                 .output_chunk_ctx = @ptrCast(app),
                 .on_output_chunk = app_callbacks.Bindings(App).onCommandOutputChunk,
-                .background_url_ctx = @ptrCast(app),
-                .on_background_url_ready = app_callbacks.Bindings(App).onBackgroundUrlReady,
                 .host_sandbox_default = if (host_workspace) |info| switch (info.permission) {
                     .allow_sandboxed => .allow_sandboxed,
                     .prompt => .prompt,
@@ -609,8 +606,6 @@ pub fn Runtime(comptime App: type) type {
                 .interactive = true,
                 .permission_mode = permission_snapshot.mode,
                 .tracker = &app.change_tracker,
-                .background = &app.background,
-                .session = &app.session,
             }, arena, messages);
         }
 
@@ -945,6 +940,7 @@ pub fn Runtime(comptime App: type) type {
                 .fast_mode = job.agent_settings.fast_mode,
                 .effort = job.agent_settings.effort,
                 .first_call_tool_choice = job.agent_settings.first_call_tool_choice,
+                .exec_mode = job.agent_settings.exec_mode,
                 .workspace_root = app.workspace_root,
                 .access_scope = appAccessScope(app),
                 .origin = if (app.session_persistence.writable) |writable|
@@ -1171,7 +1167,6 @@ const FakeApp = struct {
     fast_mode: bool = true,
     effort: types.ReasoningEffort = types.ReasoningEffort.literal("high"),
     worker: worker_runtime.WorkerRuntime = .{},
-    background: background_runtime.BackgroundRuntime = .{},
     session: session_runtime.SessionRuntime = .{ .max_history_turns = 4 },
     session_persistence: app_session_runtime.Persistence = .{},
     skills_dir: []const u8 = "/tmp/skills",
@@ -1243,7 +1238,6 @@ const FakeApp = struct {
         self.worker.deinit(std.heap.c_allocator);
         self.web_fetch_runtime.deinit(self.alloc);
         self.web_search_runtime.deinit();
-        self.background.deinit(self.alloc);
         self.session.deinit(self.alloc);
         self.change_tracker.deinit(self.alloc);
         self.lifecycle_runtime.deinit();
@@ -1495,7 +1489,6 @@ test "app agent runtime builds tool context from app state" {
     try std.testing.expectEqual(types.ToolChoice.none, ctx.first_call_tool_choice);
     try std.testing.expect(ctx.cancel_flag.? == &app.worker.worker_cancel_requested);
     try std.testing.expectEqual(&app.worker, ctx.worker);
-    try std.testing.expectEqual(&app.background, ctx.background);
     try std.testing.expect(ctx.subagent_host == null);
     try std.testing.expect(ctx.subagent_caller_id == null);
     try std.testing.expectEqual(&app.session, ctx.session);

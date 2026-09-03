@@ -48,7 +48,6 @@ const image_attachments = @import("../../images/image_attachments.zig");
 const runtime_assistant_stream = @import("assistant_stream.zig");
 const runtime_tool_presentation = @import("tool_presentation.zig");
 const runtime_execution_memory = @import("execution_memory.zig");
-const runtime_stop_policy = @import("stop_policy.zig");
 const runtime_tool_admission = @import("tool_admission.zig");
 const runtime_interruption = @import("interruption.zig");
 const runtime_parallel_execution = @import("parallel_execution.zig");
@@ -6125,42 +6124,6 @@ fn processQueuedPromptLoop(
                 status_started = try runtime_tool_presentation.startToolVisibleLifecycle(deps, arena, turn_id, stream_ctx.provisional_statuses.presentation_group_id, tool_call, tool_display_target);
             }
 
-            if (try runtime_stop_policy.blockedNonLiveBackgroundRestart(
-                arena,
-                successful_source_messages,
-                tool_call,
-                job.prompt,
-            )) |blocked_output| {
-                _ = try stream_ctx.provisional_statuses.finishDeniedCall(
-                    deps,
-                    stream_ctx.alloc,
-                    arena,
-                    turn_id,
-                    tool_call,
-                    status_started,
-                    tool_display_target,
-                    "Blocked",
-                );
-                debug_trace.eventf(
-                    "tool",
-                    "execution_result",
-                    step_ctx,
-                    "call_id={s} name={s} result_kind=blocked_non_live_background_restart model_output_bytes={d}",
-                    .{ tool_call.id, tool_call.name, blocked_output.len },
-                );
-                try runtime_tool_batch.appendToolResultContent(
-                    arena,
-                    &within_turn_suffix,
-                    &completed_tool_names,
-                    &step_batch,
-                    tool_call,
-                    blocked_output,
-                    null,
-                    .{ .increment_error = true },
-                );
-                continue;
-            }
-
             var file_call_arena_state: std.heap.ArenaAllocator = undefined;
             if (is_file_mutation) {
                 file_call_arena_state = std.heap.ArenaAllocator.init(std.heap.c_allocator);
@@ -7055,6 +7018,25 @@ fn processQueuedPromptLoop(
             &step_batch,
         );
         post_tool_decision_pending = true;
+        if (config.exec_mode == .claude and last_yielded_command != null) {
+            const notice = "Command continues in the background. This turn is released; completion will start a separate continuation.";
+            try deps.push_system_notice(deps.ctx, notice);
+            stop_state.terminal_materializing = true;
+            try finishCommonAssistantTerminal(
+                deps,
+                finalization,
+                arena,
+                job,
+                within_turn_suffix.items,
+                &summary_accumulator,
+                "",
+                .completed,
+                null,
+                &finish_trace,
+                "background_command",
+            );
+            return;
+        }
         if (malformed_arguments_retry.finishBatch()) {
             debug_trace.eventf(
                 "agent",

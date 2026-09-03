@@ -11,7 +11,6 @@ const image_attachments = @import("../images/image_attachments.zig");
 const io_mod = @import("../shared/io.zig");
 const tool_contracts = @import("../agent/runtime/tool_contracts.zig");
 const vision_executor = @import("../agent/runtime/vision_executor.zig");
-const background_runtime = @import("../background/background_runtime.zig");
 const change_tracker = @import("../workspace/change_tracker.zig");
 const diff_mod = @import("../output/diff.zig");
 const file_mutation = @import("file_mutation.zig");
@@ -35,7 +34,6 @@ const subagent_tool_result = @import("../subagent/tool_result.zig");
 const session_runtime = @import("../session/session.zig");
 const session_permission_state = @import("../permissions/session_permission_state.zig");
 const session_codec_mod = @import("../session/session_codec.zig");
-const task_helpers = @import("../tasks/task_helpers.zig");
 const session_child_store = @import("../session/session_child_store.zig");
 const command_replay_store = @import("../session/command_replay_store.zig");
 const session_store = @import("../session/session_store.zig");
@@ -82,7 +80,6 @@ const PermissionMode = types.PermissionMode;
 const ToolPermissionDecision = types.ToolPermissionDecision;
 const subagent_tool_name = "subagent";
 const ToolExecutionResult = tool_contracts.ToolExecutionResult;
-const BackgroundRuntime = background_runtime.BackgroundRuntime;
 const SessionRuntime = session_runtime.SessionRuntime;
 const WorkerRuntime = worker_runtime.WorkerRuntime;
 const max_file_mutation_success_bytes: usize = 8 * 1024;
@@ -97,6 +94,7 @@ const parseToolArgsObject = helpers.parseToolArgsObject;
 const context_limits = @import("../config/context_limits.zig");
 const workspace_access = @import("../workspace/workspace_access.zig");
 const unified_exec_runtime = @import("../execution/unified_exec.zig");
+const exec_mode = @import("../execution/exec_mode.zig");
 
 test {
     _ = tool_admission;
@@ -155,7 +153,6 @@ pub const Context = struct {
     /// (e.g. ACP hosts prompt over JSON-RPC by setting this).
     permission_prompter: ?permission_prompter.Prompter = null,
     cancel_flag: ?*std.atomic.Value(bool) = null,
-    background: *BackgroundRuntime,
     session: *SessionRuntime,
     session_allocator: Allocator = std.heap.c_allocator,
     skills_dir: []const u8 = "",
@@ -167,13 +164,12 @@ pub const Context = struct {
     output_chunk_lifecycle_id: ?types.ToolLifecycleId = null,
     output_chunk_ctx: *anyopaque,
     on_output_chunk: command_contract.CommandOutputCallback,
-    background_url_ctx: *anyopaque,
-    on_background_url_ready: *const fn (*anyopaque, u64, []const u8) void,
     command_artifact_dir: ?[]const u8 = null,
     tool_result_dir: ?[]const u8 = null,
     session_child_capability: ?*session_child_store.SessionChildCapability = null,
     ephemeral_command_replay: ?*command_replay_store.EphemeralStore = null,
     unified_exec: ?*unified_exec_runtime.Manager = null,
+    exec_mode: exec_mode.Mode = .codex,
     command_timeout_ms: ?usize = null,
     command_timeout_started_ms: ?i64 = null,
     command_replay_capture: ?*command_replay_store.Capture = null,
@@ -219,7 +215,6 @@ pub const Context = struct {
             .tool_registry = self.tool_registry,
             .worker = self.worker,
             .permission_prompter = self.permission_prompter,
-            .background = self.background,
             .auto_classifier = self.admissionAutoClassifier(),
             .host_sandbox_default = self.host_sandbox_default,
         };
@@ -612,7 +607,7 @@ fn typedDispatchContext(ctx: Context, arena: Allocator) tool_dispatch.DispatchCo
         .session_child_capability = ctx.session_child_capability,
         .ephemeral_command_replay = ctx.ephemeral_command_replay,
         .unified_exec = ctx.unified_exec,
-        .background_lifecycle_allocator = ctx.session_allocator,
+        .exec_mode = ctx.exec_mode,
         .cancel_flag = runtimeCancelFlag(ctx),
         .output_chunk_lifecycle_id = ctx.output_chunk_lifecycle_id,
         .session_id = ctx.lifecycle_scope.session_id,
@@ -1239,13 +1234,7 @@ fn persistedSubagentEpoch(
     return identity.epoch;
 }
 
-fn splitConversationLanguage(language: session_runtime.ConversationLanguage) task_helpers.ConversationLanguage {
-    return task_helpers.ConversationLanguage.fromSlice(language.view()) catch task_helpers.ConversationLanguage.default();
-}
-
 fn noopOutput(_: *anyopaque, _: ?types.ToolLifecycleId, _: command_contract.CommandOutputStream, _: []const u8) !void {}
-fn noopBackgroundReady(_: *anyopaque, _: u64, _: []const u8) void {}
-
 const test_tool_registry = tool_dispatch.Registry{ .tools = &.{
     test_builtin_tools.glob_files,
     test_builtin_tools.grep_files,
@@ -1301,7 +1290,6 @@ const TestRuntime = struct {
     agent_stream_provider: agent_stream_provider.Provider = agent_stream_provider.unavailable_provider,
     tool_registry: tool_dispatch.Registry = test_tool_registry,
     worker: WorkerRuntime = .{},
-    background: BackgroundRuntime = .{},
     session: SessionRuntime = .{ .max_history_turns = 8 },
     subagent_host: ?*subagent_tool_host.Runtime = null,
     subagent_caller_id: ?[]const u8 = null,
@@ -1345,7 +1333,6 @@ const TestRuntime = struct {
 
     fn deinit(self: *TestRuntime, alloc: Allocator) void {
         self.worker.deinit(alloc);
-        self.background.deinit(alloc);
         self.session.deinit(alloc);
     }
 
@@ -1380,7 +1367,6 @@ const TestRuntime = struct {
             else
                 null,
             .cancel_flag = self.cancel_flag,
-            .background = &self.background,
             .session = &self.session,
             .session_allocator = self.session_allocator,
             .skills_dir = self.skills_dir,
@@ -1388,8 +1374,6 @@ const TestRuntime = struct {
             .context_limits = self.context_limits,
             .output_chunk_ctx = undefined,
             .on_output_chunk = noopOutput,
-            .background_url_ctx = undefined,
-            .on_background_url_ready = noopBackgroundReady,
             .command_artifact_dir = self.command_artifact_dir,
             .session_child_capability = self.session_child_capability,
             .ephemeral_command_replay = self.ephemeral_command_replay,
@@ -2484,14 +2468,6 @@ fn setTestHome(home: ?[]const u8) !void {
     map.* = std.process.Environ.Map.init(std.heap.c_allocator);
     if (home) |value| try map.put("HOME", value);
     io_mod.setEnvironMap(map);
-}
-
-test "background imports come from background and task modules" {
-    try std.testing.expect(BackgroundRuntime == @import("../background/background_runtime.zig").BackgroundRuntime);
-    try std.testing.expect(task_helpers.TaskState == @import("../tasks/task_helpers.zig").TaskState);
-
-    const language = splitConversationLanguage(session_runtime.ConversationLanguage.literal("es"));
-    try std.testing.expectEqualStrings("es", language.view());
 }
 
 test "tool runtime explicit cancellation source overrides worker fallback" {

@@ -2,8 +2,10 @@ const std = @import("std");
 const builtin = @import("builtin");
 const debug_trace = @import("../shared/debug_trace.zig");
 const io_mod = @import("../shared/io.zig");
+const pseudo_terminal = @import("pseudo_terminal.zig");
 const command_contract = @import("command_contract.zig");
 const command_runner = @import("command_runner.zig");
+const exec_mode = @import("exec_mode.zig");
 const session_child_store = @import("../session/session_child_store.zig");
 const shell_resolver = @import("../terminal/shell_resolver.zig");
 const types = @import("../shared/types.zig");
@@ -133,6 +135,9 @@ pub const Manager = struct {
     mutex: std.Io.Mutex = .init,
     lifecycle_mutex: std.Io.Mutex = .init,
     processes: std.AutoHashMap(u64, *Process),
+    event_mutex: std.Io.Mutex = .init,
+    lifecycle_events: std.ArrayList(LifecycleEvent) = .empty,
+    next_chunk_id: std.atomic.Value(u64) = .init(1),
     next_id: u64 = 1,
     generation: u64 = 1,
     pending_processes: usize = 0,
@@ -147,6 +152,10 @@ pub const Manager = struct {
 
     pub fn deinit(self: *Manager) void {
         self.stopAll(true);
+        self.event_mutex.lockUncancelable(io_mod.getIo());
+        for (self.lifecycle_events.items) |*event| event.deinit(self.alloc);
+        self.lifecycle_events.deinit(self.alloc);
+        self.event_mutex.unlock(io_mod.getIo());
         self.processes.deinit();
     }
 
@@ -169,6 +178,7 @@ pub const Manager = struct {
         else
             "/bin/sh",
         login: bool = false,
+        tty: bool = false,
         yield_time_ms: u64 = 10_000,
         max_output_tokens: ?u64 = null,
         command_artifact_capability: ?*session_child_store.SessionChildCapability = null,
@@ -176,6 +186,7 @@ pub const Manager = struct {
         command_artifact_threshold: usize = 0,
         output_sink: ?OutputSink = null,
         cancel_flag: ?*const std.atomic.Value(bool) = null,
+        mode: exec_mode.Mode = .codex,
     };
 
     pub const WriteRequest = struct {
@@ -197,6 +208,7 @@ pub const Manager = struct {
     };
 
     pub const Result = struct {
+        chunk_id: ?[6]u8 = null,
         process_id: ?u64 = null,
         status: Status = .exited,
         exit_code: ?i32 = null,
@@ -228,6 +240,62 @@ pub const Manager = struct {
 
     pub const Status = enum { running, exited };
 
+    pub const ProcessSnapshot = struct {
+        process_id: u64,
+        pid: u64,
+        status: Status,
+        command: []u8,
+        cwd: []u8,
+        started_at_ms: i64,
+        mode: exec_mode.Mode,
+
+        pub fn deinit(self: *ProcessSnapshot, alloc: Allocator) void {
+            alloc.free(self.command);
+            alloc.free(self.cwd);
+            self.* = undefined;
+        }
+    };
+
+    pub const LifecycleEvent = struct {
+        process_id: u64,
+        status: Status = .exited,
+        exit_code: ?i32 = null,
+        signal: ?u8 = null,
+        command: []u8,
+        cwd: []u8,
+        stdout: []u8,
+        stderr: []u8,
+        started_at_ms: i64,
+
+        pub fn deinit(self: *LifecycleEvent, alloc: Allocator) void {
+            alloc.free(self.command);
+            alloc.free(self.cwd);
+            alloc.free(self.stdout);
+            alloc.free(self.stderr);
+            self.* = undefined;
+        }
+
+        fn clone(self: LifecycleEvent, alloc: Allocator) !LifecycleEvent {
+            const command = try alloc.dupe(u8, self.command);
+            errdefer alloc.free(command);
+            const cwd = try alloc.dupe(u8, self.cwd);
+            errdefer alloc.free(cwd);
+            const stdout = try alloc.dupe(u8, self.stdout);
+            errdefer alloc.free(stdout);
+            return .{
+                .process_id = self.process_id,
+                .status = self.status,
+                .exit_code = self.exit_code,
+                .signal = self.signal,
+                .command = command,
+                .cwd = cwd,
+                .stdout = stdout,
+                .stderr = try alloc.dupe(u8, self.stderr),
+                .started_at_ms = self.started_at_ms,
+            };
+        }
+    };
+
     pub fn exec(self: *Manager, alloc: Allocator, request: ExecRequest) !Result {
         if (!supported()) return error.UnsupportedHost;
         if (request.cancel_flag) |flag| if (flag.load(.seq_cst)) return error.Cancelled;
@@ -244,6 +312,7 @@ pub const Manager = struct {
             finished = process.waitUntilDone(initial_min_yield_ms, request.output_sink, null);
         }
         if (!finished) {
+            process.markBackgrounded();
             return process.snapshot(alloc, id, .running, request.max_output_tokens, .model);
         }
         if (!self.detachHeld(id, process)) return error.ProcessUnavailable;
@@ -260,24 +329,43 @@ pub const Manager = struct {
         defer self.releaseActive(process);
         try process.beginOutputProjection(request.output_sink, true);
         defer process.finishOutputProjection(request.output_sink);
-        try process.write(request.chars);
+        var wrote_tty_input = process.tty and request.chars.len > 0;
+        process.write(request.chars) catch |err| {
+            wrote_tty_input = false;
+            // Codex treats a TTY write racing with process exit as a final
+            // poll: retain the terminal bytes and report the exit instead of
+            // losing them behind a stdin error.
+            if (!(process.tty and process.hasExited())) return err;
+        };
+        if (wrote_tty_input) {
+            // Match Codex's reaction window before beginning the requested
+            // interaction wait, improving the chance of returning prompt
+            // output from interactive programs in this same tool result.
+            io_mod.sleep(100 * std.time.ns_per_ms);
+        }
         const yield_ms = if (request.chars.len == 0)
             clampPollYield(request.yield_time_ms)
         else
             clampInitialYield(request.yield_time_ms);
+        const operation_started_ms = io_mod.milliTimestamp();
         if (!process.waitUntilDone(yield_ms, request.output_sink, request.cancel_flag)) {
-            return process.snapshot(alloc, request.process_id, .running, request.max_output_tokens, .model);
+            var result = try process.snapshot(alloc, request.process_id, .running, request.max_output_tokens, .model);
+            result.wall_time_seconds = elapsedSeconds(operation_started_ms);
+            return result;
         }
         if (!self.detachHeld(request.process_id, process)) return error.ProcessUnavailable;
         process.stopAndJoin();
         process.finalizeArtifact();
-        return process.snapshot(alloc, null, .exited, request.max_output_tokens, .model);
+        var result = try process.snapshot(alloc, null, .exited, request.max_output_tokens, .model);
+        result.wall_time_seconds = elapsedSeconds(operation_started_ms);
+        return result;
     }
 
     /// Writes input and returns the output currently available without a
     /// bounded wait. ACP uses this path so process control cannot stall its
     /// request dispatch loop.
     pub fn writeStdinNonblocking(self: *Manager, alloc: Allocator, request: WriteRequest) !Result {
+        const operation_started_ms = io_mod.milliTimestamp();
         const process = self.acquire(request.process_id) orelse return error.UnknownProcessId;
         defer self.releaseActive(process);
         // Establish ACP's independent cursor before input can make the child
@@ -288,13 +376,15 @@ pub const Manager = struct {
         // ACP is an observer of the model-owned process. It must neither drain
         // the model's output cursor nor claim terminal cleanup when the child
         // exits; the model-facing write_stdin path remains the sole consumer.
-        return process.snapshot(
+        var result = try process.snapshot(
             alloc,
             if (status == .running) request.process_id else null,
             status,
             request.max_output_tokens,
             .observer,
         );
+        result.wall_time_seconds = elapsedSeconds(operation_started_ms);
+        return result;
     }
 
     /// Explicitly terminate one background process and its process group.
@@ -305,6 +395,96 @@ pub const Manager = struct {
         defer self.releaseActive(process);
         process.stopAndJoin();
         return true;
+    }
+
+    /// Returns owned snapshots of every command that has crossed its initial
+    /// yield boundary. This is the single source used by /ps and host APIs.
+    pub fn snapshotProcesses(self: *Manager, alloc: Allocator) ![]ProcessSnapshot {
+        var snapshots: std.ArrayList(ProcessSnapshot) = .empty;
+        errdefer {
+            for (snapshots.items) |*snapshot| snapshot.deinit(alloc);
+            snapshots.deinit(alloc);
+        }
+        self.mutex.lockUncancelable(io_mod.getIo());
+        defer self.mutex.unlock(io_mod.getIo());
+        var iterator = self.processes.iterator();
+        while (iterator.next()) |entry| {
+            const process = entry.value_ptr.*;
+            if (try process.statusSnapshot(alloc)) |snapshot| {
+                try snapshots.append(alloc, snapshot);
+            }
+        }
+        return snapshots.toOwnedSlice(alloc);
+    }
+
+    pub fn freeProcessSnapshots(alloc: Allocator, snapshots: []ProcessSnapshot) void {
+        for (snapshots) |*snapshot| snapshot.deinit(alloc);
+        alloc.free(snapshots);
+    }
+
+    /// Transfers terminal events to the host. Reader/waiter threads only append
+    /// owned data here; they never call the UI or agent worker directly.
+    pub fn takeLifecycleEvents(self: *Manager) std.ArrayList(LifecycleEvent) {
+        self.queueDueWatchdogs();
+        self.event_mutex.lockUncancelable(io_mod.getIo());
+        const events = self.lifecycle_events;
+        self.lifecycle_events = .empty;
+        self.event_mutex.unlock(io_mod.getIo());
+        // Claude-mode completion is consumed by the host event, not by a later
+        // model poll. Reap the settled map entries after releasing event_mutex
+        // so process destruction can never participate in an event-queue lock.
+        for (events.items) |event| {
+            if (event.status != .exited) continue;
+            if (self.takeForOperation(event.process_id)) |process| {
+                process.stopAndJoin();
+                self.releaseActive(process);
+            }
+        }
+        return events;
+    }
+
+    /// Retains a lifecycle trigger when the host cannot yet enqueue its model
+    /// continuation, for example while credentials are temporarily absent.
+    pub fn retryLifecycleEvent(self: *Manager, event: LifecycleEvent) !void {
+        var owned = try event.clone(self.alloc);
+        errdefer owned.deinit(self.alloc);
+        self.event_mutex.lockUncancelable(io_mod.getIo());
+        defer self.event_mutex.unlock(io_mod.getIo());
+        try self.lifecycle_events.append(self.alloc, owned);
+    }
+
+    fn queueDueWatchdogs(self: *Manager) void {
+        const now_ms = io_mod.milliTimestamp();
+        self.mutex.lockUncancelable(io_mod.getIo());
+        defer self.mutex.unlock(io_mod.getIo());
+        var iterator = self.processes.iterator();
+        while (iterator.next()) |entry| {
+            if (entry.value_ptr.*.takeWatchdogEvent(now_ms)) |event| {
+                self.queueLifecycleEvent(event);
+            }
+        }
+    }
+
+    fn queueLifecycleEvent(self: *Manager, event: LifecycleEvent) void {
+        self.event_mutex.lockUncancelable(io_mod.getIo());
+        defer self.event_mutex.unlock(io_mod.getIo());
+        self.lifecycle_events.append(self.alloc, event) catch {
+            var owned = event;
+            owned.deinit(self.alloc);
+        };
+    }
+
+    fn generateChunkId(self: *Manager) [6]u8 {
+        const alphabet = "0123456789abcdef";
+        var value = self.next_chunk_id.fetchAdd(1, .seq_cst) ^ @as(u64, @bitCast(io_mod.milliTimestamp()));
+        var id: [6]u8 = undefined;
+        var index: usize = id.len;
+        while (index > 0) {
+            index -= 1;
+            id[index] = alphabet[@as(usize, @intCast(value & 0xf))];
+            value >>= 4;
+        }
+        return id;
     }
 
     fn createProcess(self: *Manager, request: ExecRequest) !*Process {
@@ -326,12 +506,17 @@ pub const Manager = struct {
         const id = identity.id;
 
         const invocation = try shell_resolver.commandInvocation(request.shell, request.login, request.command);
+        const pty: ?pseudo_terminal.Pair = if (request.tty) try pseudo_terminal.open() else null;
+        var pty_master_owned = pty != null;
+        errdefer if (pty_master_owned) pseudo_terminal.close(pty.?.master);
+        defer if (pty) |pair| pseudo_terminal.close(pair.slave);
+        const slave_file = if (pty) |pair| pseudo_terminal.file(pair.slave, false) else undefined;
         var child = try std.process.spawn(zio, .{
             .argv = invocation.argv(),
             .cwd = .{ .path = request.cwd },
-            .stdin = .pipe,
-            .stdout = .pipe,
-            .stderr = .pipe,
+            .stdin = if (request.tty) .{ .file = slave_file } else .pipe,
+            .stdout = if (request.tty) .{ .file = slave_file } else .pipe,
+            .stderr = if (request.tty) .{ .file = slave_file } else .pipe,
             .pgid = if (comptime builtin.os.tag == .windows) null else 0,
             .start_suspended = builtin.os.tag == .windows,
         });
@@ -347,16 +532,30 @@ pub const Manager = struct {
         var windows_job_owned = true;
         errdefer if (windows_job_owned and comptime builtin.os.tag == .windows)
             windows_job.deinit();
-        const stdin = child.stdin orelse return error.SpawnFailed;
-        const stdout = child.stdout orelse return error.SpawnFailed;
-        const stderr = child.stderr orelse return error.SpawnFailed;
+        const stdin = if (pty) |pair|
+            pseudo_terminal.file(try pseudo_terminal.duplicate(pair.master), true)
+        else
+            child.stdin orelse return error.SpawnFailed;
+        const stdout = if (pty) |pair|
+            pseudo_terminal.file(pair.master, true)
+        else
+            child.stdout orelse return error.SpawnFailed;
+        const stderr = if (request.tty) null else child.stderr orelse return error.SpawnFailed;
+        var process_io_owned = true;
+        errdefer if (process_io_owned) {
+            stdin.close(zio);
+            stdout.close(zio);
+            if (stderr) |file| file.close(zio);
+        };
         try setNonblocking(stdin.handle);
         child.stdin = null;
         child.stdout = null;
         child.stderr = null;
+        if (request.tty) pty_master_owned = false;
         const process = try self.alloc.create(Process);
         process.* = Process.init(
             self.alloc,
+            self,
             id,
             child.id orelse return error.SpawnFailed,
             child,
@@ -369,6 +568,7 @@ pub const Manager = struct {
             self.alloc.destroy(process);
             return err;
         };
+        process_io_owned = false;
         child_owned = false;
         windows_job_owned = false;
         errdefer {
@@ -509,6 +709,7 @@ const initial_min_yield_ms: u64 = 250;
 const empty_min_yield_ms: u64 = 5_000;
 const max_yield_ms: u64 = 30_000;
 const max_poll_yield_ms: u64 = 300_000;
+const claude_watchdog_ms: i64 = 5 * 60 * 1000;
 const output_limit: usize = 1024 * 1024;
 const output_projection_limit: usize = 1024 * 1024;
 const output_projection_omitted = "\n[... live output omitted while the consumer was unavailable ...]\n";
@@ -523,6 +724,13 @@ fn clampPollYield(value: u64) u64 {
 
 fn cancelRequested(flag: ?*const std.atomic.Value(bool)) bool {
     return if (flag) |value| value.load(.seq_cst) else false;
+}
+
+fn elapsedSeconds(started_at_ms: i64) f64 {
+    return @as(f64, @floatFromInt(@max(
+        @as(i64, 0),
+        io_mod.milliTimestamp() - started_at_ms,
+    ))) / 1000.0;
 }
 
 const OutputProjectionChunk = struct {
@@ -546,16 +754,16 @@ const Process = struct {
     const SnapshotConsumer = enum { model, observer };
 
     alloc: Allocator,
+    manager: *Manager,
     id: u64,
     pid: std.process.Child.Id,
     child: std.process.Child,
     windows_job: WindowsJob,
     stdin: ?std.Io.File,
-    stdin_thread: ?std.Thread = null,
-    stdin_write_active: bool = false,
-    stdin_write_failed: bool = false,
     stdout: std.Io.File,
-    stderr: std.Io.File,
+    stderr: ?std.Io.File,
+    tty: bool,
+    reader_count: u8,
     mutex: std.Io.Mutex = .init,
     stop_mutex: std.Io.Mutex = .init,
     stdout_buffer: HeadTailBuffer = .{},
@@ -568,6 +776,8 @@ const Process = struct {
     observer_stdout_buffer: HeadTailBuffer = .{},
     observer_stderr_buffer: HeadTailBuffer = .{},
     observer_active: bool = false,
+    lifecycle_stdout_buffer: HeadTailBuffer = .{},
+    lifecycle_stderr_buffer: HeadTailBuffer = .{},
     artifact_threshold: usize,
     artifact_eager: bool,
     artifact_capability: ?*session_child_store.SessionChildCapability,
@@ -586,6 +796,10 @@ const Process = struct {
     done: bool = false,
     term: ?std.process.Child.Term = null,
     readers_done: u8 = 0,
+    backgrounded: bool = false,
+    lifecycle_event_emitted: bool = false,
+    next_watchdog_ms: i64 = 0,
+    mode: exec_mode.Mode,
     stop_requested: std.atomic.Value(bool) = .init(false),
     wait_thread: ?std.Thread = null,
     stdout_thread: ?std.Thread = null,
@@ -593,12 +807,13 @@ const Process = struct {
 
     fn init(
         alloc: Allocator,
+        manager: *Manager,
         id: u64,
         pid: std.process.Child.Id,
         child: std.process.Child,
         stdin: std.Io.File,
         stdout: std.Io.File,
-        stderr: std.Io.File,
+        stderr: ?std.Io.File,
         windows_job: WindowsJob,
         request: Manager.ExecRequest,
     ) !Process {
@@ -608,6 +823,7 @@ const Process = struct {
         errdefer alloc.free(cwd);
         return .{
             .alloc = alloc,
+            .manager = manager,
             .id = id,
             .pid = pid,
             .child = child,
@@ -615,6 +831,8 @@ const Process = struct {
             .stdin = stdin,
             .stdout = stdout,
             .stderr = stderr,
+            .tty = request.tty,
+            .reader_count = if (request.tty) 1 else 2,
             .output_projection_active = request.output_sink != null,
             .artifact_threshold = if (request.command_artifact_threshold == 0)
                 0
@@ -630,15 +848,18 @@ const Process = struct {
             .command = command,
             .cwd = cwd,
             .started_at_ms = io_mod.milliTimestamp(),
+            .mode = request.mode,
         };
     }
 
     fn start(self: *Process) !void {
         self.stdout_thread = try std.Thread.spawn(.{}, readerMain, .{ self, false });
-        self.stderr_thread = std.Thread.spawn(.{}, readerMain, .{ self, true }) catch |err| {
-            self.stopAndJoin();
-            return err;
-        };
+        if (self.stderr != null) {
+            self.stderr_thread = std.Thread.spawn(.{}, readerMain, .{ self, true }) catch |err| {
+                self.stopAndJoin();
+                return err;
+            };
+        }
         self.wait_thread = std.Thread.spawn(.{}, waitMain, .{self}) catch |err| {
             self.stopAndJoin();
             return err;
@@ -667,31 +888,128 @@ const Process = struct {
     fn isSettled(self: *Process) bool {
         self.mutex.lockUncancelable(io_mod.getIo());
         defer self.mutex.unlock(io_mod.getIo());
-        return self.done and self.readers_done == 2;
+        return self.done and self.readers_done == self.reader_count;
+    }
+
+    fn hasExited(self: *Process) bool {
+        self.mutex.lockUncancelable(io_mod.getIo());
+        defer self.mutex.unlock(io_mod.getIo());
+        return self.done;
+    }
+
+    fn markBackgrounded(self: *Process) void {
+        self.mutex.lockUncancelable(io_mod.getIo());
+        self.backgrounded = true;
+        self.next_watchdog_ms = io_mod.milliTimestamp() + claude_watchdog_ms;
+        self.mutex.unlock(io_mod.getIo());
+        self.maybeQueueLifecycleEvent();
+    }
+
+    fn statusSnapshot(self: *Process, alloc: Allocator) !?Manager.ProcessSnapshot {
+        self.mutex.lockUncancelable(io_mod.getIo());
+        defer self.mutex.unlock(io_mod.getIo());
+        if (!self.backgrounded) return null;
+        const command = try alloc.dupe(u8, self.command);
+        errdefer alloc.free(command);
+        return .{
+            .process_id = self.id,
+            .pid = @intCast(self.pid),
+            .status = if (self.done) .exited else .running,
+            .command = command,
+            .cwd = try alloc.dupe(u8, self.cwd),
+            .started_at_ms = self.started_at_ms,
+            .mode = self.mode,
+        };
+    }
+
+    /// Thread handoff:
+    ///
+    /// child waiter/readers -> owned Manager event queue -> host event loop
+    ///
+    /// No transport, worker, transcript, or renderer callback occurs while a
+    /// process lock is held. This keeps process completion independent from UI
+    /// paint and from the model-facing output cursor.
+    fn maybeQueueLifecycleEvent(self: *Process) void {
+        var event: ?Manager.LifecycleEvent = null;
+        self.mutex.lockUncancelable(io_mod.getIo());
+        if (self.backgrounded and self.mode == .claude and self.done and
+            self.readers_done == self.reader_count and !self.lifecycle_event_emitted)
+        {
+            event = self.buildLifecycleEventLocked(.exited);
+            if (event != null) self.lifecycle_event_emitted = true;
+        }
+        self.mutex.unlock(io_mod.getIo());
+        if (event) |owned| self.manager.queueLifecycleEvent(owned);
+    }
+
+    fn takeWatchdogEvent(self: *Process, now_ms: i64) ?Manager.LifecycleEvent {
+        self.mutex.lockUncancelable(io_mod.getIo());
+        defer self.mutex.unlock(io_mod.getIo());
+        if (!self.backgrounded or self.mode != .claude or self.done or
+            now_ms < self.next_watchdog_ms)
+        {
+            return null;
+        }
+        const event = self.buildLifecycleEventLocked(.running) orelse return null;
+        self.next_watchdog_ms = now_ms + claude_watchdog_ms;
+        return event;
+    }
+
+    fn buildLifecycleEventLocked(self: *Process, status: Manager.Status) ?Manager.LifecycleEvent {
+        const out = self.lifecycle_stdout_buffer.snapshot(self.alloc, output_limit) catch return null;
+        const err = self.lifecycle_stderr_buffer.snapshot(self.alloc, output_limit) catch {
+            self.alloc.free(out.bytes);
+            return null;
+        };
+        const command = self.alloc.dupe(u8, self.command) catch {
+            self.alloc.free(out.bytes);
+            self.alloc.free(err.bytes);
+            return null;
+        };
+        const cwd = self.alloc.dupe(u8, self.cwd) catch {
+            self.alloc.free(out.bytes);
+            self.alloc.free(err.bytes);
+            self.alloc.free(command);
+            return null;
+        };
+        var event = Manager.LifecycleEvent{
+            .process_id = self.id,
+            .status = status,
+            .command = command,
+            .cwd = cwd,
+            .stdout = out.bytes,
+            .stderr = err.bytes,
+            .started_at_ms = self.started_at_ms,
+        };
+        if (status == .exited) {
+            if (self.term) |term| switch (term) {
+                .exited => |code| event.exit_code = code,
+                .signal => |signal| event.signal = @intCast(@intFromEnum(signal)),
+                .stopped, .unknown => {},
+            };
+        }
+        return event;
     }
 
     fn write(self: *Process, chars: []const u8) !void {
         if (chars.len == 0) return;
+        if (!self.tty) {
+            if (std.mem.eql(u8, chars, "\x03")) {
+                if (comptime builtin.os.tag == .windows) {
+                    self.windows_job.terminate();
+                } else {
+                    std.posix.kill(-self.pid, std.posix.SIG.INT) catch return error.WriteFailed;
+                }
+                return;
+            }
+            return error.ProcessStdinClosed;
+        }
         self.mutex.lockUncancelable(io_mod.getIo());
         defer self.mutex.unlock(io_mod.getIo());
         if (self.stop_requested.load(.seq_cst)) return error.ProcessExited;
         if (self.done) return error.ProcessExited;
         const stdin = self.stdin orelse return error.ProcessStdinClosed;
-        if (comptime builtin.os.tag == .windows) {
-            if (self.stdin_write_failed) return error.ProcessStdinClosed;
-            if (self.stdin_write_active or chars.len > windows_max_pending_stdin_bytes)
-                return error.WriteWouldBlock;
-            if (self.stdin_thread) |thread| {
-                thread.join();
-                self.stdin_thread = null;
-            }
-            const owned = try self.alloc.dupe(u8, chars);
-            errdefer self.alloc.free(owned);
-            self.stdin_write_active = true;
-            errdefer self.stdin_write_active = false;
-            self.stdin_thread = try std.Thread.spawn(.{}, windowsStdinWriterMain, .{ self, stdin.handle, owned });
-            return;
-        }
+        if (comptime builtin.os.tag == .windows) return error.PtyUnavailable;
         var offset: usize = 0;
         while (offset < chars.len) {
             const rc = std.posix.system.write(stdin.handle, chars[offset..].ptr, chars.len - offset);
@@ -889,6 +1207,7 @@ const Process = struct {
         const err = try stderr_buffer.snapshot(alloc, maxOutputBytes(max_output_tokens));
         errdefer alloc.free(err.bytes);
         var result = Manager.Result{
+            .chunk_id = self.manager.generateChunkId(),
             .process_id = process_id,
             .status = status,
             .wall_time_seconds = @as(f64, @floatFromInt(@max(
@@ -924,11 +1243,10 @@ const Process = struct {
         if (comptime builtin.os.tag == .wasi) return;
         self.stop_mutex.lockUncancelable(io_mod.getIo());
         defer self.stop_mutex.unlock(io_mod.getIo());
-        var stdin_writer: ?std.Thread = null;
         if (!self.stop_requested.swap(true, .seq_cst)) {
             self.mutex.lockUncancelable(io_mod.getIo());
             var done = self.done;
-            var readers_done = self.readers_done == 2;
+            var readers_done = self.readers_done == self.reader_count;
             self.mutex.unlock(io_mod.getIo());
             if (!done or !readers_done) {
                 if (comptime builtin.os.tag == .windows) {
@@ -941,7 +1259,7 @@ const Process = struct {
                         io_mod.sleep(2 * std.time.ns_per_ms);
                         self.mutex.lockUncancelable(io_mod.getIo());
                         done = self.done;
-                        readers_done = self.readers_done == 2;
+                        readers_done = self.readers_done == self.reader_count;
                         self.mutex.unlock(io_mod.getIo());
                         if (done and readers_done) break;
                     }
@@ -951,10 +1269,6 @@ const Process = struct {
             self.mutex.lockUncancelable(io_mod.getIo());
             const stdin = self.stdin;
             self.stdin = null;
-            if (comptime builtin.os.tag == .windows) {
-                stdin_writer = self.stdin_thread;
-                self.stdin_thread = null;
-            }
             self.mutex.unlock(io_mod.getIo());
             if (stdin) |file| file.close(io_mod.getIo());
         }
@@ -983,7 +1297,6 @@ const Process = struct {
             thread.join();
             self.stderr_thread = null;
         }
-        if (stdin_writer) |thread| thread.join();
         if (comptime builtin.os.tag == .windows) self.windows_job.deinit();
     }
 
@@ -1001,6 +1314,8 @@ const Process = struct {
         self.stderr_buffer.deinit(self.alloc);
         self.observer_stdout_buffer.deinit(self.alloc);
         self.observer_stderr_buffer.deinit(self.alloc);
+        self.lifecycle_stdout_buffer.deinit(self.alloc);
+        self.lifecycle_stderr_buffer.deinit(self.alloc);
         self.alloc.destroy(self);
     }
 
@@ -1010,22 +1325,31 @@ const Process = struct {
         self.term = term;
         self.done = true;
         self.mutex.unlock(io_mod.getIo());
+        self.maybeQueueLifecycleEvent();
     }
 
     fn readerMain(self: *Process, stderr: bool) void {
         var buffer: [8192]u8 = undefined;
-        var file = if (stderr) self.stderr else self.stdout;
+        var file = if (stderr) self.stderr.? else self.stdout;
         defer file.close(io_mod.getIo());
         while (true) {
-            const count = file.readStreaming(io_mod.getIo(), &.{buffer[0..]}) catch break;
+            const count = file.readStreaming(io_mod.getIo(), &.{buffer[0..]}) catch |err| {
+                if (self.tty and err == error.WouldBlock) {
+                    io_mod.sleep(std.time.ns_per_ms);
+                    continue;
+                }
+                break;
+            };
             if (count == 0) break;
             self.mutex.lockUncancelable(io_mod.getIo());
             if (stderr) {
                 self.stderr_buffer.append(self.alloc, buffer[0..count]) catch {};
+                self.lifecycle_stderr_buffer.append(self.alloc, buffer[0..count]) catch {};
                 if (self.observer_active)
                     self.observer_stderr_buffer.append(self.alloc, buffer[0..count]) catch {};
             } else {
                 self.stdout_buffer.append(self.alloc, buffer[0..count]) catch {};
+                self.lifecycle_stdout_buffer.append(self.alloc, buffer[0..count]) catch {};
                 if (self.observer_active)
                     self.observer_stdout_buffer.append(self.alloc, buffer[0..count]) catch {};
             }
@@ -1036,6 +1360,7 @@ const Process = struct {
         self.mutex.lockUncancelable(io_mod.getIo());
         self.readers_done += 1;
         self.mutex.unlock(io_mod.getIo());
+        self.maybeQueueLifecycleEvent();
     }
 
     fn appendArtifactLocked(self: *Process, stderr: bool, bytes: []const u8) void {
@@ -1158,53 +1483,6 @@ const HeadTailBuffer = struct {
         self.* = undefined;
     }
 };
-
-const windows_max_pending_stdin_bytes: usize = 64 * 1024;
-
-fn windowsStdinWriterMain(
-    process: *Process,
-    handle: std.Io.File.Handle,
-    owned: []u8,
-) void {
-    const succeeded = writeWindowsPipeBlocking(handle, owned);
-    process.alloc.free(owned);
-    process.mutex.lockUncancelable(io_mod.getIo());
-    process.stdin_write_active = false;
-    process.stdin_write_failed = !succeeded;
-    process.mutex.unlock(io_mod.getIo());
-}
-
-fn writeWindowsPipeBlocking(handle: std.Io.File.Handle, bytes: []const u8) bool {
-    const windows = std.os.windows;
-    var offset: usize = 0;
-    while (offset < bytes.len) {
-        var written: windows.DWORD = 0;
-        const chunk_len: windows.DWORD = @intCast(@min(
-            bytes.len - offset,
-            std.math.maxInt(windows.DWORD),
-        ));
-        if (WriteFile(
-            handle,
-            bytes[offset..].ptr,
-            chunk_len,
-            &written,
-            null,
-        ) == .FALSE) {
-            return false;
-        }
-        if (written == 0) return false;
-        offset += written;
-    }
-    return true;
-}
-
-extern "kernel32" fn WriteFile(
-    handle: std.os.windows.HANDLE,
-    buffer: *const anyopaque,
-    bytes_to_write: std.os.windows.DWORD,
-    bytes_written: *std.os.windows.DWORD,
-    overlapped: ?*anyopaque,
-) callconv(.winapi) std.os.windows.BOOL;
 
 fn maxOutputBytes(max_output_tokens: ?u64) usize {
     const tokens = max_output_tokens orelse 10_000;
@@ -1368,6 +1646,11 @@ test "unified exec keeps long process addressable and polls output" {
     defer first.deinit(std.testing.allocator);
     try std.testing.expect(first.process_id != null);
     try std.testing.expectEqual(Manager.Status.running, first.status);
+    const snapshots = try manager.snapshotProcesses(std.testing.allocator);
+    defer Manager.freeProcessSnapshots(std.testing.allocator, snapshots);
+    try std.testing.expectEqual(@as(usize, 1), snapshots.len);
+    try std.testing.expectEqual(first.process_id.?, snapshots[0].process_id);
+    try std.testing.expectEqual(Manager.Status.running, snapshots[0].status);
 
     var stdout: std.ArrayList(u8) = .empty;
     defer stdout.deinit(std.testing.allocator);
@@ -1389,8 +1672,131 @@ test "unified exec keeps long process addressable and polls output" {
     try std.testing.expectEqualStrings("readydone", stdout.items);
 }
 
+test "unified exec queues one Claude continuation event from an independent cursor" {
+    if (!Manager.supported() or builtin.os.tag == .windows) return error.SkipZigTest;
+    var manager = Manager.init(std.testing.allocator);
+    defer manager.deinit();
+    var first = try manager.exec(std.testing.allocator, .{
+        .command = "printf started; sleep 0.4; printf done",
+        .cwd = "/tmp",
+        .yield_time_ms = 250,
+        .mode = .claude,
+    });
+    defer first.deinit(std.testing.allocator);
+    try std.testing.expectEqual(Manager.Status.running, first.status);
+
+    var events: std.ArrayList(Manager.LifecycleEvent) = .empty;
+    const deadline = io_mod.milliTimestamp() + 3_000;
+    while (events.items.len == 0 and io_mod.milliTimestamp() < deadline) {
+        events.deinit(std.testing.allocator);
+        io_mod.sleep(10 * std.time.ns_per_ms);
+        events = manager.takeLifecycleEvents();
+    }
+    defer {
+        for (events.items) |*event| event.deinit(std.testing.allocator);
+        events.deinit(std.testing.allocator);
+    }
+    try std.testing.expectEqual(@as(usize, 1), events.items.len);
+    try std.testing.expectEqual(first.process_id.?, events.items[0].process_id);
+    try std.testing.expectEqual(@as(?i32, 0), events.items[0].exit_code);
+    try std.testing.expectEqualStrings("starteddone", events.items[0].stdout);
+    try std.testing.expectError(error.UnknownProcessId, manager.writeStdin(
+        std.testing.allocator,
+        .{ .process_id = first.process_id.? },
+    ));
+    var duplicate = manager.takeLifecycleEvents();
+    defer duplicate.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 0), duplicate.items.len);
+}
+
+test "Claude watchdog event keeps the running process addressable" {
+    if (!Manager.supported() or builtin.os.tag == .windows) return error.SkipZigTest;
+    var manager = Manager.init(std.testing.allocator);
+    defer manager.deinit();
+    var first = try manager.exec(std.testing.allocator, .{
+        .command = "sleep 30",
+        .cwd = "/tmp",
+        .yield_time_ms = 250,
+        .mode = .claude,
+    });
+    const process_id = first.process_id.?;
+    first.deinit(std.testing.allocator);
+
+    const process = manager.acquire(process_id) orelse return error.TestExpectedEqual;
+    process.mutex.lockUncancelable(std.testing.io);
+    process.next_watchdog_ms = io_mod.milliTimestamp() - 1;
+    process.mutex.unlock(std.testing.io);
+    manager.releaseActive(process);
+
+    var events = manager.takeLifecycleEvents();
+    defer {
+        for (events.items) |*event| event.deinit(std.testing.allocator);
+        events.deinit(std.testing.allocator);
+    }
+    try std.testing.expectEqual(@as(usize, 1), events.items.len);
+    try std.testing.expectEqual(Manager.Status.running, events.items[0].status);
+
+    const snapshots = try manager.snapshotProcesses(std.testing.allocator);
+    defer Manager.freeProcessSnapshots(std.testing.allocator, snapshots);
+    try std.testing.expectEqual(@as(usize, 1), snapshots.len);
+    try std.testing.expectEqual(process_id, snapshots[0].process_id);
+    try std.testing.expect(manager.terminate(process_id));
+}
+
+test "Claude lifecycle trigger can be retained after host admission fails" {
+    var manager = Manager.init(std.testing.allocator);
+    defer manager.deinit();
+    var event = Manager.LifecycleEvent{
+        .process_id = 42,
+        .status = .exited,
+        .exit_code = 7,
+        .command = try std.testing.allocator.dupe(u8, "false"),
+        .cwd = try std.testing.allocator.dupe(u8, "/tmp"),
+        .stdout = try std.testing.allocator.dupe(u8, ""),
+        .stderr = try std.testing.allocator.dupe(u8, "failed"),
+        .started_at_ms = 1,
+    };
+    defer event.deinit(std.testing.allocator);
+
+    try manager.retryLifecycleEvent(event);
+    var retained = manager.takeLifecycleEvents();
+    defer {
+        for (retained.items) |*item| item.deinit(std.testing.allocator);
+        retained.deinit(std.testing.allocator);
+    }
+    try std.testing.expectEqual(@as(usize, 1), retained.items.len);
+    try std.testing.expectEqual(@as(u64, 42), retained.items[0].process_id);
+    try std.testing.expectEqual(@as(?i32, 7), retained.items[0].exit_code);
+    try std.testing.expectEqualStrings("failed", retained.items[0].stderr);
+}
+
+test "non-tty write_stdin accepts polling and control-c only" {
+    if (!Manager.supported() or builtin.os.tag == .windows) return error.SkipZigTest;
+    var manager = Manager.init(std.testing.allocator);
+    defer manager.deinit();
+    var first = try manager.exec(std.testing.allocator, .{
+        .command = "sleep 30",
+        .cwd = "/tmp",
+        .yield_time_ms = 250,
+    });
+    const process_id = first.process_id.?;
+    first.deinit(std.testing.allocator);
+    try std.testing.expectError(error.ProcessStdinClosed, manager.writeStdinNonblocking(
+        std.testing.allocator,
+        .{ .process_id = process_id, .chars = "input" },
+    ));
+    var interrupted = try manager.writeStdin(std.testing.allocator, .{
+        .process_id = process_id,
+        .chars = "\x03",
+        .yield_time_ms = 2_000,
+    });
+    defer interrupted.deinit(std.testing.allocator);
+    try std.testing.expectEqual(Manager.Status.exited, interrupted.status);
+}
+
 test "unified exec projects live and between-poll output through one sink" {
     if (!Manager.supported()) return error.SkipZigTest;
+    if (!pseudo_terminal.supported()) return error.SkipZigTest;
     var manager = Manager.init(std.testing.allocator);
     defer manager.deinit();
     var capture = TestOutputCapture{};
@@ -1405,6 +1811,7 @@ test "unified exec projects live and between-poll output through one sink" {
         .cwd = "/tmp",
         .yield_time_ms = 250,
         .output_sink = sink,
+        .tty = true,
     });
     const process_id = first.process_id.?;
     defer first.deinit(std.testing.allocator);
@@ -1590,6 +1997,7 @@ test "unified exec retains oversized output in command artifacts" {
 
 test "unified exec writes interactive input without blocking the caller" {
     if (!Manager.supported()) return error.SkipZigTest;
+    if (!pseudo_terminal.supported()) return error.SkipZigTest;
     var manager = Manager.init(std.testing.allocator);
     defer manager.deinit();
     var first = try manager.exec(std.testing.allocator, .{
@@ -1599,6 +2007,7 @@ test "unified exec writes interactive input without blocking the caller" {
             "IFS= read -r line; printf 'got:%s' \"$line\"",
         .cwd = if (builtin.os.tag == .windows) "." else "/tmp",
         .yield_time_ms = if (builtin.os.tag == .windows) 1_000 else 250,
+        .tty = true,
     });
     defer first.deinit(std.testing.allocator);
     try std.testing.expectEqual(Manager.Status.running, first.status);
@@ -1609,74 +2018,42 @@ test "unified exec writes interactive input without blocking the caller" {
     });
     defer second.deinit(std.testing.allocator);
     try std.testing.expectEqual(Manager.Status.exited, second.status);
-    try std.testing.expectEqualStrings("got:hello", second.stdout);
+    try std.testing.expect(std.mem.find(u8, second.stdout, "got:hello") != null);
 }
 
-test "unified exec Windows reaps each completed stdin writer before replacement" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
+test "tty input racing with exit returns the final process result" {
+    if (!Manager.supported() or !pseudo_terminal.supported()) return error.SkipZigTest;
     var manager = Manager.init(std.testing.allocator);
     defer manager.deinit();
     var first = try manager.exec(std.testing.allocator, .{
-        .command = "while (($line = [Console]::In.ReadLine()) -ne 'done') {}",
-        .cwd = ".",
-        .yield_time_ms = 1_000,
+        .command = "printf final; sleep 0.35",
+        .cwd = "/tmp",
+        .yield_time_ms = 250,
+        .tty = true,
     });
     const process_id = first.process_id.?;
+    try std.testing.expect(std.mem.find(u8, first.stdout, "final") != null);
     first.deinit(std.testing.allocator);
+    io_mod.sleep(250 * std.time.ns_per_ms);
 
-    for (0..16) |_| {
-        var write_result = while (true) {
-            const result = manager.writeStdinNonblocking(std.testing.allocator, .{
-                .process_id = process_id,
-                .chars = "next\n",
-            }) catch |err| switch (err) {
-                error.WriteWouldBlock => {
-                    io_mod.sleep(std.time.ns_per_ms);
-                    continue;
-                },
-                else => return err,
-            };
-            break result;
-        };
-        write_result.deinit(std.testing.allocator);
-
-        const idle_deadline = io_mod.milliTimestamp() + 2_000;
-        while (io_mod.milliTimestamp() < idle_deadline) {
-            const process = manager.acquire(process_id) orelse return error.ProcessUnavailable;
-            process.mutex.lockUncancelable(io_mod.getIo());
-            const write_active = process.stdin_write_active;
-            process.mutex.unlock(io_mod.getIo());
-            manager.releaseActive(process);
-            if (!write_active) break;
-            io_mod.sleep(std.time.ns_per_ms);
-        }
-        const process = manager.acquire(process_id) orelse return error.ProcessUnavailable;
-        defer manager.releaseActive(process);
-        process.mutex.lockUncancelable(io_mod.getIo());
-        const write_active = process.stdin_write_active;
-        const writer_retained = process.stdin_thread != null;
-        process.mutex.unlock(io_mod.getIo());
-        try std.testing.expect(!write_active);
-        try std.testing.expect(writer_retained);
-    }
-
-    var finished = try manager.writeStdin(std.testing.allocator, .{
+    var final = try manager.writeStdin(std.testing.allocator, .{
         .process_id = process_id,
-        .chars = "done\n",
-        .yield_time_ms = 5_000,
+        .chars = "late input\n",
     });
-    defer finished.deinit(std.testing.allocator);
-    try std.testing.expectEqual(Manager.Status.exited, finished.status);
+    defer final.deinit(std.testing.allocator);
+    try std.testing.expectEqual(Manager.Status.exited, final.status);
 }
 
 test "unified exec nonblocking writes return a live process immediately" {
     if (!Manager.supported()) return error.SkipZigTest;
+    if (!pseudo_terminal.supported()) return error.SkipZigTest;
     var manager = Manager.init(std.testing.allocator);
     defer manager.deinit();
     var first = try manager.exec(std.testing.allocator, .{
         .command = "IFS= read -r line; printf 'got:%s' \"$line\"; sleep 30",
         .cwd = "/tmp",
         .yield_time_ms = 250,
+        .tty = true,
     });
     const process_id = first.process_id.?;
     first.deinit(std.testing.allocator);
@@ -1694,12 +2071,14 @@ test "unified exec nonblocking writes return a live process immediately" {
 
 test "unified exec activates the observer before a direct write can fail" {
     if (!Manager.supported()) return error.SkipZigTest;
+    if (!pseudo_terminal.supported()) return error.SkipZigTest;
     var manager = Manager.init(std.testing.allocator);
     defer manager.deinit();
     var first = try manager.exec(std.testing.allocator, .{
         .command = if (builtin.os.tag == .windows) "Start-Sleep -Seconds 30" else "sleep 30",
         .cwd = if (builtin.os.tag == .windows) "." else "/tmp",
         .yield_time_ms = if (builtin.os.tag == .windows) 1_000 else 250,
+        .tty = true,
     });
     const process_id = first.process_id.?;
     first.deinit(std.testing.allocator);
@@ -1722,6 +2101,7 @@ test "unified exec activates the observer before a direct write can fail" {
 
 test "unified exec direct control stays responsive during a model poll" {
     if (!Manager.supported()) return error.SkipZigTest;
+    if (!pseudo_terminal.supported()) return error.SkipZigTest;
     var manager = Manager.init(std.testing.allocator);
     defer manager.deinit();
     var first = try manager.exec(std.testing.allocator, .{
@@ -1731,6 +2111,7 @@ test "unified exec direct control stays responsive during a model poll" {
             "IFS= read -r first; printf 'model:%s' \"$first\"; IFS= read -r second",
         .cwd = if (builtin.os.tag == .windows) "." else "/tmp",
         .yield_time_ms = 250,
+        .tty = true,
     });
     const process_id = first.process_id.?;
     first.deinit(std.testing.allocator);

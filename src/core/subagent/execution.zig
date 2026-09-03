@@ -24,7 +24,6 @@ const session_store = @import("../session/session_store.zig");
 const permissions = @import("../permissions/permissions.zig");
 const tooling_tool_admission = @import("../tooling/tool_admission.zig");
 const shell_resolver = @import("../terminal/shell_resolver.zig");
-const background_runtime = @import("../background/background_runtime.zig");
 const tool_dispatch = @import("../tooling/tool_dispatch.zig");
 const types = @import("../shared/types.zig");
 const control_store = @import("control_store.zig");
@@ -1341,6 +1340,7 @@ fn livePresentationEventBytes(event: worker_runtime.WorkerEvent) ?usize {
         .begin_prompt_with_skill_bindings,
         .append_prompt,
         .begin_presented_prompt,
+        .background_continuation_begin,
         .finish_prompt,
         .notification,
         .question_requested,
@@ -6726,8 +6726,6 @@ test "canonical approval wait refreshes revoked authority and races reject relat
     var initial_authority = try turn.resolveLiveAuthority(alloc);
     const initial_authority_generation = initial_authority.generation;
     initial_authority.deinit(alloc);
-    var background: background_runtime.BackgroundRuntime = .{};
-    defer background.deinit(alloc);
     var rules = [_]types.PermissionRule{.{
         .permission = @constCast("bash"),
         .pattern = @constCast("*"),
@@ -6793,7 +6791,6 @@ test "canonical approval wait refreshes revoked authority and races reject relat
         .tool_registry = .{ .tools = &.{test_builtin_tools.exec_command} },
         .worker = &turn.worker,
         .permission_prompter = turn.permissionPrompter(),
-        .background = &background,
     }, .start = &registration_start, .ready = &registration_ready };
     var detach_command = try domain.validateCommand(alloc, .{ .relationship = .{
         .action = .detach,

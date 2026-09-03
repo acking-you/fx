@@ -1,7 +1,5 @@
 const std = @import("std");
-const background_runtime = @import("../background/background_runtime.zig");
 const change_tracker = @import("change_tracker.zig");
-const session_runtime = @import("../session/session.zig");
 const types = @import("../shared/types.zig");
 const context_limits = @import("../config/context_limits.zig");
 const workspace_access = @import("workspace_access.zig");
@@ -253,8 +251,6 @@ pub const TransientContextInput = struct {
     interactive: bool,
     permission_mode: types.PermissionMode,
     tracker: ?*change_tracker.ChangeTracker,
-    background: *background_runtime.BackgroundRuntime,
-    session: *session_runtime.SessionRuntime,
 };
 
 pub const Provider = struct {
@@ -400,7 +396,7 @@ pub const Fragment = enum {
             .scoped_instructions => "bounded global, workspace, and nested scoped rules plus the bounded visible skill catalog",
             .available_tools => "gateway-advertised tool schemas after permission and entrypoint filtering",
             .permission_mode => "captured ask, auto, or yolo baseline for the active turn without rule or grant contents",
-            .environment_metadata => "OS, shell, date, home directory, and live/non-live background runtime hints",
+            .environment_metadata => "OS, shell, date, and home directory",
             .session_metadata => "model, step budget, max tool-result bytes, conversation history, grants, loaded skills, and persisted session id when present",
         };
     }
@@ -463,7 +459,7 @@ const current_inventory = [_]EntrypointInventory{
         .entrypoint = .interactive,
         .assembly_path = "main.App.enqueuePrompt -> app_agent_runtime.processQueuedPrompt -> agent_runtime dependencies",
         .static_context = "builtins/context captures one global/root/ancestor/applicable AGENTS.md snapshot before enqueue, then adds scoped deltas from effective structured tool targets",
-        .transient_context = "tool_runtime transient context each model step: env_context, captured permission mode, background runtime, non-live background history",
+        .transient_context = "tool_runtime transient context each model step: env_context and captured permission mode",
         .tools = "App.snapshotModelToolProjection pairs full tool advertisement with included custom-provider guidance after permission",
         .permission = "PermissionEngine mode, persistent rules, and session grants are enforced by interactive permission prompts",
         .session = "live SessionRuntime history plus persisted session/log/artifact stores when enabled",
@@ -635,7 +631,7 @@ test "minimum shared model context contract snapshot" {
         \\- scoped_instructions: bounded global, workspace, and nested scoped rules plus the bounded visible skill catalog
         \\- available_tools: gateway-advertised tool schemas after permission and entrypoint filtering
         \\- permission_mode: captured ask, auto, or yolo baseline for the active turn without rule or grant contents
-        \\- environment_metadata: OS, shell, date, home directory, and live/non-live background runtime hints
+        \\- environment_metadata: OS, shell, date, and home directory
         \\- session_metadata: model, step budget, max tool-result bytes, conversation history, grants, loaded skills, and persisted session id when present
         \\
     ,
@@ -653,7 +649,7 @@ test "entrypoint context inventory snapshot documents current deltas" {
         \\- entrypoint: interactive
         \\  assembly_path: main.App.enqueuePrompt -> app_agent_runtime.processQueuedPrompt -> agent_runtime dependencies
         \\  static_context: builtins/context captures one global/root/ancestor/applicable AGENTS.md snapshot before enqueue, then adds scoped deltas from effective structured tool targets
-        \\  transient_context: tool_runtime transient context each model step: env_context, captured permission mode, background runtime, non-live background history
+        \\  transient_context: tool_runtime transient context each model step: env_context and captured permission mode
         \\  tools: App.snapshotModelToolProjection pairs full tool advertisement with included custom-provider guidance after permission
         \\  permission: PermissionEngine mode, persistent rules, and session grants are enforced by interactive permission prompts
         \\  session: live SessionRuntime history plus persisted session/log/artifact stores when enabled
@@ -762,10 +758,6 @@ test "context registry routes the default provider" {
     defer snapshot.deinit(alloc);
     const contribution = snapshot.contribution orelse return error.TestExpectedEqual;
 
-    var background: background_runtime.BackgroundRuntime = .{};
-    defer background.deinit(alloc);
-    var session: session_runtime.SessionRuntime = .{ .max_history_turns = 4 };
-    defer session.deinit(alloc);
     var tracker: change_tracker.ChangeTracker = .{};
     defer tracker.deinit(alloc);
     var arena_state = std.heap.ArenaAllocator.init(alloc);
@@ -780,8 +772,6 @@ test "context registry routes the default provider" {
         .interactive = true,
         .permission_mode = .ask,
         .tracker = &tracker,
-        .background = &background,
-        .session = &session,
     }, arena, &messages);
 
     try std.testing.expectEqual(@as(usize, 2), messages.items.len);

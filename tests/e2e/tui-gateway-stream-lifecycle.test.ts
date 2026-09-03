@@ -25,6 +25,7 @@ import {
   fakeGatewaySse,
   fakeGatewayToolCall,
   hasEmptyComposer,
+  heldFakeGatewayFinalText,
   isEmptyComposerLine,
   isComposerLine,
   responseCompleted,
@@ -5756,6 +5757,192 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
           encoding: "utf8",
         }),
       ).not.toBe("");
+    },
+    TIMEOUT,
+  );
+
+  test(
+    "bang-prefixed input is an ordinary model prompt and never a shell shortcut",
+    async () => {
+      root = realpathSync(mkdtempSync(join(tmpdir(), "fx-tui-bang-prompt-")));
+      const home = join(root, "home");
+      const workspacePath = join(root, "workspace");
+      const stderrPath = join(root, "stderr.log");
+      mkdirSync(join(home, ".fx"), { recursive: true });
+      mkdirSync(workspacePath, { recursive: true });
+      writeFileSync(join(home, ".fx", "settings.json"), "{}");
+      const workspace = realpathSync(workspacePath);
+      const bangPrompt = "!touch bang-command-must-not-run";
+
+      const promptGateway = startFakeGateway([
+        fakeGatewayFinalText("BANG_PREFIX_IS_A_PROMPT"),
+      ]);
+      gateway = promptGateway;
+      session = await TmuxSession.create({
+        cwd: workspace,
+        stderrPath,
+        env: {
+          HOME: home,
+          OPENAI_API_KEY: "fake-bang-prompt-key",
+          FX_RESPONSES_BASE_URL: promptGateway.baseUrl,
+          FX_MODEL: MODEL,
+        },
+      });
+
+      await session.waitForComposer(TIMEOUT);
+      await session.sendText(bangPrompt);
+      await session.waitForText("BANG_PREFIX_IS_A_PROMPT", TIMEOUT);
+
+      expect(promptGateway.requests).toHaveLength(1);
+      expect(promptGateway.requests[0]!.body).toContain(bangPrompt);
+      expect(existsSync(join(workspace, "bang-command-must-not-run"))).toBe(false);
+      expect(readFileSync(stderrPath, "utf8")).toBe("");
+    },
+    TIMEOUT,
+  );
+
+  test(
+    "Codex exec mode keeps the turn active for model write_stdin polling",
+    async () => {
+      root = realpathSync(mkdtempSync(join(tmpdir(), "fx-tui-codex-exec-mode-")));
+      const home = join(root, "home");
+      const workspace = join(root, "workspace");
+      const stderrPath = join(root, "stderr.log");
+      mkdirSync(join(home, ".fx"), { recursive: true });
+      mkdirSync(workspace, { recursive: true });
+      writeFileSync(join(home, ".fx", "settings.json"), "{}");
+
+      let phase = 0;
+      const commandGateway = startDynamicFakeGateway((body) => {
+        if (phase === 0) {
+          phase = 1;
+          return fakeGatewayToolCall("codex_background_1", "exec_command", {
+            cmd: "printf CODEX_BG_STARTED; sleep 0.6; printf CODEX_BG_DONE",
+            yield_time_ms: 250,
+          });
+        }
+        if (phase === 1) {
+          const request = JSON.parse(body);
+          const output = request.input.find(
+            (item: any) =>
+              item.type === "function_call_output" &&
+              item.call_id === "codex_background_1",
+          );
+          const processId = JSON.parse(output.output).session_id;
+          phase = 2;
+          return fakeGatewayToolCall("codex_poll_1", "write_stdin", {
+            session_id: processId,
+          });
+        }
+        if (phase === 2) {
+          phase = 3;
+          return fakeGatewayFinalText("CODEX_POLL_CONTINUATION_DONE");
+        }
+        return new Response("unexpected Codex exec-mode request", { status: 500 });
+      });
+      gateway = commandGateway;
+      session = await TmuxSession.create({
+        cwd: realpathSync(workspace),
+        stderrPath,
+        env: {
+          HOME: home,
+          OPENAI_API_KEY: "fake-codex-exec-mode-key",
+          FX_PERMISSION_MODE: "yolo",
+          FX_RESPONSES_BASE_URL: commandGateway.baseUrl,
+          FX_MODEL: MODEL,
+        },
+      });
+
+      await session.waitForComposer(TIMEOUT);
+      await session.sendText("Run and poll the background fixture.");
+      await session.waitForText("CODEX_POLL_CONTINUATION_DONE", TIMEOUT);
+      await waitForCondition(
+        () => commandGateway.requests.length === 3,
+        "Codex write_stdin continuation",
+      );
+
+      const finalRequest = JSON.parse(commandGateway.requests[2]!.body);
+      const pollOutput = finalRequest.input.find(
+        (item: any) =>
+          item.type === "function_call_output" && item.call_id === "codex_poll_1",
+      );
+      expect(JSON.parse(pollOutput.output)).toMatchObject({
+        output: "CODEX_BG_DONE",
+        exit_code: 0,
+      });
+      expect(readFileSync(stderrPath, "utf8")).toBe("");
+    },
+    TIMEOUT,
+  );
+
+  test(
+    "Claude exec mode releases the turn and resumes completion after a concurrent user turn",
+    async () => {
+      root = realpathSync(mkdtempSync(join(tmpdir(), "fx-tui-claude-exec-mode-")));
+      const home = join(root, "home");
+      const workspace = join(root, "workspace");
+      const stderrPath = join(root, "stderr.log");
+      const heldUserTurn = heldFakeGatewayFinalText();
+      mkdirSync(join(home, ".fx"), { recursive: true });
+      mkdirSync(workspace, { recursive: true });
+      writeFileSync(join(home, ".fx", "settings.json"), "{}");
+
+      const commandGateway = startFakeGateway([
+        fakeGatewayToolCall("claude_background_1", "exec_command", {
+          cmd: "printf CLAUDE_BG_STARTED; sleep 1; printf CLAUDE_BG_DONE",
+          yield_time_ms: 250,
+        }),
+        () => heldUserTurn.response,
+        fakeGatewayFinalText("CLAUDE_BACKGROUND_CONTINUATION_DONE"),
+      ]);
+      gateway = commandGateway;
+      session = await TmuxSession.create({
+        cwd: realpathSync(workspace),
+        stderrPath,
+        env: {
+          HOME: home,
+          OPENAI_API_KEY: "fake-claude-exec-mode-key",
+          FX_PERMISSION_MODE: "yolo",
+          FX_RESPONSES_BASE_URL: commandGateway.baseUrl,
+          FX_MODEL: MODEL,
+        },
+      });
+
+      await session.waitForComposer(TIMEOUT);
+      await session.sendText("/exec-mode claude");
+      await session.waitForText("Exec mode set to claude", TIMEOUT);
+      await session.sendText("Start the background fixture.");
+      await session.waitForText("This turn is released", TIMEOUT);
+
+      await session.sendText("USER_TURN_WHILE_BACKGROUND_RUNNING");
+      await waitForCondition(
+        () => commandGateway.requests.length === 2,
+        "concurrent user turn",
+      );
+      await Bun.sleep(1_250);
+      expect(commandGateway.requests).toHaveLength(2);
+
+      heldUserTurn.release("CONCURRENT_USER_TURN_DONE");
+      const pane = await session.waitForText(
+        "CLAUDE_BACKGROUND_CONTINUATION_DONE",
+        TIMEOUT,
+      );
+      await waitForCondition(
+        () => commandGateway.requests.length === 3,
+        "background lifecycle continuation",
+      );
+
+      expect(commandGateway.requests[1]!.body).toContain(
+        "USER_TURN_WHILE_BACKGROUND_RUNNING",
+      );
+      const continuationRequest = JSON.parse(commandGateway.requests[2]!.body);
+      const continuationText = continuationRequest.input.at(-1).content[0].text;
+      expect(continuationText).toContain("<background_command_event_json>");
+      expect(continuationText).toContain("CLAUDE_BG_STARTEDCLAUDE_BG_DONE");
+      expect(continuationText).toContain('"status":"completed"');
+      expect(pane).toContain("CONCURRENT_USER_TURN_DONE");
+      expect(readFileSync(stderrPath, "utf8")).toBe("");
+      heldUserTurn.dispose();
     },
     TIMEOUT,
   );

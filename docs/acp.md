@@ -291,7 +291,8 @@ Send the exact local command `/ps` through `session/prompt`:
 - The active turn ID
 - The number of queued steer messages
 - Running durable terminal sessions
-- Running legacy background tasks
+- Unified Exec commands that crossed their yield window, including exited
+  commands not yet collected by the model
 
 The request then completes with the normal ACP prompt response:
 
@@ -318,19 +319,33 @@ Example result:
       "command": "zig build test",
       "state": "running",
       "backend": "native"
+    },
+    {
+      "kind": "unifiedExec",
+      "id": 7,
+      "command": "zig build test",
+      "state": "running",
+      "cwd": "/workspace",
+      "pid": 12345,
+      "mode": "codex"
     }
   ],
   "nextCursor": null
 }
 ```
 
-The catalog is refreshed from the durable terminal owner before the response is written. `kind` is `terminal` for durable terminal sessions and `background` for older background-runtime tasks.
+The response projects both process owners at request time. `kind` is `terminal`
+for hosted terminal sessions and `unifiedExec` for yielded model commands.
 
 ## Unified Exec commands
 
 A native writable ACP session advertises `exec_command` and `write_stdin`. `exec_command` waits for a bounded yield window, returns immediately when the command exits, or returns a numeric session ID while the same process continues running. `write_stdin` uses that ID to poll newly available output or send input.
 
-Unified Exec processes are session-local and are not durable terminal catalog entries, so they do not appear in `/ps` or `fx/backgroundTerminals/list`. WASM ACP sessions, read-only sessions, and configurations without native process support do not advertise these tools and do not fall back to the removed model-facing `terminal` tool.
+Unified Exec processes are session-local. A process that crosses its initial
+yield window appears in `/ps` and `fx/backgroundTerminals/list` under the same
+numeric ID returned to the model. WASM ACP sessions, read-only sessions, and
+configurations without native process support do not advertise these tools and
+do not fall back to the removed model-facing `terminal` tool.
 
 These are the only model-facing shell tools. Internal provider, search, and
 authentication subprocesses remain service implementation details and are not
@@ -417,7 +432,8 @@ ACP method. Terminate the process with:
 ```
 
 These are fx extensions, not the Codex app-server `process/*` methods: fx keeps
-its existing numeric manager IDs and plain-pipe Unified Exec implementation.
+numeric manager IDs and supports both plain-pipe and `tty=true` Unified Exec
+sessions.
 
 ## Cancellation
 

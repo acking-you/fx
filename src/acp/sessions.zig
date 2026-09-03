@@ -724,27 +724,6 @@ fn activateSession(
     };
     server.enableSubagentHost(state);
     state.active_session.?.session_rt.attachProfileUsagePublisher(state.alloc);
-    activateManagedBackground(state, store);
-}
-
-fn activateManagedBackground(
-    state: *server.ServerState,
-    store: session_store.Store,
-) void {
-    const active = if (state.active_session) |*session| session else return;
-    const writable = if (active.writable) |*value| value else return;
-    state.background.restoreWorkspaceFromStore(
-        std.heap.c_allocator,
-        store,
-        state.workspace_root,
-        writable.active_id,
-    ) catch {};
-    state.background.restoreFromManagedPersistence(
-        std.heap.c_allocator,
-        writable.childCapability() catch return,
-        writable.active_id,
-        state.workspace_root,
-    ) catch {};
 }
 
 fn handleLoadFailure(
