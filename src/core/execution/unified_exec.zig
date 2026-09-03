@@ -733,6 +733,13 @@ fn elapsedSeconds(started_at_ms: i64) f64 {
     ))) / 1000.0;
 }
 
+fn processIdValue(pid: std.process.Child.Id) u64 {
+    return if (comptime builtin.os.tag == .windows)
+        @intCast(@intFromPtr(pid))
+    else
+        @intCast(pid);
+}
+
 const OutputProjectionChunk = struct {
     stream: command_contract.CommandOutputStream,
     bytes: []u8,
@@ -913,7 +920,7 @@ const Process = struct {
         errdefer alloc.free(command);
         return .{
             .process_id = self.id,
-            .pid = @intCast(self.pid),
+            .pid = processIdValue(self.pid),
             .status = if (self.done) .exited else .running,
             .command = command,
             .cwd = try alloc.dupe(u8, self.cwd),

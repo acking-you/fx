@@ -1,9 +1,11 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+const Handle = if (supported()) std.posix.fd_t else std.Io.File.Handle;
+
 pub const Pair = struct {
-    master: std.posix.fd_t,
-    slave: std.posix.fd_t,
+    master: Handle,
+    slave: Handle,
 };
 
 extern "c" fn posix_openpt(flags: c_int) c_int;
@@ -19,7 +21,11 @@ pub fn supported() bool {
 }
 
 pub fn open() !Pair {
-    if (!supported()) return error.PtyUnavailable;
+    if (comptime supported()) return openUnix();
+    return error.PtyUnavailable;
+}
+
+fn openUnix() !Pair {
     const master = posix_openpt(@bitCast(std.posix.O{
         .ACCMODE = .RDWR,
         .NOCTTY = true,
@@ -44,25 +50,39 @@ pub fn open() !Pair {
     return .{ .master = master, .slave = slave };
 }
 
-pub fn duplicate(fd: std.posix.fd_t) !std.posix.fd_t {
-    const result = std.c.dup(fd);
-    if (result < 0) return error.PtyUnavailable;
-    return result;
+pub fn duplicate(fd: Handle) !Handle {
+    if (comptime supported()) {
+        const result = std.c.dup(fd);
+        if (result < 0) return error.PtyUnavailable;
+        return result;
+    } else {
+        return error.PtyUnavailable;
+    }
 }
 
-pub fn file(fd: std.posix.fd_t, nonblocking: bool) std.Io.File {
-    return .{ .handle = fd, .flags = .{ .nonblocking = nonblocking } };
+pub fn file(fd: Handle, nonblocking: bool) std.Io.File {
+    if (comptime supported()) {
+        return .{ .handle = fd, .flags = .{ .nonblocking = nonblocking } };
+    } else {
+        unreachable;
+    }
 }
 
-pub fn close(fd: std.posix.fd_t) void {
-    switch (std.posix.errno(std.posix.system.close(fd))) {
-        .SUCCESS, .BADF => {},
-        else => {},
+pub fn close(fd: Handle) void {
+    if (comptime supported()) {
+        switch (std.posix.errno(std.posix.system.close(fd))) {
+            .SUCCESS, .BADF => {},
+            else => {},
+        }
     }
 }
 
 test "pseudo terminal opens a nonblocking master" {
-    if (!supported()) return error.SkipZigTest;
+    if (comptime supported()) return testOpen();
+    return error.SkipZigTest;
+}
+
+fn testOpen() !void {
     const pair = try open();
     defer close(pair.master);
     defer close(pair.slave);
