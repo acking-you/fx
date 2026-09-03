@@ -1355,10 +1355,7 @@ fn persistRecoveryCheckpoint(
     runtime_execution_memory.boundRecoveryCheckpointPresentation(arena, &execution);
     try effect.set(deps.ctx, .{
         .turn_id = job.turn_id,
-        .user = .{
-            .text = @constCast(job.prompt),
-            .images = job.images,
-        },
+        .user = job.historyUser(),
         .assistant_source = @constCast(assistant_source),
         .execution = execution,
         .cause = checkpointCause(cause),
@@ -4576,7 +4573,7 @@ fn processQueuedPromptLoop(
             const finish_execution = try runtime_execution_memory.buildExecutionMemory(arena, within_turn_suffix.items);
             const completed_summary = summary_accumulator.finish();
             var turn: HistoryTurn = .{ .assistant = .{
-                .user = .{ .text = job.prompt, .images = job.images },
+                .user = job.historyUser(),
                 .assistant = @constCast(assistant_text),
                 .execution = finish_execution,
             } };
@@ -7243,7 +7240,7 @@ fn finishFailedTurnWithNotice(
     );
     const completed_summary = summary_accumulator.finish();
     var turn: HistoryTurn = .{ .assistant = .{
-        .user = .{ .text = job.prompt, .images = job.images },
+        .user = job.historyUser(),
         .assistant = @constCast(notice),
         .execution = execution_memory,
     } };

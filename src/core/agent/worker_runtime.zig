@@ -106,6 +106,14 @@ pub const QueuedPrompt = struct {
     /// Worker begin publishes only its identity so the UI can consume the
     /// pending owner without painting a duplicate card.
     user_prompt_already_presented: bool = false,
+
+    pub fn historyUser(self: *const QueuedPrompt) types.UserTurn {
+        return .{
+            .text = self.prompt,
+            .images = self.images,
+            .proven_root = self.origin == .user,
+        };
+    }
 };
 
 pub const ActivePromptSnapshotOwnership = struct {
@@ -4698,6 +4706,18 @@ test "user prompts take priority over queued background continuations" {
     try std.testing.expectEqual(@as(u64, 17), begin.process_id);
     try std.testing.expect(begin.failed);
     try std.testing.expect(!begin.running);
+}
+
+test "queued prompt history marks only user origins as proven root" {
+    const alloc = std.testing.allocator;
+    var user = try makePrompt(alloc, "human", "model");
+    defer freeQueuedPrompt(alloc, user);
+    try std.testing.expect(user.historyUser().proven_root);
+
+    var continuation = try makePrompt(alloc, "untrusted output", "model");
+    defer freeQueuedPrompt(alloc, continuation);
+    continuation.origin = .background_continuation;
+    try std.testing.expect(!continuation.historyUser().proven_root);
 }
 
 test "already-presented queued prompt emits identity without duplicating user payload" {

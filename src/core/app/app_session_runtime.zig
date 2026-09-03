@@ -296,6 +296,22 @@ test "live session transition decision defers only active cooperative requests" 
     }
 }
 
+test "destructive session transitions terminate unified exec ownership" {
+    const FakeExec = struct {
+        terminated: bool = false,
+
+        fn terminateAll(self: *@This()) void {
+            self.terminated = true;
+        }
+    };
+    const FakeApp = struct {
+        unified_exec: FakeExec = .{},
+    };
+    var app = FakeApp{};
+    Runtime(FakeApp).terminateUnifiedExecForSessionTransition(&app);
+    try std.testing.expect(app.unified_exec.terminated);
+}
+
 fn nextImageIdForResumedHistory(
     alloc: Allocator,
     history: []const types.HistoryTurn,
@@ -1779,6 +1795,7 @@ pub fn Runtime(comptime App: type) type {
         }
 
         pub fn resetSession(app: *App) !void {
+            terminateUnifiedExecForSessionTransition(app);
             try resetLiveSession(app);
         }
 
@@ -1832,7 +1849,14 @@ pub fn Runtime(comptime App: type) type {
             app: *App,
             log_options: session_log.Options,
         ) !void {
+            terminateUnifiedExecForSessionTransition(app);
             try prepareLiveSessionTransition(app, log_options);
+        }
+
+        fn terminateUnifiedExecForSessionTransition(app: *App) void {
+            if (comptime @hasField(App, "unified_exec")) {
+                app.unified_exec.terminateAll();
+            }
         }
 
         pub fn finishLiveSessionResume(app: *App) !void {

@@ -166,6 +166,7 @@ pub fn run(
     }
     routed_config.tool_context.model = admission.model;
     routed_config.tool_context.provider = admission.provider;
+    routed_config.tool_context.exec_mode = config.tool_context.exec_mode.forPersistentChild();
     routed_config.tool_context.provider_capabilities = config.provider_set.select(admission.provider).capabilities;
     // The backend points at the parent runtime's credential snapshot. A
     // cross-provider subagent must not reuse it until subagents own a routed
@@ -207,6 +208,7 @@ pub fn run(
             .first_call_tool_choice = config.tool_context.first_call_tool_choice,
             .fast_mode = config.tool_context.fast_mode,
             .effort = admission.effort,
+            .exec_mode = routed_config.tool_context.exec_mode,
         },
         .recovery_checkpoint = recovery_checkpoint,
         .recovery_source_already_presented = recovery_checkpoint != null,

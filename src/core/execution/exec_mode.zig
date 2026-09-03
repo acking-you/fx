@@ -19,11 +19,19 @@ pub const Mode = enum {
         if (std.ascii.eqlIgnoreCase(value, "claude")) return .claude;
         return null;
     }
+
+    /// Claude lifecycle triggers are owned by the interactive root loop. A
+    /// persistent child has its own continuation lifecycle, so sharing that
+    /// projection would resume the parent for child-owned process output.
+    pub fn forPersistentChild(_: Mode) Mode {
+        return .codex;
+    }
 };
 
 test "exec mode defaults and parser" {
     try std.testing.expectEqual(Mode.codex, @as(Mode, .codex));
     try std.testing.expectEqual(Mode.codex, Mode.parse("CODEX").?);
     try std.testing.expectEqual(Mode.claude, Mode.parse("claude").?);
+    try std.testing.expectEqual(Mode.codex, Mode.claude.forPersistentChild());
     try std.testing.expect(Mode.parse("background") == null);
 }

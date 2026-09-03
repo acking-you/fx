@@ -266,6 +266,8 @@ pub const Manager = struct {
         stdout: []u8,
         stderr: []u8,
         started_at_ms: i64,
+        retry_at_ms: i64 = 0,
+        retry_count: u8 = 0,
 
         pub fn deinit(self: *LifecycleEvent, alloc: Allocator) void {
             alloc.free(self.command);
@@ -273,26 +275,6 @@ pub const Manager = struct {
             alloc.free(self.stdout);
             alloc.free(self.stderr);
             self.* = undefined;
-        }
-
-        fn clone(self: LifecycleEvent, alloc: Allocator) !LifecycleEvent {
-            const command = try alloc.dupe(u8, self.command);
-            errdefer alloc.free(command);
-            const cwd = try alloc.dupe(u8, self.cwd);
-            errdefer alloc.free(cwd);
-            const stdout = try alloc.dupe(u8, self.stdout);
-            errdefer alloc.free(stdout);
-            return .{
-                .process_id = self.process_id,
-                .status = self.status,
-                .exit_code = self.exit_code,
-                .signal = self.signal,
-                .command = command,
-                .cwd = cwd,
-                .stdout = stdout,
-                .stderr = try alloc.dupe(u8, self.stderr),
-                .started_at_ms = self.started_at_ms,
-            };
         }
     };
 
@@ -426,10 +408,27 @@ pub const Manager = struct {
     /// owned data here; they never call the UI or agent worker directly.
     pub fn takeLifecycleEvents(self: *Manager) std.ArrayList(LifecycleEvent) {
         self.queueDueWatchdogs();
+        return self.takeLifecycleEventsAt(io_mod.milliTimestamp());
+    }
+
+    fn takeLifecycleEventsAt(self: *Manager, now_ms: i64) std.ArrayList(LifecycleEvent) {
+        var events: std.ArrayList(LifecycleEvent) = .empty;
         self.event_mutex.lockUncancelable(io_mod.getIo());
-        const events = self.lifecycle_events;
-        self.lifecycle_events = .empty;
-        self.event_mutex.unlock(io_mod.getIo());
+        {
+            defer self.event_mutex.unlock(io_mod.getIo());
+            events.ensureTotalCapacity(self.alloc, self.lifecycle_events.items.len) catch
+                return events;
+            var retained: usize = 0;
+            for (self.lifecycle_events.items) |event| {
+                if (event.retry_at_ms > now_ms) {
+                    self.lifecycle_events.items[retained] = event;
+                    retained += 1;
+                } else {
+                    events.appendAssumeCapacity(event);
+                }
+            }
+            self.lifecycle_events.items.len = retained;
+        }
         // Claude-mode completion is consumed by the host event, not by a later
         // model poll. Reap the settled map entries after releasing event_mutex
         // so process destruction can never participate in an event-queue lock.
@@ -443,14 +442,21 @@ pub const Manager = struct {
         return events;
     }
 
-    /// Retains a lifecycle trigger when the host cannot yet enqueue its model
-    /// continuation, for example while credentials are temporarily absent.
+    /// Consumes a lifecycle trigger after failed host admission and delays its
+    /// next attempt. The original owned buffers move back into the queue, so a
+    /// missing credential cannot cause a focused-loop-sized clone storm.
     pub fn retryLifecycleEvent(self: *Manager, event: LifecycleEvent) !void {
-        var owned = try event.clone(self.alloc);
-        errdefer owned.deinit(self.alloc);
+        return self.retryLifecycleEventAt(event, io_mod.milliTimestamp());
+    }
+
+    fn retryLifecycleEventAt(self: *Manager, event: LifecycleEvent, now_ms: i64) !void {
+        var owned = event;
+        owned.retry_at_ms = now_ms +| lifecycleRetryDelayMs(owned.retry_count);
+        owned.retry_count +|= 1;
         self.event_mutex.lockUncancelable(io_mod.getIo());
         defer self.event_mutex.unlock(io_mod.getIo());
-        try self.lifecycle_events.append(self.alloc, owned);
+        try self.lifecycle_events.ensureUnusedCapacity(self.alloc, 1);
+        self.lifecycle_events.appendAssumeCapacity(owned);
     }
 
     fn queueDueWatchdogs(self: *Manager) void {
@@ -506,20 +512,24 @@ pub const Manager = struct {
         const id = identity.id;
 
         const invocation = try shell_resolver.commandInvocation(request.shell, request.login, request.command);
-        const pty: ?pseudo_terminal.Pair = if (request.tty) try pseudo_terminal.open() else null;
+        const pty: ?pseudo_terminal.Spawned = if (request.tty)
+            try pseudo_terminal.spawn(self.alloc, invocation.argv(), request.cwd)
+        else
+            null;
         var pty_master_owned = pty != null;
         errdefer if (pty_master_owned) pseudo_terminal.close(pty.?.master);
-        defer if (pty) |pair| pseudo_terminal.close(pair.slave);
-        const slave_file = if (pty) |pair| pseudo_terminal.file(pair.slave, false) else undefined;
-        var child = try std.process.spawn(zio, .{
-            .argv = invocation.argv(),
-            .cwd = .{ .path = request.cwd },
-            .stdin = if (request.tty) .{ .file = slave_file } else .pipe,
-            .stdout = if (request.tty) .{ .file = slave_file } else .pipe,
-            .stderr = if (request.tty) .{ .file = slave_file } else .pipe,
-            .pgid = if (comptime builtin.os.tag == .windows) null else 0,
-            .start_suspended = builtin.os.tag == .windows,
-        });
+        var child = if (pty) |spawned|
+            spawned.child
+        else
+            try std.process.spawn(zio, .{
+                .argv = invocation.argv(),
+                .cwd = .{ .path = request.cwd },
+                .stdin = .pipe,
+                .stdout = .pipe,
+                .stderr = .pipe,
+                .pgid = if (comptime builtin.os.tag == .windows) null else 0,
+                .start_suspended = builtin.os.tag == .windows,
+            });
         var child_owned = true;
         errdefer if (child_owned) {
             child.kill(zio);
@@ -697,6 +707,10 @@ pub const Manager = struct {
             if (drained) break;
             io_mod.sleep(std.time.ns_per_ms);
         }
+        self.event_mutex.lockUncancelable(zio);
+        for (self.lifecycle_events.items) |*event| event.deinit(self.alloc);
+        self.lifecycle_events.clearRetainingCapacity();
+        self.event_mutex.unlock(zio);
         if (!mark_stopping) {
             self.mutex.lockUncancelable(zio);
             self.resetting = false;
@@ -710,9 +724,24 @@ const empty_min_yield_ms: u64 = 5_000;
 const max_yield_ms: u64 = 30_000;
 const max_poll_yield_ms: u64 = 300_000;
 const claude_watchdog_ms: i64 = 5 * 60 * 1000;
+const lifecycle_retry_base_ms: i64 = 1_000;
+const lifecycle_retry_max_ms: i64 = 30_000;
 const output_limit: usize = 1024 * 1024;
 const output_projection_limit: usize = 1024 * 1024;
 const output_projection_omitted = "\n[... live output omitted while the consumer was unavailable ...]\n";
+
+fn lifecycleRetryDelayMs(retry_count: u8) i64 {
+    const shift: u6 = @intCast(@min(retry_count, 5));
+    return @min(lifecycle_retry_max_ms, lifecycle_retry_base_ms * (@as(i64, 1) << shift));
+}
+
+test "lifecycle retry backoff grows and caps" {
+    try std.testing.expectEqual(@as(i64, 1_000), lifecycleRetryDelayMs(0));
+    try std.testing.expectEqual(@as(i64, 2_000), lifecycleRetryDelayMs(1));
+    try std.testing.expectEqual(@as(i64, 16_000), lifecycleRetryDelayMs(4));
+    try std.testing.expectEqual(@as(i64, 30_000), lifecycleRetryDelayMs(5));
+    try std.testing.expectEqual(@as(i64, 30_000), lifecycleRetryDelayMs(255));
+}
 
 fn clampInitialYield(value: u64) u64 {
     return @max(initial_min_yield_ms, @min(max_yield_ms, value));
@@ -1759,7 +1788,7 @@ test "Claude watchdog event keeps the running process addressable" {
 test "Claude lifecycle trigger can be retained after host admission fails" {
     var manager = Manager.init(std.testing.allocator);
     defer manager.deinit();
-    var event = Manager.LifecycleEvent{
+    const event = Manager.LifecycleEvent{
         .process_id = 42,
         .status = .exited,
         .exit_code = 7,
@@ -1769,10 +1798,13 @@ test "Claude lifecycle trigger can be retained after host admission fails" {
         .stderr = try std.testing.allocator.dupe(u8, "failed"),
         .started_at_ms = 1,
     };
-    defer event.deinit(std.testing.allocator);
+    const command_pointer = event.command.ptr;
+    try manager.retryLifecycleEventAt(event, 1_000);
+    var early = manager.takeLifecycleEventsAt(1_999);
+    defer early.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 0), early.items.len);
 
-    try manager.retryLifecycleEvent(event);
-    var retained = manager.takeLifecycleEvents();
+    var retained = manager.takeLifecycleEventsAt(2_000);
     defer {
         for (retained.items) |*item| item.deinit(std.testing.allocator);
         retained.deinit(std.testing.allocator);
@@ -1781,6 +1813,25 @@ test "Claude lifecycle trigger can be retained after host admission fails" {
     try std.testing.expectEqual(@as(u64, 42), retained.items[0].process_id);
     try std.testing.expectEqual(@as(?i32, 7), retained.items[0].exit_code);
     try std.testing.expectEqualStrings("failed", retained.items[0].stderr);
+    try std.testing.expectEqual(command_pointer, retained.items[0].command.ptr);
+}
+
+test "terminate all discards lifecycle events from the prior session" {
+    var manager = Manager.init(std.testing.allocator);
+    defer manager.deinit();
+    const event = Manager.LifecycleEvent{
+        .process_id = 7,
+        .command = try std.testing.allocator.dupe(u8, "true"),
+        .cwd = try std.testing.allocator.dupe(u8, "/tmp"),
+        .stdout = try std.testing.allocator.dupe(u8, "done"),
+        .stderr = try std.testing.allocator.dupe(u8, ""),
+        .started_at_ms = 1,
+    };
+    try manager.retryLifecycleEventAt(event, 1_000);
+    manager.terminateAll();
+    var events = manager.takeLifecycleEventsAt(std.math.maxInt(i64));
+    defer events.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 0), events.items.len);
 }
 
 test "non-tty write_stdin accepts polling and control-c only" {
@@ -1798,6 +1849,28 @@ test "non-tty write_stdin accepts polling and control-c only" {
         std.testing.allocator,
         .{ .process_id = process_id, .chars = "input" },
     ));
+    var interrupted = try manager.writeStdin(std.testing.allocator, .{
+        .process_id = process_id,
+        .chars = "\x03",
+        .yield_time_ms = 2_000,
+    });
+    defer interrupted.deinit(std.testing.allocator);
+    try std.testing.expectEqual(Manager.Status.exited, interrupted.status);
+}
+
+test "tty control-c interrupts the foreground process group" {
+    if (!Manager.supported() or !pseudo_terminal.supported()) return error.SkipZigTest;
+    var manager = Manager.init(std.testing.allocator);
+    defer manager.deinit();
+    var first = try manager.exec(std.testing.allocator, .{
+        .command = "sleep 30",
+        .cwd = "/tmp",
+        .yield_time_ms = 250,
+        .tty = true,
+    });
+    const process_id = first.process_id.?;
+    first.deinit(std.testing.allocator);
+
     var interrupted = try manager.writeStdin(std.testing.allocator, .{
         .process_id = process_id,
         .chars = "\x03",

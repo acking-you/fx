@@ -5948,6 +5948,59 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
   );
 
   test(
+    "reset terminates yielded Unified Exec commands without resuming the new session",
+    async () => {
+      root = realpathSync(mkdtempSync(join(tmpdir(), "fx-tui-reset-unified-exec-")));
+      const home = join(root, "home");
+      const workspace = join(root, "workspace");
+      const stderrPath = join(root, "stderr.log");
+      mkdirSync(join(home, ".fx"), { recursive: true });
+      mkdirSync(workspace, { recursive: true });
+      writeFileSync(join(home, ".fx", "settings.json"), "{}");
+
+      const commandGateway = startFakeGateway([
+        fakeGatewayToolCall("reset_background_1", "exec_command", {
+          cmd: "printf RESET_BG_STARTED; sleep 30",
+          yield_time_ms: 250,
+        }),
+        fakeGatewayFinalText("RESET_MUST_NOT_RESUME_OLD_COMMAND"),
+      ]);
+      gateway = commandGateway;
+      session = await TmuxSession.create({
+        cwd: realpathSync(workspace),
+        stderrPath,
+        env: {
+          HOME: home,
+          OPENAI_API_KEY: "fake-reset-unified-exec-key",
+          FX_PERMISSION_MODE: "yolo",
+          FX_RESPONSES_BASE_URL: commandGateway.baseUrl,
+          FX_MODEL: MODEL,
+        },
+      });
+
+      await session.waitForComposer(TIMEOUT);
+      await session.sendText("/exec-mode claude");
+      await session.waitForText("Exec mode set to claude", TIMEOUT);
+      await session.sendText("Start a command that reset must terminate.");
+      await session.waitForText("This turn is released", TIMEOUT);
+
+      await session.sendText("/reset");
+      await Bun.sleep(250);
+      await session.sendText("/ps");
+      const pane = await session.waitForText(
+        "No background commands or terminals are running.",
+        TIMEOUT,
+      );
+      await Bun.sleep(750);
+
+      expect(commandGateway.requests).toHaveLength(1);
+      expect(pane).not.toContain("RESET_MUST_NOT_RESUME_OLD_COMMAND");
+      expect(readFileSync(stderrPath, "utf8")).toBe("");
+    },
+    TIMEOUT,
+  );
+
+  test(
     "multiline Unified Exec keeps raw approval and persistence with compact activity",
     async () => {
       root = realpathSync(mkdtempSync(join(tmpdir(), "fx-tui-multiline-command-")));
