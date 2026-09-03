@@ -3437,12 +3437,15 @@ test "ACP publishes an account-bound refreshed Codex token for later prompts" {
     state.api_key = try alloc.dupe(u8, "stale-token");
     state.account_id = try alloc.dupe(u8, "acct-1");
     state.credential_source = .chatgpt_subscription;
+    state.cfg.provider_set = .{ .gateway = .{}, .codex = .{}, .grok = .{} };
+    state.account_usage = account_usage_runtime.Runtime.init(alloc);
     var active: ActiveSessionState = undefined;
     active.api_key = state.api_key;
     active.account_id = state.account_id;
     active.credential_source = .chatgpt_subscription;
     state.active_session = active;
     defer {
+        state.account_usage.deinit();
         secret.zeroAndFree(alloc, state.api_key);
         alloc.free(state.account_id.?);
     }
