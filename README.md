@@ -148,6 +148,8 @@ fx
 
 The current directory becomes the primary workspace. Enter a prompt, or run `/help` to browse interactive commands. Run `/ps` to inspect active durable terminals and background command history; open terminal output from the Ctrl+X process manager, or use `/background logs <id>` for legacy background tasks. Press Ctrl+V to attach an image from the clipboard, or run `/paste`; macOS uses the native pasteboard, Linux uses `wl-paste` or `xclip`, and WSL can bridge through PowerShell.
 
+Closed `mermaid` code fences render as bounded Unicode diagrams directly in the TUI. Flowcharts, state diagrams, class diagrams, entity-relationship diagrams, and sequence diagrams are supported. Unsupported syntax and diagrams that do not fit the terminal remain visible as ordinary source code blocks.
+
 With a Codex subscription login, the status line also shows remaining account windows such as `5h 88% · week 65%`. Codex Pro accounts without a 5-hour window show only the weekly remaining. A Grok subscription login shows the current billing window, such as `week 57%`. `fx usage --codex` prints the full Codex account snapshot.
 
 The status line hides the workspace path and Git branch by default. Enable the `Status line workspace` option in `/settings`, run `/statusline workspace`, or set it in `~/.fx/settings.json`:
