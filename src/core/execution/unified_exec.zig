@@ -734,10 +734,16 @@ fn elapsedSeconds(started_at_ms: i64) f64 {
 }
 
 fn processIdValue(pid: std.process.Child.Id) u64 {
+    if (comptime @TypeOf(pid) == void) return 0;
     return if (comptime builtin.os.tag == .windows)
         @intCast(@intFromPtr(pid))
     else
         @intCast(pid);
+}
+
+fn processSignalValue(signal: anytype) ?u8 {
+    if (comptime @TypeOf(signal) == void) return null;
+    return @intCast(@intFromEnum(signal));
 }
 
 const OutputProjectionChunk = struct {
@@ -991,7 +997,7 @@ const Process = struct {
         if (status == .exited) {
             if (self.term) |term| switch (term) {
                 .exited => |code| event.exit_code = code,
-                .signal => |signal| event.signal = @intCast(@intFromEnum(signal)),
+                .signal => |signal| event.signal = processSignalValue(signal),
                 .stopped, .unknown => {},
             };
         }
@@ -1240,7 +1246,7 @@ const Process = struct {
         result.cwd = try alloc.dupe(u8, self.cwd);
         if (term) |term_value| switch (term_value) {
             .exited => |code| result.exit_code = code,
-            .signal => |signal| result.signal = @intCast(@intFromEnum(signal)),
+            .signal => |signal| result.signal = processSignalValue(signal),
             .stopped, .unknown => {},
         };
         return result;
@@ -2078,24 +2084,21 @@ test "unified exec nonblocking writes return a live process immediately" {
 
 test "unified exec activates the observer before a direct write can fail" {
     if (!Manager.supported()) return error.SkipZigTest;
-    if (!pseudo_terminal.supported()) return error.SkipZigTest;
     var manager = Manager.init(std.testing.allocator);
     defer manager.deinit();
     var first = try manager.exec(std.testing.allocator, .{
         .command = if (builtin.os.tag == .windows) "Start-Sleep -Seconds 30" else "sleep 30",
         .cwd = if (builtin.os.tag == .windows) "." else "/tmp",
         .yield_time_ms = if (builtin.os.tag == .windows) 1_000 else 250,
-        .tty = true,
     });
     const process_id = first.process_id.?;
     first.deinit(std.testing.allocator);
 
-    const input = try std.testing.allocator.alloc(u8, 4 * 1024 * 1024);
-    defer std.testing.allocator.free(input);
-    @memset(input, 'x');
-    try std.testing.expectError(error.WriteWouldBlock, manager.writeStdinNonblocking(
+    // A non-TTY command rejects arbitrary input on every host. Use that
+    // deterministic failure instead of depending on platform pipe capacity.
+    try std.testing.expectError(error.ProcessStdinClosed, manager.writeStdinNonblocking(
         std.testing.allocator,
-        .{ .process_id = process_id, .chars = input },
+        .{ .process_id = process_id, .chars = "input" },
     ));
 
     const process = manager.acquire(process_id) orelse return error.ProcessUnavailable;
