@@ -5804,7 +5804,7 @@ test "SessionRuntime.snapshotHistory returns deep copy that outlives runtime his
     try runtime.appendAssistantHistoryTurn(alloc, "hello", "world");
     try runtime.appendHistoryEntry(alloc, .{ .background_command = .{
         .user = .{ .text = @constCast("run") },
-        .log_path = "/tmp/run.log",
+        .log_path = @constCast("/tmp/run.log"),
         .expect_url = false,
     } });
 
