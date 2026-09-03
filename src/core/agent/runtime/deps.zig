@@ -219,6 +219,7 @@ pub const AgentRuntimeDeps = struct {
     push_diff_block: *const fn (ctx: *anyopaque, payload: DiffEntryPayload) anyerror!void,
     push_system_notice: *const fn (ctx: *anyopaque, text: []const u8) anyerror!void,
     push_interactive_notice: ?*const fn (ctx: *anyopaque, notice: types.SemanticNotice) anyerror!void = null,
+    set_compacting_context: ?*const fn (ctx: *anyopaque, active: bool) void = null,
     /// Source-limit notices use a session-scoped deduplicating path when the
     /// host provides one; ordinary system notices remain unaffected.
     push_context_notice: ?*const fn (ctx: *anyopaque, text: []const u8) anyerror!void = null,

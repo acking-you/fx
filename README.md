@@ -119,7 +119,7 @@ fx
 
 `OPENAI_BASE_URL` is also supported when `FX_RESPONSES_BASE_URL` is unset. This path expects the Responses API, not the Chat Completions protocol.
 
-Inside the interactive app, run `/model` to browse the active provider's catalog. After choosing a model, the same picker offers only the reasoning efforts and Fast mode supported by that catalog entry. The **Model** row in `/settings` uses the same flow. `/effort` shows or sets the current reasoning effort, while `/fast` toggles Fast mode for the current model. ACP clients receive the same `model`, `provider`, `effort`, and `fast_mode` configuration options. Native ACP also exposes provider login plus connection-scoped BYOK URL and API-key configuration without requiring those secrets in the process environment; persistent child turns keep their own provider route even when the parent switches or the connection binding is replaced. See [ACP usage](docs/acp.md#provider-control). The JavaScript SDK exposes `setModel`, `setEffort`, and `setFastMode`. On the Responses wire, Fast mode uses the `priority` service tier. Selecting a model that does not support the current effort or Fast mode clears that stale setting instead of sending an invalid request.
+Inside the interactive app, run `/model` to browse the active provider's catalog. After choosing a model, the same picker offers only the reasoning efforts and Fast mode supported by that catalog entry. The **Model** row in `/settings` uses the same flow. `/effort` shows or sets the current reasoning effort, while `/fast` toggles Fast mode for the current model. ACP clients receive the same `model`, `provider`, `effort`, and `fast_mode` configuration options. Native ACP also exposes provider login plus connection-scoped BYOK URL and API-key configuration without requiring those secrets in the process environment; persistent child turns keep their own provider route even when the parent switches or the connection binding is replaced. See [ACP usage](docs/acp.md#provider-control). The JavaScript SDK exposes `setModel`, `setEffort`, and `setFastMode`. On the Responses wire, Fast mode uses the `priority` service tier. Selecting a model that does not support the current effort or Fast mode maps that setting onto the model's catalog default, or clears it, instead of sending an invalid request. `auto` keeps the model's own default on the wire, so Grok 4.6 uses `high` unless you pick another supported level.
 
 For a direct switch, pass the model, effort, and optional speed in one command:
 
@@ -147,6 +147,8 @@ fx
 ```
 
 The current directory becomes the primary workspace. Enter a prompt, or run `/help` to browse interactive commands. Run `/ps` to inspect active durable terminals and background command history; open terminal output from the Ctrl+X process manager, or use `/background logs <id>` for legacy background tasks. Press Ctrl+V to attach an image from the clipboard, or run `/paste`; macOS uses the native pasteboard, Linux uses `wl-paste` or `xclip`, and WSL can bridge through PowerShell.
+
+With a Codex subscription login, the status line also shows remaining account windows such as `5h 88% · week 65%`. Codex Pro accounts without a 5-hour window show only the weekly remaining. A Grok subscription login shows the current billing window, such as `week 57%`. `fx usage --codex` prints the full Codex account snapshot.
 
 The status line hides the workspace path and Git branch by default. Enable the `Status line workspace` option in `/settings`, run `/statusline workspace`, or set it in `~/.fx/settings.json`:
 

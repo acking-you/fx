@@ -3154,6 +3154,16 @@ pub fn Runtime(comptime App: type) type {
             return app.session_persistence.compaction_tasks.isActive();
         }
 
+        pub fn compactingContext(app: *const App) bool {
+            if (compactionActive(app)) return true;
+            if (comptime @hasField(App, "worker") and
+                @hasDecl(@TypeOf(app.worker), "compactingContext"))
+            {
+                return app.worker.compactingContext();
+            }
+            return false;
+        }
+
         pub fn compactHistory(app: *App) !CompactHistoryOutcome {
             if (compactionActive(app)) return .busy;
             const turn_start_held = if (comptime @hasField(App, "worker") and
@@ -3661,6 +3671,11 @@ pub fn Runtime(comptime App: type) type {
                     .{@errorName(err)},
                 );
             };
+            if (comptime @hasField(App, "shell") and
+                @hasField(@TypeOf(app.shell), "render_requests"))
+            {
+                app.shell.render_requests.request(.footer);
+            }
         }
 
         pub fn commitRuntimePreferences(

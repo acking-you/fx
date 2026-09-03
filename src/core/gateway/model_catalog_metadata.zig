@@ -11,6 +11,7 @@ pub fn fromCatalogEntry(entry: model_catalog.ModelCatalogEntry) model_capabiliti
     return .{
         .supports_reasoning = entry.has_reasoning,
         .reasoning_efforts = .fromSlice(entry.reasoning_efforts.items),
+        .default_reasoning_effort = entry.default_reasoning_effort,
         .supports_fast_mode = entry.supports_fast_mode,
         .supports_tool_use = entry.has_tool_use,
         .supports_vision = entry.has_vision,

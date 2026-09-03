@@ -616,21 +616,28 @@ pub fn Runtime(comptime App: type) type {
                 app.backgroundActivityActive()
             else
                 false;
-            if (!app.stream.active and
-                !app.pacer.hasCompletedAssistantPresentationTail() and
-                !background_activity)
-            {
-                return status_changed;
-            }
-            if (app.approval_prompt.isActive() or
-                app.question_prompt.isActive() or
-                !app.shell.shimmer_active)
-            {
+            const compacting = app_session_runtime.Runtime(App).compactingContext(app);
+            if (!compacting) {
+                if (!app.stream.active and
+                    !app.pacer.hasCompletedAssistantPresentationTail() and
+                    !background_activity)
+                {
+                    return status_changed;
+                }
+                if (app.approval_prompt.isActive() or
+                    app.question_prompt.isActive() or
+                    !app.shell.shimmer_active)
+                {
+                    return status_changed;
+                }
+            } else if (app.approval_prompt.isActive() or app.question_prompt.isActive()) {
                 return status_changed;
             }
 
             var label_buf: [256]u8 = undefined;
-            _ = activityShimmerLabel(app, presenter, &label_buf) orelse return status_changed;
+            if (!compacting) {
+                _ = activityShimmerLabel(app, presenter, &label_buf) orelse return status_changed;
+            }
             const previous_deadline = app.shell.render_requests.animation_next_deadline_ms;
             if (!app.shell.render_requests.requestAnimationDue(now_ms)) return status_changed;
             debug_trace.logf(

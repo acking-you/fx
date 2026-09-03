@@ -9,15 +9,18 @@ const openai_codex_usage = @import("../gateway/openai_codex_usage.zig");
 const xai_grok = @import("../gateway/xai_grok.zig");
 const xai_grok_models = @import("../gateway/xai_grok_models.zig");
 const xai_grok_permission_reviewer = @import("../gateway/xai_grok_permission_reviewer.zig");
+const xai_grok_usage = @import("../gateway/xai_grok_usage.zig");
 const configured_responses_search = @import("../gateway/configured_responses_search.zig");
 const provider_catalog = @import("../core/auth/provider_catalog.zig");
 const model_capabilities = @import("../core/config/model_capabilities.zig");
 
-fn grokFallbackModelCapabilities(_: []const u8) model_capabilities.Capabilities {
+fn grokFallbackModelCapabilities(model: []const u8) model_capabilities.Capabilities {
     // Grok's current subscription Responses route supports backend search by
     // default. A loaded catalog entry can still override this to false for a
-    // model that explicitly does not support it.
-    return .{ .supports_tool_use = true, .supports_web_search = true };
+    // model that explicitly does not support it. Reasoning menus come from the
+    // live catalog when present, otherwise from the provider-owned fallback
+    // for the current Grok 4 family.
+    return xai_grok_models.fallbackModelCapabilities(model);
 }
 
 pub const native = provider_set.Set{
@@ -44,6 +47,7 @@ pub const native = provider_set.Set{
         .cli_model_catalog = xai_grok_models.cli_model_catalog_provider,
         .model_catalog = xai_grok_models.model_catalog_provider,
         .permission_reviewer = xai_grok_permission_reviewer.provider,
+        .account_usage = xai_grok_usage.provider,
         .web_search = .{
             .projection = .hosted,
             .executor = configured_responses_search.provider,
@@ -55,4 +59,13 @@ test "default provider is direct BYOK Responses" {
     try @import("std").testing.expect(
         native.gateway.agent_stream.?.stream_fn == responses.agent_stream_provider.stream_fn,
     );
+}
+
+test "Grok fallback capabilities accept high for grok-4.6" {
+    const capabilities = native.grok.fallbackModelCapabilities("grok-4.6");
+    try @import("std").testing.expect(model_capabilities.reasoningEffortSupported(
+        capabilities,
+        @import("../core/shared/types.zig").ReasoningEffort.literal("high"),
+    ));
+    try @import("std").testing.expectEqualStrings("high", capabilities.default_reasoning_effort.label());
 }

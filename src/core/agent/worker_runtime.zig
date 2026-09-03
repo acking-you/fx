@@ -560,6 +560,7 @@ pub const WorkerRuntime = struct {
     worker_cancel_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     worker_recovery_pause_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     worker_connectivity_wait_active: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    compacting_context: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     /// Set under `worker_mutex` once the active turn publishes its terminal
     /// recovery pause. The turn may still be finalizing, but cannot perform
     /// more model work, so one continuation may queue before processing clears.
@@ -1362,6 +1363,14 @@ pub const WorkerRuntime = struct {
         self.worker_mutex.lockUncancelable(io_mod.getIo());
         defer self.worker_mutex.unlock(io_mod.getIo());
         return self.active_turn_id;
+    }
+
+    pub fn setCompactingContext(self: *WorkerRuntime, active: bool) void {
+        self.compacting_context.store(active, .seq_cst);
+    }
+
+    pub fn compactingContext(self: *const WorkerRuntime) bool {
+        return self.compacting_context.load(.seq_cst);
     }
 
     pub fn queuePreview(self: *WorkerRuntime) QueuePreview {

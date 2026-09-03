@@ -34,6 +34,7 @@ pub const ImageInputSupport = enum {
 pub const GatewayMetadata = struct {
     supports_reasoning: bool = false,
     reasoning_efforts: ReasoningEffortOptions = .{},
+    default_reasoning_effort: types.ReasoningEffort = .auto,
     supports_fast_mode: bool = false,
     supports_tool_use: bool = false,
     supports_vision: bool = false,
@@ -50,6 +51,7 @@ pub const GatewayMetadata = struct {
 pub const Capabilities = struct {
     supports_reasoning: bool = false,
     reasoning_efforts: ReasoningEffortOptions = .{},
+    default_reasoning_effort: types.ReasoningEffort = .auto,
     supports_fast_mode: bool = false,
     supports_tool_use: bool = false,
     supports_vision: bool = false,
@@ -84,8 +86,20 @@ pub const Resolver = struct {
 pub fn mergeCapabilities(capabilities_value: Capabilities, gateway_metadata: ?GatewayMetadata) Capabilities {
     var capabilities = capabilities_value;
     if (gateway_metadata) |metadata| {
-        capabilities.supports_reasoning = metadata.supports_reasoning or metadata.reasoning_efforts.len > 0;
-        capabilities.reasoning_efforts = metadata.reasoning_efforts;
+        if (metadata.reasoning_efforts.len > 0) {
+            capabilities.reasoning_efforts = metadata.reasoning_efforts;
+        } else if (!metadata.supports_reasoning) {
+            capabilities.reasoning_efforts = .{};
+            capabilities.default_reasoning_effort = .auto;
+        }
+        if (!metadata.default_reasoning_effort.isDefault() and
+            reasoningEffortSupported(.{ .reasoning_efforts = capabilities.reasoning_efforts }, metadata.default_reasoning_effort))
+        {
+            capabilities.default_reasoning_effort = metadata.default_reasoning_effort;
+        } else if (!reasoningEffortSupported(.{ .reasoning_efforts = capabilities.reasoning_efforts }, capabilities.default_reasoning_effort)) {
+            capabilities.default_reasoning_effort = .auto;
+        }
+        capabilities.supports_reasoning = metadata.supports_reasoning or capabilities.reasoning_efforts.len > 0;
         capabilities.supports_fast_mode = metadata.supports_fast_mode;
         capabilities.supports_tool_use = metadata.supports_tool_use;
         capabilities.supports_vision = metadata.supports_vision;
@@ -150,6 +164,30 @@ pub fn reasoningEffortOptionCount(capabilities: Capabilities) usize {
     return if (capabilities.reasoning_efforts.len == 0) 0 else capabilities.reasoning_efforts.len + 1;
 }
 
+pub fn clampReasoningEffort(capabilities: Capabilities, effort: types.ReasoningEffort) types.ReasoningEffort {
+    if (effort.isDefault()) return .auto;
+    if (reasoningEffortSupported(capabilities, effort)) return effort;
+    if (!capabilities.default_reasoning_effort.isDefault() and
+        reasoningEffortSupported(capabilities, capabilities.default_reasoning_effort))
+    {
+        return capabilities.default_reasoning_effort;
+    }
+    return .auto;
+}
+
+pub fn resolveReasoningEffortForRequest(
+    capabilities: Capabilities,
+    effort: types.ReasoningEffort,
+) ?types.ReasoningEffort {
+    if (!effort.isDefault() and reasoningEffortSupported(capabilities, effort)) return effort;
+    if (!capabilities.default_reasoning_effort.isDefault() and
+        reasoningEffortSupported(capabilities, capabilities.default_reasoning_effort))
+    {
+        return capabilities.default_reasoning_effort;
+    }
+    return null;
+}
+
 pub fn effectiveContextWindowTokens(capabilities: Capabilities) ?u32 {
     const context_window = capabilities.context_window orelse return null;
     const percent = capabilities.effective_context_window_percent orelse return context_window;
@@ -177,9 +215,7 @@ pub fn resolveProviderOptionsForCapabilities(
         .parallel_tool_calls = capabilities.parallel_tool_calls,
         .prompt_caching = capabilities.prompt_caching,
     };
-    if (!effort.isDefault() and reasoningEffortSupported(capabilities, effort)) {
-        resolved.reasoning = effort;
-    }
+    resolved.reasoning = resolveReasoningEffortForRequest(capabilities, effort);
     resolved.fast = fast_mode and capabilities.supports_fast_mode;
     resolved.native_web_search = capabilities.supports_web_search;
     return resolved;
@@ -234,6 +270,7 @@ test "mergeCapabilities preserves provider controls and supplied fallback policy
     try std.testing.expect(capabilities.supports_reasoning);
     try std.testing.expectEqual(@as(usize, 2), capabilities.reasoning_efforts.len);
     try std.testing.expectEqualStrings("future-tier", capabilities.reasoning_efforts.values[0].label());
+    try std.testing.expect(capabilities.default_reasoning_effort.isDefault());
     try std.testing.expect(capabilities.supports_fast_mode);
     try std.testing.expect(capabilities.supports_tool_use);
     try std.testing.expect(capabilities.supports_vision);
@@ -334,7 +371,7 @@ test "request controls remain safe across repeated state transitions" {
         const resolved = resolveProviderOptionsForCapabilities(state.capabilities, state.effort, state.fast_mode);
         if (resolved.reasoning) |effort| {
             try std.testing.expect(reasoningEffortSupported(state.capabilities, effort));
-            try std.testing.expect(effort.eql(state.effort));
+            try std.testing.expect(effort.eql(resolveReasoningEffortForRequest(state.capabilities, state.effort).?));
         }
         try std.testing.expect(!resolved.fast or (state.fast_mode and state.capabilities.supports_fast_mode));
     }
@@ -344,4 +381,66 @@ test "generic fallback capabilities contain no vendor policy" {
     const fallback = capabilitiesForModel("anthropic/claude-any");
     try std.testing.expect(!fallback.prompt_caching);
     try std.testing.expect(fallback.context_window == null);
+}
+
+test "mergeCapabilities keeps fallback efforts when catalog supports reasoning without a menu" {
+    const fallback_efforts = [_]types.ReasoningEffort{
+        types.ReasoningEffort.literal("xhigh"),
+        types.ReasoningEffort.literal("high"),
+        types.ReasoningEffort.literal("medium"),
+        types.ReasoningEffort.literal("low"),
+    };
+    const fallback = Capabilities{
+        .supports_tool_use = true,
+        .supports_web_search = true,
+        .reasoning_efforts = .fromSlice(&fallback_efforts),
+        .default_reasoning_effort = types.ReasoningEffort.literal("high"),
+    };
+
+    const kept = mergeCapabilities(fallback, .{
+        .supports_reasoning = true,
+        .supports_web_search = false,
+    });
+    try std.testing.expect(kept.supports_reasoning);
+    try std.testing.expectEqual(@as(usize, 4), kept.reasoning_efforts.len);
+    try std.testing.expectEqualStrings("high", kept.default_reasoning_effort.label());
+    try std.testing.expect(!kept.supports_web_search);
+
+    const cleared = mergeCapabilities(fallback, .{
+        .supports_reasoning = false,
+        .supports_web_search = true,
+    });
+    try std.testing.expect(!cleared.supports_reasoning);
+    try std.testing.expectEqual(@as(usize, 0), cleared.reasoning_efforts.len);
+    try std.testing.expect(cleared.default_reasoning_effort.isDefault());
+}
+
+test "auto and unsupported effort resolve to the model default on the wire" {
+    const efforts = [_]types.ReasoningEffort{
+        types.ReasoningEffort.literal("xhigh"),
+        types.ReasoningEffort.literal("high"),
+        types.ReasoningEffort.literal("low"),
+    };
+    const capabilities = Capabilities{
+        .reasoning_efforts = .fromSlice(&efforts),
+        .default_reasoning_effort = types.ReasoningEffort.literal("high"),
+    };
+
+    try std.testing.expectEqualStrings(
+        "high",
+        resolveReasoningEffortForRequest(capabilities, .auto).?.label(),
+    );
+    try std.testing.expectEqualStrings(
+        "low",
+        resolveReasoningEffortForRequest(capabilities, types.ReasoningEffort.literal("low")).?.label(),
+    );
+    try std.testing.expectEqualStrings(
+        "high",
+        resolveReasoningEffortForRequest(capabilities, types.ReasoningEffort.literal("stale")).?.label(),
+    );
+    try std.testing.expectEqualStrings(
+        "high",
+        clampReasoningEffort(capabilities, types.ReasoningEffort.literal("stale")).label(),
+    );
+    try std.testing.expect(clampReasoningEffort(capabilities, .auto).isDefault());
 }

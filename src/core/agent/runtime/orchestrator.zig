@@ -3029,6 +3029,8 @@ fn processQueuedPromptLoop(
             const provider_opts = model_capabilities.resolveProviderOptionsForCapabilities(request_capabilities, config.effort, route_fast_mode);
             runtime_telemetry.traceGatewayProviderOptions(step_ctx, gateway_model, route_fast_mode, config.effort, provider_opts);
             if (inline_auto_compaction_pending) {
+                if (deps.set_compacting_context) |set| set(deps.ctx, true);
+                defer if (deps.set_compacting_context) |set| set(deps.ctx, false);
                 try pushVisibleCompactionNotice(
                     deps,
                     .information,

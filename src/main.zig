@@ -17,6 +17,8 @@ const credentials = @import("core/auth/credentials.zig");
 const secret = @import("core/auth/secret.zig");
 const model_cache_runtime = @import("core/app/model_cache_runtime.zig");
 const usage_dashboard_runtime = @import("core/app/usage_dashboard_runtime.zig");
+const account_usage_runtime = @import("core/app/account_usage_runtime.zig");
+const session_commands = @import("core/session/session_commands.zig");
 const app_auth_runtime = @import("core/app/app_auth_runtime.zig");
 const app_host_config_runtime = @import("core/app/app_host_config_runtime.zig");
 const app_entry_runtime = @import("core/app/app_entry_runtime.zig");
@@ -547,6 +549,7 @@ const App = struct {
     provider_setup: provider_setup.Runtime = provider_setup.Runtime.init(std.heap.c_allocator),
     model_cache: model_cache_runtime.Runtime = model_cache_runtime.Runtime.init(std.heap.c_allocator, builtin_gateway.models_path),
     usage_dashboard: usage_dashboard_runtime.Runtime = usage_dashboard_runtime.Runtime.init(std.heap.c_allocator),
+    account_usage: account_usage_runtime.Runtime = account_usage_runtime.Runtime.init(std.heap.c_allocator),
     workspace_root: []u8 = &.{},
     workspace_identity: statusline_identity.Runtime = .{},
     workspace_host: WorkspaceHostRuntime = .{},
@@ -629,6 +632,7 @@ const App = struct {
         var app = Self{
             .alloc = alloc,
             .usage_dashboard = undefined,
+            .account_usage = undefined,
             .shell = .{ .stdout_file = std.Io.File.stdout() },
             .subagents = ui_subagents.Controller.init(),
             .lifecycle_runtime = hooks.Runtime.init(alloc),
@@ -643,6 +647,7 @@ const App = struct {
             .unified_exec = unified_exec_runtime.Manager.init(std.heap.c_allocator),
         };
         usage_dashboard_runtime.Runtime.initInto(&app.usage_dashboard, std.heap.c_allocator);
+        account_usage_runtime.Runtime.initInto(&app.account_usage, std.heap.c_allocator);
         if (comptime host_profile.js_host_workspace) {
             app.workspace_host = js_host_workspace.Runtime.init(alloc) catch |err| blk: {
                 if (err != error.WorkspaceUnavailable) {
@@ -836,6 +841,7 @@ const App = struct {
         self.provider_setup.deinit();
         self.model_cache.deinit();
         self.usage_dashboard.deinit();
+        self.account_usage.deinit();
         InputSubmitRuntime.clearPendingSubmission(self, "shutdown");
         const resume_handoff = if (capture_resume_handoff and
             direct_deinit_disposition == .settled)
@@ -1770,6 +1776,39 @@ const App = struct {
                 self.auth.modelCatalogAccess(),
             );
         }
+        self.startAccountUsageRefresh(false);
+    }
+
+    pub fn startAccountUsageRefresh(self: *App, force: bool) void {
+        if (comptime host_target.is_wasm) return;
+        const source = self.auth.credentialSource() orelse {
+            self.account_usage.clear();
+            return;
+        };
+        const account_usage = switch (source) {
+            .chatgpt_subscription => self.providerSet().codex.account_usage,
+            .grok_subscription => self.providerSet().grok.account_usage,
+            else => {
+                self.account_usage.clear();
+                return;
+            },
+        } orelse {
+            self.account_usage.clear();
+            return;
+        };
+        const credential = self.auth.apiKey() orelse return;
+        const account_id = self.auth.accountId() orelse return;
+        _ = self.account_usage.requestRefresh(
+            account_usage,
+            self.auth.oauthTransport(),
+            credential,
+            account_id,
+            source,
+            io_mod.milliTimestamp(),
+            force,
+        ) catch |err| {
+            debug_trace.logf("account_usage", "refresh start failed err={s}", .{@errorName(err)});
+        };
     }
 
     pub fn ensureModelCache(self: *App) void {
@@ -2592,11 +2631,19 @@ const App = struct {
         );
 
         if (try self.model_cache.pollLoadTransition()) {
+            session_commands.Commands(App).reconcileEffortForCurrentModel(self, false) catch |err| {
+                debug_trace.logf("session", "effort reconcile after catalog load failed err={s}", .{@errorName(err)});
+            };
             RenderAppRuntime.requestActiveSurfaceFrame(self, .footer);
         }
         if (try app_commands.Handlers(App).collectUsageDashboardFacts(self)) {
             RenderAppRuntime.requestActiveSurfaceFrame(self, .footer);
         }
+        switch (self.account_usage.pollTransition()) {
+            .none => {},
+            .ready, .failed => RenderAppRuntime.requestActiveSurfaceFrame(self, .footer),
+        }
+        self.startAccountUsageRefresh(false);
         if (comptime host_profile.native_auth or host_profile.js_host_auth) {
             try AuthAppRuntime.collectSourceInventoryFacts(self);
             try AuthAppRuntime.collectSignInFacts(self);
@@ -3962,6 +4009,8 @@ test {
     _ = @import("core/app/app_lifecycle.zig");
     _ = @import("core/app/model_cache_runtime.zig");
     _ = @import("core/app/usage_dashboard_runtime.zig");
+    _ = @import("core/app/account_usage_runtime.zig");
+    _ = @import("gateway/xai_grok_usage.zig");
     _ = @import("core/app/app_process_runtime.zig");
     _ = @import("core/app/app_render_runtime.zig");
     _ = @import("core/app/app_terminal_takeover_runtime.zig");

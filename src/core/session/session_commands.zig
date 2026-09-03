@@ -329,6 +329,7 @@ pub fn Commands(comptime App: type) type {
             const resolved = try resolveModelQuery(app, query);
             defer app.alloc.free(resolved);
             try setResolvedModel(app, resolved, true);
+            try reconcileEffortForCurrentModel(app, true);
         }
 
         pub fn handleEffort(app: *App, raw_effort: []const u8) !void {
@@ -790,6 +791,17 @@ pub fn Commands(comptime App: type) type {
             try applyEffort(app, effort, false, true);
         }
 
+        pub fn reconcileEffortForCurrentModel(app: *App, persist: bool) !void {
+            const capabilities = model_capabilities.resolveForApp(
+                App,
+                app,
+                provider_runtime.model(app),
+            );
+            const clamped = model_capabilities.clampReasoningEffort(capabilities, app.effort);
+            if (clamped.eql(app.effort)) return;
+            try applyEffort(app, clamped, false, persist);
+        }
+
         pub fn selectModelFromPicker(app: *App, model: []const u8, effort: types.ReasoningEffort, fast_mode: bool) !void {
             try setResolvedModelRuntime(app, model, true);
             var patch = app_session_runtime.SessionPreferencePatch{
@@ -797,12 +809,8 @@ pub fn Commands(comptime App: type) type {
                 .model = model,
             };
             const capabilities = model_capabilities.resolveForApp(App, app, model);
-            const selected_effort = if (capabilities.reasoning_efforts.len > 0 and
-                model_capabilities.reasoningEffortSupported(capabilities, effort))
-                effort
-            else
-                types.ReasoningEffort.auto;
-            if (capabilities.reasoning_efforts.len > 0 or !app.effort.isDefault()) {
+            const selected_effort = model_capabilities.clampReasoningEffort(capabilities, effort);
+            if (capabilities.reasoning_efforts.len > 0 or !app.effort.isDefault() or !selected_effort.eql(app.effort)) {
                 try applyEffort(app, selected_effort, false, false);
                 patch.effort = selected_effort;
             }
@@ -2198,6 +2206,47 @@ test "session_commands handleEffort validates syncs and reports current model co
     app.clearTranscript();
     try Commands(FakeApp).handleEffort(&app, "not/an/effort");
     try expectTranscriptContains(&app, "Use: /effort [auto|supported-level].");
+}
+
+test "session_commands handleEffort accepts grok-4.6 high from the model menu" {
+    const alloc = std.testing.allocator;
+    var app = try FakeApp.init(alloc, "/tmp/workspace", "grok-4.6");
+    defer app.deinit();
+    const efforts = [_]types.ReasoningEffort{
+        types.ReasoningEffort.literal("xhigh"),
+        types.ReasoningEffort.literal("high"),
+        types.ReasoningEffort.literal("medium"),
+        types.ReasoningEffort.literal("low"),
+    };
+    app.setGatewayControls("grok-4.6", &efforts, false);
+    app.gateway_metadata.default_reasoning_effort = types.ReasoningEffort.literal("high");
+
+    try Commands(FakeApp).handleEffort(&app, "high");
+    try std.testing.expectEqual(types.ReasoningEffort.literal("high"), app.effort);
+    try expectTranscriptContains(&app, "● Effort: high");
+
+    app.clearTranscript();
+    try Commands(FakeApp).handleEffort(&app, "stale");
+    try std.testing.expectEqual(types.ReasoningEffort.literal("high"), app.effort);
+    try expectTranscriptContains(&app, "stale is not supported by grok-4.6. Available: auto, xhigh, high, medium, low");
+}
+
+test "session_commands model switch clamps unsupported effort to the model default" {
+    const alloc = std.testing.allocator;
+    var app = try FakeApp.init(alloc, "/tmp/workspace", "grok-4.6");
+    defer app.deinit();
+    app.effort = types.ReasoningEffort.literal("xhigh");
+    const efforts = [_]types.ReasoningEffort{
+        types.ReasoningEffort.literal("high"),
+        types.ReasoningEffort.literal("medium"),
+        types.ReasoningEffort.literal("low"),
+    };
+    app.setGatewayControls("grok-4.5", &efforts, false);
+    app.gateway_metadata.default_reasoning_effort = types.ReasoningEffort.literal("high");
+
+    try Commands(FakeApp).selectModelFromPicker(&app, "grok-4.5", types.ReasoningEffort.literal("xhigh"), false);
+    try std.testing.expectEqualStrings("grok-4.5", app.selected_model.items);
+    try std.testing.expectEqual(types.ReasoningEffort.literal("high"), app.effort);
 }
 
 test "session_commands handleModel resolves fuzzy cached model and syncs queued prompts" {

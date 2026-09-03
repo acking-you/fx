@@ -409,7 +409,7 @@ pub fn buildHintLine(
     }
 
     if (statusline.usage) |usage| {
-        var usage_buf: [32]u8 = undefined;
+        var usage_buf: [64]u8 = undefined;
         appendStatusSegment(out, &end, usage.statusline(&usage_buf));
     }
 
@@ -921,6 +921,21 @@ test "buildHintLine shows provider usage from the shared summary" {
         .usage = provider_usage.Summary.fromCounters(.codex, .chatgpt_subscription, "acct", 1200, 800, 1, null),
     }, 120, &buf);
     try std.testing.expect(std.mem.find(u8, line, "Usage: 2k") != null);
+}
+
+test "buildHintLine shows remaining 5h and week account limits" {
+    var buf: [256]u8 = undefined;
+    const line = buildHintLine(false, false, true, "gpt-5.4", .ask, 0, null, false, false, .auto, .{
+        .usage = provider_usage.Summary.fromAccountLimits(
+            .codex,
+            .chatgpt_subscription,
+            "acct",
+            .{ .kind = .five_hour, .remaining_percent = 88 },
+            .{ .kind = .weekly, .remaining_percent = 65 },
+        ),
+    }, 120, &buf);
+    try std.testing.expect(std.mem.find(u8, line, "5h 88%") != null);
+    try std.testing.expect(std.mem.find(u8, line, "week 65%") != null);
 }
 
 test "buildHintLine shows the session title" {
