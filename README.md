@@ -72,6 +72,8 @@ The current directory becomes the primary workspace. Enter a prompt, or run `/he
 
 Tool calls are expanded by default. Enable `Collapse tool calls` in `/settings`, or set `"collapse_tool_calls": true` in `~/.fx/settings.json`, to show one summary per tool-call group in the main transcript. Individual calls remain available in the full transcript with Ctrl+O.
 
+Closed `mermaid` code fences render as bounded Unicode diagrams directly in the TUI. Flowcharts, state diagrams, class diagrams, entity-relationship diagrams, and sequence diagrams are supported. Unsupported syntax and diagrams that do not fit the terminal remain visible as ordinary source code blocks.
+
 The status line hides the workspace path and Git branch by default. Enable the `Status line workspace` option in `/settings`, run `/statusline workspace`, or set it in `~/.fx/settings.json`:
 
 ```json
