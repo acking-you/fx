@@ -302,7 +302,7 @@ fn parseCatalog(
         const api_backend = objectStringAliases(object, &.{ "api_backend", "apiBackend" }) orelse continue;
         if (!std.mem.eql(u8, api_backend, "responses")) continue;
         const raw_id = objectStringAliases(object, &.{ "model", "id" }) orelse continue;
-        validateModelId(raw_id) catch continue;
+        try validateModelId(raw_id);
         const modality = findModalityModel(modality_models.array.items, raw_id) orelse continue;
         if (!(stringArrayContains(modality, "output_modalities", "text") catch continue)) continue;
 

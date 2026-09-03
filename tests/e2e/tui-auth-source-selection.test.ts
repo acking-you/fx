@@ -467,6 +467,14 @@ function startFakeGrokOAuth(options: {
           status: valid ? 200 : 400,
         });
       }
+      if (url.pathname === "/v1/billing") {
+        return Response.json({
+          config: {
+            creditUsagePercent: 42.5,
+            currentPeriod: { type: "USAGE_PERIOD_TYPE_WEEKLY" },
+          },
+        });
+      }
       if (url.pathname === "/v1/language-models") {
         return Response.json({ models });
       }
@@ -502,6 +510,7 @@ function startFakeGrokOAuth(options: {
       FX_E2E_XAI_GROK_MODELS_URL: `${baseUrl}/v1/models`,
       FX_E2E_XAI_GROK_MODALITIES_URL: `${baseUrl}/v1/language-models`,
       FX_E2E_XAI_GROK_RESPONSES_URL: `${baseUrl}/v1/responses`,
+      FX_E2E_XAI_GROK_BILLING_URL: `${baseUrl}/v1/billing?format=credits`,
     },
     setModels(next: typeof models) {
       models = next;
