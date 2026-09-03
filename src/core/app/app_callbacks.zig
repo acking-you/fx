@@ -324,6 +324,11 @@ pub fn Bindings(comptime App: type) type {
                 .push_diff_block = agentPushDiffBlock,
                 .push_system_notice = agentPushSystemNotice,
                 .push_interactive_notice = agentPushInteractiveNotice,
+                .set_compacting_context = if (comptime @hasField(App, "worker") and
+                    @hasDecl(@TypeOf(app.worker), "setCompactingContext"))
+                    agentSetCompactingContext
+                else
+                    null,
                 .push_context_notice = agentPushContextNotice,
                 .push_route_recovery_status = agentPushRouteRecoveryStatus,
                 .push_command_output_complete = agentPushCommandOutputComplete,
@@ -886,6 +891,11 @@ pub fn Bindings(comptime App: type) type {
         fn agentPushInteractiveNotice(ctx: *anyopaque, notice: types.SemanticNotice) !void {
             const app: *App = @ptrCast(@alignCast(ctx));
             try app_worker_runtime.Runtime(App).pushSemanticNotice(app, notice);
+        }
+
+        fn agentSetCompactingContext(ctx: *anyopaque, active: bool) void {
+            const app: *App = @ptrCast(@alignCast(ctx));
+            app.worker.setCompactingContext(active);
         }
 
         fn agentPushContextNotice(ctx: *anyopaque, text: []const u8) !void {

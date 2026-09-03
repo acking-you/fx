@@ -738,6 +738,7 @@ fn handleCompactCommand(
     }
 
     try ctx.sendAgentThought("Compacting context.");
+    try ctx.sendAgentText("Compacting context.");
     const history = try session.session_rt.snapshotCompactionHistory(ctx.alloc);
     defer types.freeHistoryTurnSlice(ctx.alloc, history);
     var messages: std.ArrayList(ChatMessage) = .empty;

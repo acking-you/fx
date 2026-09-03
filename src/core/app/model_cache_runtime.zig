@@ -781,6 +781,13 @@ fn findCatalogModel(catalog: []const model_catalog.ModelCatalogEntry, model: []c
             if (std.mem.eql(u8, entry.id, wire_model)) return entry;
         }
     }
+    const xai_prefix = "xai/";
+    if (std.mem.startsWith(u8, model, xai_prefix)) {
+        const wire_model = model[xai_prefix.len..];
+        for (catalog) |*entry| {
+            if (std.mem.eql(u8, entry.id, wire_model)) return entry;
+        }
+    }
     return null;
 }
 
@@ -1363,6 +1370,22 @@ test "catalog lookup matches OpenAI display IDs to wire model IDs" {
     try std.testing.expect(prefixed.has_vision);
     try std.testing.expect(prefixed.has_file_input);
     try std.testing.expect(findCatalogModel(&catalog, "private/gpt-5.5") == null);
+}
+
+test "catalog lookup matches Grok display IDs to wire model IDs" {
+    const catalog = [_]model_catalog.ModelCatalogEntry{
+        .{
+            .id = @constCast("grok-4.6"),
+            .model_type = @constCast("language"),
+            .has_reasoning = true,
+        },
+    };
+
+    try std.testing.expect(findCatalogModel(&catalog, "grok-4.6") != null);
+    const prefixed = findCatalogModel(&catalog, "xai/grok-4.6") orelse
+        return error.TestExpectedEqual;
+    try std.testing.expect(prefixed.has_reasoning);
+    try std.testing.expect(findCatalogModel(&catalog, "private/grok-4.6") == null);
 }
 
 test "model menu provider navigation skips absent and redundant filters" {

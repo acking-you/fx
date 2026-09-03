@@ -1136,10 +1136,7 @@ pub fn writeEffortConfigOption(
     current: types.ReasoningEffort,
     capabilities: model_capabilities.Capabilities,
 ) !void {
-    const effective_current = if (model_capabilities.reasoningEffortSupported(capabilities, current))
-        current
-    else
-        types.ReasoningEffort.auto;
+    const effective_current = model_capabilities.clampReasoningEffort(capabilities, current);
     try writer.writeAll("{\"id\":\"effort\",\"name\":\"Reasoning Effort\",\"description\":\"Controls how deeply the selected model reasons\",\"category\":\"model\",\"type\":\"select\",\"currentValue\":");
     try writeJsonStr(effective_current.label(), writer);
     try writer.writeAll(",\"options\":[{\"value\":\"auto\",\"name\":\"Default\"}");

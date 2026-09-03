@@ -9,6 +9,7 @@ import {
   createFxTerminal,
   fxSdkApiVersion,
   libfxApiVersion,
+  supportsJspi,
 } from "../node.js";
 import * as browser from "../browser.js";
 
@@ -49,8 +50,11 @@ assert.equal(terminal.options.marker, 2);
 
 await assert.rejects(
   createFxAgent({ nativeAddon: nativeUrl, backend: "wasm" }),
-  (error) => error?.code === "LIBFX_JSPI_REQUIRED" &&
-    error.message.includes("--experimental-wasm-jspi"),
+  supportsJspi()
+    ? (error) => error?.code === "ENOENT" &&
+      String(error.path ?? error.message).includes("fx-core.wasm")
+    : (error) => error?.code === "LIBFX_JSPI_REQUIRED" &&
+      error.message.includes("--experimental-wasm-jspi"),
 );
 
 const coreOnlyPath = resolve(dir, "core-only.mjs");

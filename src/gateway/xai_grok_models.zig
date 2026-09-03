@@ -6,6 +6,7 @@ const gateway_provider = @import("../core/gateway/gateway_provider.zig");
 const io_mod = @import("../core/shared/io.zig");
 const secret = @import("../core/auth/secret.zig");
 const types = @import("../core/shared/types.zig");
+const model_capabilities = @import("../core/config/model_capabilities.zig");
 const gateway_client = @import("client.zig");
 
 const max_catalog_models: usize = 128;
@@ -24,6 +25,54 @@ pub const model_catalog_provider = model_catalog.Provider{
 pub const cli_model_catalog_provider = gateway_provider.CliModelCatalogProvider{
     .fetch_fn = fetchCliModelCatalog,
 };
+
+const grok46_reasoning_efforts = [_]types.ReasoningEffort{
+    types.ReasoningEffort.literal("xhigh"),
+    types.ReasoningEffort.literal("high"),
+    types.ReasoningEffort.literal("medium"),
+    types.ReasoningEffort.literal("low"),
+};
+
+const grok45_reasoning_efforts = [_]types.ReasoningEffort{
+    types.ReasoningEffort.literal("high"),
+    types.ReasoningEffort.literal("medium"),
+    types.ReasoningEffort.literal("low"),
+};
+
+pub fn fallbackModelCapabilities(model: []const u8) model_capabilities.Capabilities {
+    const id = grokModelId(model);
+    var capabilities = model_capabilities.Capabilities{
+        .supports_tool_use = true,
+        .supports_web_search = true,
+    };
+    if (std.mem.eql(u8, id, "grok-4.6") or
+        std.mem.startsWith(u8, id, "grok-4.6-") or
+        std.mem.startsWith(u8, id, "grok-4.6."))
+    {
+        capabilities.supports_reasoning = true;
+        capabilities.reasoning_efforts = .fromSlice(&grok46_reasoning_efforts);
+        capabilities.default_reasoning_effort = types.ReasoningEffort.literal("high");
+        return capabilities;
+    }
+    if (std.mem.eql(u8, id, "grok-4.5") or
+        std.mem.startsWith(u8, id, "grok-4.5-") or
+        std.mem.startsWith(u8, id, "grok-4.5.") or
+        std.mem.eql(u8, id, "grok-4") or
+        std.mem.startsWith(u8, id, "grok-4-") or
+        std.mem.startsWith(u8, id, "grok-4."))
+    {
+        capabilities.supports_reasoning = true;
+        capabilities.reasoning_efforts = .fromSlice(&grok45_reasoning_efforts);
+        capabilities.default_reasoning_effort = types.ReasoningEffort.literal("high");
+    }
+    return capabilities;
+}
+
+fn grokModelId(model: []const u8) []const u8 {
+    const xai_prefix = "xai/";
+    if (std.mem.startsWith(u8, model, xai_prefix)) return model[xai_prefix.len..];
+    return model;
+}
 
 fn fetchCliModelCatalog(
     _: ?*anyopaque,
@@ -248,48 +297,62 @@ fn parseCatalog(
     var catalog: std.ArrayList(model_catalog.ModelCatalogEntry) = .empty;
     errdefer model_catalog.freeModelCatalog(alloc, &catalog);
     for (subscription_models.array.items) |value| {
-        if (value != .object) return error.InvalidGrokModelCatalog;
+        if (value != .object) continue;
         const object = value.object;
-        const api_backend = try requiredString(object, "api_backend");
+        const api_backend = objectStringAliases(object, &.{ "api_backend", "apiBackend" }) orelse continue;
         if (!std.mem.eql(u8, api_backend, "responses")) continue;
-        const raw_id = try requiredString(object, "model");
+        const raw_id = objectStringAliases(object, &.{ "model", "id" }) orelse continue;
         try validateModelId(raw_id);
-        const modality_object = try findModalityModel(modality_models.array.items, raw_id) orelse
-            return error.InvalidGrokModelCatalog;
-        if (!try stringArrayContains(modality_object, "output_modalities", "text")) continue;
+        const modality = findModalityModel(modality_models.array.items, raw_id) orelse continue;
+        if (!(stringArrayContains(modality, "output_modalities", "text") catch continue)) continue;
 
-        const id = try alloc.dupe(u8, raw_id);
-        errdefer alloc.free(id);
-        const model_type = try alloc.dupe(u8, "language");
-        errdefer alloc.free(model_type);
-        var reasoning_efforts: std.ArrayList(types.ReasoningEffort) = .empty;
-        errdefer reasoning_efforts.deinit(alloc);
-        const supports_reasoning = try requiredBool(object, "supports_reasoning_effort");
-        try appendProviderReasoningEfforts(alloc, &reasoning_efforts, object);
-        if (supports_reasoning != (reasoning_efforts.items.len > 0)) {
-            return error.InvalidGrokModelCatalog;
-        }
-        const context_window = try requiredPositiveU32(object, "context_window");
-        const max_output_tokens = try optionalPositiveU32(object, "max_completion_tokens");
-        const has_vision = try stringArrayContains(modality_object, "input_modalities", "image");
-        const has_web_search = try optionalBoolAliases(
+        const context_window = objectPositiveU32Aliases(object, &.{ "context_window", "contextWindow" }) orelse continue;
+        const max_output_tokens = objectPositiveU32Aliases(object, &.{ "max_completion_tokens", "maxCompletionTokens" }) orelse 0;
+        const has_vision = stringArrayContains(modality, "input_modalities", "image") catch false;
+        const has_web_search = optionalBoolAliases(
             object,
             &.{ "supportsBackendSearch", "supports_backend_search" },
-        ) orelse false;
+        ) catch continue orelse false;
+        const supports_reasoning = optionalBoolAliases(
+            object,
+            &.{ "supports_reasoning_effort", "supportsReasoningEffort" },
+        ) catch continue orelse false;
 
-        try catalog.append(alloc, .{
+        var reasoning_efforts: std.ArrayList(types.ReasoningEffort) = .empty;
+        const default_effort = appendProviderReasoningEfforts(alloc, &reasoning_efforts, object) catch {
+            reasoning_efforts.deinit(alloc);
+            continue;
+        };
+
+        const id = alloc.dupe(u8, raw_id) catch {
+            reasoning_efforts.deinit(alloc);
+            return error.OutOfMemory;
+        };
+        const model_type = alloc.dupe(u8, "language") catch {
+            alloc.free(id);
+            reasoning_efforts.deinit(alloc);
+            return error.OutOfMemory;
+        };
+
+        catalog.append(alloc, .{
             .id = id,
             .model_type = model_type,
             .has_tool_use = true,
-            .has_reasoning = supports_reasoning,
+            .has_reasoning = supports_reasoning or reasoning_efforts.items.len > 0,
             .reasoning_efforts = reasoning_efforts,
+            .default_reasoning_effort = default_effort,
             .has_vision = has_vision,
             .has_file_input = has_vision,
             .has_web_search = has_web_search,
             .has_implicit_caching = true,
             .context_window = context_window,
             .max_tokens = max_output_tokens,
-        });
+        }) catch |err| {
+            alloc.free(id);
+            alloc.free(model_type);
+            reasoning_efforts.deinit(alloc);
+            return err;
+        };
     }
     return catalog;
 }
@@ -298,32 +361,97 @@ fn appendProviderReasoningEfforts(
     alloc: std.mem.Allocator,
     out: *std.ArrayList(types.ReasoningEffort),
     object: std.json.ObjectMap,
-) !void {
-    const value = object.get("reasoning_efforts") orelse return error.InvalidGrokModelCatalog;
-    if (value != .array or value.array.items.len > types.ReasoningEffort.max_options) {
-        return error.InvalidGrokModelCatalog;
-    }
-    for (value.array.items) |entry| {
-        if (entry != .object) return error.InvalidGrokModelCatalog;
-        const raw_effort = try requiredString(entry.object, "value");
-        const effort = types.ReasoningEffort.parse(raw_effort) orelse
+) !types.ReasoningEffort {
+    var default_effort: types.ReasoningEffort = .auto;
+    if (objectValue(object, &.{ "reasoning_efforts", "reasoningEfforts" })) |value| {
+        if (value != .array or value.array.items.len > types.ReasoningEffort.max_options) {
             return error.InvalidGrokModelCatalog;
-        if (effort.isDefault()) return error.InvalidGrokModelCatalog;
-        for (out.items) |existing| {
-            if (existing.eql(effort)) return error.InvalidGrokModelCatalog;
         }
-        try out.append(alloc, effort);
+        for (value.array.items) |entry| {
+            const parsed = parseEffortOption(entry) orelse continue;
+            if (parsed.effort.isDefault()) continue;
+            var duplicate = false;
+            for (out.items) |existing| {
+                if (existing.eql(parsed.effort)) {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (duplicate) continue;
+            try out.append(alloc, parsed.effort);
+            if (parsed.is_default) default_effort = parsed.effort;
+        }
     }
+    if (default_effort.isDefault()) {
+        if (objectStringAliases(object, &.{ "reasoning_effort", "reasoningEffort" })) |raw| {
+            if (types.ReasoningEffort.parse(raw)) |legacy| {
+                if (!legacy.isDefault()) {
+                    for (out.items) |existing| {
+                        if (existing.eql(legacy)) {
+                            default_effort = legacy;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if (default_effort.isDefault() and out.items.len > 0) {
+        default_effort = out.items[0];
+    }
+    return default_effort;
+}
+
+const ParsedEffortOption = struct {
+    effort: types.ReasoningEffort,
+    is_default: bool = false,
+};
+
+fn parseEffortOption(entry: std.json.Value) ?ParsedEffortOption {
+    switch (entry) {
+        .string => |raw| {
+            const effort = types.ReasoningEffort.parse(raw) orelse return null;
+            if (effort.isDefault()) return null;
+            return .{ .effort = effort };
+        },
+        .object => |object| {
+            const raw = objectStringAliases(object, &.{ "value", "effort" }) orelse return null;
+            const effort = types.ReasoningEffort.parse(raw) orelse return null;
+            if (effort.isDefault()) return null;
+            const is_default = optionalBoolAliases(object, &.{"default"}) catch null orelse false;
+            return .{ .effort = effort, .is_default = is_default };
+        },
+        else => return null,
+    }
+}
+
+fn objectValue(object: std.json.ObjectMap, keys: []const []const u8) ?std.json.Value {
+    for (keys) |key| {
+        if (object.get(key)) |value| return value;
+    }
+    return null;
+}
+
+fn objectStringAliases(object: std.json.ObjectMap, keys: []const []const u8) ?[]const u8 {
+    const value = objectValue(object, keys) orelse return null;
+    if (value != .string or value.string.len == 0) return null;
+    return value.string;
+}
+
+fn objectPositiveU32Aliases(object: std.json.ObjectMap, keys: []const []const u8) ?u32 {
+    const value = objectValue(object, keys) orelse return null;
+    if (value != .integer or value.integer <= 0) return null;
+    return std.math.cast(u32, value.integer);
 }
 
 fn findModalityModel(
     models: []const std.json.Value,
     model_id: []const u8,
-) !?std.json.ObjectMap {
+) ?std.json.ObjectMap {
     for (models) |value| {
-        if (value != .object) return error.InvalidGrokModelCatalog;
-        const candidate = try requiredString(value.object, "id");
-        try validateModelId(candidate);
+        if (value != .object) continue;
+        const candidate = objectStringAliases(value.object, &.{ "id", "model" }) orelse continue;
+        validateModelId(candidate) catch continue;
         if (std.mem.eql(u8, candidate, model_id)) return value.object;
     }
     return null;
@@ -343,18 +471,6 @@ fn stringArrayContains(
     return false;
 }
 
-fn requiredString(object: std.json.ObjectMap, key: []const u8) ![]const u8 {
-    const value = object.get(key) orelse return error.InvalidGrokModelCatalog;
-    if (value != .string or value.string.len == 0) return error.InvalidGrokModelCatalog;
-    return value.string;
-}
-
-fn requiredBool(object: std.json.ObjectMap, key: []const u8) !bool {
-    const value = object.get(key) orelse return error.InvalidGrokModelCatalog;
-    if (value != .bool) return error.InvalidGrokModelCatalog;
-    return value.bool;
-}
-
 fn optionalBoolAliases(
     object: std.json.ObjectMap,
     keys: []const []const u8,
@@ -370,19 +486,6 @@ fn optionalBoolAliases(
         }
     }
     return resolved;
-}
-
-fn requiredPositiveU32(object: std.json.ObjectMap, key: []const u8) !u32 {
-    const value = object.get(key) orelse return error.InvalidGrokModelCatalog;
-    if (value != .integer or value.integer <= 0) return error.InvalidGrokModelCatalog;
-    return std.math.cast(u32, value.integer) orelse error.InvalidGrokModelCatalog;
-}
-
-fn optionalPositiveU32(object: std.json.ObjectMap, key: []const u8) !u32 {
-    const value = object.get(key) orelse return 0;
-    if (value == .null) return 0;
-    if (value != .integer or value.integer <= 0) return error.InvalidGrokModelCatalog;
-    return std.math.cast(u32, value.integer) orelse error.InvalidGrokModelCatalog;
 }
 
 fn validateModelId(id: []const u8) !void {
@@ -440,28 +543,78 @@ test "Grok catalog parser joins provider-owned subscription capabilities and mod
     try std.testing.expectEqualStrings("low", second.reasoning_efforts.items[1].label());
     try std.testing.expect(!second.has_vision);
     try std.testing.expect(second.has_web_search);
+    try std.testing.expectEqualStrings("xhigh", first.default_reasoning_effort.label());
+    try std.testing.expectEqualStrings("provider-next", second.default_reasoning_effort.label());
 }
 
-test "Grok catalog rejects missing provider-owned capability metadata" {
+test "Grok catalog skips incomplete models instead of failing the catalog" {
     const modalities =
         \\{"models":[{"id":"current","input_modalities":["text"],"output_modalities":["text"]}]}
     ;
-    const cases = [_][]const u8{
+    const missing_context =
         \\{"data":[{"id":"current","model":"current","api_backend":"responses","supports_reasoning_effort":false,"reasoning_efforts":[]}]}
-        ,
+    ;
+    var skipped_context = try parseCatalog(std.testing.allocator, missing_context, modalities);
+    defer model_catalog.freeModelCatalog(std.testing.allocator, &skipped_context);
+    try std.testing.expectEqual(@as(usize, 0), skipped_context.items.len);
+
+    const empty_efforts =
         \\{"data":[{"id":"current","model":"current","api_backend":"responses","context_window":500000,"supports_reasoning_effort":true,"reasoning_efforts":[]}]}
-        ,
-    };
-    for (cases) |subscription| {
-        try expectCatalogParseError(error.InvalidGrokModelCatalog, subscription, modalities);
-    }
+    ;
+    var kept = try parseCatalog(std.testing.allocator, empty_efforts, modalities);
+    defer model_catalog.freeModelCatalog(std.testing.allocator, &kept);
+    try std.testing.expectEqual(@as(usize, 1), kept.items.len);
+    try std.testing.expect(kept.items[0].has_reasoning);
+    try std.testing.expectEqual(@as(usize, 0), kept.items[0].reasoning_efforts.items.len);
+
     const missing_modalities =
         \\{"models":[{"id":"other","input_modalities":["text"],"output_modalities":["text"]}]}
     ;
     const valid_subscription =
         \\{"data":[{"id":"current","model":"current","api_backend":"responses","context_window":500000,"supports_reasoning_effort":false,"reasoning_efforts":[]}]}
     ;
-    try expectCatalogParseError(error.InvalidGrokModelCatalog, valid_subscription, missing_modalities);
+    var skipped_modality = try parseCatalog(std.testing.allocator, valid_subscription, missing_modalities);
+    defer model_catalog.freeModelCatalog(std.testing.allocator, &skipped_modality);
+    try std.testing.expectEqual(@as(usize, 0), skipped_modality.items.len);
+}
+
+test "Grok catalog accepts camelCase effort menus and skips auto" {
+    const alloc = std.testing.allocator;
+    const subscription_json =
+        \\{"data":[
+        \\  {"id":"grok-4.6","model":"grok-4.6","apiBackend":"responses","contextWindow":500000,"supportsReasoningEffort":true,"reasoningEffort":"high","reasoningEfforts":[{"value":"auto"},{"value":"xhigh"},{"value":"high","default":true},{"value":"medium"},"low"],"supportsBackendSearch":true},
+        \\  {"id":"orphan","model":"orphan","api_backend":"responses","context_window":1000,"supports_reasoning_effort":true,"reasoning_efforts":[{"value":"high"}]}
+        \\]}
+    ;
+    const modalities_json =
+        \\{"models":[{"id":"grok-4.6","input_modalities":["text","image"],"output_modalities":["text"]}]}
+    ;
+    var catalog = try parseCatalog(alloc, subscription_json, modalities_json);
+    defer model_catalog.freeModelCatalog(alloc, &catalog);
+
+    try std.testing.expectEqual(@as(usize, 1), catalog.items.len);
+    try std.testing.expectEqualStrings("grok-4.6", catalog.items[0].id);
+    try std.testing.expectEqual(@as(usize, 4), catalog.items[0].reasoning_efforts.items.len);
+    try std.testing.expectEqualStrings("xhigh", catalog.items[0].reasoning_efforts.items[0].label());
+    try std.testing.expectEqualStrings("high", catalog.items[0].reasoning_efforts.items[1].label());
+    try std.testing.expectEqualStrings("medium", catalog.items[0].reasoning_efforts.items[2].label());
+    try std.testing.expectEqualStrings("low", catalog.items[0].reasoning_efforts.items[3].label());
+    try std.testing.expectEqualStrings("high", catalog.items[0].default_reasoning_effort.label());
+    try std.testing.expect(catalog.items[0].has_web_search);
+}
+
+test "Grok fallback capabilities expose current model effort menus" {
+    const grok46 = fallbackModelCapabilities("xai/grok-4.6");
+    try std.testing.expect(grok46.supports_reasoning);
+    try std.testing.expectEqual(@as(usize, 4), grok46.reasoning_efforts.len);
+    try std.testing.expectEqualStrings("xhigh", grok46.reasoning_efforts.values[0].label());
+    try std.testing.expectEqualStrings("high", grok46.default_reasoning_effort.label());
+    try std.testing.expect(model_capabilities.reasoningEffortSupported(grok46, types.ReasoningEffort.literal("high")));
+
+    const grok45 = fallbackModelCapabilities("grok-4.5");
+    try std.testing.expectEqual(@as(usize, 3), grok45.reasoning_efforts.len);
+    try std.testing.expectEqualStrings("high", grok45.reasoning_efforts.values[0].label());
+    try std.testing.expect(!model_capabilities.reasoningEffortSupported(grok45, types.ReasoningEffort.literal("xhigh")));
 }
 
 test "Grok catalog URLs use provider-owned subscription and modality endpoints" {

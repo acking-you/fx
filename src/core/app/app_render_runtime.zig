@@ -677,6 +677,7 @@ pub fn Runtime(comptime App: type) type {
                 .stream = visible_stream,
                 .completed_assistant_presentation_tail = app.pacer.hasCompletedAssistantPresentationTail(),
                 .writing_response = app.pacer.hasPending(),
+                .compacting_context = app_session_runtime.Runtime(App).compactingContext(app),
                 .has_api_key = app.auth.credentialSource() != null,
                 .model = visible_model,
                 .pending_images = app.pending_images.items,
@@ -1293,6 +1294,7 @@ pub fn Runtime(comptime App: type) type {
             ctx.stream = .{};
             ctx.completed_assistant_presentation_tail = false;
             ctx.writing_response = chat.busy();
+            ctx.compacting_context = false;
             ctx.model = visible_model;
             ctx.pending_images = &.{};
             ctx.composer_visible = chat.messageable();
@@ -1442,6 +1444,13 @@ pub fn Runtime(comptime App: type) type {
                 if (app.statusline_session) {
                     items.session_title = app_session_runtime.Runtime(App).cachedSessionTitle(app);
                 }
+            }
+            if (comptime @hasField(App, "account_usage") and @hasField(App, "auth")) {
+                items.usage = app.account_usage.summary(
+                    provider_runtime.provider(app),
+                    app.auth.credentialSource(),
+                    app.auth.accountId(),
+                );
             }
             return items;
         }

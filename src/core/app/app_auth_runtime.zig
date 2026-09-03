@@ -942,6 +942,9 @@ pub fn Runtime(comptime App: type) type {
             if (comptime @hasDecl(App, "startModelCacheWarmup")) {
                 app.startModelCacheWarmup();
             }
+            if (comptime @hasDecl(App, "startAccountUsageRefresh")) {
+                app.startAccountUsageRefresh(true);
+            }
         }
 
         pub fn admitPromptCredential(app: *App) !bool {
@@ -1005,6 +1008,9 @@ pub fn Runtime(comptime App: type) type {
             app.model_cache.reset();
             if (comptime @hasDecl(App, "startModelCacheWarmup")) {
                 app.startModelCacheWarmup();
+            }
+            if (comptime @hasDecl(App, "startAccountUsageRefresh")) {
+                app.startAccountUsageRefresh(true);
             }
             if (comptime @hasDecl(App, "reconcileModelForCredentialSource")) {
                 app.reconcileModelForCredentialSource(true);

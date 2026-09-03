@@ -2451,7 +2451,7 @@ fn normalizeModelControls(
     capabilities: model_capabilities.Capabilities,
 ) ModelControls {
     return .{
-        .effort = if (model_capabilities.reasoningEffortSupported(capabilities, effort)) effort else .auto,
+        .effort = model_capabilities.clampReasoningEffort(capabilities, effort),
         .fast_mode = fast_mode and capabilities.supports_fast_mode,
     };
 }
