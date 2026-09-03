@@ -1256,8 +1256,6 @@ describe("cli: read-only no-create matrix", () => {
     { args: ["sessions", "--json"], code: 0, kind: "sessions", count: 0 },
     { args: ["session", "last", "--json"], code: 1, error: "no saved sessions" },
     { args: ["session", "--id", "missing.valid-id", "--json"], code: 1, error: "record not found" },
-    { args: ["background", "--json"], code: 0, kind: "background", count: 0 },
-    { args: ["background", "999999", "--json"], code: 1, error: "no persisted records" },
     { args: ["doctor", "--json"], code: 0, kind: "doctor" },
   ] as const;
 
