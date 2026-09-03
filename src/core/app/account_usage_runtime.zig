@@ -93,18 +93,20 @@ pub const Runtime = struct {
         if (!self.hasCachedOrPending()) return;
         self.cancel_requested.store(true, .seq_cst);
         self.finishThreadIfDone();
-        if (self.thread) |thread| {
-            self.thread = null;
-            thread.join();
-        }
         self.mutex.lockUncancelable(io_mod.getIo());
-        self.state = .idle;
-        self.completion_pending = false;
         self.cache = null;
         self.last_error = null;
         self.last_refresh_ms = 0;
+        self.completion_pending = false;
+        if (self.thread == null) {
+            self.state = .idle;
+            self.mutex.unlock(io_mod.getIo());
+            self.cancel_requested.store(false, .seq_cst);
+            return;
+        }
+        // Leave the in-flight worker running. The TUI/ACP event loop must not
+        // join HTTP cleanup; finishThreadIfDone reaps it after the thread exits.
         self.mutex.unlock(io_mod.getIo());
-        self.cancel_requested.store(false, .seq_cst);
     }
 
     pub fn requestRefresh(
@@ -211,12 +213,7 @@ pub const Runtime = struct {
         const thread = if (should_join) self.thread.? else null;
         if (should_join) self.thread = null;
         self.mutex.unlock(io_mod.getIo());
-        if (thread) |handle| {
-            handle.join();
-            self.mutex.lockUncancelable(io_mod.getIo());
-            self.completion_pending = true;
-            self.mutex.unlock(io_mod.getIo());
-        }
+        if (thread) |handle| handle.join();
     }
 
     fn loadThreadMain(self: *Self, request: LoadRequest) void {
@@ -234,16 +231,25 @@ pub const Runtime = struct {
 
         self.mutex.lockUncancelable(io_mod.getIo());
         defer self.mutex.unlock(io_mod.getIo());
+        if (self.cancel_requested.load(.seq_cst)) {
+            self.state = .idle;
+            self.last_error = null;
+            self.completion_pending = false;
+            self.cancel_requested.store(false, .seq_cst);
+            return;
+        }
         if (fetched.failure != null or fetched.data == null) {
             self.state = if (self.cache != null) .ready else .failed;
             self.last_error = error.AccountUsageUnavailable;
             self.last_refresh_ms = io_mod.milliTimestamp();
+            self.completion_pending = true;
             return;
         }
         self.cache = snapshotFromCodex(fetched.data.?);
         self.state = .ready;
         self.last_error = null;
         self.last_refresh_ms = io_mod.milliTimestamp();
+        self.completion_pending = true;
     }
 };
 
@@ -472,6 +478,58 @@ test "account usage runtime fetches off the caller thread" {
     gate.allow_finish.store(true, .seq_cst);
     var remaining_ms: usize = 5000;
     while (runtime.pollTransition() == .none and remaining_ms > 0) : (remaining_ms -= 1) {
+        io_mod.sleep(std.time.ns_per_ms);
+    }
+    try std.testing.expect(remaining_ms > 0);
+    try std.testing.expectEqual(@as(usize, 1), gate.loads.load(.seq_cst));
+}
+
+test "account usage clear does not join an in-flight refresh" {
+    const Gate = struct {
+        allow_finish: std.atomic.Value(bool) = .init(false),
+        loads: std.atomic.Value(usize) = .init(0),
+        entered: std.atomic.Value(bool) = .init(false),
+
+        fn fetch(
+            raw: ?*anyopaque,
+            _: Allocator,
+            input: gateway_provider.AccountUsageLookupInput,
+        ) @import("../output/output_contracts.zig").CodexAccountUsageSnapshot {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            _ = self.loads.fetchAdd(1, .seq_cst);
+            self.entered.store(true, .seq_cst);
+            while (!self.allow_finish.load(.seq_cst)) {
+                if (input.cancel_flag) |flag| {
+                    if (flag.load(.seq_cst)) break;
+                }
+                io_mod.sleep(std.time.ns_per_ms);
+            }
+            return .{};
+        }
+    };
+
+    var gate = Gate{};
+    var runtime = Runtime.init(std.testing.allocator);
+    defer runtime.deinit();
+    try std.testing.expect(try runtime.requestRefresh(
+        .{ .context = &gate, .fetch_fn = Gate.fetch },
+        oauth_transport.unavailable_provider,
+        "access",
+        "acct",
+        .chatgpt_subscription,
+        1,
+        true,
+    ));
+    var remaining_ms: usize = 5000;
+    while (!gate.entered.load(.seq_cst) and remaining_ms > 0) : (remaining_ms -= 1) {
+        io_mod.sleep(std.time.ns_per_ms);
+    }
+    try std.testing.expect(gate.entered.load(.seq_cst));
+    runtime.clear();
+    try std.testing.expect(runtime.snapshot() == null);
+    gate.allow_finish.store(true, .seq_cst);
+    remaining_ms = 5000;
+    while (runtime.hasCachedOrPending() and remaining_ms > 0) : (remaining_ms -= 1) {
         io_mod.sleep(std.time.ns_per_ms);
     }
     try std.testing.expect(remaining_ms > 0);

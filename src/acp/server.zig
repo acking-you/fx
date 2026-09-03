@@ -35,6 +35,7 @@ const session_store = @import("../core/session/session_store.zig");
 const session_runtime = @import("../core/session/session.zig");
 const session_usage = @import("../core/session/session_usage.zig");
 const provider_usage = @import("../core/session/provider_usage.zig");
+const account_usage_runtime = @import("../core/app/account_usage_runtime.zig");
 const image_attachments = @import("../core/images/image_attachments.zig");
 const worker_runtime = @import("../core/agent/worker_runtime.zig");
 const background_runtime = @import("../core/background/background_runtime.zig");
@@ -402,6 +403,7 @@ pub const ServerState = struct {
     outbound_cond: std.Io.Condition = .init,
     next_outbound_request_id: u64 = 1,
     pending_outbound: std.AutoHashMapUnmanaged(u64, PendingOutbound) = .empty,
+    account_usage: account_usage_runtime.Runtime = account_usage_runtime.Runtime.init(std.heap.c_allocator),
 
     pub fn deinit(self: *ServerState) void {
         reapActivePrompt(self, true);
@@ -442,6 +444,7 @@ pub const ServerState = struct {
             if (entry.response) |*response| response.deinit(self.alloc);
         }
         self.pending_outbound.deinit(self.alloc);
+        self.account_usage.deinit();
     }
 };
 
@@ -568,6 +571,7 @@ fn adoptServerCredential(state: *ServerState, credential: *credentials.Credentia
         active.credential_source = state.credential_source;
         active.account_id = state.account_id;
     }
+    startAccountUsageRefresh(state, true);
 }
 
 /// Ensures the process and active ACP session use a credential authorized for
@@ -670,6 +674,39 @@ fn publishRefreshedSubscriptionToken(
         active.api_key = state.api_key;
         active.credential_source = source;
     }
+    startAccountUsageRefresh(state, true);
+}
+
+fn startAccountUsageRefresh(state: *ServerState, force: bool) void {
+    if (comptime host_target.is_wasm) return;
+    const source = state.credential_source orelse {
+        state.account_usage.clear();
+        return;
+    };
+    const account_usage = switch (source) {
+        .chatgpt_subscription => state.cfg.provider_set.codex.account_usage,
+        .grok_subscription => state.cfg.provider_set.grok.account_usage,
+        else => {
+            state.account_usage.clear();
+            return;
+        },
+    } orelse {
+        state.account_usage.clear();
+        return;
+    };
+    if (state.api_key.len == 0) return;
+    const account_id = state.account_id orelse return;
+    _ = state.account_usage.requestRefresh(
+        account_usage,
+        state.cfg.gateway_provider.oauth_transport,
+        state.api_key,
+        account_id,
+        source,
+        io_mod.milliTimestamp(),
+        force,
+    ) catch |err| {
+        debug_trace.logf("account_usage", "acp refresh start failed err={s}", .{@errorName(err)});
+    };
 }
 
 pub fn releaseActiveSession(state: *ServerState) !void {
@@ -1875,6 +1912,11 @@ fn handleProviderUsage(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Mess
             usage,
             null,
         );
+    }
+    if (credentialMatchesProvider(state.credential_source, provider)) {
+        if (state.account_usage.summary(provider, state.credential_source, state.account_id)) |account| {
+            summary.overlayAccountLimits(account);
+        }
     }
 
     var out: std.Io.Writer.Allocating = .init(alloc);

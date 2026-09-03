@@ -120,6 +120,10 @@ const DetachedWorkerEventBatch = struct {
         return self.events.items[self.next_unvisited - 1 ..];
     }
 
+    fn remaining(self: *const DetachedWorkerEventBatch) []const WorkerEvent {
+        return self.events.items[self.next_unvisited..];
+    }
+
     fn markClaimedAndRemainingTransferred(self: *DetachedWorkerEventBatch) void {
         self.next_unvisited = self.events.items.len;
     }
@@ -202,7 +206,9 @@ pub fn Runtime(comptime App: type) type {
                 .turn_phase_update,
                 .diff_block,
                 => .drop,
-                .compaction => .admit,
+                .compacting_context,
+                .compaction,
+                => .admit,
                 .route_recovery_status => |status| if (status.action == .paused)
                     .admit
                 else
@@ -913,6 +919,16 @@ pub fn Runtime(comptime App: type) type {
                         drain_owns_current = false;
                         try handlers.diff_block(handlers.ctx, payload);
                     },
+                    .compacting_context => |active| {
+                        if (comptime @hasDecl(@TypeOf(app.worker), "setCompactingContext")) {
+                            app.worker.setCompactingContext(active);
+                        }
+                        app.shell.render_requests.request(.footer);
+                        if (active and remainingHasCompactingFalse(&batch)) {
+                            try retainRemainingEvents(app, &batch, "compacting_context_frame");
+                            break :events;
+                        }
+                    },
                     .compaction => |completed| {
                         try handlers.compaction(handlers.ctx, completed);
                     },
@@ -1009,6 +1025,31 @@ pub fn Runtime(comptime App: type) type {
                 "retained detached worker events reason={s} count={d}",
                 .{ reason, retained.len },
             );
+        }
+
+        fn retainRemainingEvents(
+            app: *App,
+            batch: *DetachedWorkerEventBatch,
+            reason: []const u8,
+        ) !void {
+            const retained = batch.remaining();
+            try app.worker.prependOwnedEvents(batch.alloc, retained);
+            batch.markClaimedAndRemainingTransferred();
+            debug_trace.logf(
+                "worker",
+                "retained remaining worker events reason={s} count={d}",
+                .{ reason, retained.len },
+            );
+        }
+
+        fn remainingHasCompactingFalse(batch: *const DetachedWorkerEventBatch) bool {
+            for (batch.remaining()) |event| {
+                switch (event) {
+                    .compacting_context => |active| if (!active) return true,
+                    else => {},
+                }
+            }
+            return false;
         }
 
         fn applyToolLifecycle(
@@ -1212,6 +1253,7 @@ const FakeWorker = struct {
     propagated_grants: usize = 0,
     reset_cancel_after_take_events: bool = false,
     admission_snapshot: worker_runtime.InteractiveAdmissionSnapshot = .open,
+    compacting_context: bool = false,
 
     fn deinit(self: *FakeWorker) void {
         for (self.events.items) |event| worker_runtime.freeWorkerEvent(std.heap.c_allocator, event);
@@ -1257,6 +1299,14 @@ const FakeWorker = struct {
             .events = self.takeEvents(),
             .cancel_requested = cancel_requested,
         };
+    }
+
+    fn setCompactingContext(self: *FakeWorker, active: bool) void {
+        self.compacting_context = active;
+    }
+
+    fn compactingContext(self: *const FakeWorker) bool {
+        return self.compacting_context;
     }
 
     fn snapshotState(self: *FakeWorker, alloc: std.mem.Allocator) !FakeSnapshot {
@@ -2031,6 +2081,23 @@ test "detached worker batch frees claimed current and unvisited suffix exactly o
 
     const current = batch.claim().?;
     worker_runtime.freeWorkerEvent(batch.alloc, current);
+}
+
+test "compacting context start yields a frame before the matching finish event" {
+    var app = FakeApp.init(std.testing.allocator);
+    defer app.deinit();
+
+    try app.worker.pushEvent(std.heap.c_allocator, .{ .compacting_context = true });
+    try app.worker.pushEvent(std.heap.c_allocator, .{ .compacting_context = false });
+    try tickNoop(&app);
+
+    try std.testing.expect(app.worker.compactingContext());
+    try std.testing.expectEqual(@as(usize, 1), app.worker.events.items.len);
+    try std.testing.expectEqual(false, app.worker.events.items[0].compacting_context);
+
+    try tickNoop(&app);
+    try std.testing.expect(!app.worker.compactingContext());
+    try std.testing.expectEqual(@as(usize, 0), app.worker.events.items.len);
 }
 
 test "core.app_worker_runtime fatal admission rejects tick before work" {

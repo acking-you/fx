@@ -98,6 +98,13 @@ pub const Summary = struct {
         };
     }
 
+    pub fn overlayAccountLimits(self: *Summary, limits: Summary) void {
+        self.primary_limit = limits.primary_limit;
+        self.secondary_limit = limits.secondary_limit;
+        if (limits.account_id_present) self.account_id_present = true;
+        if (limits.credential_source) |source| self.credential_source = source;
+    }
+
     pub fn statusline(self: Summary, out: []u8) []const u8 {
         if (self.primary_limit != null or self.secondary_limit != null) {
             return formatAccountLimits(self, out);
@@ -199,4 +206,18 @@ test "provider usage summary omits a missing 5h window" {
     );
     var buf: [32]u8 = undefined;
     try std.testing.expectEqualStrings("week 91%", summary.statusline(&buf));
+}
+
+test "provider usage summary overlays cached account windows onto session counters" {
+    var summary = Summary.fromCounters(.codex, .chatgpt_subscription, "acct", 1200, 800, 1, null);
+    summary.overlayAccountLimits(Summary.fromAccountLimits(
+        .codex,
+        .chatgpt_subscription,
+        "acct",
+        .{ .kind = .five_hour, .remaining_percent = 88 },
+        .{ .kind = .weekly, .remaining_percent = 65 },
+    ));
+    try std.testing.expectEqual(@as(u64, 2000), summary.total_tokens);
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("5h 88% · week 65%", summary.statusline(&buf));
 }

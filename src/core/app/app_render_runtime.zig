@@ -1193,6 +1193,7 @@ pub fn Runtime(comptime App: type) type {
                 .turn_phase_update,
                 // Product-state compaction is installed by the UI worker-event
                 // drain and must never be replayed as transcript presentation.
+                .compacting_context,
                 .compaction,
                 .finish_prompt,
                 .session_grant,

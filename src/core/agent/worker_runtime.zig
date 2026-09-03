@@ -535,6 +535,7 @@ pub const WorkerEvent = union(enum) {
     turn_token_update: types.TurnTokenProgress,
     turn_phase_update: types.TurnPhaseUpdate,
     diff_block: diff_mod.DiffEntryPayload,
+    compacting_context: bool,
     compaction: types.CompactionWorkerEvent,
     finish_prompt: types.FinishedPrompt,
     session_grant: types.PermissionGrant,
@@ -3079,6 +3080,7 @@ pub fn dupeWorkerEvent(alloc: std.mem.Allocator, event: WorkerEvent) !WorkerEven
                 .full = full,
             } };
         },
+        .compacting_context => |active| .{ .compacting_context = active },
         .compaction => |completed| .{
             .compaction = try types.dupeCompactionWorkerEvent(
                 alloc,
@@ -3130,6 +3132,7 @@ pub fn freeWorkerEvent(alloc: std.mem.Allocator, event: WorkerEvent) void {
         },
         .tool_lifecycle => |lifecycle| freeToolLifecycleEvent(alloc, lifecycle),
         .diff_block => |payload| diff_mod.freeDiffEntryPayload(alloc, payload),
+        .compacting_context => {},
         .compaction => |completed| {
             types.freeCompactionWorkerEvent(alloc, completed);
         },
@@ -5009,6 +5012,8 @@ test "clear queued prompts preserves events and discard frees event payloads" {
     } });
     freeWorkerEvent(alloc, .{ .turn_token_update = .{ .input_tokens = 10, .output_tokens = 5 } });
     freeWorkerEvent(alloc, .{ .diff_block = .{ .preview = try alloc.dupe(u8, "preview") } });
+    freeWorkerEvent(alloc, try dupeWorkerEvent(alloc, .{ .compacting_context = true }));
+    freeWorkerEvent(alloc, .{ .compacting_context = false });
     freeWorkerEvent(alloc, .{ .tool_lifecycle = .{
         .turn_finished = .{ .turn_id = 1, .outcome = .completed },
     } });

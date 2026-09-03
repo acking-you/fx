@@ -895,7 +895,14 @@ pub fn Bindings(comptime App: type) type {
 
         fn agentSetCompactingContext(ctx: *anyopaque, active: bool) void {
             const app: *App = @ptrCast(@alignCast(ctx));
-            app.worker.setCompactingContext(active);
+            app_worker_runtime.Runtime(App).pushEvent(app, .{ .compacting_context = active }) catch |err| {
+                debug_trace.logf(
+                    "worker",
+                    "compacting_context queue failed active={} err={s}",
+                    .{ active, @errorName(err) },
+                );
+                app.worker.setCompactingContext(active);
+            };
         }
 
         fn agentPushContextNotice(ctx: *anyopaque, text: []const u8) !void {
