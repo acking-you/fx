@@ -633,6 +633,12 @@ function startAcpFakeCodex(options: {
           expires_in: 3600,
         });
       }
+      if (path === "/api/codex/usage") {
+        return Response.json({ plan_type: "plus" });
+      }
+      if (path === "/api/codex/profiles/me") {
+        return Response.json({ stats: {} });
+      }
       const body = await request.text();
       requests.push({ ...recorded, body });
       if (unauthorizedResponses > 0) {
@@ -713,6 +719,7 @@ function startAcpFakeGrok(options: {
   const modelRequests: Array<{ path: string; authorization: string | null }> = [];
   const tokenRequests: Array<{ path: string; authorization: string | null; body: string }> = [];
   const userinfoRequests: Array<{ path: string; authorization: string | null }> = [];
+  const billingRequests: Array<{ path: string; authorization: string | null }> = [];
   let unauthorizedResponses = options.unauthorizedResponses ?? 0;
   const server = Bun.serve({
     hostname: "127.0.0.1",
@@ -740,6 +747,15 @@ function startAcpFakeGrok(options: {
       if (path === "/userinfo") {
         userinfoRequests.push({ path, authorization });
         return Response.json({ sub: "acct_grok_acp" });
+      }
+      if (path === "/billing") {
+        billingRequests.push({ path, authorization });
+        return Response.json({
+          config: {
+            creditUsagePercent: 25,
+            currentPeriod: { type: "USAGE_PERIOD_TYPE_WEEKLY" },
+          },
+        });
       }
       const body = await request.text();
       requests.push({
@@ -771,11 +787,13 @@ function startAcpFakeGrok(options: {
     modelRequests,
     tokenRequests,
     userinfoRequests,
+    billingRequests,
     responsesUrl: `${base}/responses`,
     modelsUrl: `${base}/models`,
     modalitiesUrl: `${base}/modalities`,
     tokenUrl: `${base}/token`,
     userinfoUrl: `${base}/userinfo`,
+    billingUrl: `${base}/billing?format=credits`,
     stop() { server.stop(true); },
   };
 }
@@ -1437,6 +1455,7 @@ describe("acp: model-independent", () => {
             FX_E2E_GROK_ISSUER_URL: grok.tokenUrl.replace(/\/token$/, ""),
             FX_E2E_GROK_TOKEN_URL: grok.tokenUrl,
             FX_E2E_GROK_USERINFO_URL: grok.userinfoUrl,
+            FX_E2E_XAI_GROK_BILLING_URL: grok.billingUrl,
           },
         });
         await client.request("initialize", { protocolVersion: 1 }, 50);
@@ -6215,6 +6234,7 @@ describe("acp: model-independent", () => {
             FX_E2E_XAI_GROK_RESPONSES_URL: grok.responsesUrl,
             FX_E2E_XAI_GROK_MODELS_URL: grok.modelsUrl,
             FX_E2E_XAI_GROK_MODALITIES_URL: grok.modalitiesUrl,
+            FX_E2E_XAI_GROK_BILLING_URL: grok.billingUrl,
           },
         });
         await client.request("initialize", { protocolVersion: 1 }, 1);
@@ -6755,6 +6775,7 @@ describe.skipIf(!HAS_API_KEY)("acp: model-backed protocol", () => {
             FX_E2E_XAI_GROK_MODALITIES_URL: grok.modalitiesUrl,
             FX_E2E_GROK_TOKEN_URL: grok.tokenUrl,
             FX_E2E_GROK_USERINFO_URL: grok.userinfoUrl,
+            FX_E2E_XAI_GROK_BILLING_URL: grok.billingUrl,
           },
         });
         await client.request("initialize", { protocolVersion: 1 }, 1);
@@ -6794,6 +6815,18 @@ describe.skipIf(!HAS_API_KEY)("acp: model-backed protocol", () => {
         }
         expect(grok.tokenRequests).toHaveLength(1);
         expect(grok.tokenRequests[0]!.body).toContain("grant_type=refresh_token");
+        await waitForCondition(
+          "Grok account usage request",
+          () => grok.billingRequests.length > 0,
+          TIMEOUT,
+        );
+        for (const request of grok.billingRequests) {
+          expect(request.path).toBe("/billing");
+          expect([
+            `Bearer ${grok.accessToken}`,
+            `Bearer ${grok.refreshedAccessToken}`,
+          ]).toContain(request.authorization);
+        }
         expect(grok.userinfoRequests).toHaveLength(1);
         expect(grok.userinfoRequests[0]!.authorization).toBe(`Bearer ${grok.refreshedAccessToken}`);
         for (const request of [...gateway.requests, ...gateway.modelRequests]) {
