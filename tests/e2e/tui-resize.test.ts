@@ -2362,6 +2362,12 @@ describe.skipIf(SKIP)("tui: resize", () => {
   test(
     "closed mermaid blocks render and reflow between diagrams and source fallback",
     async () => {
+      // Keep one live model turn open while the same semantic block moves
+      // through the complete presentation lifecycle:
+      //
+      //   open fence ── close ──▶ 90 cols: diagram ── shrink ──▶ 20 cols: source
+      //                                ▲                              │
+      //                                └──────────── grow ────────────┘
       const gated = gatedResizeResponse(
         "MERMAID_STREAM_BEFORE\n```mermaid\nflowchart LR\n  A[Request]",
         " -->|validate| B[Response]\n```\n",

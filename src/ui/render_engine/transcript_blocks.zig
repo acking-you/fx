@@ -971,6 +971,9 @@ fn renderAssistantCodeBlock(
     styles: Styles,
 ) ![]u8 {
     if (std.ascii.eqlIgnoreCase(block.language, "mermaid")) {
+        // Transcript reflow calls this path again with the current width.
+        // A null diagram deliberately falls through to the source renderer,
+        // making wide diagram -> narrow source -> wide diagram reversible.
         if (try mermaid_renderer.render(alloc, block.code, cols, .{
             .dim = styles.dim_style,
             .reset = styles.reset_style,
