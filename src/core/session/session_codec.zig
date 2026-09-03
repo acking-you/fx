@@ -1420,6 +1420,7 @@ fn writeUserTurn(writer: *std.Io.Writer, user: session.UserTurn) !void {
         try writer.writeByte('}');
     }
     try writer.writeByte(']');
+    if (!user.proven_root) try writer.writeAll(",\"proven_root\":false");
     if (user.work_id) |work_id| {
         try writer.writeAll(",\"work_id\":");
         try writeJsonString(writer, work_id);
@@ -1741,12 +1742,22 @@ fn writeFileEvidence(writer: *std.Io.Writer, file: session.FileEvidence) !void {
 
 fn parseUserTurn(alloc: Allocator, value: std.json.Value) !session.UserTurn {
     const source = try requireObject(value);
-    const object = if (source.count() == 2)
-        try exactObject(value, &.{ "text", "images" })
+    const has_proven_root = source.get("proven_root") != null;
+    const has_work_id = source.get("work_id") != null;
+    const object = if (has_proven_root and has_work_id)
+        try exactObject(value, &.{ "text", "images", "proven_root", "work_id" })
+    else if (has_proven_root)
+        try exactObject(value, &.{ "text", "images", "proven_root" })
+    else if (has_work_id)
+        try exactObject(value, &.{ "text", "images", "work_id" })
     else
-        try exactObject(value, &.{ "text", "images", "work_id" });
+        try exactObject(value, &.{ "text", "images" });
     const text = try parseRequiredDurableBytes(alloc, object, "text");
     errdefer alloc.free(text);
+    const proven_root = if (object.get("proven_root")) |field| switch (field) {
+        .bool => |flag| flag,
+        else => return error.InvalidSessionFormat,
+    } else true;
     const work_id = if (object.get("work_id")) |_|
         try alloc.dupe(u8, try requireString(object, "work_id"))
     else
@@ -1755,7 +1766,11 @@ fn parseUserTurn(alloc: Allocator, value: std.json.Value) !session.UserTurn {
     if (work_id) |id| session.validateWorkId(id) catch return error.InvalidSessionFormat;
     const images_value = object.get("images") orelse return error.InvalidSessionFormat;
     if (images_value != .array) return error.InvalidSessionFormat;
-    if (images_value.array.items.len == 0) return .{ .text = text, .work_id = work_id };
+    if (images_value.array.items.len == 0) return .{
+        .text = text,
+        .proven_root = proven_root,
+        .work_id = work_id,
+    };
 
     const images = try alloc.alloc(session.ImageAttachment, images_value.array.items.len);
     errdefer alloc.free(images);
@@ -1791,7 +1806,12 @@ fn parseUserTurn(alloc: Allocator, value: std.json.Value) !session.UserTurn {
         };
         parsed_count += 1;
     }
-    return .{ .text = text, .images = images, .work_id = work_id };
+    return .{
+        .text = text,
+        .images = images,
+        .proven_root = proven_root,
+        .work_id = work_id,
+    };
 }
 
 fn imageAttachmentObject(value: std.json.Value) !std.json.ObjectMap {
@@ -3173,6 +3193,7 @@ test "durable state round trips live history while discarding legacy authority" 
             .user = .{
                 .text = @constCast(invalid_a[0..]),
                 .images = images[0..],
+                .proven_root = false,
                 .work_id = @constCast("work-assistant"),
             },
             .assistant = @constCast(invalid_b[0..]),
@@ -3419,16 +3440,19 @@ test "per-turn work provenance is strict and ordinary state omits it" {
     var state = try decodeState(alloc, &ordinary_source, .{});
     defer state.deinit(alloc);
     try std.testing.expect(state.history[0].assistant.user.work_id == null);
+    try std.testing.expect(state.history[0].assistant.user.proven_root);
 
     var encoded: std.Io.Writer.Allocating = .init(alloc);
     defer encoded.deinit();
     _ = try encodeState(state, &encoded.writer);
     try std.testing.expect(std.mem.find(u8, encoded.written(), "work_id") == null);
+    try std.testing.expect(std.mem.find(u8, encoded.written(), "proven_root") == null);
 
     const invalid = [_][]const u8{
         "{\"kind\":\"assistant\",\"user\":{\"text\":\"hello\",\"images\":[],\"work_id\":\"\"},\"assistant\":\"world\",\"execution\":{\"schema_version\":3,\"tool_steps\":[],\"files\":[]}}",
         "{\"kind\":\"assistant\",\"user\":{\"text\":\"hello\",\"images\":[],\"work_id\":null},\"assistant\":\"world\",\"execution\":{\"schema_version\":3,\"tool_steps\":[],\"files\":[]}}",
         "{\"kind\":\"assistant\",\"user\":{\"text\":\"hello\",\"images\":[],\"work_id\":\"bad\\u0000id\"},\"assistant\":\"world\",\"execution\":{\"schema_version\":3,\"tool_steps\":[],\"files\":[]}}",
+        "{\"kind\":\"assistant\",\"user\":{\"text\":\"hello\",\"images\":[],\"proven_root\":null},\"assistant\":\"world\",\"execution\":{\"schema_version\":3,\"tool_steps\":[],\"files\":[]}}",
     };
     for (invalid) |json| {
         var parsed = try std.json.parseFromSlice(std.json.Value, alloc, json, .{});
@@ -4452,6 +4476,7 @@ fn expectResponsesProviderOutputItemsEqual(
 
 fn expectUserTurnEqual(expected: session.UserTurn, actual: session.UserTurn) !void {
     try std.testing.expectEqualSlices(u8, expected.text, actual.text);
+    try std.testing.expectEqual(expected.proven_root, actual.proven_root);
     try expectOptionalBytesEqual(expected.work_id, actual.work_id);
     try std.testing.expectEqual(expected.images.len, actual.images.len);
     for (expected.images, actual.images) |image, got| {
@@ -4550,7 +4575,10 @@ test "recovery checkpoint round trips while legacy state stays absent" {
     const alloc = std.testing.allocator;
     const checkpoint = RecoveryCheckpoint{
         .turn_id = 42,
-        .user = .{ .text = @constCast("keep working") },
+        .user = .{
+            .text = @constCast("keep working"),
+            .proven_root = false,
+        },
         .assistant_source = @constCast("partial answer"),
         .cause = .response_interrupted,
         .action = .continuing_response,
@@ -4599,6 +4627,7 @@ test "recovery checkpoint round trips while legacy state stays absent" {
     const restored = decoded.recovery_checkpoint.?;
     try std.testing.expectEqual(@as(u64, 42), restored.turn_id);
     try std.testing.expectEqualStrings("keep working", restored.user.text);
+    try std.testing.expect(!restored.user.proven_root);
     try std.testing.expectEqualStrings("partial answer", restored.assistant_source);
     try std.testing.expectEqual(types.ModelRecoveryCause.response_interrupted, restored.cause);
     try std.testing.expectEqual(types.ModelRecoveryAction.continuing_response, restored.action);

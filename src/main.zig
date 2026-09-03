@@ -91,19 +91,17 @@ const permission_auto_classifier = @import("core/permissions/auto_classifier.zig
 const auto_classifier_context = @import("core/permissions/auto_classifier_context.zig");
 const agent_runtime = @import("core/agent/agent_runtime.zig");
 const assistant_presentation = @import("core/agent/assistant_presentation.zig");
-const background_runtime = @import("core/background/background_runtime.zig");
 const background_process_provider = @import(
     "core/execution/background_process_provider.zig",
 );
 const background_process = @import("tools/shell/background_process.zig");
-const process_supervisor = @import("core/background/process_supervisor.zig");
 const terminal_client_runtime = @import("core/terminal/client.zig");
-const terminal_direct_runtime = @import("core/terminal/direct_runtime.zig");
-const app_terminal_runtime = @import("core/app/app_terminal_runtime.zig");
 const app_terminal_takeover_runtime = @import("core/app/app_terminal_takeover_runtime.zig");
 const terminal_host = @import("core/terminal/host.zig");
 const terminal_native_session = @import("core/terminal/native_session.zig");
 const unified_exec_runtime = @import("core/execution/unified_exec.zig");
+const lifecycle_prompt = @import("core/execution/lifecycle_prompt.zig");
+const exec_mode = @import("core/execution/exec_mode.zig");
 const terminal_tmux_session = @import("core/terminal/tmux_session.zig");
 const session_runtime = @import("core/session/session.zig");
 const session_codec = @import("core/session/session_codec.zig");
@@ -164,7 +162,6 @@ const QueuedPrompt = worker_runtime.QueuedPrompt;
 const WorkerRuntime = worker_runtime.WorkerRuntime;
 const SessionRuntime = session_runtime.SessionRuntime;
 const PromptHistoryRuntime = prompt_history_runtime.PromptHistoryRuntime;
-const BackgroundRuntime = background_runtime.BackgroundRuntime;
 const ToolExecutionResult = agent_runtime.ToolExecutionResult;
 const ApprovalPrompt = approval_prompt.ApprovalPrompt;
 const ApprovalScreenState = footer_runtime.ApprovalScreenState;
@@ -175,8 +172,6 @@ const TerminalState = shell_runtime.TerminalState;
 const TranscriptRuntime = transcript_runtime.TranscriptRuntime;
 const ResumeProjection = resume_projection.ResumeProjection;
 const RawEnviron = io_mod.RawEnviron;
-
-const RuntimeContextSnapshot = background_runtime.RuntimeContextSnapshot;
 
 const footer_rows: u16 = 4;
 const focused_ui_worker_poll_timeout_ms: i32 = 1;
@@ -480,7 +475,6 @@ const App = struct {
         }
         try WorkerAppRuntime.tick(
             self,
-            app_callbacks.Bindings(App).onTaskCompletion,
             app_callbacks.Bindings(App).workerEventHandlers(self),
         );
         try self.flushRequestedFrame();
@@ -587,10 +581,8 @@ const App = struct {
 
     worker_thread: ?std.Thread = null,
     worker: WorkerRuntime = .{},
-    background: BackgroundRuntime = .{},
     terminal_client: terminal_client_runtime.Runtime = .{},
     unified_exec: unified_exec_runtime.Manager = unified_exec_runtime.Manager.init(std.heap.c_allocator),
-    terminal_direct: terminal_direct_runtime.Runtime = .{},
     terminal_takeover: app_terminal_takeover_runtime.Controller = .{},
     subagents: ui_subagents.Controller = .{},
     change_tracker: change_tracker_mod.ChangeTracker = .{},
@@ -604,6 +596,9 @@ const App = struct {
     /// uses the unified shell for discovery and `rg` search instead of the
     /// overlapping specialized search built-ins.
     bash_first: bool = false,
+    /// Session-local long-command interaction policy. Captured by each turn so
+    /// changing it cannot alter an already running model/tool loop.
+    exec_mode: exec_mode.Mode = .codex,
     thought_entry_id: ?u32 = null,
     thought_body: std.ArrayList(u8) = .empty,
     thought_heading_locked: bool = false,
@@ -636,10 +631,6 @@ const App = struct {
             .shell = .{ .stdout_file = std.Io.File.stdout() },
             .subagents = ui_subagents.Controller.init(),
             .lifecycle_runtime = hooks.Runtime.init(alloc),
-            .background = BackgroundRuntime.init(if (comptime host_target.is_wasm)
-                background_process_provider.unavailable_provider
-            else
-                background_process.provider),
             .terminal_client = terminal_client_runtime.Runtime.init(if (comptime host_target.is_wasm)
                 background_process_provider.unavailable_provider
             else
@@ -819,7 +810,6 @@ const App = struct {
         self.stopStream();
 
         self.worker.requestShutdown();
-        self.background.requestStop();
         self.file_index.requestStop();
 
         self.terminal_takeover.shutdown(App, self);
@@ -828,12 +818,6 @@ const App = struct {
         self.worker.setEventWake(null, null);
         self.terminal.deinitEventWake();
         self.terminal_takeover.deinit(self.alloc);
-        const direct_deinit_disposition = if (capture_resume_handoff)
-            self.terminal_direct.deinitSettled(self.alloc)
-        else blk: {
-            self.terminal_direct.deinitAbnormal(self.alloc, "runtime_failure");
-            break :blk terminal_direct_runtime.DeinitDisposition.abnormal;
-        };
         self.terminal_client.deinit();
         self.unified_exec.deinit();
         self.provider_switch.deinit();
@@ -843,14 +827,12 @@ const App = struct {
         self.usage_dashboard.deinit();
         self.account_usage.deinit();
         InputSubmitRuntime.clearPendingSubmission(self, "shutdown");
-        const resume_handoff = if (capture_resume_handoff and
-            direct_deinit_disposition == .settled)
+        const resume_handoff = if (capture_resume_handoff)
             SessionAppRuntime.finalizePersistenceWithResumeHandoff(self)
         else blk: {
             SessionAppRuntime.finalizePersistence(self);
             break :blk null;
         };
-        self.background.deinit(std.heap.c_allocator);
         self.worker.deinit(std.heap.c_allocator);
         self.web_fetch_runtime.deinit(self.alloc);
         self.web_search_runtime.deinit();
@@ -983,22 +965,9 @@ const App = struct {
             );
             switch (exit_cause) {
                 .requested_exit => {},
-                .input_closed => {
-                    self.terminal_direct.deinitAbnormal(self.alloc, "input_closed");
-                    return error.TerminalInputClosed;
-                },
+                .input_closed => return error.TerminalInputClosed,
             }
-            switch (app_terminal_runtime.Runtime(App).prepareGracefulExit(self)) {
-                .ready => return,
-                .deferred => {
-                    self.should_exit = false;
-                    debug_trace.logf(
-                        "terminal",
-                        "interactive exit resumed after direct graceful-exit deferral",
-                        .{},
-                    );
-                },
-            }
+            return;
         }
     }
 
@@ -1034,7 +1003,6 @@ const App = struct {
         if (comptime !host_target.is_wasm) return;
         try app_process_runtime.Runtime(App).processNextCooperativePrompt(
             self,
-            app_callbacks.Bindings(App).onTaskCompletion,
             app_callbacks.Bindings(App).workerEventHandlers(self),
             flushRequestedFrame,
         );
@@ -1183,6 +1151,8 @@ const App = struct {
             draft.images,
             draft.turn_id,
             true,
+            .user,
+            null,
         )) return error.PendingPromptQueueRejected;
         WorkerAppRuntime.syncState(
             self,
@@ -1323,10 +1293,6 @@ const App = struct {
         SessionAppRuntime.persistResumeViewAfterFrame(self);
     }
 
-    pub fn flushDirectTerminalShutdownOutcome(self: *App) !void {
-        try RenderAppRuntime.flushRequestedFrame(@as(*Self, self));
-    }
-
     pub fn snapshotAndQueuePromptWithSkillBindings(
         self: *App,
         prompt: []const u8,
@@ -1341,6 +1307,8 @@ const App = struct {
             null,
             0,
             false,
+            .user,
+            null,
         );
     }
 
@@ -1352,6 +1320,10 @@ const App = struct {
         self: *App,
         checkpoint: *const session_codec.RecoveryCheckpoint,
     ) !bool {
+        const prompt_origin: worker_runtime.PromptOrigin = if (checkpoint.user.proven_root)
+            .user
+        else
+            .background_continuation;
         if (!try self.snapshotAndQueuePrompt(
             checkpoint.user.text,
             &.{},
@@ -1360,6 +1332,8 @@ const App = struct {
             null,
             checkpoint.turn_id,
             false,
+            prompt_origin,
+            null,
         )) return false;
         WorkerAppRuntime.syncState(
             self,
@@ -1377,8 +1351,12 @@ const App = struct {
         prompt_images: ?[]const types.ImageAttachment,
         turn_id: u64,
         user_prompt_already_presented: bool,
+        prompt_origin: worker_runtime.PromptOrigin,
+        background_continuation: ?worker_runtime.BackgroundContinuation,
     ) !bool {
-        const source_images = if (recovery_checkpoint) |checkpoint|
+        const source_images: []const types.ImageAttachment = if (prompt_origin == .background_continuation)
+            &.{}
+        else if (recovery_checkpoint) |checkpoint|
             checkpoint.user.images
         else if (prompt_images) |images|
             images
@@ -1411,7 +1389,7 @@ const App = struct {
         errdefer types.freeHistoryTurnSlice(std.heap.c_allocator, history_copy);
         const root_user_intent_context = try auto_classifier_context.buildCanonicalRootUserContext(
             std.heap.c_allocator,
-            prompt_copy,
+            if (prompt_origin == .user) prompt_copy else "",
             self.session.history.items,
         );
         errdefer std.heap.c_allocator.free(root_user_intent_context);
@@ -1459,6 +1437,10 @@ const App = struct {
 
         try self.worker.admitPrompt(std.heap.c_allocator, .{
             .turn_id = if (recovery_checkpoint) |checkpoint| checkpoint.turn_id else turn_id,
+            .origin = prompt_origin,
+            .background_process_id = if (background_continuation) |background| background.process_id else null,
+            .background_failed = if (background_continuation) |background| background.failed else false,
+            .background_running = if (background_continuation) |background| background.running else false,
             .prompt = prompt_copy,
             .images = images_copy,
             .authorized_image_catalog = authorized_image_catalog,
@@ -1481,6 +1463,27 @@ const App = struct {
         }, recovery_checkpoint == null);
         HerdrAppRuntime.reportWorking(self);
         return true;
+    }
+
+    fn queueBackgroundContinuation(
+        self: *App,
+        event: *const unified_exec_runtime.Manager.LifecycleEvent,
+    ) !void {
+        const prompt = try lifecycle_prompt.format(self.alloc, event);
+        defer self.alloc.free(prompt);
+        const running = event.status == .running;
+        const failed = !running and (event.signal != null or (event.exit_code orelse 0) != 0);
+        if (!try self.snapshotAndQueuePrompt(
+            prompt,
+            &.{},
+            null,
+            null,
+            &.{},
+            0,
+            false,
+            .background_continuation,
+            .{ .process_id = event.process_id, .failed = failed, .running = running },
+        )) return error.BackgroundContinuationRejected;
     }
 
     fn effectiveToolSet(self: *const App) tool_set_contract.ToolSet {
@@ -1932,7 +1935,7 @@ const App = struct {
             .text = @constCast(text),
         } });
         if (comptime host_profile.cooperative_agent) {
-            try WorkerAppRuntime.tick(self, app_callbacks.Bindings(App).onTaskCompletion, app_callbacks.Bindings(App).workerEventHandlers(self));
+            try WorkerAppRuntime.tick(self, app_callbacks.Bindings(App).workerEventHandlers(self));
             try self.flushRequestedFrame();
         }
     }
@@ -1982,10 +1985,6 @@ const App = struct {
                 .content = browser_capabilities.model_context,
             });
         }
-    }
-
-    fn runtimeContextSnapshot(self: *App, alloc: Allocator) !RuntimeContextSnapshot {
-        return self.background.snapshot(alloc);
     }
 
     pub fn writeTranscript(self: *App, text: []const u8, record: bool) !void {
@@ -2144,15 +2143,11 @@ const App = struct {
         try self.shell.writeNotice(self.alloc, &self.metrics, notice, record);
     }
 
-    pub fn submitDirectTerminal(self: *App, command: []const u8) !void {
-        try app_terminal_runtime.Runtime(App).submitDirect(self, command);
-    }
-
     pub fn requestTerminalOpen(
         self: *App,
         session_id: []const u8,
-    ) app_terminal_runtime.OpenRequestResult {
-        return app_terminal_runtime.Runtime(App).requestOpen(self, session_id);
+    ) app_terminal_takeover_runtime.OpenRequestResult {
+        return self.terminal_takeover.requestOpen(self.alloc, session_id);
     }
 
     pub fn appendDomainNotice(self: *App, notice: types.SemanticNotice) !u32 {
@@ -2651,8 +2646,26 @@ const App = struct {
             try AuthAppRuntime.collectProviderLogoutFacts(self);
             try AuthAppRuntime.collectProviderSetupFacts(self);
         }
-        if (comptime host_profile.native_auth) {
-            try app_terminal_runtime.Runtime(App).collectFacts(self);
+        var exec_events = self.unified_exec.takeLifecycleEvents();
+        defer exec_events.deinit(std.heap.c_allocator);
+        for (exec_events.items) |*event| {
+            self.queueBackgroundContinuation(event) catch |err| {
+                debug_trace.logf(
+                    "unified_exec",
+                    "background continuation enqueue failed process_id={d} err={s}",
+                    .{ event.process_id, @errorName(err) },
+                );
+                self.unified_exec.retryLifecycleEvent(event.*) catch |retry_err| {
+                    debug_trace.logf(
+                        "unified_exec",
+                        "background continuation retry retention failed process_id={d} err={s}",
+                        .{ event.process_id, @errorName(retry_err) },
+                    );
+                    event.deinit(std.heap.c_allocator);
+                };
+                continue;
+            };
+            event.deinit(std.heap.c_allocator);
         }
         try self.processNextCooperativePrompt();
 
@@ -2777,7 +2790,7 @@ const App = struct {
             );
             try self.routeTerminalInputIngress(terminal_input);
         }
-        try WorkerAppRuntime.tick(self, app_callbacks.Bindings(App).onTaskCompletion, app_callbacks.Bindings(App).workerEventHandlers(self));
+        try WorkerAppRuntime.tick(self, app_callbacks.Bindings(App).workerEventHandlers(self));
         const now_ns = io_mod.nanoTimestamp();
         if (!self.approval_prompt.isActive() and !self.question_prompt.isActive()) {
             try self.pacer.tick(self.alloc, now_ns, self.pacerCallbacks());
@@ -3835,80 +3848,6 @@ test "/version command writes version to transcript" {
     try std.testing.expect(std.mem.find(u8, notice.body, version) != null);
 }
 
-test "background process registry ignores stale watcher urls" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const tmp_root = try io_mod.dirRealpathAlloc(std.testing.allocator, tmp.dir, ".");
-    defer std.testing.allocator.free(tmp_root);
-    const old_log = try std.fs.path.join(std.testing.allocator, &.{ tmp_root, "old.log" });
-    defer std.testing.allocator.free(old_log);
-    const new_log = try std.fs.path.join(std.testing.allocator, &.{ tmp_root, "new.log" });
-    defer std.testing.allocator.free(new_log);
-    {
-        var file = try std.Io.Dir.createFileAbsolute(io_mod.getIo(), old_log, .{ .truncate = true });
-        file.close(io_mod.getIo());
-    }
-    {
-        var file = try std.Io.Dir.createFileAbsolute(io_mod.getIo(), new_log, .{ .truncate = true });
-        file.close(io_mod.getIo());
-    }
-    const Stub = struct {
-        fn match(
-            pid_text: []const u8,
-            _: process_supervisor.ProcessInstanceToken,
-        ) process_supervisor.TokenMatch {
-            return if (std.mem.eql(u8, pid_text, "12345"))
-                .matched
-            else
-                .missing;
-        }
-    };
-    process_supervisor.process_token_match_for_test = Stub.match;
-    defer process_supervisor.process_token_match_for_test = null;
-    const token = try process_supervisor.ProcessInstanceToken.parse(
-        "linux:00112233445566778899aabbccddeeff:12345",
-    );
-
-    var app = App{ .alloc = std.testing.allocator };
-    app.background.process_provider =
-        background_process_provider.process_supervisor_test_provider;
-    defer {
-        app.worker.deinit(std.heap.c_allocator);
-        app.background.deinit(std.heap.c_allocator);
-    }
-
-    const old_id = try app.background.registerBackground(std.heap.c_allocator, .{
-        .pid = "12345",
-        .process_token = token,
-        .command = "npm run dev",
-        .cwd = "/tmp/a",
-        .log_path = old_log,
-        .expect_url = true,
-    });
-    const new_id = try app.background.registerBackground(std.heap.c_allocator, .{
-        .pid = "12345",
-        .process_token = token,
-        .command = "npm run dev",
-        .cwd = "/tmp/b",
-        .log_path = new_log,
-        .expect_url = true,
-    });
-
-    _ = app.background.publishServerUrl(std.heap.c_allocator, old_id, try std.heap.c_allocator.dupe(u8, "http://localhost:3000"));
-
-    var snapshot = try app.runtimeContextSnapshot(std.testing.allocator);
-    defer snapshot.deinit(std.testing.allocator);
-    try std.testing.expectEqual(new_id, snapshot.process_id.?);
-    try std.testing.expect(snapshot.server_url == null);
-
-    const resolved = app.background.publishServerUrl(std.heap.c_allocator, new_id, try std.heap.c_allocator.dupe(u8, "http://localhost:4000")) orelse return error.TestExpectedEqual;
-    std.heap.c_allocator.free(resolved);
-
-    snapshot.deinit(std.testing.allocator);
-    snapshot = try app.runtimeContextSnapshot(std.testing.allocator);
-    try std.testing.expectEqualStrings("http://localhost:4000", snapshot.server_url.?);
-}
-
 test "normalize assistant text removes markdown emphasis and leading blank lines" {
     const normalized = try agent_runtime.normalizeAssistantTextForDisplay(std.testing.allocator, "\n\n**Hola** `mundo`");
     defer std.testing.allocator.free(normalized);
@@ -4025,9 +3964,7 @@ test {
     _ = @import("ui/subagent/controller.zig");
     _ = @import("ui/subagent/runtime.zig");
     _ = @import("core/agent/assistant_presentation.zig");
-    _ = @import("core/background/background.zig");
     _ = @import("core/background/background_commands.zig");
-    _ = @import("core/background/background_runtime.zig");
     _ = @import("core/background/background_store.zig");
     _ = @import("core/cli/cli_ask.zig");
     _ = @import("core/cli/cli_replay.zig");
@@ -4131,11 +4068,8 @@ test {
     _ = @import("core/terminal/host.zig");
     _ = @import("core/terminal/tmux_session.zig");
     _ = @import("core/terminal/client.zig");
-    _ = @import("core/terminal/direct_runtime.zig");
-    _ = @import("core/app/app_terminal_runtime.zig");
     _ = @import("core/app/input_approval_runtime.zig");
     _ = @import("acp/sessions.zig");
-    _ = @import("core/tasks/task_helpers.zig");
     _ = @import("core/shared/text_utils.zig");
     _ = @import("core/tooling/tool_projection.zig");
     _ = @import("core/tooling/tool_dispatch.zig");

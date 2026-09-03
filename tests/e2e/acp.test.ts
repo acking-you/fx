@@ -2436,6 +2436,7 @@ describe("acp: model-independent", () => {
         fakeGatewayToolCall(toolCallId, "exec_command", {
           cmd: "IFS= read -r reply; printf 'ACP_DIRECT_%s' \"$reply\"; sleep 60",
           yield_time_ms: 250,
+          tty: true,
         }),
         finalText("ACP direct process complete"),
       ]);
@@ -2513,7 +2514,7 @@ describe("acp: model-independent", () => {
         }
         expect(output).toContain("ACP_DIRECT_hello");
 
-        const controlIds = new Set([900, 901, 902]);
+        const controlIds = new Set([900, 901, 902, 903]);
         const controlResponses = new Map<number, any>();
         const controlStartedAt = Date.now();
         client.send({
@@ -2530,6 +2531,12 @@ describe("acp: model-independent", () => {
           jsonrpc: "2.0",
           id: 901,
           method: "fx/turn/status",
+          params: { sessionId },
+        });
+        client.send({
+          jsonrpc: "2.0",
+          id: 903,
+          method: "fx/backgroundTerminals/list",
           params: { sessionId },
         });
         client.send({
@@ -2553,6 +2560,13 @@ describe("acp: model-independent", () => {
         expect(controlResponses.get(900)?.result.status).toBe("running");
         expect(controlResponses.get(901)?.error).toBeUndefined();
         expect(controlResponses.get(902)?.result.terminated).toBe(true);
+        expect(controlResponses.get(903)?.result.data).toContainEqual(
+          expect.objectContaining({
+            kind: "unifiedExec",
+            id: directResponse.result.processId,
+            mode: "codex",
+          }),
+        );
         expect(client.stderr).toBe("");
       } finally {
         await client?.close();
@@ -2577,6 +2591,7 @@ describe("acp: model-independent", () => {
           return fakeGatewayToolCall(execCallId, "exec_command", {
             cmd: "IFS= read -r first; printf 'MODEL_SEES_%s' \"$first\"; IFS= read -r second",
             yield_time_ms: 250,
+            tty: true,
           });
         }
         if (gatewayPhase === 1) {

@@ -1090,6 +1090,10 @@ pub const ImageAttachment = struct {
 pub const UserTurn = struct {
     text: []u8,
     images: []ImageAttachment = &.{},
+    /// True only when `text` came from an admitted root-user turn. Internal
+    /// lifecycle prompts remain model context, but must never become authority
+    /// for a later automatic permission review.
+    proven_root: bool = true,
     /// Durable join key for manager-owned child work. This is metadata only;
     /// model projections continue to use `text` and `images` exclusively.
     work_id: ?[]u8 = null,
@@ -2930,6 +2934,7 @@ pub fn dupeUserTurn(alloc: std.mem.Allocator, user: UserTurn) !UserTurn {
     return .{
         .text = text,
         .images = images,
+        .proven_root = user.proven_root,
         .work_id = work_id,
     };
 }

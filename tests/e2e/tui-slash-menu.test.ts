@@ -3517,9 +3517,10 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
 
       const grid = await session.capturePaneGrid();
       const pane = grid.join("\n");
-      expect(pane).toContain("Commands 2");
+      expect(pane).toContain("Commands 3");
       expect(pane).toContain("/model");
       expect(pane).toContain("/models");
+      expect(pane).toContain("/exec-mode");
       expect(pane).toContain("…");
       expect(pane).not.toMatch(/\sModel\s*$/m);
       expect(session.isAlive()).toBe(true);

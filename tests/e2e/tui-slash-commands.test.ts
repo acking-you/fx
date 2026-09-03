@@ -74,27 +74,26 @@ describe.skipIf(TMUX_SKIP)("tui: no-key slash commands", () => {
   );
 
   test(
-    "/ps lists a running durable terminal and points to its output view",
+    "/ps reports the empty unified exec catalog without a model",
     async () => {
       const launched = await launchNoKeyAndWait();
       session = launched.terminal;
 
-      await session.sendText("!sleep 8");
-      await session.waitForText("Running ", 25_000);
       await session.sendText("/ps");
       const pane = await session.waitForText(
-        "output: press Ctrl+X and select Processes",
-        10_000,
+        "No background commands or terminals are running.",
+        5_000,
       );
-      expect(pane).toContain("sleep 8");
-      expect(pane).toMatch(/\[(starting|running)\]/);
+      expect(pane).toContain(
+        "No background commands or terminals are running.",
+      );
+      expect(readFileSync(launched.stderrPath, "utf8")).toBe("");
 
-      await Bun.sleep(8_500);
       await session.sendText("/quit");
       expect(await session.waitForSessionEnd(10_000)).toBe(true);
       session = null;
     },
-    45_000,
+    TIMEOUT,
   );
 
   test(
@@ -141,6 +140,34 @@ describe.skipIf(TMUX_SKIP)("tui: no-key slash commands", () => {
         5_000,
       );
       expect(disabled).toContain("Specialized workspace search tools are available");
+      expect(session.paneStatus()).toEqual({ dead: false, status: null });
+      expect(readFileSync(launched.stderrPath, "utf8")).toBe("");
+    },
+    TIMEOUT,
+  );
+
+  test(
+    "/exec-mode toggles the session-local yielded-command policy",
+    async () => {
+      const launched = await launchNoKeyAndWait();
+      session = launched.terminal;
+
+      await session.sendText("/exec-mode");
+      await session.waitForText("Exec mode: codex", 5_000);
+
+      await session.sendText("/exec-mode claude");
+      const enabled = await session.waitForText(
+        "A yielded command ends the current turn",
+        5_000,
+      );
+      expect(enabled).toContain("Exec mode set to claude");
+
+      await session.sendText("/exec-mode codex");
+      const disabled = await session.waitForText(
+        "polls yielded commands with write_stdin",
+        5_000,
+      );
+      expect(disabled).toContain("Exec mode set to codex");
       expect(session.paneStatus()).toEqual({ dead: false, status: null });
       expect(readFileSync(launched.stderrPath, "utf8")).toBe("");
     },

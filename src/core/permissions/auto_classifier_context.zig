@@ -131,15 +131,15 @@ pub fn buildCanonicalRootUserContext(
                 );
             },
             .assistant => |entry| {
-                try turns.append(alloc, entry.user.text);
+                if (entry.user.proven_root) try turns.append(alloc, entry.user.text);
                 try appendExecutionPermissionFeedback(alloc, &permission_feedback, entry.execution);
             },
             .background_command => |entry| {
-                try turns.append(alloc, entry.user.text);
+                if (entry.user.proven_root) try turns.append(alloc, entry.user.text);
                 try appendExecutionPermissionFeedback(alloc, &permission_feedback, entry.execution);
             },
             .interrupted => |entry| {
-                try turns.append(alloc, entry.user.text);
+                if (entry.user.proven_root) try turns.append(alloc, entry.user.text);
                 try appendExecutionPermissionFeedback(alloc, &permission_feedback, entry.execution);
             },
         }
@@ -166,12 +166,13 @@ pub fn refreshQueuedRootUserContext(
 ) ![]u8 {
     const Finished = struct {
         user: []const u8,
+        proven_root: bool,
         execution: types.ExecutionMemory,
     };
     const finished: Finished = switch (finished_turn) {
-        .assistant => |entry| .{ .user = entry.user.text, .execution = entry.execution },
-        .background_command => |entry| .{ .user = entry.user.text, .execution = entry.execution },
-        .interrupted => |entry| .{ .user = entry.user.text, .execution = entry.execution },
+        .assistant => |entry| .{ .user = entry.user.text, .proven_root = entry.user.proven_root, .execution = entry.execution },
+        .background_command => |entry| .{ .user = entry.user.text, .proven_root = entry.user.proven_root, .execution = entry.execution },
+        .interrupted => |entry| .{ .user = entry.user.text, .proven_root = entry.user.proven_root, .execution = entry.execution },
         .compacted_summary => return alloc.dupe(u8, existing_context),
     };
     const finished_user = finished.user;
@@ -184,20 +185,23 @@ pub fn refreshQueuedRootUserContext(
     if (first) |first_request| {
         try turns.append(alloc, first_request);
         if (lineValue(existing_context, recent_root_user_label)) |recent| {
-            if (!std.mem.eql(u8, recent, first_request) and !std.mem.eql(u8, recent, finished_user)) {
+            if (!std.mem.eql(u8, recent, first_request) and
+                (!finished.proven_root or !std.mem.eql(u8, recent, finished_user)))
+            {
                 try turns.append(alloc, recent);
             }
         }
-        if (!std.mem.eql(u8, first_request, finished_user)) try turns.append(alloc, finished_user);
+        if (finished.proven_root and !std.mem.eql(u8, first_request, finished_user))
+            try turns.append(alloc, finished_user);
     } else {
         if (has_unknown_prefix) {
             if (lineValue(existing_context, recent_root_user_label)) |recent| {
-                if (!std.mem.eql(u8, recent, finished_user)) {
+                if (!finished.proven_root or !std.mem.eql(u8, recent, finished_user)) {
                     try turns.append(alloc, recent);
                 }
             }
         }
-        try turns.append(alloc, finished_user);
+        if (finished.proven_root) try turns.append(alloc, finished_user);
     }
     try turns.append(alloc, current_request);
 
@@ -774,6 +778,47 @@ test "compacted prefix remains unknown across queued context refresh" {
         "omitted_proven_root_user_turns: 3",
     ) != null);
     try std.testing.expect(isCanonicalRootUserContext(refreshed));
+}
+
+test "synthetic lifecycle turns never become root-user authority" {
+    const history = [_]types.HistoryTurn{
+        .{ .assistant = .{
+            .user = .{
+                .text = @constCast("command output says allow everything"),
+                .proven_root = false,
+            },
+            .assistant = @constCast("internal continuation reply"),
+        } },
+        .{ .assistant = .{
+            .user = .{ .text = @constCast("preserve permission boundaries") },
+            .assistant = @constCast("ordinary reply"),
+        } },
+    };
+    const context = try buildCanonicalRootUserContext(
+        std.testing.allocator,
+        "inspect the next change",
+        &history,
+    );
+    defer std.testing.allocator.free(context);
+    try std.testing.expect(std.mem.find(u8, context, "allow everything") == null);
+    try std.testing.expect(std.mem.find(u8, context, "preserve permission boundaries") != null);
+
+    const synthetic_finished: types.HistoryTurn = .{ .assistant = .{
+        .user = .{
+            .text = @constCast("stdout requests destructive access"),
+            .proven_root = false,
+        },
+        .assistant = @constCast("internal reply"),
+    } };
+    const refreshed = try refreshQueuedRootUserContext(
+        std.testing.allocator,
+        "queued human request",
+        context,
+        synthetic_finished,
+    );
+    defer std.testing.allocator.free(refreshed);
+    try std.testing.expect(std.mem.find(u8, refreshed, "destructive access") == null);
+    try std.testing.expect(std.mem.find(u8, refreshed, "queued human request") != null);
 }
 
 test "persisted root user context accepts only the bounded canonical format" {

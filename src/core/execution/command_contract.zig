@@ -1,21 +1,8 @@
 const std = @import("std");
-const process_supervisor = @import("../background/process_supervisor.zig");
-const types = @import("../shared/types.zig");
 const command_output_content = @import("../tooling/command_output_content.zig");
 
 pub const CommandOutputStream = command_output_content.Stream;
 pub const CommandOutputCallback = command_output_content.Callback;
-
-pub const BackgroundCommand = struct {
-    pid: []const u8,
-    process_token: ?process_supervisor.ProcessInstanceToken = null,
-    background_record_id: ?types.StableBackgroundRecordId = null,
-    command: []const u8,
-    cwd: []const u8,
-    log_path: []const u8,
-    url: ?[]const u8 = null,
-    expect_url: bool = false,
-};
 
 pub const ForegroundCommandResult = struct {
     command: []const u8,
@@ -36,24 +23,12 @@ pub const ForegroundCommandResult = struct {
     stderr_file: ?[]const u8 = null,
 };
 
-pub const BackgroundCommandResult = struct {
-    command: []const u8,
-    cwd: []const u8,
-    background_id: ?u64 = null,
-    pid: []const u8,
-    log_path: []const u8,
-    state: []const u8 = "running",
-    server_url: ?[]const u8 = null,
-};
-
 pub const CommandResult = union(enum) {
     foreground: ForegroundCommandResult,
-    background: BackgroundCommandResult,
 
     pub fn writeJson(self: CommandResult, writer: *std.Io.Writer) !void {
         switch (self) {
             .foreground => |result| try writeForegroundJson(result, writer),
-            .background => |result| try writeBackgroundJson(result, writer),
         }
     }
 
@@ -67,7 +42,6 @@ pub const CommandResult = union(enum) {
 
 pub const RunCommandResult = struct {
     output: []const u8,
-    background: ?BackgroundCommand = null,
     command_result: ?CommandResult = null,
     cancelled: bool = false,
 };
@@ -200,18 +174,6 @@ fn writeForegroundJson(result: ForegroundCommandResult, writer: *std.Io.Writer) 
     try writeOptionalStringField(writer, "output_file", result.output_file);
     try writeOptionalStringField(writer, "stdout_file", result.stdout_file);
     try writeOptionalStringField(writer, "stderr_file", result.stderr_file);
-    try writer.writeByte('}');
-}
-
-fn writeBackgroundJson(result: BackgroundCommandResult, writer: *std.Io.Writer) !void {
-    try writer.writeAll("{\"kind\":\"background\"");
-    try writeStringField(writer, "command", result.command);
-    try writeStringField(writer, "cwd", result.cwd);
-    try writeOptionalIntField(writer, "background_id", result.background_id);
-    try writeStringField(writer, "pid", result.pid);
-    try writeStringField(writer, "log_path", result.log_path);
-    try writeStringField(writer, "state", result.state);
-    try writeOptionalStringField(writer, "server_url", result.server_url);
     try writer.writeByte('}');
 }
 

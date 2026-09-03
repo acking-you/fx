@@ -11,7 +11,6 @@ LINUX_BUDGETS = {
     "fx (startup)": 0.002,
     "fx help": 0.002,
     "fx status --json": 0.002,
-    "fx background --json": 0.002,
     "fx doctor --json": 0.002,
     "fx sessions --json": 0.002,
 }

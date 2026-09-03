@@ -43,6 +43,12 @@ const SurfaceReturnAction = enum {
     none,
 };
 
+pub const OpenRequestResult = enum {
+    accepted,
+    occupied,
+    rejected,
+};
+
 fn surfaceReturnAction(
     manager_active: bool,
     owner: shell_runtime.AlternateScreenOwner,
@@ -136,6 +142,7 @@ fn forward(byte: u8) PrefixResult {
 
 pub const Controller = struct {
     phase: Phase = .inactive,
+    open_intent: ?[]u8 = null,
     session_id: ?[]u8 = null,
     authority: ?operation.OwnedAuthorityClaim = null,
     lease_acquired: bool = false,
@@ -158,10 +165,21 @@ pub const Controller = struct {
     next_screen_ms: i64 = 0,
 
     pub fn deinit(self: *Controller, alloc: std.mem.Allocator) void {
+        if (self.open_intent) |session_id| alloc.free(session_id);
         if (self.session_id) |session_id| alloc.free(session_id);
         if (self.authority) |*authority| authority.deinit();
         self.input.deinit(alloc);
         self.* = .{};
+    }
+
+    pub fn requestOpen(
+        self: *Controller,
+        alloc: std.mem.Allocator,
+        session_id: []const u8,
+    ) OpenRequestResult {
+        if (self.open_intent != null or self.phase != .inactive) return .occupied;
+        self.open_intent = alloc.dupe(u8, session_id) catch return .rejected;
+        return .accepted;
     }
 
     pub fn shutdown(self: *Controller, comptime App: type, app: *App) void {
@@ -289,7 +307,8 @@ pub const Controller = struct {
 
     pub fn collect(self: *Controller, comptime App: type, app: *App) !void {
         if (self.phase == .inactive) {
-            const session_id = app.terminal_direct.takeOpenIntent() orelse return;
+            const session_id = self.open_intent orelse return;
+            self.open_intent = null;
             self.beginOpen(App, app, session_id) catch |err| {
                 self.containFailure(App, app, "acquire_admission", err);
             };

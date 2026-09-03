@@ -1184,6 +1184,7 @@ pub fn Runtime(comptime App: type) type {
                 .begin_prompt_with_skill_bindings,
                 .append_prompt,
                 .begin_presented_prompt,
+                .background_continuation_begin,
                 .append_user_feedback,
                 .thought,
                 .notification,

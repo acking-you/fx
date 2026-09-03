@@ -8,11 +8,8 @@ const app_runtime_setup = @import("../app/app_runtime_setup.zig");
 const auth_runtime = @import("../auth/auth_runtime.zig");
 const credentials = @import("../auth/credentials.zig");
 const oauth_transport = @import("../auth/oauth_transport.zig");
-const background_runtime = @import("../background/background_runtime.zig");
 const terminal_client_runtime = @import("../terminal/client.zig");
 const unified_exec_runtime = @import("../execution/unified_exec.zig");
-const background_store = @import("../background/background_store.zig");
-const process_supervisor = @import("../background/process_supervisor.zig");
 const context_contract = @import("../workspace/context_contract.zig");
 const gateway_provider = @import("../gateway/gateway_provider.zig");
 const model_catalog = @import("../gateway/model_catalog.zig");
@@ -83,7 +80,6 @@ const ask_presentation = @import("../../ui/ask_presentation.zig");
 const url_opener = @import("../hosts/url_opener.zig");
 
 const Allocator = std.mem.Allocator;
-const BackgroundRuntime = background_runtime.BackgroundRuntime;
 const ChatMessage = types.ChatMessage;
 const HistoryTurn = types.HistoryTurn;
 const ImageAttachment = types.ImageAttachment;
@@ -510,7 +506,6 @@ const AskContext = struct {
         permission_auto_classifier.Classifier.disabled(),
     worker: WorkerRuntime = .{},
     use_process_interrupt_flag: bool = false,
-    background: BackgroundRuntime = .{},
     terminal_client: terminal_client_runtime.Runtime = .{},
     unified_exec: unified_exec_runtime.Manager = unified_exec_runtime.Manager.init(std.heap.c_allocator),
     ephemeral_command_replay: command_replay_store.EphemeralStore,
@@ -569,9 +564,6 @@ const AskContext = struct {
             .mode_id = cfg.mode_registry.default_mode_id,
             .session = session_runtime.SessionRuntime.init(cfg.max_history_turns),
             .web_search_runtime = web_search_runtime.Runtime.init(.{}),
-            .background = BackgroundRuntime.init(
-                cfg.background_process_provider,
-            ),
             .terminal_client = terminal_client_runtime.Runtime.init(
                 cfg.background_process_provider,
             ),
@@ -665,7 +657,6 @@ const AskContext = struct {
         self.terminal_client.deinit();
         self.unified_exec.deinit();
         self.workspace_access.deinit(self.alloc);
-        self.background.deinit(std.heap.c_allocator);
         self.worker.deinit(std.heap.c_allocator);
         self.session.usage.finishProfilePublicationsBeforeShutdown();
         self.session.usage.configurePublicationSink(null);
@@ -876,32 +867,6 @@ const AskContext = struct {
                 );
             };
         }
-        const capability = try self.writable.?.childCapability();
-
-        self.background.restoreWorkspaceFromStore(
-            std.heap.c_allocator,
-            self.store.?,
-            self.workspace_root,
-            self.writable.?.active_id,
-        ) catch |err| {
-            debug_trace.logf(
-                "background",
-                "headless ask workspace background restore failed workspace={s} err={s}",
-                .{ self.workspace_root, @errorName(err) },
-            );
-        };
-        self.background.restoreFromManagedPersistence(
-            std.heap.c_allocator,
-            capability,
-            self.writable.?.active_id,
-            self.workspace_root,
-        ) catch |err| {
-            debug_trace.logf(
-                "background",
-                "headless ask managed background restore failed session={s} err={s}",
-                .{ self.writable.?.active_id, @errorName(err) },
-            );
-        };
     }
 
     fn toolContext(self: *AskContext) tool_runtime.Context {
@@ -960,7 +925,6 @@ const AskContext = struct {
             .auto_classifier = self.admissionAutoClassifier(),
             .worker = &self.worker,
             .cancel_flag = self.cancelFlag(),
-            .background = &self.background,
             .session = &self.session,
             .session_allocator = self.alloc,
             .skills_dir = self.skills_dir,
@@ -969,8 +933,6 @@ const AskContext = struct {
             .context_registry = self.deps.context_registry,
             .output_chunk_ctx = @ptrCast(self),
             .on_output_chunk = onCommandOutputChunk,
-            .background_url_ctx = @ptrCast(self),
-            .on_background_url_ready = onBackgroundUrlReady,
             .session_child_capability = if (self.writable) |*writable|
                 writable.childCapability() catch null
             else
@@ -1783,8 +1745,6 @@ fn finalizeFreshAuthSession(ctx: *AskContext, result: *PromptRunResult) void {
         };
     }
 
-    const active_id = ctx.writable.?.active_id;
-    ctx.background.detachManagedPersistence(std.heap.c_allocator, active_id);
     ctx.session.clearWebFetchArtifacts();
     if (ctx.subagent_host) |subagent_host| subagent_host.deinit();
     ctx.subagent_host = null;
@@ -2000,8 +1960,6 @@ fn appendRuntimeContext(raw_ctx: *anyopaque, arena: Allocator, messages: *std.Ar
         .interactive = false,
         .permission_mode = ctx.permission_mode,
         .tracker = null,
-        .background = &ctx.background,
-        .session = &ctx.session,
     }, arena, messages);
 }
 
@@ -2966,13 +2924,6 @@ fn resolveAskSubagentAuthority(
     );
 }
 
-fn onBackgroundUrlReady(raw_ctx: *anyopaque, task_id: u64, url: []const u8) void {
-    const ctx: *AskContext = @ptrCast(@alignCast(raw_ctx));
-    var buf: [512]u8 = undefined;
-    const line = std.fmt.bufPrint(&buf, "[notice] task #{d} server ready at {s}\n", .{ task_id, url }) catch return;
-    ctx.writeStderr(line) catch {};
-}
-
 fn parseOptionsWithStdin(alloc: Allocator, args: []const [:0]const u8, stdin: StdinSource) !AskOptions {
     var opts: AskOptions = .{ .prompt = &.{} };
     errdefer opts.deinit(alloc);
@@ -3752,9 +3703,6 @@ const DiscardProbe = struct {
         self.calls += 1;
         self.borrowers_detached = ctx.writable == null and
             ctx.subagent_host == null and
-            ctx.background.persisted_store == null and
-            ctx.background.borrowed_session_capability == null and
-            ctx.background.source_session_id == null and
             ctx.session.webFetchArtifactStore() == null;
         loaded.deinit(ctx.alloc);
         return self.disposition;
@@ -6251,32 +6199,13 @@ test "fx ask renders one-off resume denial in text and JSON modes" {
     }
 }
 
-fn expectAskContextManagedBorrowOwnership(ctx: *AskContext) !void {
-    const background_capability = if (ctx.background.persisted_store) |store|
-        store.capability
-    else
-        null;
-    if (background_capability == null) return;
-
-    try std.testing.expect(ctx.writable != null);
-    const owner_capability = try ctx.writable.?.childCapability();
-    if (background_capability) |capability| {
-        try std.testing.expectEqual(owner_capability, capability);
-    }
-}
-
 fn expectAskSessionStoresUnavailable(ctx: *const AskContext) !void {
     try std.testing.expect(ctx.store == null);
     try std.testing.expect(ctx.writable == null);
     try std.testing.expect(ctx.subagent_host == null);
-    try std.testing.expect(ctx.background.persisted_store == null);
-    try std.testing.expect(ctx.background.borrowed_session_capability == null);
 }
 
-fn exerciseSavedAskSessionStoreAllocation(
-    alloc: Allocator,
-    enforce_borrow_invariant: bool,
-) !void {
+fn exerciseSavedAskSessionStoreAllocation(alloc: Allocator) !void {
     const setup_alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -6313,31 +6242,20 @@ fn exerciseSavedAskSessionStoreAllocation(
     defer ctx.deinit();
     ctx.session.setConversationLanguageFromUserMessage("persist this turn");
 
-    ctx.initializeSessionStores() catch {
-        if (enforce_borrow_invariant) {
-            try expectAskContextManagedBorrowOwnership(&ctx);
-        }
-        return;
-    };
-    if (enforce_borrow_invariant) {
-        try expectAskContextManagedBorrowOwnership(&ctx);
-    }
+    ctx.initializeSessionStores() catch return;
 }
 
 test "saved ask allocation failures keep managed borrows owned" {
     const backing = std.testing.allocator;
     var counting = std.testing.FailingAllocator.init(backing, .{});
-    try exerciseSavedAskSessionStoreAllocation(counting.allocator(), false);
+    try exerciseSavedAskSessionStoreAllocation(counting.allocator());
 
     for (0..counting.alloc_index) |fail_index| {
         var failing = std.testing.FailingAllocator.init(
             backing,
             .{ .fail_index = fail_index },
         );
-        exerciseSavedAskSessionStoreAllocation(
-            failing.allocator(),
-            true,
-        ) catch |err| {
+        exerciseSavedAskSessionStoreAllocation(failing.allocator()) catch |err| {
             std.debug.print(
                 "saved ask allocation fail_index={d} violated ownership: {s}\n",
                 .{ fail_index, @errorName(err) },
@@ -6548,7 +6466,7 @@ test "saved ask propagates store allocation failure" {
     try expectAskSessionStoresUnavailable(&ctx);
 }
 
-test "saved ask initializes subagent host and background persistence" {
+test "saved ask initializes subagent host and writable session" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -6569,7 +6487,7 @@ test "saved ask initializes subagent host and background persistence" {
     defer stderr_capture.deinit(alloc);
     var ctx = AskContext.init(alloc, testConfig(), testPromptRunDeps(&stdout_capture, &stderr_capture, testPresentKeyStartup), workspace);
     defer ctx.deinit();
-    ctx.session.setConversationLanguageFromUserMessage("start a background command");
+    ctx.session.setConversationLanguageFromUserMessage("start a saved session");
 
     try ctx.initializeSessionStores();
 
@@ -6577,19 +6495,8 @@ test "saved ask initializes subagent host and background persistence" {
     const deps = agentRuntimeDeps(&ctx);
     try std.testing.expect(deps.prepare_parent_turn_context != null);
     try std.testing.expect(deps.acknowledge_parent_turn_context != null);
-    try std.testing.expect(ctx.background.persisted_store != null);
     try std.testing.expect(ctx.writable != null);
     try std.testing.expect(ctx.writable.?.state.usage != null);
-    try expectAskContextManagedBorrowOwnership(&ctx);
-
-    var prepared = try ctx.background.prepareBackgroundLaunch(
-        std.heap.c_allocator,
-        .saved_headless,
-    );
-    defer ctx.background.cancelPreparedBackgroundLaunch(
-        std.heap.c_allocator,
-        &prepared,
-    );
 
     var store = try session_store.Store.initFromHome(alloc, home, workspace);
     defer store.deinit(alloc);
@@ -6789,233 +6696,6 @@ test "saved ask ignores existing legacy task files" {
     try ctx.initializeSessionStores();
     try std.testing.expect(ctx.writable != null);
     try std.testing.expect(ctx.subagent_host != null);
-    try std.testing.expect(ctx.background.persisted_store != null);
-}
-
-test "saved ask carries live workspace background records into fresh session runtime" {
-    const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.createDirPath(io_mod.getIo(), "home");
-    try tmp.dir.createDirPath(io_mod.getIo(), "workspace");
-    try tmp.dir.createDirPath(io_mod.getIo(), "logs");
-
-    const home = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "home");
-    defer alloc.free(home);
-    const workspace = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "workspace");
-    defer alloc.free(workspace);
-    {
-        var file = try tmp.dir.createFile(io_mod.getIo(), "logs/dev.log", .{ .truncate = true });
-        defer file.close(io_mod.getIo());
-        try file.writeStreamingAll(io_mod.getIo(), "ready on http://localhost:48765\n");
-    }
-    const log_path = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "logs/dev.log");
-    defer alloc.free(log_path);
-
-    const test_home = try TestAskHome.install(alloc, home);
-    defer test_home.deinit();
-
-    var store = try session_store.Store.initFromHome(alloc, home, workspace);
-    defer store.deinit(alloc);
-    var previous_state = try testAskDurableState(
-        alloc,
-        workspace,
-        "saved-ask-prior",
-    );
-    defer previous_state.deinit(alloc);
-    var previous = try store.startWritableSession(alloc, previous_state);
-    var previous_owned = true;
-    defer if (previous_owned) previous.deinit(alloc);
-    var previous_bg_store = background_store.Store.initManaged(
-        try previous.childCapability(),
-    );
-
-    const Stub = struct {
-        fn match(
-            pid_text: []const u8,
-            _: process_supervisor.ProcessInstanceToken,
-        ) process_supervisor.TokenMatch {
-            return if (std.mem.eql(u8, pid_text, "12345"))
-                .matched
-            else
-                .missing;
-        }
-    };
-    process_supervisor.process_token_match_for_test = Stub.match;
-    defer process_supervisor.process_token_match_for_test = null;
-    const pid_text = "12345";
-    const process_token = try process_supervisor.ProcessInstanceToken.parse(
-        "linux:00112233445566778899aabbccddeeff:12345",
-    );
-    const stable_id = background_store.StableBackgroundRecordId{
-        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
-        0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
-    };
-    try previous_bg_store.saveRecord(alloc, .{
-        .id = 1,
-        .background_record_id = stable_id,
-        .process_token = @constCast(process_token.view()),
-        .pid = @constCast(pid_text),
-        .command = @constCast("npm run dev"),
-        .cwd = @constCast(workspace),
-        .log_path = @constCast(log_path),
-        .log_storage = .{ .external = .{
-            .path = @constCast(log_path),
-        } },
-        .expect_url = true,
-        .started_at_ms = 1,
-        .updated_at_ms = 1,
-        .state = .running,
-    });
-    previous.deinit(alloc);
-    previous_owned = false;
-
-    var stdout_capture: TestCapture = .{};
-    defer stdout_capture.deinit(alloc);
-    var stderr_capture: TestCapture = .{};
-    defer stderr_capture.deinit(alloc);
-    var cfg = testConfig();
-    cfg.background_process_provider =
-        background_process_provider.process_supervisor_test_provider;
-    var ctx = AskContext.init(alloc, cfg, testPromptRunDeps(&stdout_capture, &stderr_capture, testPresentKeyStartup), workspace);
-    defer ctx.deinit();
-    ctx.session.setConversationLanguageFromUserMessage("start a background command");
-
-    try ctx.initializeSessionStores();
-
-    var tasks = try ctx.background.snapshotTasks(alloc);
-    defer tasks.deinit(alloc);
-    try std.testing.expectEqual(@as(usize, 1), tasks.items.len);
-    try std.testing.expectEqualStrings("npm run dev", tasks.items[0].command);
-    try std.testing.expectEqualStrings(workspace, tasks.items[0].cwd);
-    try std.testing.expectEqualStrings(log_path, tasks.items[0].log_path);
-    try std.testing.expectEqual(background_runtime.TaskState.running, tasks.items[0].state);
-    try std.testing.expectEqualStrings("http://localhost:48765", tasks.items[0].server_url.?);
-
-    const current_dir = try session_store.sessionDirPath(
-        alloc,
-        store.sessions_dir,
-        ctx.writable.?.active_id,
-    );
-    defer alloc.free(current_dir);
-    const current_bg_dir = try std.fs.path.join(alloc, &.{ current_dir, "background" });
-    defer alloc.free(current_bg_dir);
-    var current_bg_store = try background_store.Store.initWithDir(alloc, current_bg_dir);
-    defer current_bg_store.deinit(alloc);
-    var carried = try current_bg_store.list(alloc);
-    defer {
-        for (carried.items) |*record| record.deinit(alloc);
-        carried.deinit(alloc);
-    }
-    try std.testing.expectEqual(@as(usize, 0), carried.items.len);
-}
-
-test "saved ask leaves unattached source background records unchanged" {
-    const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.createDirPath(io_mod.getIo(), "home");
-    try tmp.dir.createDirPath(io_mod.getIo(), "workspace");
-    try tmp.dir.createDirPath(io_mod.getIo(), "logs");
-
-    const home = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "home");
-    defer alloc.free(home);
-    const workspace = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "workspace");
-    defer alloc.free(workspace);
-    {
-        var file = try tmp.dir.createFile(io_mod.getIo(), "logs/dead.log", .{ .truncate = true });
-        defer file.close(io_mod.getIo());
-        try file.writeStreamingAll(io_mod.getIo(), "server started once\n");
-    }
-    const log_path = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "logs/dead.log");
-    defer alloc.free(log_path);
-
-    const test_home = try TestAskHome.install(alloc, home);
-    defer test_home.deinit();
-
-    var store = try session_store.Store.initFromHome(alloc, home, workspace);
-    defer store.deinit(alloc);
-    var previous_state = try testAskDurableState(
-        alloc,
-        workspace,
-        "saved-ask-unattached-prior",
-    );
-    defer previous_state.deinit(alloc);
-    var previous = try store.startWritableSession(alloc, previous_state);
-    var previous_bg_store = background_store.Store.initManaged(
-        try previous.childCapability(),
-    );
-
-    const stable_id = background_store.StableBackgroundRecordId{
-        0xff, 0xee, 0xdd, 0xcc, 0xbb, 0xaa, 0x99, 0x88,
-        0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0x00,
-    };
-    try previous_bg_store.saveRecord(alloc, .{
-        .id = 1,
-        .background_record_id = stable_id,
-        .process_token = @constCast(
-            "linux:00112233445566778899aabbccddeeff:12345",
-        ),
-        .pid = @constCast("not-a-pid"),
-        .command = @constCast("npm run dev"),
-        .cwd = @constCast(workspace),
-        .log_path = @constCast(log_path),
-        .log_storage = .{ .external = .{
-            .path = @constCast(log_path),
-        } },
-        .expect_url = true,
-        .started_at_ms = 1,
-        .updated_at_ms = 1,
-        .state = .running,
-    });
-    previous.deinit(alloc);
-
-    var stdout_capture: TestCapture = .{};
-    defer stdout_capture.deinit(alloc);
-    var stderr_capture: TestCapture = .{};
-    defer stderr_capture.deinit(alloc);
-    var ctx = AskContext.init(alloc, testConfig(), testPromptRunDeps(&stdout_capture, &stderr_capture, testPresentKeyStartup), workspace);
-    defer ctx.deinit();
-    ctx.session.setConversationLanguageFromUserMessage("start a background command");
-
-    try ctx.initializeSessionStores();
-
-    var tasks = try ctx.background.snapshotTasks(alloc);
-    defer tasks.deinit(alloc);
-    try std.testing.expectEqual(@as(usize, 0), tasks.items.len);
-
-    var previous_read_capability = try store.openChildCapabilityReadOnly(
-        alloc,
-        previous_state.id,
-    );
-    defer previous_read_capability.deinit();
-    var previous_read_store = background_store.Store.initManaged(
-        &previous_read_capability,
-    );
-    var refreshed = try previous_read_store.load(alloc, 1);
-    defer refreshed.deinit(alloc);
-    try std.testing.expectEqual(
-        background_runtime.TaskState.running,
-        refreshed.state,
-    );
-    try std.testing.expect(refreshed.diagnostic == null);
-
-    const current_dir = try session_store.sessionDirPath(
-        alloc,
-        store.sessions_dir,
-        ctx.writable.?.active_id,
-    );
-    defer alloc.free(current_dir);
-    const current_bg_dir = try std.fs.path.join(alloc, &.{ current_dir, "background" });
-    defer alloc.free(current_bg_dir);
-    var current_bg_store = try background_store.Store.initWithDir(alloc, current_bg_dir);
-    defer current_bg_store.deinit(alloc);
-    var carried = try current_bg_store.list(alloc);
-    defer {
-        for (carried.items) |*record| record.deinit(alloc);
-        carried.deinit(alloc);
-    }
-    try std.testing.expectEqual(@as(usize, 0), carried.items.len);
 }
 
 test "parse options trims explicit stdin fallback" {

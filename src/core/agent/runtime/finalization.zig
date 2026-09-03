@@ -176,7 +176,7 @@ pub fn finishAssistantTerminalWithExecutionAndReasoning(
     );
     const completed_summary = summary.finish();
     var turn: HistoryTurn = .{ .assistant = .{
-        .user = .{ .text = job.prompt, .images = job.images },
+        .user = job.historyUser(),
         .assistant = @constCast(assistant_text),
         .responses_message_output_index = message_output_index,
         .reasoning = if (reasoning) |value| @constCast(value) else null,

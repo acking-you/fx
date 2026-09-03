@@ -8,6 +8,7 @@ const workspace_access = @import("../../workspace/workspace_access.zig");
 const model_response_recovery = @import("model_response_recovery.zig");
 const provider_set = @import("../../gateway/provider_set.zig");
 const model_tool_schema = @import("../../tooling/model_tool_schema.zig");
+const exec_mode = @import("../../execution/exec_mode.zig");
 
 const ReasoningEffort = types.ReasoningEffort;
 
@@ -49,6 +50,7 @@ pub const Config = struct {
     fast_mode: bool = false,
     effort: ReasoningEffort = .auto,
     first_call_tool_choice: types.ToolChoice = .auto,
+    exec_mode: exec_mode.Mode = .codex,
     workspace_root: []const u8 = "",
     access_scope: ?workspace_access.AccessScope = null,
     origin: TurnOrigin = .root,

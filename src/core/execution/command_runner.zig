@@ -9,7 +9,6 @@ const background_process_provider = @import(
 );
 const io_mod = @import("../shared/io.zig");
 const self_exe = @import("../shared/self_exe.zig");
-const background_launch_output = @import("../background/background_launch_output.zig");
 const config_runtime = @import("../config/config_runtime.zig");
 const session_child_store = @import("../session/session_child_store.zig");
 const artifact_digest = @import("../session/artifact_digest.zig");
@@ -589,26 +588,6 @@ pub fn executeCommandInEnvironment(
     );
 }
 
-pub fn spawnPreparedBackground(
-    cfg: Config,
-    arena: Allocator,
-    cwd: []const u8,
-    output: *const background_launch_output.Output,
-) !background_process_provider.PreparedProcess {
-    var effective_cfg = cfg;
-    if (effective_cfg.timeout_started_ms == null) {
-        effective_cfg.timeout_started_ms = io_mod.milliTimestamp();
-    }
-    try ExecutionControl.init(effective_cfg).check();
-    return effective_cfg.background_process_provider.spawnPrepared(
-        arena,
-        .{
-            .cwd = cwd,
-            .output = output.providerCapability(),
-            .isolation = .none,
-        },
-    );
-}
 const ExecutionControl = struct {
     cancel_flag: ?*std.atomic.Value(bool),
     timeout_ms: ?usize,

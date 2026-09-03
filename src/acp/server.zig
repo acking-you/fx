@@ -38,7 +38,6 @@ const provider_usage = @import("../core/session/provider_usage.zig");
 const account_usage_runtime = @import("../core/app/account_usage_runtime.zig");
 const image_attachments = @import("../core/images/image_attachments.zig");
 const worker_runtime = @import("../core/agent/worker_runtime.zig");
-const background_runtime = @import("../core/background/background_runtime.zig");
 const terminal_client_runtime = @import("../core/terminal/client.zig");
 const unified_exec_runtime = @import("../core/execution/unified_exec.zig");
 const subagent_tool_host = @import("../core/subagent/tool_host.zig");
@@ -382,7 +381,6 @@ pub const ServerState = struct {
     skills: skill_runtime.Runtime = .{},
     context_snapshot: context_contract.GatheredContextSnapshot = .{},
     worker: worker_runtime.WorkerRuntime = .{},
-    background: background_runtime.BackgroundRuntime = .{},
     terminal_client: terminal_client_runtime.Runtime = .{},
     unified_exec: unified_exec_runtime.Manager = unified_exec_runtime.Manager.init(std.heap.c_allocator),
     provider_job_thread: ?std.Thread = null,
@@ -431,7 +429,6 @@ pub const ServerState = struct {
         if (self.selected_model.len > 0) self.alloc.free(self.selected_model);
         if (self.configured_model.len > 0) self.alloc.free(self.configured_model);
         self.permission_rules.deinit(self.alloc);
-        self.background.deinit(std.heap.c_allocator);
         self.skills.deinit(self.alloc);
         self.context_snapshot.deinit(self.alloc);
         self.worker.deinit(std.heap.c_allocator);
@@ -742,10 +739,6 @@ fn destroyActiveSession(state: *ServerState) void {
     // process before releasing the session so an old client handle cannot
     // reach a process after a session switch.
     state.unified_exec.terminateAll();
-    state.background.detachManagedPersistence(
-        std.heap.c_allocator,
-        active.session_id,
-    );
     state.alloc.free(active.session_id);
     state.alloc.free(active.model);
     types.freePermissionGrantSlice(state.alloc, active.session_grants);
@@ -903,9 +896,6 @@ pub fn runWithTransport(
         .cfg = cfg,
         .writer = writer_value,
         .web_search_runtime = web_search_runtime.Runtime.init(.{}),
-        .background = background_runtime.BackgroundRuntime.init(
-            cfg.background_process_provider,
-        ),
         .terminal_client = terminal_client_runtime.Runtime.init(
             cfg.background_process_provider,
         ),

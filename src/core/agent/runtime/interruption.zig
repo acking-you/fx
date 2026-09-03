@@ -119,7 +119,7 @@ fn persistInterruptedTurnWithPresentation(
         );
         defer std.heap.c_allocator.free(@constCast(assistant));
         const turn: HistoryTurn = .{ .interrupted = .{
-            .user = .{ .text = job.prompt, .images = job.images },
+            .user = job.historyUser(),
             .assistant = @constCast(assistant),
             .tool_call = durable_active_tool_call,
             .completed_tool_names = completed_tool_names,
@@ -160,7 +160,7 @@ fn persistInterruptedTurnWithPresentation(
 
     persisted.* = true;
     const turn: HistoryTurn = .{ .interrupted = .{
-        .user = .{ .text = job.prompt, .images = job.images },
+        .user = job.historyUser(),
         .assistant = if (partial_assistant) |text| if (text.len > 0) @constCast(text) else null else null,
         .tool_call = durable_active_tool_call,
         .completed_tool_names = completed_tool_names,
@@ -208,7 +208,7 @@ pub fn persistFailedPartialTurnOnce(
     terminal_materializing.* = true;
 
     const turn: HistoryTurn = .{ .interrupted = .{
-        .user = .{ .text = job.prompt, .images = job.images },
+        .user = job.historyUser(),
         .assistant = @constCast(partial_assistant),
         .execution = execution,
         .terminal_reason = .failed,

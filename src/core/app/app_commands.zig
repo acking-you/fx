@@ -6,6 +6,7 @@ const io_mod = @import("../shared/io.zig");
 const auth_runtime = @import("../auth/auth_runtime.zig");
 const credentials = @import("../auth/credentials.zig");
 const background_commands = @import("../background/background_commands.zig");
+const unified_exec = @import("../execution/unified_exec.zig");
 const gateway_provider = @import("../gateway/gateway_provider.zig");
 const host = @import("../hosts/host.zig");
 const change_tracker_mod = @import("../workspace/change_tracker.zig");
@@ -300,8 +301,6 @@ pub fn Handlers(comptime App: type) type {
                 .show_status = commandShowStatus,
                 .show_background = commandShowBackground,
                 .stop_background = commandStopBackground,
-                .open_background = commandOpenBackground,
-                .show_background_logs = commandShowBackgroundLogs,
                 .attach_image = commandAttachImage,
                 .manage_images = commandManageImages,
                 .handle_model = commandHandleModel,
@@ -321,6 +320,7 @@ pub fn Handlers(comptime App: type) type {
                 .paste_clipboard = commandPasteClipboard,
                 .toggle_fast = commandToggleFast,
                 .bash_first = commandBashFirst,
+                .exec_mode = commandExecMode,
                 .handle_statusline = commandHandleStatusline,
                 .rename_session = commandRenameSession,
                 .handle_notifications = commandHandleNotifications,
@@ -500,16 +500,6 @@ pub fn Handlers(comptime App: type) type {
         fn commandStopBackground(ctx: *anyopaque, target: []const u8) !void {
             const app: *App = @ptrCast(@alignCast(ctx));
             try background_commands.Commands(App).stop(app, target);
-        }
-
-        fn commandOpenBackground(ctx: *anyopaque, target: []const u8) !void {
-            const app: *App = @ptrCast(@alignCast(ctx));
-            try background_commands.Commands(App).open(app, target);
-        }
-
-        fn commandShowBackgroundLogs(ctx: *anyopaque, target: []const u8) !void {
-            const app: *App = @ptrCast(@alignCast(ctx));
-            try background_commands.Commands(App).logs(app, target);
         }
 
         fn commandAttachImage(ctx: *anyopaque, path: []const u8) !void {
@@ -1415,6 +1405,46 @@ pub fn Handlers(comptime App: type) type {
             app.shell.render_requests.request(.footer);
         }
 
+        fn commandExecMode(ctx: *anyopaque, rest: []const u8) !void {
+            const app: *App = @ptrCast(@alignCast(ctx));
+            if (comptime !@hasField(App, "exec_mode")) {
+                try app.writeDomainNotice(.{
+                    .topic = "exec_mode",
+                    .tone = .@"error",
+                    .body = "exec mode is not available in this runtime",
+                }, true);
+                return;
+            }
+            const mode_contract = @import("../execution/exec_mode.zig");
+            const trimmed = std.mem.trim(u8, rest, " \t");
+            if (trimmed.len == 0) {
+                const body = try std.fmt.allocPrint(app.alloc, "Exec mode: {s}", .{app.exec_mode.label()});
+                defer app.alloc.free(body);
+                try app.writeDomainNotice(.{ .topic = "exec_mode", .tone = .neutral, .body = body }, true);
+                return;
+            }
+            const next = mode_contract.Mode.parse(trimmed) orelse {
+                try app.writeDomainNotice(.{
+                    .topic = "exec_mode",
+                    .tone = .neutral,
+                    .body = "Use: /exec-mode [codex|claude].",
+                }, true);
+                return;
+            };
+            app.permission_state.authority_mutex.lockUncancelable(io_mod.getIo());
+            app.exec_mode = next;
+            app.permission_state.authority_mutex.unlock(io_mod.getIo());
+            app.worker.syncQueuedPromptExecMode(next);
+            try app.writeDomainNotice(.{
+                .topic = "exec_mode",
+                .tone = .neutral,
+                .body = if (next == .codex)
+                    "Exec mode set to codex. The model keeps the turn active and polls yielded commands with write_stdin."
+                else
+                    "Exec mode set to claude. A yielded command ends the current turn and completion starts a separate continuation.",
+            }, true);
+        }
+
         fn commandHandleStatusline(ctx: *anyopaque, rest: []const u8) !void {
             const app: *App = @ptrCast(@alignCast(ctx));
             if (std.mem.trim(u8, rest, " \t").len == 0) {
@@ -1871,24 +1901,29 @@ fn writeRuntimeContextSummary(writer: *std.Io.Writer, app: anytype, alloc: std.m
     try writer.print("TERM_PROGRAM: {s}\n", .{io_mod.getenv("TERM_PROGRAM") orelse "(unset)"});
     try writer.print("LANG: {s}\n", .{io_mod.getenv("LANG") orelse "(unset)"});
 
-    const tasks = app.background.snapshotTasks(alloc) catch null;
-    if (tasks) |snapshot| {
-        defer snapshot.deinit(alloc);
-        if (snapshot.items.len == 0) {
-            try writer.writeAll("background_tasks: none\n");
+    const commands = app.unified_exec.snapshotProcesses(alloc) catch null;
+    if (commands) |snapshot| {
+        defer unified_exec.Manager.freeProcessSnapshots(
+            alloc,
+            snapshot,
+        );
+        if (snapshot.len == 0) {
+            try writer.writeAll("background_commands: none\n");
         } else {
-            try writer.print("background_tasks ({d}):\n", .{snapshot.items.len});
-            for (snapshot.items) |task| {
-                try writer.print("  - id={d} state={s} pid={s} cwd=", .{ task.id, @tagName(task.state), task.pid });
-                try writeMaskedInline(writer, alloc, task.cwd);
+            try writer.print("background_commands ({d}):\n", .{snapshot.len});
+            for (snapshot) |command| {
+                try writer.print(
+                    "  - id={d} state={s} pid={d} mode={s} cwd=",
+                    .{
+                        command.process_id,
+                        @tagName(command.status),
+                        command.pid,
+                        command.mode.label(),
+                    },
+                );
+                try writeMaskedInline(writer, alloc, command.cwd);
                 try writer.writeAll(" command=");
-                try writeMaskedInline(writer, alloc, task.command);
-                try writer.writeAll(" log=");
-                try writeMaskedInline(writer, alloc, task.log_path);
-                if (task.server_url) |url| {
-                    try writer.writeAll(" url=");
-                    try writeMaskedInline(writer, alloc, url);
-                }
+                try writeMaskedInline(writer, alloc, command.command);
                 try writer.writeByte('\n');
             }
         }

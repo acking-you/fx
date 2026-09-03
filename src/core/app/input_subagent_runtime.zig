@@ -6,7 +6,7 @@ const input_visual_layout = @import("../../ui/input/visual_layout.zig");
 const shell_runtime = @import("../../ui/shell_runtime.zig");
 const transcript_runtime = @import("../../ui/transcript/runtime.zig");
 const app_render_runtime = @import("app_render_runtime.zig");
-const app_terminal_runtime = @import("app_terminal_runtime.zig");
+const app_terminal_takeover_runtime = @import("app_terminal_takeover_runtime.zig");
 const input_selection_runtime = @import("input_selection_runtime.zig");
 const app_session_runtime = @import("app_session_runtime.zig");
 const command_specs = @import("../slash_commands/command_specs.zig");
@@ -1039,7 +1039,7 @@ const TerminalOpenTestSubagents = struct {
 
 const TerminalOpenTestApp = struct {
     subagents: TerminalOpenTestSubagents = .{},
-    open_result: app_terminal_runtime.OpenRequestResult = .occupied,
+    open_result: app_terminal_takeover_runtime.OpenRequestResult = .occupied,
     requested_id: ?[]const u8 = null,
     inline_draft: []const u8 = "preserved inline draft",
     inline_cursor: usize = 9,
@@ -1047,7 +1047,7 @@ const TerminalOpenTestApp = struct {
     fn requestTerminalOpen(
         self: *TerminalOpenTestApp,
         session_id: []const u8,
-    ) app_terminal_runtime.OpenRequestResult {
+    ) app_terminal_takeover_runtime.OpenRequestResult {
         self.requested_id = session_id;
         return self.open_result;
     }

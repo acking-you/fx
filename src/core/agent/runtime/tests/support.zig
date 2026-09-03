@@ -7,7 +7,6 @@ const types = @import("../../../shared/types.zig");
 const secret = @import("../../../auth/secret.zig");
 const permissions = @import("../../../permissions/permissions.zig");
 const worker_runtime = @import("../../worker_runtime.zig");
-const background_runtime = @import("../../../background/background_runtime.zig");
 const builtin_context = @import("../../../../builtins/context.zig");
 const builtin_gateway = @import("../../../../builtins/responses.zig");
 const builtin_tools = @import("../../../../builtins/tools.zig");
@@ -71,12 +70,10 @@ pub const VisionAgentToolRuntime = struct {
     execution_count: usize = 0,
     result_count: usize = 0,
     worker: worker_runtime.WorkerRuntime = .{},
-    background: background_runtime.BackgroundRuntime = .{},
     session: session_runtime.SessionRuntime = .{ .max_history_turns = 8 },
 
     pub fn deinit(self: *VisionAgentToolRuntime) void {
         self.worker.deinit(self.alloc);
-        self.background.deinit(self.alloc);
         self.session.deinit(self.alloc);
     }
 
@@ -128,7 +125,6 @@ pub const VisionAgentToolRuntime = struct {
             .permission_grants = &.{},
             .permission_rules = .{},
             .worker = &self.worker,
-            .background = &self.background,
             .session = &self.session,
             .session_allocator = self.alloc,
             .context_limits = .{ .image_adapter_output_bytes = .{
@@ -143,8 +139,6 @@ pub const VisionAgentToolRuntime = struct {
             },
             .output_chunk_ctx = undefined,
             .on_output_chunk = discardVisionToolOutput,
-            .background_url_ctx = undefined,
-            .on_background_url_ready = discardVisionBackgroundUrl,
         };
     }
 };
@@ -155,8 +149,6 @@ fn discardVisionToolOutput(
     _: command_output_content.Stream,
     _: []const u8,
 ) anyerror!void {}
-
-fn discardVisionBackgroundUrl(_: *anyopaque, _: u64, _: []const u8) void {}
 
 const test_tools = [_]tool_dispatch.Tool{
     builtin_tools.glob_files,

@@ -20,8 +20,6 @@ pub const ParsedCommand = union(enum) {
     status,
     background,
     background_stop: []const u8,
-    background_open: []const u8,
-    background_logs: []const u8,
     image: []const u8,
     images: []const u8,
     model: []const u8,
@@ -41,6 +39,7 @@ pub const ParsedCommand = union(enum) {
     paste,
     fast,
     bash_first: []const u8,
+    exec_mode: []const u8,
     statusline: []const u8,
     notifications: []const u8,
     workspace: []const u8,
@@ -64,8 +63,6 @@ pub const CommandHandlers = struct {
     show_status: *const fn (ctx: *anyopaque) anyerror!void,
     show_background: *const fn (ctx: *anyopaque) anyerror!void,
     stop_background: *const fn (ctx: *anyopaque, target: []const u8) anyerror!void,
-    open_background: *const fn (ctx: *anyopaque, target: []const u8) anyerror!void,
-    show_background_logs: *const fn (ctx: *anyopaque, target: []const u8) anyerror!void,
     attach_image: *const fn (ctx: *anyopaque, path: []const u8) anyerror!void,
     manage_images: *const fn (ctx: *anyopaque, rest: []const u8) anyerror!void,
     handle_model: *const fn (ctx: *anyopaque, query: []const u8) anyerror!void,
@@ -85,6 +82,7 @@ pub const CommandHandlers = struct {
     paste_clipboard: *const fn (ctx: *anyopaque) anyerror!void,
     toggle_fast: *const fn (ctx: *anyopaque) anyerror!void,
     bash_first: *const fn (ctx: *anyopaque, rest: []const u8) anyerror!void,
+    exec_mode: *const fn (ctx: *anyopaque, rest: []const u8) anyerror!void,
     handle_statusline: *const fn (ctx: *anyopaque, rest: []const u8) anyerror!void,
     rename_session: *const fn (ctx: *anyopaque, rest: []const u8) anyerror!void,
     handle_notifications: *const fn (ctx: *anyopaque, rest: []const u8) anyerror!void,
@@ -114,8 +112,6 @@ fn parsedCommand(kind: SlashKind, payload: []const u8) ParsedCommand {
         .status => .status,
         .background => .background,
         .background_stop => .{ .background_stop = payload },
-        .background_open => .{ .background_open = payload },
-        .background_logs => .{ .background_logs = payload },
         .images => .{ .images = payload },
         .image => .{ .image = payload },
         .model => .{ .model = payload },
@@ -135,6 +131,7 @@ fn parsedCommand(kind: SlashKind, payload: []const u8) ParsedCommand {
         .paste => .paste,
         .fast => .fast,
         .bash_first => .{ .bash_first = payload },
+        .exec_mode => .{ .exec_mode = payload },
         .statusline => .{ .statusline = payload },
         .notifications => .{ .notifications = payload },
         .workspace => .{ .workspace = payload },
@@ -172,8 +169,6 @@ pub fn route(registry: SlashRegistry, handlers: *const CommandHandlers, cmd: []c
         .status => try handlers.show_status(handlers.ctx),
         .background => try handlers.show_background(handlers.ctx),
         .background_stop => |target| try handlers.stop_background(handlers.ctx, target),
-        .background_open => |target| try handlers.open_background(handlers.ctx, target),
-        .background_logs => |target| try handlers.show_background_logs(handlers.ctx, target),
         .image => |path| try handlers.attach_image(handlers.ctx, path),
         .images => |rest| try handlers.manage_images(handlers.ctx, rest),
         .model => |query| try handlers.handle_model(handlers.ctx, query),
@@ -193,6 +188,7 @@ pub fn route(registry: SlashRegistry, handlers: *const CommandHandlers, cmd: []c
         .paste => try handlers.paste_clipboard(handlers.ctx),
         .fast => try handlers.toggle_fast(handlers.ctx),
         .bash_first => |rest| try handlers.bash_first(handlers.ctx, rest),
+        .exec_mode => |rest| try handlers.exec_mode(handlers.ctx, rest),
         .statusline => |rest| try handlers.handle_statusline(handlers.ctx, rest),
         .notifications => |rest| try handlers.handle_notifications(handlers.ctx, rest),
         .workspace => |rest| try handlers.handle_workspace(handlers.ctx, rest),
@@ -290,17 +286,6 @@ test "parse extracts background stop target" {
     const parsed = parse(testSlashRegistry(), "/background stop last");
     switch (parsed) {
         .background_stop => |target| try std.testing.expectEqualStrings("last", target),
-        else => return error.TestExpectedEqual,
-    }
-}
-
-test "parse extracts background open and logs targets" {
-    switch (parse(testSlashRegistry(), "/background open 3")) {
-        .background_open => |target| try std.testing.expectEqualStrings("3", target),
-        else => return error.TestExpectedEqual,
-    }
-    switch (parse(testSlashRegistry(), "/background logs last")) {
-        .background_logs => |target| try std.testing.expectEqualStrings("last", target),
         else => return error.TestExpectedEqual,
     }
 }
@@ -507,8 +492,6 @@ fn testHandlers(ctx: *TestContext) CommandHandlers {
         .show_status = unexpectedNoPayload,
         .show_background = unexpectedNoPayload,
         .stop_background = unexpectedPayload,
-        .open_background = unexpectedPayload,
-        .show_background_logs = unexpectedPayload,
         .attach_image = unexpectedPayload,
         .manage_images = unexpectedPayload,
         .handle_model = unexpectedPayload,
@@ -528,6 +511,7 @@ fn testHandlers(ctx: *TestContext) CommandHandlers {
         .paste_clipboard = unexpectedNoPayload,
         .toggle_fast = unexpectedNoPayload,
         .bash_first = unexpectedPayload,
+        .exec_mode = unexpectedPayload,
         .handle_statusline = unexpectedPayload,
         .rename_session = unexpectedPayload,
         .handle_notifications = unexpectedPayload,

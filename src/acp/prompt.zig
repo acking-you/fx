@@ -602,7 +602,6 @@ const AcpContext = struct {
                 .retain_grant_fn = retainAcpGrant,
             } else null,
             .cancel_flag = &session.cancel_flag,
-            .background = &self.state.background,
             .session = &session.session_rt,
             .session_allocator = self.alloc,
             .skills_dir = self.state.skills.dir,
@@ -613,8 +612,6 @@ const AcpContext = struct {
             .on_plan_update = onPlanUpdate,
             .output_chunk_ctx = @ptrCast(self),
             .on_output_chunk = onCommandOutputChunk,
-            .background_url_ctx = @ptrCast(self),
-            .on_background_url_ready = onBackgroundUrlReady,
             .session_child_capability = if (session.writable) |*writable|
                 writable.childCapability() catch null
             else
@@ -1511,8 +1508,11 @@ fn writeBackgroundTerminalsJson(
 ) !void {
     var terminal_snapshot = try state.terminal_client.terminalProjection(alloc);
     defer terminal_snapshot.deinit();
-    var task_snapshot = try state.background.snapshotTasks(alloc);
-    defer task_snapshot.deinit(alloc);
+    const commands = try state.unified_exec.snapshotProcesses(alloc);
+    defer unified_exec_runtime.Manager.freeProcessSnapshots(
+        alloc,
+        commands,
+    );
 
     try writer.writeAll("{\"data\":[");
     var first = true;
@@ -1530,15 +1530,17 @@ fn writeBackgroundTerminalsJson(
         try jsonrpc.writeJsonStr(@tagName(row.backend), writer);
         try writer.writeAll("}");
     }
-    for (task_snapshot.items) |task| {
-        if (task.state != .running) continue;
+    for (commands) |command| {
         if (!first) try writer.writeByte(',');
         first = false;
-        try writer.writeAll("{\"kind\":\"background\",\"id\":");
-        try writer.print("\"background-{d}\",\"command\":", .{task.id});
-        try jsonrpc.writeJsonStr(task.command, writer);
-        try writer.writeAll(",\"state\":\"running\",\"cwd\":");
-        try jsonrpc.writeJsonStr(task.cwd, writer);
+        try writer.print("{{\"kind\":\"unifiedExec\",\"id\":{d},\"command\":", .{command.process_id});
+        try jsonrpc.writeJsonStr(command.command, writer);
+        try writer.writeAll(",\"state\":");
+        try jsonrpc.writeJsonStr(@tagName(command.status), writer);
+        try writer.writeAll(",\"cwd\":");
+        try jsonrpc.writeJsonStr(command.cwd, writer);
+        try writer.print(",\"pid\":{d},\"mode\":", .{command.pid});
+        try jsonrpc.writeJsonStr(command.mode.label(), writer);
         try writer.writeAll("}");
     }
     try writer.writeAll("],\"nextCursor\":null}");
@@ -1583,8 +1585,11 @@ pub fn handleProcessStatusPrompt(
     const session = if (state.active_session) |*active| active else return state.writer.writeError(alloc, msg.id, no_active_session_rpc_error);
     var terminal_snapshot = try state.terminal_client.terminalProjection(alloc);
     defer terminal_snapshot.deinit();
-    var task_snapshot = try state.background.snapshotTasks(alloc);
-    defer task_snapshot.deinit(alloc);
+    const commands = try state.unified_exec.snapshotProcesses(alloc);
+    defer unified_exec_runtime.Manager.freeProcessSnapshots(
+        alloc,
+        commands,
+    );
 
     var text: std.Io.Writer.Allocating = .init(alloc);
     defer text.deinit();
@@ -1604,9 +1609,7 @@ pub fn handleProcessStatusPrompt(
     for (terminal_snapshot.rows) |row| {
         if (terminalVisibleInProcessStatus(row)) running_count += 1;
     }
-    for (task_snapshot.items) |task| {
-        if (task.state == .running) running_count += 1;
-    }
+    running_count += commands.len;
     if (running_count == 0) {
         try text.writer.writeAll("Background processes: none");
     } else {
@@ -1618,11 +1621,16 @@ pub fn handleProcessStatusPrompt(
                 .{ row.session_id, row.label, @tagName(row.lifecycle), @tagName(row.backend) },
             );
         }
-        for (task_snapshot.items) |task| {
-            if (task.state != .running) continue;
+        for (commands) |command| {
             try text.writer.print(
-                "- [background-{d}] {s} (running)\n",
-                .{ task.id, task.command },
+                "- [#{d}] {s} ({s}, pid {d}, {s})\n",
+                .{
+                    command.process_id,
+                    command.command,
+                    @tagName(command.status),
+                    command.pid,
+                    command.mode.label(),
+                },
             );
         }
     }
@@ -2288,8 +2296,6 @@ fn appendRuntimeContext(raw_ctx: *anyopaque, arena: Allocator, messages: *std.Ar
         .interactive = false,
         .permission_mode = ctx.captured_permission_mode orelse session.permission_mode,
         .tracker = null,
-        .background = &ctx.state.background,
-        .session = &session.session_rt,
     }, arena, messages);
 }
 
@@ -3073,8 +3079,6 @@ fn onCommandOutputChunk(raw_ctx: *anyopaque, lifecycle_id: ?types.ToolLifecycleI
     const id = lifecycle_id orelse return;
     try ctx.sendCommandOutputDelta(id.call_id, stream, chunk);
 }
-
-fn onBackgroundUrlReady(_: *anyopaque, _: u64, _: []const u8) void {}
 
 pub fn mapToolKind(tool_name: []const u8) acp_types.ToolCallKind {
     if (std.mem.eql(u8, tool_name, "glob_files")) return .read;

@@ -1,7 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const debug_trace = @import("../shared/debug_trace.zig");
-const background_runtime = @import("../background/background_runtime.zig");
 const vision_contracts = @import("../agent/runtime/vision_contracts.zig");
 const command_admission = @import("../permissions/command_admission.zig");
 const command_environment = @import("../execution/command_environment.zig");
@@ -36,7 +35,6 @@ const ToolCall = types.ToolCall;
 const PermissionGrant = types.PermissionGrant;
 const PermissionMode = types.PermissionMode;
 const ToolPermissionDecision = types.ToolPermissionDecision;
-const BackgroundRuntime = background_runtime.BackgroundRuntime;
 const WorkerRuntime = worker_runtime.WorkerRuntime;
 
 pub const HostSandboxDefault = enum {
@@ -73,7 +71,6 @@ pub const Input = struct {
     tool_registry: tool_dispatch.Registry,
     worker: *WorkerRuntime,
     permission_prompter: ?permission_prompter.Prompter = null,
-    background: *BackgroundRuntime,
     auto_classifier: permission_auto_classifier.Classifier = .disabled(),
     host_sandbox_default: HostSandboxDefault = .none,
 };
@@ -2379,11 +2376,8 @@ test "interactive Vision path approval names every canonical image" {
     defer arena_state.deinit();
     var worker: WorkerRuntime = .{};
     defer worker.deinit(alloc);
-    var background: BackgroundRuntime = .{};
-    defer background.deinit(alloc);
     var input = testInputWithClassifier(
         &worker,
-        &background,
         permission_auto_classifier.Classifier.disabled(),
     );
     input.workspace_root = workspace;
@@ -2426,11 +2420,8 @@ test "Vision path admission returns a tool failure for directories" {
     defer arena_state.deinit();
     var worker: WorkerRuntime = .{};
     defer worker.deinit(alloc);
-    var background: BackgroundRuntime = .{};
-    defer background.deinit(alloc);
     var input = testInputWithClassifier(
         &worker,
-        &background,
         permission_auto_classifier.Classifier.disabled(),
     );
     input.workspace_root = workspace;
@@ -2477,11 +2468,8 @@ test "Vision path admission retains the canonical execution targets" {
     defer arena_state.deinit();
     var worker: WorkerRuntime = .{};
     defer worker.deinit(alloc);
-    var background: BackgroundRuntime = .{};
-    defer background.deinit(alloc);
     var input = testInputWithClassifier(
         &worker,
-        &background,
         permission_auto_classifier.Classifier.disabled(),
     );
     input.workspace_root = workspace;
@@ -2589,11 +2577,8 @@ test "prepared file mutation admission decodes and resolves exactly once without
     const arena = arena_state.allocator();
     var worker: WorkerRuntime = .{};
     defer worker.deinit(alloc);
-    var background: BackgroundRuntime = .{};
-    defer background.deinit(alloc);
     var input = testInputWithClassifier(
         &worker,
-        &background,
         permission_auto_classifier.Classifier.disabled(),
     );
     input.workspace_root = workspace;
@@ -3133,7 +3118,6 @@ const test_admission_registry = tool_dispatch.Registry{ .tools = &.{
 
 fn testInputWithClassifier(
     worker: *WorkerRuntime,
-    background: *BackgroundRuntime,
     classifier: permission_auto_classifier.Classifier,
 ) Input {
     return .{
@@ -3142,7 +3126,6 @@ fn testInputWithClassifier(
         .permission_rules = .{},
         .tool_registry = test_admission_registry,
         .worker = worker,
-        .background = background,
         .auto_classifier = classifier,
         .permission_review_turn = testReviewTurn(),
     };
@@ -3200,12 +3183,9 @@ test "interactive admission routes prompts through the supplied prompter" {
     defer arena_state.deinit();
     var worker: WorkerRuntime = .{};
     defer worker.deinit(std.testing.allocator);
-    var background: BackgroundRuntime = .{};
-    defer background.deinit(std.testing.allocator);
     var recording = RecordingPrompter{};
     var input = testInputWithClassifier(
         &worker,
-        &background,
         permission_auto_classifier.Classifier.disabled(),
     );
     input.permission_prompter = recording.prompter();
@@ -3255,12 +3235,9 @@ test "interactive file admission passes its canonical grant offer to the prompte
     const arena = arena_state.allocator();
     var worker: WorkerRuntime = .{};
     defer worker.deinit(alloc);
-    var background: BackgroundRuntime = .{};
-    defer background.deinit(alloc);
     var recording = RecordingPrompter{};
     var input = testInputWithClassifier(
         &worker,
-        &background,
         permission_auto_classifier.Classifier.disabled(),
     );
     input.workspace_root = workspace;
@@ -3307,8 +3284,6 @@ test "automatic non-allow is recoverable regardless tool approval policy" {
     defer arena_state.deinit();
     var worker: WorkerRuntime = .{};
     defer worker.deinit(std.testing.allocator);
-    var background: BackgroundRuntime = .{};
-    defer background.deinit(std.testing.allocator);
     var fake = FakeAutoClassifier{
         .decision = .caution,
         .risk = .high,
@@ -3317,7 +3292,6 @@ test "automatic non-allow is recoverable regardless tool approval policy" {
     var recording = RecordingPrompter{};
     var input = testInputWithClassifier(
         &worker,
-        &background,
         permission_auto_classifier.Classifier.withOverride(
             @ptrCast(&fake),
             FakeAutoClassifier.classify,
@@ -3421,13 +3395,10 @@ test "ask-only policy bypasses prompt and reviewer in auto and uses the ordinary
     defer arena_state.deinit();
     var worker: WorkerRuntime = .{};
     defer worker.deinit(std.testing.allocator);
-    var background: BackgroundRuntime = .{};
-    defer background.deinit(std.testing.allocator);
     var fake = FakeAutoClassifier{};
     var recording = RecordingPrompter{};
     var input = testInputWithClassifier(
         &worker,
-        &background,
         permission_auto_classifier.Classifier.withOverride(
             @ptrCast(&fake),
             FakeAutoClassifier.classify,
@@ -3507,13 +3478,10 @@ test "yolo file admission preserves canonical mutation authority" {
     const arena = arena_state.allocator();
     var worker: WorkerRuntime = .{};
     defer worker.deinit(alloc);
-    var background: BackgroundRuntime = .{};
-    defer background.deinit(alloc);
     var classifier = FakeAutoClassifier{};
     var prompter = RecordingPrompter{};
     var input = testInputWithClassifier(
         &worker,
-        &background,
         permission_auto_classifier.Classifier.withOverride(
             @ptrCast(&classifier),
             FakeAutoClassifier.classify,
@@ -3594,11 +3562,8 @@ test "admission registration follows the supplied registry" {
     defer arena_state.deinit();
     var worker: WorkerRuntime = .{};
     defer worker.deinit(std.testing.allocator);
-    var background: BackgroundRuntime = .{};
-    defer background.deinit(std.testing.allocator);
     var input = testInputWithClassifier(
         &worker,
-        &background,
         permission_auto_classifier.Classifier.disabled(),
     );
 
@@ -3633,11 +3598,8 @@ test "registered subagent commands do not require generic tool approval" {
     defer arena_state.deinit();
     var worker: WorkerRuntime = .{};
     defer worker.deinit(std.testing.allocator);
-    var background: BackgroundRuntime = .{};
-    defer background.deinit(std.testing.allocator);
     var input = testInputWithClassifier(
         &worker,
-        &background,
         permission_auto_classifier.Classifier.disabled(),
     );
     var subagent = test_builtin_tools.read_file;
@@ -3663,11 +3625,8 @@ test "web search permission target follows registered tool metadata" {
     defer arena_state.deinit();
     var worker: WorkerRuntime = .{};
     defer worker.deinit(std.testing.allocator);
-    var background: BackgroundRuntime = .{};
-    defer background.deinit(std.testing.allocator);
     var input = testInputWithClassifier(
         &worker,
-        &background,
         permission_auto_classifier.Classifier.disabled(),
     );
 
@@ -3692,11 +3651,8 @@ test "permission target kind follows supplied registry metadata" {
     defer arena_state.deinit();
     var worker: WorkerRuntime = .{};
     defer worker.deinit(std.testing.allocator);
-    var background: BackgroundRuntime = .{};
-    defer background.deinit(std.testing.allocator);
     var input = testInputWithClassifier(
         &worker,
-        &background,
         permission_auto_classifier.Classifier.disabled(),
     );
 
@@ -3734,11 +3690,8 @@ test "live authority resolves a missing read target without changing ordinary ad
     defer arena_state.deinit();
     var worker: WorkerRuntime = .{};
     defer worker.deinit(alloc);
-    var background: BackgroundRuntime = .{};
-    defer background.deinit(alloc);
     var input = testInputWithClassifier(
         &worker,
-        &background,
         permission_auto_classifier.Classifier.disabled(),
     );
     input.workspace_root = workspace;
@@ -3795,11 +3748,8 @@ test "live authority preserves a non-directory read failure for tool execution" 
     defer arena_state.deinit();
     var worker: WorkerRuntime = .{};
     defer worker.deinit(alloc);
-    var background: BackgroundRuntime = .{};
-    defer background.deinit(alloc);
     var input = testInputWithClassifier(
         &worker,
-        &background,
         permission_auto_classifier.Classifier.disabled(),
     );
     input.workspace_root = workspace;
@@ -3830,11 +3780,8 @@ test "permission rule display follows supplied registry metadata" {
     defer arena_state.deinit();
     var worker: WorkerRuntime = .{};
     defer worker.deinit(std.testing.allocator);
-    var background: BackgroundRuntime = .{};
-    defer background.deinit(std.testing.allocator);
     var input = testInputWithClassifier(
         &worker,
-        &background,
         permission_auto_classifier.Classifier.disabled(),
     );
 
@@ -3870,11 +3817,8 @@ test "prepared session deny blocks local file mutation without setup effects" {
     const arena = arena_state.allocator();
     var worker: WorkerRuntime = .{};
     defer worker.deinit(alloc);
-    var background: BackgroundRuntime = .{};
-    defer background.deinit(alloc);
     var input = testInputWithClassifier(
         &worker,
-        &background,
         permission_auto_classifier.Classifier.disabled(),
     );
     input.workspace_root = workspace;
@@ -3934,12 +3878,9 @@ test "external prepared file review carries frozen path and diff authority" {
     const arena = arena_state.allocator();
     var worker: WorkerRuntime = .{};
     defer worker.deinit(alloc);
-    var background: BackgroundRuntime = .{};
-    defer background.deinit(alloc);
     var fake = FakeAutoClassifier{};
     var input = testInputWithClassifier(
         &worker,
-        &background,
         permission_auto_classifier.Classifier.withOverride(
             @ptrCast(&fake),
             FakeAutoClassifier.classify,
@@ -4058,12 +3999,9 @@ test "automatic workspace write uses reversible admission without reviewer" {
     const arena = arena_state.allocator();
     var worker: WorkerRuntime = .{};
     defer worker.deinit(alloc);
-    var background: BackgroundRuntime = .{};
-    defer background.deinit(alloc);
     var fake = FakeAutoClassifier{};
     var input = testInputWithClassifier(
         &worker,
-        &background,
         permission_auto_classifier.Classifier.withOverride(
             @ptrCast(&fake),
             FakeAutoClassifier.classify,
@@ -4141,12 +4079,9 @@ test "automatic added-root write bypasses reviewer while untrusted external writ
     const arena = arena_state.allocator();
     var worker: WorkerRuntime = .{};
     defer worker.deinit(alloc);
-    var background: BackgroundRuntime = .{};
-    defer background.deinit(alloc);
     var fake = FakeAutoClassifier{};
     var input = testInputWithClassifier(
         &worker,
-        &background,
         permission_auto_classifier.Classifier.withOverride(
             @ptrCast(&fake),
             FakeAutoClassifier.classify,
@@ -4214,12 +4149,9 @@ test "automatic trusted-root write keeps persistence targets on reviewer path" {
     const arena = arena_state.allocator();
     var worker: WorkerRuntime = .{};
     defer worker.deinit(alloc);
-    var background: BackgroundRuntime = .{};
-    defer background.deinit(alloc);
     var fake = FakeAutoClassifier{};
     var input = testInputWithClassifier(
         &worker,
-        &background,
         permission_auto_classifier.Classifier.withOverride(
             @ptrCast(&fake),
             FakeAutoClassifier.classify,
@@ -4276,12 +4208,9 @@ test "automatic trusted-root overwrite preserves configured read disclosure revi
     const arena = arena_state.allocator();
     var worker: WorkerRuntime = .{};
     defer worker.deinit(alloc);
-    var background: BackgroundRuntime = .{};
-    defer background.deinit(alloc);
     var fake = FakeAutoClassifier{};
     var input = testInputWithClassifier(
         &worker,
-        &background,
         permission_auto_classifier.Classifier.withOverride(
             @ptrCast(&fake),
             FakeAutoClassifier.classify,
