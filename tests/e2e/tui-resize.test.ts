@@ -2360,6 +2360,73 @@ describe.skipIf(SKIP)("tui: resize", () => {
   );
 
   test(
+    "closed mermaid blocks render and reflow between diagrams and source fallback",
+    async () => {
+      const gated = gatedResizeResponse(
+        "MERMAID_STREAM_BEFORE\n```mermaid\nflowchart LR\n  A[Request]",
+        " -->|validate| B[Response]\n```\n",
+        "MERMAID_STREAM_AFTER\n",
+      );
+      const gateway = startFakeGateway([gated.response]);
+      gateways.push(gateway);
+      const launched = await launchRecordedSurfaceSession(
+        "mermaid-reflow",
+        90,
+        30,
+        {
+          OPENAI_API_KEY: "fake-mermaid-resize-key",
+          FX_RESPONSES_BASE_URL: gateway.baseUrl,
+          FX_MODEL: FAKE_GATEWAY_MODEL,
+        },
+      );
+      session = launched.active;
+      await session.sendText("render the mermaid fixture");
+      await session.waitForText("MERMAID_STREAM_BEFORE", TIMEOUT);
+
+      const openFence = await session.capturePane();
+      expect(openFence).not.toContain("flowchart LR");
+      expect(openFence).not.toContain("Request");
+
+      gated.releaseSecond();
+      const wide = await session.waitForPane(
+        (pane) =>
+          pane.includes("Request") &&
+          pane.includes("Response") &&
+          pane.includes("validate") &&
+          pane.includes("▶") &&
+          !pane.includes("flowchart LR"),
+        TIMEOUT,
+      );
+      expect(wide).toContain("┌");
+
+      await session.resizeWindow(20, 24, 300);
+      const narrow = await session.waitForPane(
+        (pane) => pane.includes("flowchart") && pane.includes("A[Request]"),
+        TIMEOUT,
+      );
+      expect(narrow).toContain("mermaid");
+
+      await session.resizeWindow(90, 30, 300);
+      await session.waitForPane(
+        (pane) =>
+          pane.includes("Request") &&
+          pane.includes("Response") &&
+          pane.includes("▶") &&
+          !pane.includes("flowchart LR"),
+        TIMEOUT,
+      );
+
+      gated.releaseFinal();
+      await session.waitForText("MERMAID_STREAM_AFTER", TIMEOUT);
+      await session.waitForComposer(TIMEOUT);
+      expect(gateway.requests).toHaveLength(1);
+      expect(session.isPaneAlive()).toBe(true);
+      expectEmptyStderr(launched.stderrPath);
+    },
+    60_000,
+  );
+
+  test(
     "visibly open slash picker adapts across shrink and grow without losing transcript state",
     async () => {
       const root = realpathSync(
