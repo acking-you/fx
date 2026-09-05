@@ -1242,6 +1242,38 @@ describe("acp: model-independent", () => {
     if (client) await client.close();
   });
 
+  test("ACP initializes with an unreadable Gateway binding and can replace it", async () => {
+    const root = createIsolatedRoot("fx-acp-broken-binding-");
+    const gateway = startFakeGateway([finalText("ACP_BINDING_RECOVERED")]);
+    try {
+      mkdirSync(join(root.home, ".fx"), { recursive: true, mode: 0o700 });
+      writeFileSync(join(root.home, ".fx", "gateway-auth.json"), "{broken", { mode: 0o600 });
+      client = await AcpClient.create({ cwd: root.workspace, env: {
+        HOME: root.home, OPENAI_API_KEY: undefined, FX_API_KEY: undefined,
+        FX_RESPONSES_BASE_URL: undefined, OPENAI_BASE_URL: undefined,
+      } });
+      const initialized = await client.request("initialize", { protocolVersion: 1 }, 1) as any;
+      expect(initialized.error).toBeUndefined();
+      expect(initialized.result.agentInfo.name).toBeTruthy();
+      const configured = await client.request("fx/provider/configure", {
+        baseUrl: gateway.baseUrl, apiKey: "recovered-binding-key",
+      }, 2) as any;
+      expect(configured.error).toBeUndefined();
+      const created = await client.request("session/new", { cwd: root.workspace }, 3) as any;
+      expect(created.result.sessionId).toBeTruthy();
+      await client.readLine();
+      const result = await runPrompt(client, "Verify the recovered binding.", TIMEOUT);
+      expect(result.promptResult.result.stopReason).toBe("end_turn");
+      expect(JSON.stringify(result.messages)).toContain("ACP_BINDING_RECOVERED");
+      expect(gateway.requests).toHaveLength(1);
+      expect(gateway.requests[0].headers.get("authorization")).toBe("Bearer recovered-binding-key");
+    } finally {
+      await client?.close();
+      gateway.stop();
+      rmSync(root.root, { recursive: true, force: true });
+    }
+  }, TIMEOUT);
+
   test(
     "ACP configures and restores one BYOK binding without blocking its control plane",
     async () => {

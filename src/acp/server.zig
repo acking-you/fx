@@ -480,8 +480,15 @@ pub const GatewayRouteSnapshot = struct {
 };
 
 fn installStoredGatewayBinding(state: *ServerState) !void {
-    if (state.gateway_binding != null) return;
-    var session = (try gateway_session.copyStoredBinding(state.alloc)) orelse return;
+    if (state.gateway_binding != null or state.cfg.credential_override != null) return;
+    var session = (if (state.cfg.home_override) |home|
+        gateway_session.loadFromHome(state.alloc, home)
+    else
+        gateway_session.copyStoredBinding(state.alloc)) catch |err| {
+        if (err == error.OutOfMemory) return err;
+        debug_trace.logf("provider", "stored Gateway binding unavailable err={s}", .{@errorName(err)});
+        return;
+    } orelse return;
     defer session.deinit(state.alloc);
     const chat_url = provider_route.appendResponsesEndpointAlloc(state.alloc, session.base_url) catch |err| {
         debug_trace.logf("provider", "stored gateway binding chat url failed err={s}", .{@errorName(err)});
@@ -513,6 +520,14 @@ fn installStoredGatewayBinding(state: *ServerState) !void {
         .models_url = models_url,
         .credential = credential,
     };
+}
+
+fn persistGatewayBinding(state: *ServerState, base_url: []const u8, api_key: []const u8) !void {
+    if (state.cfg.home_override) |home| {
+        try gateway_session.saveForHome(state.alloc, home, base_url, api_key);
+    } else {
+        try gateway_session.saveAndActivate(state.alloc, base_url, api_key);
+    }
 }
 
 pub fn snapshotGatewayRoute(
@@ -1440,6 +1455,7 @@ fn handleInitialize(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message
     }
     state.provider = state.cfg.provider_override orelse startup.provider;
     state.configured_model = try alloc.dupe(u8, startup.configured_model);
+    try installStoredGatewayBinding(state);
 
     var startup_credential = startup.takeCredential();
     defer if (startup_credential) |*credential| credential.deinit(alloc);
@@ -1455,6 +1471,9 @@ fn handleInitialize(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message
             .source = state.cfg.credential_override.?.source,
         };
         break :override &routed_credential.?;
+    } else if (state.provider == .gateway and state.gateway_binding != null) binding: {
+        routed_credential = try cloneServerCredential(alloc, state.gateway_binding.?.credential);
+        break :binding &routed_credential.?;
     } else if (startup_matches_model)
         &startup_credential.?
     else routed: {
@@ -1473,7 +1492,6 @@ fn handleInitialize(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message
     if (credential) |resolved| {
         if (resolved.token.len > 0) adoptServerCredential(state, resolved);
     }
-    try installStoredGatewayBinding(state);
 
     state.permission_mode = startup.permission_mode;
     state.permission_rules = startup.takePermissionRules();
@@ -1511,7 +1529,7 @@ fn handleInitialize(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message
                     state.api_key,
                     state.account_id,
                 ),
-                .endpoint = gatewayModelsPath(state),
+                .endpoint = providerCatalogEndpoint(state, state.provider),
                 .cancel_flag = &catalog_cancel_flag,
             },
             state.selected_model,
@@ -2174,7 +2192,7 @@ fn providerJobMain(job: *ProviderJob) void {
     };
 
     if (job.persist_base_url) |base_url| {
-        gateway_session.saveAndActivate(state.alloc, base_url, prepared.credential.token) catch |err| {
+        persistGatewayBinding(state, base_url, prepared.credential.token) catch |err| {
             debug_trace.logf("provider", "ACP gateway binding persist failed err={s}", .{@errorName(err)});
             state.writer.writeError(state.alloc, job.msg.id, .{
                 .code = ErrorCode.internal_error,
@@ -2959,6 +2977,34 @@ test "ACP provider job gate leaves control-plane methods responsive" {
     try std.testing.expect(AcpMethod.fx_tool_mode_set.allowedDuringProviderJob());
     try std.testing.expect(!AcpMethod.session_prompt.allowedDuringProviderJob());
     try std.testing.expect(!AcpMethod.fx_provider_switch.allowedDuringProviderJob());
+}
+
+test "ACP Gateway discovery and persistence honor explicit home without changing process binding" {
+    const alloc = std.testing.allocator;
+    gateway_session.resetProcessBindingForTests();
+    defer gateway_session.resetProcessBindingForTests();
+    var process = gateway_session.Session{
+        .base_url = try alloc.dupe(u8, "https://process.example.test/v1"),
+        .api_key = try alloc.dupe(u8, "process-key"),
+    };
+    defer process.deinit(alloc);
+    try gateway_session.setProcessBinding(process);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
+    defer alloc.free(home);
+    var state = ServerState{ .alloc = alloc, .cfg = undefined, .writer = jsonrpc.Writer.init() };
+    defer state.deinit();
+    state.cfg.home_override = home;
+    state.cfg.credential_override = null;
+    try persistGatewayBinding(&state, "https://embedded.example.test/v1", "embedded-key");
+    try installStoredGatewayBinding(&state);
+    try std.testing.expectEqualStrings("https://embedded.example.test/v1/responses", state.gateway_binding.?.chat_url);
+    try std.testing.expectEqualStrings("embedded-key", state.gateway_binding.?.credential.token);
+    var unchanged = (try gateway_session.copyProcessBinding(alloc)).?;
+    defer unchanged.deinit(alloc);
+    try std.testing.expectEqualStrings("process-key", unchanged.api_key);
+    try std.testing.expectEqualStrings("https://process.example.test/v1", unchanged.base_url);
 }
 
 test "ACP custom gateway binding survives subscription credential activation" {

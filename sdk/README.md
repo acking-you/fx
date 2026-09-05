@@ -318,6 +318,10 @@ not populate them from request, tenant, or other untrusted input.
 The native backend sends the credential to the configured Responses API root.
 Custom roots must use HTTPS, except for explicit loopback HTTP URLs with a
 port.
+Explicit SDK credentials and routes take precedence over saved CLI Gateway
+bindings. Omitting the SDK root uses the OpenAI API root. An embedded runtime's
+explicit `home` owns its profile; loading or configuring its Gateway binding
+does not replace the process-wide CLI binding.
 
 The WebAssembly runtime intentionally does not provide:
 

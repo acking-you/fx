@@ -149,6 +149,12 @@ each child turn. Changing the parent provider does not reroute an existing
 child, and replacing the connection binding does not alter a child turn already
 in progress.
 
+Embedded ACP connections honor explicit credential overrides and use their
+configured home for Gateway profile discovery and persistence. An unreadable
+optional Gateway binding does not prevent ACP initialization; configure a new
+binding to replace a damaged file. Credentials are not recovered from that
+damaged binding.
+
 ## Compact a session
 
 Send the exact local command `/compact` through `session/prompt`:

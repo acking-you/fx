@@ -694,11 +694,11 @@ fn createRuntime(env: c.napi_env, options: c.napi_value) CreateError!*Runtime {
         .close_fn = FetchBridge.close,
     });
     runtime.stream_context.endpoint_overrides = .{
-        .responses_base_url = runtime.responses_base_url,
+        .responses_base_url = runtime.responses_base_url orelse provider_route.openai_base_url,
     };
     runtime.catalog_context = host_model_catalog.initContext(runtime.stream_context.transport);
     runtime.catalog_context.endpoint_overrides = .{
-        .responses_base_url = runtime.responses_base_url,
+        .responses_base_url = runtime.responses_base_url orelse provider_route.openai_base_url,
     };
     runtime.thread = std.Thread.spawn(.{}, Runtime.run, .{runtime}) catch return error.ThreadFailed;
     return runtime;

@@ -1176,6 +1176,7 @@ const CompactionTaskRuntime = struct {
         session_id: ?[]u8,
         credential_source: ?types.CredentialSource,
         credential: []u8,
+        endpoint: ?[]u8 = null,
         account_id: ?[]u8,
         model: []u8,
         wire_model: []u8,
@@ -1200,6 +1201,7 @@ const CompactionTaskRuntime = struct {
             const alloc = std.heap.c_allocator;
             if (self.session_id) |id| alloc.free(id);
             secret.zeroAndFree(alloc, self.credential);
+            if (self.endpoint) |endpoint| alloc.free(endpoint);
             if (self.account_id) |account| alloc.free(account);
             alloc.free(self.model);
             alloc.free(self.wire_model);
@@ -1295,6 +1297,8 @@ const CompactionTaskRuntime = struct {
             .local_provider = task.local_provider,
             .credential_source = task.credential_source,
             .credential = task.credential,
+            .local_endpoint_override = task.endpoint,
+            .remote_endpoint_override = task.endpoint,
             .account_id = task.account_id,
             .session_id = task.session_id,
             .model = task.model,
@@ -3222,6 +3226,11 @@ pub fn Runtime(comptime App: type) type {
                 current.source
             else
                 null;
+            const endpoint = if (route) |current|
+                try provider_route.resolveEndpointFromEnvironmentAlloc(alloc, current)
+            else
+                null;
+            errdefer if (!snapshots_owned_by_task) if (endpoint) |value| alloc.free(value);
             const account_id = if (credential_source != null and app.auth.accountId() != null)
                 try alloc.dupe(u8, app.auth.accountId().?)
             else
@@ -3245,11 +3254,16 @@ pub fn Runtime(comptime App: type) type {
                 if (!allow_remote or remote_provider == null or credential_source == null) break :binding null;
                 const current_route = route orelse break :binding null;
                 if (current_route.contract().remote_compaction == .unsupported) break :binding null;
-                break :binding responses_compaction_binding.buildFromEnvironmentAlloc(
+                break :binding responses_compaction_binding.buildAlloc(
                     alloc,
                     credential_source.?,
                     credential_copy,
                     account_id,
+                    .{
+                        .endpoint_overrides = .{ .responses_base_url = endpoint, .codex_base_url = endpoint },
+                        .organization = io_mod.getenv("OPENAI_ORG_ID"),
+                        .project = io_mod.getenv("OPENAI_PROJECT_ID"),
+                    },
                 ) catch |err| {
                     debug_trace.logf(
                         "compaction",
@@ -3316,6 +3330,7 @@ pub fn Runtime(comptime App: type) type {
                 .session_id = session_id,
                 .credential_source = credential_source,
                 .credential = credential_copy,
+                .endpoint = endpoint,
                 .account_id = account_id,
                 .model = model,
                 .wire_model = wire_model,
