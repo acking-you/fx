@@ -15,7 +15,6 @@ const host = @import("../hosts/host.zig");
 const model_provider = @import("../config/model_provider.zig");
 const host_tools = @import("host_tools.zig");
 
-const allocator = std.heap.c_allocator;
 const queue_limit = 8 * 1024 * 1024;
 const max_config_bytes = 1024 * 1024;
 
@@ -39,6 +38,7 @@ pub const Config = struct {
 };
 
 pub const Runtime = struct {
+    allocator: std.mem.Allocator,
     parsed: std.json.Parsed(Config),
     environment: *environment_scope.Environment,
     tools: host_tools.Registry,
@@ -49,8 +49,9 @@ pub const Runtime = struct {
     stopping: std.atomic.Value(bool) = .init(false),
 
     /// Returns an owned runtime. `destroy` joins its worker before freeing it.
+    /// The allocator must be thread-safe and remain valid until destruction.
     /// Host callers must finish concurrent read/write calls before destruction.
-    pub fn create(bytes: []const u8) !*Runtime {
+    pub fn create(allocator: std.mem.Allocator, bytes: []const u8) !*Runtime {
         if (bytes.len == 0 or bytes.len > max_config_bytes) return error.InvalidConfigSize;
         ensureIo();
         const parsed = try std.json.parseFromSlice(Config, allocator, bytes, .{ .allocate = .alloc_always });
@@ -101,6 +102,7 @@ pub const Runtime = struct {
         // Ownership of the map transfers here. On spawn failure release the
         // wrapper without running the map's earlier error defer twice.
         self.* = .{
+            .allocator = allocator,
             .parsed = parsed,
             .environment = owned_environment,
             .tools = tools,
@@ -120,6 +122,7 @@ pub const Runtime = struct {
     }
 
     pub fn destroy(self: *Runtime) void {
+        const allocator = self.allocator;
         self.close();
         if (self.thread) |thread| thread.join();
         self.input.deinit();
@@ -131,6 +134,7 @@ pub const Runtime = struct {
     }
 
     fn run(self: *Runtime) void {
+        const allocator = self.allocator;
         const guard = environment_scope.enter(self.environment);
         defer guard.leave();
         defer self.output.close();
@@ -193,7 +197,8 @@ var io_state: std.atomic.Value(u8) = .init(0);
 
 fn ensureIo() void {
     if (io_state.cmpxchgStrong(0, 1, .acq_rel, .acquire) == null) {
-        threaded_io = std.Io.Threaded.init(allocator, .{});
+        // This process-wide driver outlives every instance allocator.
+        threaded_io = std.Io.Threaded.init(std.heap.c_allocator, .{});
         io_mod.setIo(threaded_io.?.io());
         io_mod.setEmbeddedIo(environment_scope.wrapIo(io_mod.getIo()));
         if (comptime builtin.os.tag == .windows) {

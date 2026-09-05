@@ -37,7 +37,7 @@ export fn fx_runtime_create(config: ?[*]const u8, length: usize, output: ?*?*Han
     const destination = output orelse return 1;
     destination.* = null;
     const bytes = config orelse return 1;
-    const instance = runtime.Runtime.create(bytes[0..length]) catch |err| return fail(err);
+    const instance = runtime.Runtime.create(std.heap.c_allocator, bytes[0..length]) catch |err| return fail(err);
     destination.* = @ptrCast(instance);
     return 0;
 }
