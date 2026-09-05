@@ -1582,8 +1582,12 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         const active = session;
         await active.waitForComposer(TIMEOUT);
         await active.sendText("Create the always-write child.");
-        const firstApproval = await active.waitForText(
-          `Subagent ${childName} needs permission`,
+        const firstApproval = await active.waitForPane(
+          (pane) =>
+            pane.includes(`Subagent ${childName} needs permission`) &&
+            pane.includes("always-child.txt") &&
+            pane.includes("FIRST") &&
+            pane.includes("1  Apply once"),
           TIMEOUT,
         );
         expect(firstApproval).toContain("always-child.txt");
@@ -3896,7 +3900,8 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
           (pane) =>
             pane.includes("child-approval-file-effect.txt") &&
             pane.includes("Apply this change?") &&
-            pane.includes("handoff-line-80"),
+            pane.includes("handoff-line-80") &&
+            pane.includes("1  Apply once"),
           TIMEOUT,
         );
         expect(mainFileApproval).toContain("1  Apply once");
