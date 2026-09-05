@@ -1372,6 +1372,8 @@ const App = struct {
         const gateway_credential = self.auth.gatewayCredential() orelse return error.MissingApiKey;
         const api_key_copy = try std.heap.c_allocator.dupe(u8, gateway_credential.api_key);
         errdefer secret.zeroAndFree(std.heap.c_allocator, api_key_copy);
+        const gateway_endpoint = try AgentAppRuntime.snapshotGatewayEndpoint(self, std.heap.c_allocator);
+        errdefer if (gateway_endpoint) |endpoint| std.heap.c_allocator.free(endpoint);
 
         const account_id_copy = if (self.auth.accountId()) |account_id|
             try std.heap.c_allocator.dupe(u8, account_id)
@@ -1447,6 +1449,7 @@ const App = struct {
             .model = model_copy,
             .provider = self.provider_selection.selection().provider,
             .api_key = api_key_copy,
+            .gateway_endpoint = gateway_endpoint,
             .credential_source = gateway_credential.source,
             .account_id = account_id_copy,
             .permission_mode = self.permission_engine.mode,

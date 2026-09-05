@@ -210,6 +210,13 @@ pub const Mutation = struct {
 pub fn load(alloc: Allocator) !?Session {
     if (comptime host_target.is_wasm) return null;
     const home = io_mod.getenv("HOME") orelse return null;
+    return loadFromHome(alloc, home);
+}
+
+/// Loads an owned binding from one explicit profile without changing the
+/// process binding. Embedded connections must not share process HOME state.
+pub fn loadFromHome(alloc: Allocator, home: []const u8) !?Session {
+    if (comptime host_target.is_wasm) return null;
     var home_dir = std.Io.Dir.openDirAbsolute(io_mod.getIo(), home, .{ .iterate = true }) catch |err| {
         if (err == error.FileNotFound) return null;
         debug_trace.logf("auth", "Gateway session load failed step=open_home err={s}", .{@errorName(err)});
@@ -271,6 +278,17 @@ pub fn saveNewSession(alloc: Allocator, session: Session) !void {
     try mutation.save(alloc, session);
 }
 
+/// Persists an embedded connection's binding without replacing process state.
+pub fn saveForHome(alloc: Allocator, home: []const u8, base_url: []const u8, api_key: []const u8) !void {
+    if (comptime host_target.is_wasm) return error.GatewayAuthUnavailable;
+    try validate(base_url, api_key);
+    var session = try ownedSession(alloc, base_url, api_key);
+    defer session.deinit(alloc);
+    var mutation = try beginMutationFromHome(home);
+    defer mutation.deinit();
+    try mutation.save(alloc, session);
+}
+
 pub fn beginExistingMutation() !?Mutation {
     if (comptime host_target.is_wasm) return null;
     const home = io_mod.getenv("HOME") orelse return error.HomeNotSet;
@@ -288,6 +306,10 @@ pub fn beginExistingMutation() !?Mutation {
 
 fn beginMutation() !Mutation {
     const home = io_mod.getenv("HOME") orelse return error.HomeNotSet;
+    return beginMutationFromHome(home);
+}
+
+fn beginMutationFromHome(home: []const u8) !Mutation {
     var home_dir = io_mod.VerifiedDir{
         .dir = try std.Io.Dir.openDirAbsolute(io_mod.getIo(), home, .{ .iterate = true }),
     };

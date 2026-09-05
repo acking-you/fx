@@ -672,17 +672,19 @@ pub fn Runtime(comptime App: type) type {
             return model_catalog.projectModelIds(app.alloc, catalog.items);
         }
 
+        pub fn snapshotGatewayEndpoint(app: *App, alloc: std.mem.Allocator) !?[]u8 {
+            if (app.provider_selection.selection().provider != .gateway or
+                app.auth.credentialSource() != .openai_api_key) return null;
+            return try provider_route.resolveEndpointAlloc(alloc, .openai_responses_byok, .fromEnvironment());
+        }
+
         pub fn processQueuedPrompt(
             app: *App,
             job: worker_runtime.QueuedPrompt,
             gateway_retry_count: usize,
             gateway_chat_url: []const u8,
         ) !void {
-            const gateway_endpoint = if (job.provider == .gateway and job.credential_source == .openai_api_key)
-                try provider_route.resolveEndpointAlloc(std.heap.c_allocator, .openai_responses_byok, .fromEnvironment())
-            else
-                null;
-            defer if (gateway_endpoint) |endpoint| std.heap.c_allocator.free(endpoint);
+            const gateway_endpoint = job.gateway_endpoint;
             if (gateway_endpoint) |endpoint| app.worker.active_gateway_route = .{ .api_key = job.api_key, .endpoint = endpoint, .model = job.model };
             defer app.worker.active_gateway_route = null;
             var snapshot_ownership = worker_runtime.ActivePromptSnapshotOwnership.init(job.images);

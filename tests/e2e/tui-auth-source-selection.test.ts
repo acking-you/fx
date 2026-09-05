@@ -1178,6 +1178,76 @@ tmuxTest("TUI persists replaces and removes Gateway bindings without recording s
   }
 }, TIMEOUT * 3);
 
+tmuxTest("queued Gateway turn retains its endpoint when logout completes during compaction", async () => {
+  home = realpathSync(mkdtempSync(join(tmpdir(), "fx-queued-gateway-route-")));
+  stderrPath = join(home, "stderr.log");
+  let releaseCompaction!: () => void;
+  const compactionGate = new Promise<void>((resolve) => { releaseCompaction = resolve; });
+  gateway = startFakeGateway([
+    fakeGatewayFinalText("GATEWAY_SEED_ONE"),
+    fakeGatewayFinalText("GATEWAY_SEED_TWO"),
+    async () => {
+      await compactionGate;
+      // An accepted response without an opaque checkpoint triggers the model
+      // summary fallback after logout has removed the process binding.
+      return Response.json({ output: [], usage: { input_tokens: 3, output_tokens: 5 } });
+    },
+    fakeGatewayFinalText([
+      "## Primary user goal and intent",
+      "Verify that a queued Gateway request retains the URL and credential captured when the user submitted it.",
+      "## Completed work and observed results",
+      "The first seed request returned GATEWAY_SEED_ONE. The second returned GATEWAY_SEED_TWO. Both completed successfully before compaction began.",
+      "## Requirements and current state",
+      "The user submitted a continuation while compaction was running, then removed the stored Gateway binding. The queued continuation must still reach its original provider with its captured key.",
+      "## Pending work and next action",
+      "Complete the queued turn and verify that the unrelated fallback provider receives no credentials or requests. No files, builds, deployments, or user decisions are implied by these fixture responses.",
+    ].join("\n\n")),
+    fakeGatewayFinalText("QUEUED_GATEWAY_ROUTE_RETAINED"),
+  ]);
+  const fallback = startFakeGateway([fakeGatewayFinalText("WRONG_QUEUED_GATEWAY_ROUTE")]);
+  try {
+    session = await startFxWithoutAuth(home, stderrPath, fallback);
+    await session.waitForComposer(TIMEOUT);
+    await session.sendText(`/provider gateway ${gateway.baseUrl} queued-gateway-secret`);
+    await waitForModelRequestCount(gateway, 1);
+    await session.waitForComposer(TIMEOUT);
+    await session.sendText("Seed the first turn.");
+    await session.waitForText("GATEWAY_SEED_ONE", TIMEOUT);
+    await session.waitForComposer(TIMEOUT);
+    await session.sendText("Seed the second turn.");
+    await session.waitForText("GATEWAY_SEED_TWO", TIMEOUT);
+    await session.waitForComposer(TIMEOUT);
+    await session.sendText("/compact");
+    await session.waitForText("Context compaction started.", TIMEOUT);
+    const deadline = Date.now() + TIMEOUT;
+    while (gateway.requests.length < 3) {
+      if (Date.now() > deadline) throw new Error("compaction request did not start");
+      await Bun.sleep(25);
+    }
+    await session.sendText("Continue the queued Gateway turn.");
+    await session.sendText("/logout gateway");
+    await session.waitForText("Removed the saved Gateway URL and API key", TIMEOUT);
+    expect(existsSync(join(home, ".fx", "gateway-auth.json"))).toBe(false);
+    releaseCompaction();
+    const queuedDeadline = Date.now() + TIMEOUT;
+    while (gateway.requests.length < 5 && fallback.requests.length === 0) {
+      if (Date.now() > queuedDeadline) throw new Error("queued model request did not start");
+      await Bun.sleep(25);
+    }
+    expect(fallback.requests).toHaveLength(0);
+    await session.waitForText("QUEUED_GATEWAY_ROUTE_RETAINED", TIMEOUT);
+    expect(gateway.requests).toHaveLength(5);
+    for (const request of gateway.requests.slice(3)) {
+      expect(request.headers.get("authorization")).toBe("Bearer queued-gateway-secret");
+    }
+    expect(session.isAlive()).toBe(true);
+    expect(readFileSync(stderrPath, "utf8")).toBe("");
+  } finally {
+    releaseCompaction();
+    fallback.stop();
+  }
+}, TIMEOUT * 3);
+
 tmuxTest(
   "login hub exposes only supported provider and credential actions",
   async () => {
