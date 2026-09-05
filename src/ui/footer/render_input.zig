@@ -923,6 +923,54 @@ test "remote compaction owns the activity row until it settles" {
     try std.testing.expect(ctx.composer_visible);
 }
 
+test "between-turn compaction spins and counts elapsed from its own clock" {
+    var input = InputRuntime{};
+    defer input.deinit(std.testing.allocator);
+    var shell = TranscriptRuntime{};
+    defer shell.deinit(std.testing.allocator);
+    // Idle stream (turn reset) but compaction supplies turn_started_ms, as the
+    // render runtime does while a compaction task is active between turns.
+    var ctx: RenderContext = .{
+        .stream = .{ .turn_started_ms = 1_000 },
+        .compacting_context = true,
+        .has_api_key = true,
+        .model = "gpt-5.6-sol",
+        .composer_visible = true,
+        .queued_count = 0,
+        .subagent_count = 0,
+        .subagent_view_active = false,
+        .selected_subagent_id = null,
+        .selected_subagent_label = null,
+        .selected_subagent_status = null,
+        .activity = .none,
+        .input = &input,
+        .now_ms = 1_000,
+    };
+
+    var first_buf: [256]u8 = undefined;
+    const first = switch (frameOwnedActivityProjection(&first_buf, &shell, ctx, null)) {
+        .turn_thinking => |thinking| thinking.label,
+        .none, .tool_slot => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqualStrings("⠋ Compacting context (0s)", first);
+
+    ctx.now_ms = 1_000 + activity_status.spinner_interval_ms;
+    var second_buf: [256]u8 = undefined;
+    const second = switch (frameOwnedActivityProjection(&second_buf, &shell, ctx, null)) {
+        .turn_thinking => |thinking| thinking.label,
+        .none, .tool_slot => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqualStrings("⠙ Compacting context (0s)", second);
+
+    ctx.now_ms = 13_000;
+    var third_buf: [256]u8 = undefined;
+    const third = switch (frameOwnedActivityProjection(&third_buf, &shell, ctx, null)) {
+        .turn_thinking => |thinking| thinking.label,
+        .none, .tool_slot => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqualStrings("⠋ Compacting context (12s)", third);
+}
+
 test "minimal connected tool label clips with an ellipsis" {
     const alloc = std.testing.allocator;
     const projection: ActivityProjection = .{ .tool_slot = .{

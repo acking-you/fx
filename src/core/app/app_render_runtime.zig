@@ -671,13 +671,21 @@ pub fn Runtime(comptime App: type) type {
                     visible_stream.token_progress = progress;
                 }
             }
+            const compacting_context = app_session_runtime.Runtime(App).compactingContext(app);
+            if (compacting_context and visible_stream.turn_started_ms <= 0) {
+                // Between-turn compaction runs on an idle stream. Give the
+                // footer spinner and elapsed counter the task's own origin so
+                // the activity row keeps animating while the request runs.
+                const compaction_started_ms = app_session_runtime.Runtime(App).compactionStartedMs(app);
+                if (compaction_started_ms > 0) visible_stream.turn_started_ms = compaction_started_ms;
+            }
 
             return .{
                 .slash_registry = app.slashRegistry(),
                 .stream = visible_stream,
                 .completed_assistant_presentation_tail = app.pacer.hasCompletedAssistantPresentationTail(),
                 .writing_response = app.pacer.hasPending(),
-                .compacting_context = app_session_runtime.Runtime(App).compactingContext(app),
+                .compacting_context = compacting_context,
                 .has_api_key = app.auth.credentialSource() != null,
                 .model = visible_model,
                 .pending_images = app.pending_images.items,

@@ -1218,6 +1218,10 @@ const CompactionTaskRuntime = struct {
 
     active: ?*Task = null,
     next_generation: u64 = 1,
+    /// Wall-clock start of the active task. Compaction between turns runs
+    /// with an idle stream, so the footer spinner and elapsed counter need
+    /// their own origin instead of `stream.turn_started_ms`.
+    started_ms: i64 = 0,
 
     fn allocateGeneration(self: *CompactionTaskRuntime) u64 {
         const generation = self.next_generation;
@@ -1233,6 +1237,7 @@ const CompactionTaskRuntime = struct {
             // contract, but run the bounded request inline and let the normal
             // worker-event drain install or fall back from its owned result.
             self.active = task;
+            self.started_ms = io_mod.milliTimestamp();
             threadMain(task);
             return;
         }
@@ -1240,10 +1245,15 @@ const CompactionTaskRuntime = struct {
         // snapshot-construction failure follow one caller-owned cleanup path.
         task.thread = try std.Thread.spawn(.{}, threadMain, .{task});
         self.active = task;
+        self.started_ms = io_mod.milliTimestamp();
     }
 
     fn isActive(self: *const CompactionTaskRuntime) bool {
         return self.active != null;
+    }
+
+    fn startedMs(self: *const CompactionTaskRuntime) i64 {
+        return if (self.active != null) self.started_ms else 0;
     }
 
     fn takeCompletedGeneration(
@@ -1253,12 +1263,14 @@ const CompactionTaskRuntime = struct {
         const task = self.active orelse return null;
         if (task.generation != generation) return null;
         self.active = null;
+        self.started_ms = 0;
         return task;
     }
 
     fn deinit(self: *CompactionTaskRuntime) void {
         const task = self.active;
         self.active = null;
+        self.started_ms = 0;
         if (task) |active| active.deinit();
         self.* = .{};
     }
@@ -3112,6 +3124,12 @@ pub fn Runtime(comptime App: type) type {
         pub fn compactionActive(app: *const App) bool {
             if (comptime !@hasField(App, "session_persistence")) return false;
             return app.session_persistence.compaction_tasks.isActive();
+        }
+
+        /// Start of the background compaction task, or 0 when none is active.
+        pub fn compactionStartedMs(app: *const App) i64 {
+            if (comptime !@hasField(App, "session_persistence")) return 0;
+            return app.session_persistence.compaction_tasks.startedMs();
         }
 
         pub fn compactingContext(app: *const App) bool {
