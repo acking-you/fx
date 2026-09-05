@@ -6758,7 +6758,7 @@ test "latest reader waits for a discard already pending" {
         .alloc = alloc,
         .loaded = &target,
     };
-    const discard_thread = try std.Thread.spawn(.{}, DiscardWorker.run, .{&discard_worker});
+    const discard_thread = try io_mod.spawn(.{}, DiscardWorker.run, .{&discard_worker});
     target_owned = false;
     var discard_joined = false;
     defer {
@@ -6775,7 +6775,7 @@ test "latest reader waits for a discard already pending" {
         .options = reader_control.options(),
     };
     defer reader_worker.deinitResult();
-    const reader_thread = try std.Thread.spawn(.{}, ResumeWorker.run, .{&reader_worker});
+    const reader_thread = try io_mod.spawn(.{}, ResumeWorker.run, .{&reader_worker});
     var reader_joined = false;
     defer {
         discard_control.release.store(true, .seq_cst);
@@ -6837,7 +6837,7 @@ test "cached latest reader revalidates a target discarded after open" {
         .options = reader_control.options(),
     };
     defer reader_worker.deinitResult();
-    const reader_thread = try std.Thread.spawn(.{}, ResumeWorker.run, .{&reader_worker});
+    const reader_thread = try io_mod.spawn(.{}, ResumeWorker.run, .{&reader_worker});
     var reader_joined = false;
     defer {
         reader_control.release_session.store(true, .seq_cst);
@@ -6902,7 +6902,7 @@ test "latest reader retries when discard starts after an idle barrier" {
         .options = reader_control.options(),
     };
     defer reader_worker.deinitResult();
-    const reader_thread = try std.Thread.spawn(.{}, ResumeWorker.run, .{&reader_worker});
+    const reader_thread = try io_mod.spawn(.{}, ResumeWorker.run, .{&reader_worker});
     var reader_joined = false;
     defer {
         reader_control.release_session.store(true, .seq_cst);

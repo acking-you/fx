@@ -475,7 +475,7 @@ fn runSupported(alloc: Allocator, config: Config) !void {
             std.process.exit(1);
         }
     }
-    var idle_thread = try std.Thread.spawn(.{}, idleOwner, .{&state});
+    var idle_thread = try io_mod.spawn(.{}, idleOwner, .{&state});
     defer {
         state.stopping.store(true, .release);
         state.changed.set(io_mod.getIo());
@@ -502,7 +502,7 @@ fn runSupported(alloc: Allocator, config: Config) !void {
         }
         _ = state.connected_clients.fetchAdd(1, .acq_rel);
         state.noteChanged();
-        var thread = std.Thread.spawn(.{}, clientMain, .{
+        var thread = io_mod.spawn(.{}, clientMain, .{
             alloc,
             stream,
             config.process_provider,
@@ -894,7 +894,7 @@ const Connection = struct {
             self.alloc.destroy(task);
             return error.ThreadQuotaExceeded;
         }
-        var thread = std.Thread.spawn(.{}, RequestTask.run, .{task}) catch |err| {
+        var thread = io_mod.spawn(.{}, RequestTask.run, .{task}) catch |err| {
             if (task.ordered_ticket) |ticket| {
                 self.state.abandonOrderedMutation(ticket);
             }
@@ -1777,7 +1777,7 @@ test "a client that leaves during the drain window still drains" {
             target.noteChanged();
         }
     };
-    var thread = try std.Thread.spawn(.{}, Departing.run, .{&state});
+    var thread = try io_mod.spawn(.{}, Departing.run, .{&state});
     defer thread.join();
 
     try std.testing.expect(drainConnectedClients(&state, 2_000));

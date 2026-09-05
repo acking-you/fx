@@ -1,4 +1,7 @@
 const std = @import("std");
+const environment_scope = @import("environment_scope.zig");
+
+pub const spawn = environment_scope.spawn;
 const builtin = @import("builtin");
 const darwin_process_spawn = @import("darwin_process_spawn.zig");
 
@@ -55,6 +58,11 @@ var global_raw_environ: ?RawEnviron = null;
 
 pub fn setIo(zio: std.Io) void {
     real_io = process_io_for(builtin.os.tag, zio);
+}
+
+/// Installs an already platform-adapted I/O implementation at library startup.
+pub fn setEmbeddedIo(zio: std.Io) void {
+    real_io = zio;
 }
 
 fn process_io_for(comptime os_tag: std.Target.Os.Tag, zio: std.Io) std.Io {
@@ -420,6 +428,7 @@ pub fn setRawEnviron(raw: RawEnviron) void {
 }
 
 pub fn getenv(key: []const u8) ?[]const u8 {
+    if (environment_scope.current()) |environment| return environment.get(key);
     if (global_environ) |m| return m.get(key);
     const value = getenvInstalled(key);
     if (value != null) return value;
@@ -471,6 +480,7 @@ pub fn e2eFailIfDurableMutationAttempted() void {
 }
 
 pub fn environMap() ?*const std.process.Environ.Map {
+    if (environment_scope.current()) |environment| return environment;
     return global_environ;
 }
 
@@ -481,6 +491,7 @@ pub const CloneEnvironMapError = std.mem.Allocator.Error ||
 pub fn cloneEnvironMap(
     alloc: std.mem.Allocator,
 ) CloneEnvironMapError!std.process.Environ.Map {
+    if (environment_scope.current()) |environment| return environment.clone(alloc);
     if (global_environ) |map| return map.clone(alloc);
     if (global_environ_block) |block| {
         return std.process.Environ.createMap(.{ .block = block }, alloc);

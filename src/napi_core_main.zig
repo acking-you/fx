@@ -700,7 +700,7 @@ fn createRuntime(env: c.napi_env, options: c.napi_value) CreateError!*Runtime {
     runtime.catalog_context.endpoint_overrides = .{
         .responses_base_url = runtime.responses_base_url orelse provider_route.openai_base_url,
     };
-    runtime.thread = std.Thread.spawn(.{}, Runtime.run, .{runtime}) catch return error.ThreadFailed;
+    runtime.thread = io_mod.spawn(.{}, Runtime.run, .{runtime}) catch return error.ThreadFailed;
     return runtime;
 }
 

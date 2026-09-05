@@ -895,14 +895,14 @@ const Process = struct {
     }
 
     fn start(self: *Process) !void {
-        self.stdout_thread = try std.Thread.spawn(.{}, readerMain, .{ self, false });
+        self.stdout_thread = try io_mod.spawn(.{}, readerMain, .{ self, false });
         if (self.stderr != null) {
-            self.stderr_thread = std.Thread.spawn(.{}, readerMain, .{ self, true }) catch |err| {
+            self.stderr_thread = io_mod.spawn(.{}, readerMain, .{ self, true }) catch |err| {
                 self.stopAndJoin();
                 return err;
             };
         }
-        self.wait_thread = std.Thread.spawn(.{}, waitMain, .{self}) catch |err| {
+        self.wait_thread = io_mod.spawn(.{}, waitMain, .{self}) catch |err| {
             self.stopAndJoin();
             return err;
         };
@@ -1930,7 +1930,7 @@ test "blocked output sink does not hold process control or reader threads" {
         .manager = &manager,
         .capture = &capture,
     };
-    const exec_thread = try std.Thread.spawn(.{}, BlockingExecContext.run, .{&exec_context});
+    const exec_thread = try io_mod.spawn(.{}, BlockingExecContext.run, .{&exec_context});
 
     const started_deadline = io_mod.milliTimestamp() + 2_000;
     while (!capture.started.load(.acquire) and io_mod.milliTimestamp() < started_deadline) {
@@ -1943,7 +1943,7 @@ test "blocked output sink does not hold process control or reader threads" {
     }
 
     var terminate_context = TerminateContext{ .manager = &manager, .process_id = 1 };
-    const terminate_thread = std.Thread.spawn(.{}, TerminateContext.run, .{&terminate_context}) catch |err| {
+    const terminate_thread = io_mod.spawn(.{}, TerminateContext.run, .{&terminate_context}) catch |err| {
         capture.release.store(true, .release);
         exec_thread.join();
         return err;
@@ -1968,7 +1968,7 @@ test "unified exec cancellation hands off before preserving the live process" {
     defer manager.deinit();
     var cancel_flag = std.atomic.Value(bool).init(false);
     var delayed = DelayedCancel{ .flag = &cancel_flag };
-    const cancel_thread = try std.Thread.spawn(.{}, DelayedCancel.run, .{&delayed});
+    const cancel_thread = try io_mod.spawn(.{}, DelayedCancel.run, .{&delayed});
 
     const started_ms = io_mod.milliTimestamp();
     var result = try manager.exec(std.testing.allocator, .{
@@ -2000,7 +2000,7 @@ test "unified exec cancellation releases an empty poll without consuming the pro
 
     var cancel_flag = std.atomic.Value(bool).init(false);
     var delayed = DelayedCancel{ .flag = &cancel_flag };
-    const cancel_thread = try std.Thread.spawn(.{}, DelayedCancel.run, .{&delayed});
+    const cancel_thread = try io_mod.spawn(.{}, DelayedCancel.run, .{&delayed});
     const started_ms = io_mod.milliTimestamp();
     var result = try manager.writeStdin(std.testing.allocator, .{
         .process_id = process_id,
@@ -2224,7 +2224,7 @@ test "unified exec direct control stays responsive during a model poll" {
         }
     };
     var poll = Poll{ .manager = &manager, .process_id = process_id };
-    const thread = try std.Thread.spawn(.{}, Poll.run, .{&poll});
+    const thread = try io_mod.spawn(.{}, Poll.run, .{&poll});
     while (!poll.entered.load(.acquire)) io_mod.sleep(std.time.ns_per_ms);
     // Give the poller enough time to enter its bounded wait. This reproduces
     // the old global-operation-lock stall without making the assertion depend

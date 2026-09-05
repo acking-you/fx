@@ -5419,7 +5419,7 @@ test "child live authority allow to ask requires current approval before effect"
         .finished = &finished,
     };
     var joined = false;
-    const thread = try std.Thread.spawn(.{}, BlockingPromptRun.run, .{&run});
+    const thread = try io_mod.spawn(.{}, BlockingPromptRun.run, .{&run});
     defer {
         release.store(true, .seq_cst);
         if (!joined) thread.join();

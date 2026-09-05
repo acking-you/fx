@@ -10,6 +10,7 @@ const linux_self_exe = "/proc/self/exe";
 /// Returns an owned path that re-execs this process. Linux uses
 /// `/proc/self/exe` so replacing the on-disk binary does not break later spawns.
 pub fn pathForReexec(alloc: Allocator) ![]u8 {
+    if (io_mod.getenv("FX_EMBEDDED_RUNTIME") != null) return embeddedHelper(alloc);
     if (testProductExe()) |path| return alloc.dupe(u8, path);
     return productionPathForReexec(alloc);
 }
@@ -22,8 +23,15 @@ fn productionPathForReexec(alloc: Allocator) ![]u8 {
 /// Returns an owned path another process can use to launch fx. Linux prefers
 /// the on-disk path, falling back to `/proc/<pid>/exe` after replacement.
 pub fn pathForPeerReexec(alloc: Allocator) ![]u8 {
+    if (io_mod.getenv("FX_EMBEDDED_RUNTIME") != null) return embeddedHelper(alloc);
     if (testProductExe()) |path| return alloc.dupe(u8, path);
     return productionPathForPeerReexec(alloc);
+}
+
+fn embeddedHelper(alloc: Allocator) ![]u8 {
+    const path = io_mod.getenv("FX_EMBEDDED_HELPER") orelse return error.EmbeddedHelperUnavailable;
+    if (!onDiskPathIsExecutable(path)) return error.EmbeddedHelperUnavailable;
+    return alloc.dupe(u8, path);
 }
 
 fn productionPathForPeerReexec(alloc: Allocator) ![]u8 {

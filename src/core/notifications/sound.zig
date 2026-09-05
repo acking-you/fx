@@ -288,7 +288,7 @@ fn spawnSoundProcess(_: ?*anyopaque, argv: []const []const u8) std.process.Spawn
 }
 
 fn startDetachedWaiter(_: ?*anyopaque, process: Process) std.Thread.SpawnError!void {
-    const thread = try std.Thread.spawn(.{}, Process.reap, .{process});
+    const thread = try io_mod.spawn(.{}, Process.reap, .{process});
     thread.detach();
 }
 

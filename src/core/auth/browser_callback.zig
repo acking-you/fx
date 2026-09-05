@@ -635,7 +635,7 @@ test "browser callback outruns an idle preconnect held open" {
         .port = listener.socket.address.getPort(),
         .request = "GET /callback?code=granted HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
     };
-    const thread = try std.Thread.spawn(.{}, HeldPreconnectProbe.run, .{&probe});
+    const thread = try io_mod.spawn(.{}, HeldPreconnectProbe.run, .{&probe});
     defer thread.join();
     defer probe.release.store(true, .release);
     try probe.waitUntilDelivered();
@@ -664,7 +664,7 @@ test "browser callback reads request bytes arriving after accept" {
         .port = listener.socket.address.getPort(),
         .delay_ms = 50,
     };
-    const thread = try std.Thread.spawn(.{}, DelayedRequestProbe.run, .{&probe});
+    const thread = try io_mod.spawn(.{}, DelayedRequestProbe.run, .{&probe});
     defer thread.join();
 
     var cancel_flag = std.atomic.Value(bool).init(false);
@@ -687,7 +687,7 @@ test "browser callback cancels while an idle preconnect is open" {
     defer listener.deinit(io_mod.getIo());
 
     var probe = HeldPreconnectProbe{ .port = listener.socket.address.getPort() };
-    const thread = try std.Thread.spawn(.{}, HeldPreconnectProbe.run, .{&probe});
+    const thread = try io_mod.spawn(.{}, HeldPreconnectProbe.run, .{&probe});
     defer thread.join();
     defer probe.release.store(true, .release);
     try probe.waitUntilDelivered();
@@ -699,7 +699,7 @@ test "browser callback cancels while an idle preconnect is open" {
             flag.store(true, .seq_cst);
         }
     };
-    const flip = try std.Thread.spawn(.{}, Flip.run, .{&cancel_flag});
+    const flip = try io_mod.spawn(.{}, Flip.run, .{&cancel_flag});
     defer flip.join();
 
     const started_ms = io_mod.milliTimestamp();
@@ -730,7 +730,7 @@ test "browser callback survives unrelated requests before the redirect" {
         "GET /callback?code=granted HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
     };
     const probe = CallbackProbe{ .port = port, .requests = &requests };
-    const thread = try std.Thread.spawn(.{}, CallbackProbe.run, .{probe});
+    const thread = try io_mod.spawn(.{}, CallbackProbe.run, .{probe});
     defer thread.join();
 
     var cancel_flag = std.atomic.Value(bool).init(false);
@@ -758,7 +758,7 @@ fn expectResetPreconnectSurvives(hold_ms: u64) !void {
         .request = "GET /callback?code=granted HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
         .hold_ms = hold_ms,
     };
-    const thread = try std.Thread.spawn(.{}, ResetPreconnectProbe.run, .{&probe});
+    const thread = try io_mod.spawn(.{}, ResetPreconnectProbe.run, .{&probe});
     defer thread.join();
     try probe.waitUntilConnected();
 
@@ -852,7 +852,7 @@ test "browser callback permits the xAI CORS private-network preflight" {
     defer listener.deinit(io_mod.getIo());
 
     var probe = CorsCallbackProbe{ .port = listener.socket.address.getPort() };
-    const thread = try std.Thread.spawn(.{}, CorsCallbackProbe.run, .{&probe});
+    const thread = try io_mod.spawn(.{}, CorsCallbackProbe.run, .{&probe});
 
     var cancel_flag = std.atomic.Value(bool).init(false);
     var accepted = (try await(

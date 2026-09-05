@@ -51,6 +51,8 @@ pub const Config = struct {
     additional_directories: []const []const u8 = &.{},
     saved_directories_suppressed: bool = false,
     allow_native_tools: bool = true,
+    tool_set_override: ?@import("../tooling/tool_set.zig").ToolSet = null,
+    stop_flag: ?*const std.atomic.Value(bool) = null,
 };
 
 pub const RunFn = *const fn (?*anyopaque, Allocator, Config) anyerror!void;

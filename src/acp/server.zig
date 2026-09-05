@@ -16,6 +16,7 @@ const builtin_tools = @import("../builtins/tools.zig");
 const credentials = @import("../core/auth/credentials.zig");
 const gateway_session = @import("../core/auth/gateway_session.zig");
 const provider_oauth = @import("../core/auth/provider_oauth.zig");
+const provider_logout = @import("../core/auth/provider_logout.zig");
 const secret = @import("../core/auth/secret.zig");
 const auth_runtime = @import("../core/auth/auth_runtime.zig");
 const provider_activation = @import("../core/auth/provider_activation.zig");
@@ -71,6 +72,9 @@ const AcpMethod = enum {
     fx_unified_exec_write_stdin,
     fx_unified_exec_kill,
     fx_provider_switch,
+    fx_provider_status,
+    fx_provider_logout,
+    fx_provider_refresh,
     fx_provider_configure,
     fx_provider_setup_start,
     fx_provider_setup_status,
@@ -100,6 +104,9 @@ const AcpMethod = enum {
         if (std.mem.eql(u8, method, "fx/unifiedExec/writeStdin")) return .fx_unified_exec_write_stdin;
         if (std.mem.eql(u8, method, "fx/unifiedExec/kill")) return .fx_unified_exec_kill;
         if (std.mem.eql(u8, method, "fx/provider/switch")) return .fx_provider_switch;
+        if (std.mem.eql(u8, method, "fx/provider/status")) return .fx_provider_status;
+        if (std.mem.eql(u8, method, "fx/provider/logout")) return .fx_provider_logout;
+        if (std.mem.eql(u8, method, "fx/provider/refresh")) return .fx_provider_refresh;
         if (std.mem.eql(u8, method, "fx/provider/configure")) return .fx_provider_configure;
         if (std.mem.eql(u8, method, "fx/provider/setup/start")) return .fx_provider_setup_start;
         if (std.mem.eql(u8, method, "fx/provider/setup/status")) return .fx_provider_setup_status;
@@ -133,12 +140,15 @@ const AcpMethod = enum {
             .fx_provider_login_cancel,
             .fx_provider_usage,
             .fx_tool_mode_set,
+            .fx_provider_status,
             => false,
             .session_list,
             .session_remove,
             .session_prompt,
             .session_set_config_option,
             .fx_provider_switch,
+            .fx_provider_logout,
+            .fx_provider_refresh,
             .fx_provider_configure,
             .fx_provider_login_start,
             .unknown,
@@ -347,6 +357,7 @@ pub const ActivePrompt = struct {
 };
 
 pub const ServerState = struct {
+    logged_out: [3]bool = @splat(false),
     alloc: Allocator,
     cfg: Config,
     writer: jsonrpc.Writer,
@@ -389,6 +400,8 @@ pub const ServerState = struct {
     provider_job_cancel: std.atomic.Value(bool) = .init(false),
     provider_login: login_flow.SignInRuntime = .{},
     provider_login_provider: ?provider_oauth.Provider = null,
+    provider_login_terminal: ?login_flow.SignInState = null,
+    provider_login_error: ?[]const u8 = null,
     provider_setup: provider_setup.Runtime = provider_setup.Runtime.init(std.heap.c_allocator),
     subagent_store: ?session_store.Store = null,
     subagent_host: ?*subagent_tool_host.Runtime = null,
@@ -607,6 +620,7 @@ fn borrowedCredentialForProvider(
 }
 
 fn adoptServerCredential(state: *ServerState, credential: *credentials.Credential) void {
+    state.logged_out[@intFromEnum(state.provider)] = false;
     if (state.active_session) |*active| active.api_key = &.{};
     if (state.api_key.len > 0) secret.zeroAndFree(state.alloc, state.api_key);
     if (state.account_id) |account_id| state.alloc.free(account_id);
@@ -630,6 +644,7 @@ pub fn selectCredentialForProvider(
     state: *ServerState,
     provider: model_provider.ProviderId,
 ) !bool {
+    if (state.logged_out[@intFromEnum(provider)]) return false;
     if (provider == .gateway and state.gateway_binding != null) {
         var connection_credential = try cloneServerCredential(
             state.alloc,
@@ -959,6 +974,7 @@ pub fn runWithTransport(
 
     var reader = reader_value;
     while (!state.terminate_connection.load(.acquire)) {
+        if (cfg.stop_flag) |stop| if (stop.load(.acquire)) break;
         reapActivePrompt(&state, false);
         reapProviderJob(&state, false);
         const line_result = reader.readLine(alloc) catch break;
@@ -974,6 +990,7 @@ pub fn runWithTransport(
             .line => |value| value,
         };
         defer alloc.free(line);
+        if (cfg.stop_flag) |stop| if (stop.load(.acquire)) break;
         // A background provider commit can discover an indeterminate durable
         // tail while this thread is blocked in readLine. Discard the wake-up
         // frame instead of dispatching one more request on uncertain state.
@@ -1217,6 +1234,7 @@ fn dispatch(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message) !void 
         .session_load => sessions.handleLoadSession(state, alloc, msg),
         .session_resume => sessions.handleResumeSession(state, alloc, msg),
         .session_close => handleCloseSession(state, alloc, msg),
+        .session_remove => handleRemoveSession(state, alloc, msg),
         .session_list => sessions.handleListSessions(state, alloc, msg),
         .session_prompt => startPrompt(state, alloc, msg),
         .session_set_config_option => handleSetConfigOption(state, alloc, msg),
@@ -1227,6 +1245,9 @@ fn dispatch(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message) !void 
         .fx_unified_exec_write_stdin => prompt_handler.handleUnifiedExecWriteStdin(state, alloc, msg),
         .fx_unified_exec_kill => prompt_handler.handleUnifiedExecKill(state, alloc, msg),
         .fx_provider_switch => handleProviderSwitch(state, alloc, msg),
+        .fx_provider_status => handleProviderStatus(state, alloc, msg),
+        .fx_provider_logout => handleProviderMaintenance(state, alloc, msg, .logout),
+        .fx_provider_refresh => handleProviderMaintenance(state, alloc, msg, .refresh),
         .fx_provider_configure => handleProviderConfigure(state, alloc, msg),
         .fx_provider_setup_start => handleProviderSetupStart(state, alloc, msg),
         .fx_provider_setup_status => handleProviderSetupStatus(state, alloc, msg),
@@ -1238,7 +1259,6 @@ fn dispatch(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message) !void 
         .fx_tool_mode_set => handleToolModeSet(state, alloc, msg),
         .initialize,
         .session_cancel,
-        .session_remove,
         .unknown,
         => state.writer.writeError(alloc, msg.id, .{
             .code = ErrorCode.method_not_found,
@@ -1270,7 +1290,7 @@ fn startPrompt(state: *ServerState, alloc: Allocator, msg: *const jsonrpc.Messag
     } else {
         state.active_prompt = active;
         errdefer state.active_prompt = null;
-        active.thread = try std.Thread.spawn(.{}, promptWorkerMain, .{active});
+        active.thread = try io_mod.spawn(.{}, promptWorkerMain, .{active});
     }
 }
 
@@ -1618,6 +1638,68 @@ fn handleCloseSession(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Messa
     try state.writer.writeResponse(alloc, msg.id, "{}");
 }
 
+fn handleRemoveSession(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message) !void {
+    const params = try std.json.parseFromSlice(struct { sessionId: []const u8 }, alloc, msg.params_raw orelse "{}", .{ .ignore_unknown_fields = true });
+    defer params.deinit();
+    const active = if (state.active_session) |*value| value else return state.writer.writeError(alloc, msg.id, .{
+        .code = ErrorCode.invalid_request,
+        .message = "Load the session before removing it",
+    });
+    if (!std.mem.eql(u8, params.value.sessionId, active.session_id) or active.store == null or active.writable == null)
+        return state.writer.writeError(alloc, msg.id, .{ .code = ErrorCode.invalid_request, .message = "Session does not own the active writer" });
+    disableSubagentHost(state);
+    active.session_rt.usage.finishProfilePublicationsBeforeShutdown();
+    try flushActiveSessionUsage(state);
+    active.session_rt.usage.configurePublicationSink(null);
+    active.session_rt.usage.configureCheckpointSink(null);
+    var store = active.store.?;
+    defer store.deinit(alloc);
+    var writable = active.writable.?;
+    active.store = null;
+    active.writable = null;
+    destroyActiveSession(state);
+    const disposition = store.deleteCommittedSession(alloc, &writable);
+    if (disposition != .discarded) return state.writer.writeError(alloc, msg.id, .{
+        .code = ErrorCode.internal_error,
+        .message = "Session was retained because deletion could not be completed safely",
+    });
+    try state.writer.writeResponse(alloc, msg.id, "null");
+}
+
+fn handleProviderStatus(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message) !void {
+    const payload = try std.json.Stringify.valueAlloc(alloc, .{
+        .provider = @tagName(state.provider),
+        .model = state.selected_model,
+        .authenticated = state.api_key.len > 0,
+        .credentialSource = if (state.credential_source) |source| @tagName(source) else null,
+        .accountId = state.account_id,
+    }, .{});
+    defer alloc.free(payload);
+    try state.writer.writeResponse(alloc, msg.id, payload);
+}
+
+fn handleProviderMaintenance(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message, kind: ProviderJobKind) !void {
+    const params = parseProviderParams(state, alloc, msg, true) catch |err| {
+        if (err == error.ResponseWritten) return;
+        return err;
+    };
+    defer params.parsed.deinit();
+    const target = model_provider.parse(params.provider orelse "") orelse return state.writer.writeError(alloc, msg.id, .{
+        .code = ErrorCode.invalid_params,
+        .message = "provider must be gateway, codex, or grok",
+    });
+    if (kind == .refresh and target == .gateway) return state.writer.writeError(alloc, msg.id, .{
+        .code = ErrorCode.invalid_params,
+        .message = "OAuth refresh requires codex or grok",
+    });
+    if (state.provider_login.snapshot().state == .polling) return state.writer.writeError(alloc, msg.id, .{
+        .code = ErrorCode.invalid_request,
+        .message = "Cancel or complete the active login first",
+    });
+    if (!try startProviderJob(state, msg, target, kind, providerCatalogEndpoint(state, target), null, null, null))
+        return state.writer.writeError(alloc, msg.id, .{ .code = ErrorCode.invalid_request, .message = "Provider operation already in progress" });
+}
+
 fn handleProviderSwitch(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message) !void {
     const params = parseProviderParams(state, alloc, msg, true) catch |err| {
         if (err == error.ResponseWritten) return;
@@ -1870,17 +1952,33 @@ fn handleProviderLoginStart(state: *ServerState, alloc: Allocator, msg: *jsonrpc
         .message = "Provider login already in progress",
     });
     state.provider_login_provider = provider;
+    state.provider_login_terminal = null;
+    state.provider_login_error = null;
     try writeProviderLoginSnapshot(state, alloc, msg.id, state.provider_login.snapshot(), null);
 }
 
 fn handleProviderLoginStatus(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message) !void {
     switch (state.provider_login.pollTransition(alloc)) {
-        .none => try writeProviderLoginSnapshot(state, alloc, msg.id, state.provider_login.snapshot(), null),
-        .cancelled => try writeProviderLoginSnapshot(state, alloc, msg.id, .{ .state = .cancelled }, null),
-        .failed => |err| try writeProviderLoginSnapshot(state, alloc, msg.id, .{ .state = .failed }, @errorName(err)),
+        .none => {
+            const snapshot = state.provider_login.snapshot();
+            try writeProviderLoginSnapshot(state, alloc, msg.id, if (snapshot.state == .idle and state.provider_login_terminal != null)
+                .{ .state = state.provider_login_terminal.? }
+            else
+                snapshot, state.provider_login_error);
+        },
+        .cancelled => {
+            state.provider_login_terminal = .cancelled;
+            try writeProviderLoginSnapshot(state, alloc, msg.id, .{ .state = .cancelled }, null);
+        },
+        .failed => |err| {
+            state.provider_login_terminal = .failed;
+            state.provider_login_error = @errorName(err);
+            try writeProviderLoginSnapshot(state, alloc, msg.id, .{ .state = .failed }, state.provider_login_error);
+        },
         .succeeded => |completion| {
             var owned = completion;
             defer owned.deinit(alloc);
+            state.provider_login_terminal = .succeeded;
             try writeProviderLoginSnapshot(state, alloc, msg.id, .{ .state = .succeeded }, null);
         },
     }
@@ -2011,6 +2109,8 @@ fn writeProviderLoginSnapshot(
 }
 
 const ProviderJobKind = enum {
+    logout,
+    refresh,
     config_option,
     explicit_switch,
     configure_byok,
@@ -2114,7 +2214,7 @@ fn startProviderJob(
 
     state.provider_job_cancel.store(false, .seq_cst);
     state.provider_job_running.store(true, .seq_cst);
-    state.provider_job_thread = std.Thread.spawn(.{}, providerJobMain, .{job}) catch |err| {
+    state.provider_job_thread = io_mod.spawn(.{}, providerJobMain, .{job}) catch |err| {
         state.provider_job_running.store(false, .seq_cst);
         return err;
     };
@@ -2134,6 +2234,47 @@ fn providerJobMain(job: *ProviderJob) void {
         job.deinit();
         state.alloc.destroy(job);
         state.provider_job_running.store(false, .seq_cst);
+    }
+
+    if (job.kind == .logout) {
+        const outcome = provider_logout.logout(state.alloc, job.target, state.cfg.gateway_provider.oauth_transport);
+        if (outcome == .failed) {
+            state.writer.writeError(state.alloc, job.msg.id, .{ .code = ErrorCode.internal_error, .message = "Provider logout failed" }) catch {};
+            return;
+        }
+        state.logged_out[@intFromEnum(job.target)] = true;
+        if (job.target == .gateway) {
+            state.gateway_binding_mutex.lockUncancelable(io_mod.getIo());
+            if (state.gateway_binding) |*binding| binding.deinit(state.alloc);
+            state.gateway_binding = null;
+            state.gateway_binding_mutex.unlock(io_mod.getIo());
+        }
+        if (state.provider == job.target) {
+            if (state.active_session) |*active| {
+                active.api_key = &.{};
+                active.credential_source = null;
+                active.account_id = null;
+            }
+            if (state.api_key.len > 0) secret.zeroAndFree(state.alloc, state.api_key);
+            if (state.account_id) |account_id| state.alloc.free(account_id);
+            state.api_key = &.{};
+            state.credential_source = null;
+            state.account_id = null;
+        }
+        state.writer.writeResponse(state.alloc, job.msg.id, "{\"loggedOut\":true}") catch {};
+        return;
+    }
+    if (job.kind == .refresh) {
+        const provider: provider_oauth.Provider = if (job.target == .codex) .codex else .grok;
+        var access = (provider_oauth.loadAccess(provider, state.alloc, state.cfg.gateway_provider.oauth_transport, .force) catch null) orelse {
+            state.writer.writeError(state.alloc, job.msg.id, .{ .code = ErrorCode.invalid_request, .message = "Provider credential refresh failed" }) catch {};
+            return;
+        };
+        defer access.deinit(state.alloc);
+        job.credential_override = cloneServerCredential(state.alloc, .{ .token = access.access_token, .source = provider.source(), .account_id = access.account_id }) catch {
+            state.writer.writeError(state.alloc, job.msg.id, .{ .code = ErrorCode.internal_error, .message = "Credential allocation failed" }) catch {};
+            return;
+        };
     }
 
     const catalog_provider = catalogProviderFor(state, job.target) orelse {
@@ -2252,7 +2393,8 @@ fn providerJobMain(job: *ProviderJob) void {
 
     switch (job.kind) {
         .config_option => writeConfigOptionsResponse(state, state.alloc, job.msg.id) catch {},
-        .explicit_switch, .configure_byok => writeProviderOperationResponse(job, selected_model) catch {},
+        .explicit_switch, .configure_byok, .refresh => writeProviderOperationResponse(job, selected_model) catch {},
+        .logout => unreachable,
     }
 }
 
@@ -3516,7 +3658,7 @@ test "ACP model commits honor the active session write boundary" {
         .active = &active,
     };
     active.session_write_mutex.lockUncancelable(io_mod.getIo());
-    const thread = try std.Thread.spawn(.{}, Worker.run, .{&worker});
+    const thread = try io_mod.spawn(.{}, Worker.run, .{&worker});
     while (!worker.started.load(.seq_cst)) std.Thread.yield() catch {};
     for (0..100) |_| std.Thread.yield() catch {};
     const blocked_at_boundary = !worker.done.load(.seq_cst);

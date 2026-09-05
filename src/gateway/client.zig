@@ -2281,7 +2281,7 @@ fn spawn_gateway_cancel_watcher(
     if (builtin.is_test) {
         if (test_cancel_watcher_spawn_error) |err| return err;
     }
-    return std.Thread.spawn(.{}, GatewayCancelWatcher.run, .{
+    return io_mod.spawn(.{}, GatewayCancelWatcher.run, .{
         done,
         cancel_flag,
         system_resumed,
@@ -2561,7 +2561,7 @@ const LoopbackGatewayFixture = struct {
 
     fn start(self: *@This()) !void {
         std.debug.assert(self.thread == null);
-        self.thread = try std.Thread.spawn(.{}, run, .{self});
+        self.thread = try io_mod.spawn(.{}, run, .{self});
     }
 
     fn deinit(self: *@This()) void {
@@ -2937,7 +2937,7 @@ test "direct gateway request-open cancellation interrupts real TLS setup" {
             if (!done.load(.seq_cst)) flag.store(true, .seq_cst);
         }
     };
-    const cancel_thread = try std.Thread.spawn(.{}, Cancel.run, .{
+    const cancel_thread = try io_mod.spawn(.{}, Cancel.run, .{
         &harness.fixture,
         &cancel_flag,
         &request_done,
@@ -3564,7 +3564,7 @@ fn expectCancellableGatewayJsonCancellation(
             if (!done.load(.seq_cst)) flag.store(true, .seq_cst);
         }
     };
-    const cancel_thread = try std.Thread.spawn(.{}, Cancel.run, .{
+    const cancel_thread = try io_mod.spawn(.{}, Cancel.run, .{
         &fixture,
         &cancel_flag,
         &request_done,
@@ -3750,7 +3750,7 @@ fn expectBoundedLoopbackCancellation(
             flag.store(true, .seq_cst);
         }
     };
-    const cancel_thread = try std.Thread.spawn(
+    const cancel_thread = try io_mod.spawn(
         .{},
         Cancel.run,
         .{ &fixture, &cancel_flag, &request_done, cancel_after_stage_ms },
@@ -3866,7 +3866,7 @@ test "bounded stream deadline does not depend on async capacity" {
             flag.store(true, .seq_cst);
         }
     };
-    const watchdog = try std.Thread.spawn(.{}, Watchdog.run, .{ &cancel_flag, &done });
+    const watchdog = try io_mod.spawn(.{}, Watchdog.run, .{ &cancel_flag, &done });
     defer {
         done.store(true, .seq_cst);
         watchdog.join();
@@ -3925,7 +3925,7 @@ test "bounded stream cancellation cancels and joins every blocked request stage"
 
     inline for (std.meta.tags(BoundedProbeStage)) |stage| {
         var cancel_flag = std.atomic.Value(bool).init(false);
-        const thread = try std.Thread.spawn(.{}, Flip.run, .{&cancel_flag});
+        const thread = try io_mod.spawn(.{}, Flip.run, .{&cancel_flag});
 
         var probe = BoundedProbe{
             .alloc = std.testing.allocator,
@@ -4141,7 +4141,7 @@ fn expectDirectLoopbackCancellation(
             if (!done.load(.seq_cst)) flag.store(true, .seq_cst);
         }
     };
-    const cancel_thread = try std.Thread.spawn(.{}, Cancel.run, .{
+    const cancel_thread = try io_mod.spawn(.{}, Cancel.run, .{
         &fixture,
         &cancel_flag,
         &request_done,

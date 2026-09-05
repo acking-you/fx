@@ -503,12 +503,12 @@ pub fn runLauncher(alloc: Allocator) !void {
         .child_pid = child_pid,
         .watchdog = &watchdog,
     };
-    var control_thread = try std.Thread.spawn(
+    var control_thread = try io_mod.spawn(
         .{},
         LauncherControl.run,
         .{&control},
     );
-    var watchdog_thread = std.Thread.spawn(
+    var watchdog_thread = io_mod.spawn(
         .{},
         LauncherWatchdog.run,
         .{&watchdog},
@@ -1811,7 +1811,7 @@ const MonitorOwner = struct {
         if (monitorInstallFailure("timer")) return error.InjectedFailure;
         self.ready.reset();
         self.stopping.store(false, .release);
-        self.thread = std.Thread.spawn(.{}, monitorMain, .{self}) catch |err| {
+        self.thread = io_mod.spawn(.{}, monitorMain, .{self}) catch |err| {
             return err;
         };
         self.ready.waitUncancelable(io_mod.getIo());
@@ -3548,7 +3548,7 @@ const Session = struct {
         self.tmux_capture = capture;
         capture_owned = false;
         self.output_active.store(true, .release);
-        self.output_thread = std.Thread.spawn(.{}, outputMain, .{self}) catch |err| {
+        self.output_thread = io_mod.spawn(.{}, outputMain, .{self}) catch |err| {
             self.output_active.store(false, .release);
             self.tmux_capture.?.close(io_mod.getIo());
             self.tmux_capture = null;
@@ -3558,7 +3558,7 @@ const Session = struct {
             return err;
         };
         self.backend_started = true;
-        self.control_thread = std.Thread.spawn(.{}, tmuxControlMain, .{self}) catch |err| {
+        self.control_thread = io_mod.spawn(.{}, tmuxControlMain, .{self}) catch |err| {
             self.backend_started = false;
             self.tmux_backend.?.stopCapture();
             self.tmux_capture.?.close(io_mod.getIo());
@@ -3704,7 +3704,7 @@ const Session = struct {
         self.tmux_capture = stream;
         if (tmuxRecoveryFailure(self.id, "accept-capture")) return error.InjectedFailure;
         self.output_active.store(true, .release);
-        self.output_thread = std.Thread.spawn(.{}, outputMain, .{self}) catch |err| {
+        self.output_thread = io_mod.spawn(.{}, outputMain, .{self}) catch |err| {
             self.output_active.store(false, .release);
             return err;
         };
@@ -3718,7 +3718,7 @@ const Session = struct {
             if (tmuxRecoveryFailure(self.id, "release")) return error.InjectedFailure;
         }
         if (tmuxRecoveryFailure(self.id, "control-thread")) return error.InjectedFailure;
-        self.control_thread = try std.Thread.spawn(.{}, tmuxControlMain, .{self});
+        self.control_thread = try io_mod.spawn(.{}, tmuxControlMain, .{self});
         self.backend_started = true;
         return true;
     }
@@ -3917,12 +3917,12 @@ const Session = struct {
         self.control_file = control;
         control_open = false;
         self.output_active.store(true, .release);
-        self.output_thread = std.Thread.spawn(.{}, outputMain, .{self}) catch |err| {
+        self.output_thread = io_mod.spawn(.{}, outputMain, .{self}) catch |err| {
             self.output_active.store(false, .release);
             return err;
         };
         self.backend_started = true;
-        self.control_thread = std.Thread.spawn(.{}, controlMain, .{self}) catch |err| {
+        self.control_thread = io_mod.spawn(.{}, controlMain, .{self}) catch |err| {
             self.backend_started = false;
             closeFd(self.master_fd.?);
             self.master_fd = null;
