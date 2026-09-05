@@ -1375,7 +1375,16 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
     const sessions = join(root!, "home", ".fx", "sessions");
     const ids = readdirSync(sessions).filter(id => existsSync(join(sessions, id, "events.jsonl")));
     expect(ids).toHaveLength(1);
-    expect(readFileSync(join(sessions, ids[0], "events.jsonl"), "utf8")).toContain("Stopped after repeated inspections");
+    await waitForCondition(() => {
+      const saved = execFileSync(FX_BIN, ["session", "--id", ids[0], "--json"], {
+        cwd: join(root!, "workspace"),
+        env: { ...process.env, HOME: join(root!, "home") },
+        encoding: "utf8",
+        maxBuffer: 4 * 1024 * 1024,
+        timeout: TIMEOUT,
+      });
+      return saved.includes("Stopped after repeated inspections");
+    }, "persisted inspection-loop stop");
     await session!.sendText("Use the collected results and finish now.");
     await session!.waitForText("USEFUL_FOLLOW_UP_COMPLETED", TIMEOUT);
     expect(queuedGateway.requests).toHaveLength(129);
