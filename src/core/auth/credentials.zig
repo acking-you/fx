@@ -234,7 +234,14 @@ pub fn resolvePreferring(
         debug_trace.logf("auth", "preferred source unavailable source={t}; using precedence", .{source});
     }
 
-    if (try loadSource(alloc, transport, secret_store, .openai_api_key)) |credential| return .{ .credential = credential };
+    const gateway = loadSource(alloc, transport, secret_store, .openai_api_key) catch |err| {
+        if (err == error.OutOfMemory) return err;
+        // Discovery must leave the app usable when the profile cannot be read.
+        // Do not fall back to an environment key after a stored-binding error.
+        debug_trace.logf("auth", "Gateway credential discovery failed err={s}", .{@errorName(err)});
+        return .{};
+    };
+    if (gateway) |credential| return .{ .credential = credential };
     return .{};
 }
 
@@ -558,4 +565,24 @@ test "BYOK credential resolution loads persisted Gateway API key" {
     try std.testing.expectEqualStrings("persisted-key", startup.token);
     try std.testing.expectEqual(Source.openai_api_key, startup.source);
     try std.testing.expect(try sourceExists(alloc, host.unavailable_secret_store, .openai_api_key));
+}
+
+test "unreadable Gateway profile leaves discovery unauthenticated without environment fallback" {
+    const alloc = std.testing.allocator;
+    gateway_session.resetProcessBindingForTests();
+    defer gateway_session.resetProcessBindingForTests();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var profile = try tmp.dir.createFile(std.testing.io, ".fx", .{});
+    profile.close(std.testing.io);
+    const home = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
+    defer alloc.free(home);
+    const env = try CredentialTestEnv.install(alloc, &.{
+        .{ "HOME", home },
+        .{ "OPENAI_API_KEY", "unrelated-environment-key" },
+    });
+    defer env.deinit();
+
+    const resolution = try resolve(alloc, oauth_transport.unavailable_provider, host.unavailable_secret_store, .refresh_if_needed);
+    try std.testing.expect(resolution.credential == null);
 }
