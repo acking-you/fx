@@ -278,6 +278,45 @@ pub const Result = union(enum) {
     completed: Completed,
     failed: Failure,
 
+    /// Returns a caller-owned copy, independent of the provider request arena.
+    pub fn dupe(self: Result, alloc: Allocator) !Result {
+        switch (self) {
+            .failed => |failure| return .{ .failed = .{
+                .kind = failure.kind,
+                .detail = if (failure.detail) |detail| try alloc.dupe(u8, detail) else null,
+                .retry_after_seconds = failure.retry_after_seconds,
+                .ownership = .owned,
+            } },
+            .completed => |completed| {
+                var copy = Result{ .completed = completed };
+                copy.completed.ownership = .owned;
+                const dst = &copy.completed.completion;
+                const src = completed.completion;
+                const strings = .{ "content", "reasoning", "reasoning_signature", "reasoning_item_id", "reasoning_encrypted_content", "generation_id", "provider_failure_detail", "provider_state_json" };
+                inline for (strings) |field| @field(dst, field) = null;
+                dst.reasoning_items = &.{};
+                dst.responses_provider_output_items = &.{};
+                dst.url_citations = &.{};
+                dst.tool_calls = &.{};
+                dst.billing = null;
+                errdefer copy.deinit(alloc);
+                inline for (strings) |field| {
+                    if (@field(src, field)) |value| @field(dst, field) = try alloc.dupe(u8, value);
+                }
+                dst.reasoning_items = try types.dupeResponsesReasoningItems(alloc, src.reasoning_items);
+                dst.responses_provider_output_items = try types.dupeResponsesProviderOutputItems(alloc, src.responses_provider_output_items);
+                dst.url_citations = try types.dupeResponsesUrlCitations(alloc, src.url_citations);
+                dst.tool_calls = try types.dupeToolCallSlice(alloc, src.tool_calls);
+                if (src.billing) |billing| {
+                    var owned = billing;
+                    owned.model = try alloc.dupe(u8, billing.model);
+                    dst.billing = owned;
+                }
+                return copy;
+            },
+        }
+    }
+
     /// Providers mark allocated response fields as `owned`; test and embedded
     /// providers may return stable borrowed fields instead.
     pub fn deinit(self: *Result, alloc: Allocator) void {
@@ -453,5 +492,10 @@ test "owned stream result releases every Responses completion field" {
         },
         .ownership = .owned,
     } };
+    var copied = try result.dupe(alloc);
+    defer copied.deinit(alloc);
     result.deinit(alloc);
+    try std.testing.expectEqualStrings("answer", copied.completed.completion.content.?);
+    try std.testing.expectEqualStrings("summary", copied.completed.completion.reasoning_items[0].summary.?);
+    try std.testing.expectEqualStrings("https://example.com", copied.completed.completion.url_citations[0].url);
 }

@@ -53,6 +53,7 @@ const runtime_interruption = @import("interruption.zig");
 const runtime_parallel_execution = @import("parallel_execution.zig");
 const runtime_tool_batch = @import("tool_batch.zig");
 const model_response_recovery = @import("model_response_recovery.zig");
+const progress_guard = @import("progress_guard.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -1332,7 +1333,7 @@ noinline fn recoveryCheckpointAssistantSource(
 
 fn persistRecoveryCheckpoint(
     deps: *const AgentRuntimeDeps,
-    arena: Allocator,
+    _: Allocator,
     job: QueuedPrompt,
     current_turn_messages: []const ChatMessage,
     assistant_source: []const u8,
@@ -1348,6 +1349,11 @@ fn persistRecoveryCheckpoint(
     trace_ctx: TraceContext,
 ) !void {
     const effect = deps.recovery_checkpoint orelse return;
+    // The sink synchronously copies the checkpoint. A turn arena would retain
+    // every full-history reconstruction until the entire user turn finishes.
+    var scratch = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+    defer scratch.deinit();
+    const arena = scratch.allocator();
     var execution = try runtime_execution_memory.buildExecutionMemory(
         arena,
         current_turn_messages,
@@ -1396,6 +1402,53 @@ fn persistRecoveryCheckpoint(
 
 fn streamSucceeded(result: runtime_gateway_step.StreamResult) bool {
     return std.meta.activeTag(result) == .completed;
+}
+
+test "recovery checkpoints do not accumulate temporary history copies in the turn arena" {
+    const support = @import("tests/support.zig");
+    const Sink = struct {
+        checkpoint: ?session_codec.RecoveryCheckpoint = null,
+        fail: bool = false,
+
+        fn set(raw: *anyopaque, checkpoint: session_codec.RecoveryCheckpoint) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (self.fail) return error.CheckpointWriteFailed;
+            const next = try checkpoint.dupe(std.testing.allocator);
+            if (self.checkpoint) |*old| old.deinit(std.testing.allocator);
+            self.checkpoint = next;
+        }
+    };
+    var sink: Sink = .{};
+    defer if (sink.checkpoint) |*checkpoint| checkpoint.deinit(std.testing.allocator);
+    var fake = support.FakeAgentRuntimeDeps.init(std.testing.allocator);
+    defer fake.deinit();
+    var deps = fake.deps();
+    deps.ctx = &sink;
+    deps.recovery_checkpoint = .{ .set = Sink.set };
+    var fixture: support.PromptFixture = .{};
+    var turn = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer turn.deinit();
+    const alloc = turn.allocator();
+    var messages: std.ArrayList(ChatMessage) = .empty;
+    for (0..1000) |step_index| {
+        const id = try std.fmt.allocPrint(alloc, "read_{d}", .{step_index});
+        const calls = try alloc.alloc(ToolCall, 1);
+        calls[0] = .{ .id = id, .name = "read_file", .arguments_json = "{\"path\":\"evidence.txt\"}" };
+        try messages.appendSlice(alloc, &.{
+            .{ .role = .assistant, .tool_calls = calls },
+            .{ .role = .tool, .tool_call_id = id, .tool_name = "read_file", .tool_result_status = .success, .content = "current evidence" ** 16 },
+        });
+        const retained_bytes = turn.queryCapacity();
+        try persistRecoveryCheckpoint(&deps, alloc, fixture.job(), messages.items, "partial", "model", false, false, 10, 1, false, .transport_interrupted, .retry_request, .confirmed, .{});
+        try std.testing.expectEqual(retained_bytes, turn.queryCapacity());
+        try std.testing.expectEqual(step_index + 1, sink.checkpoint.?.execution.tool_steps.len);
+        try std.testing.expectEqualStrings(id, sink.checkpoint.?.execution.tool_steps[step_index].tool_calls[0].id);
+    }
+    sink.fail = true;
+    const retained_bytes = turn.queryCapacity();
+    try std.testing.expectError(error.CheckpointWriteFailed, persistRecoveryCheckpoint(&deps, alloc, fixture.job(), messages.items, "cancelled", "model", false, false, 10, 1, false, .transport_interrupted, .pause, .confirmed, .{}));
+    try std.testing.expectEqual(retained_bytes, turn.queryCapacity());
+    try std.testing.expectEqual(@as(usize, 1000), sink.checkpoint.?.execution.tool_steps.len);
 }
 
 fn streamFailure(result: runtime_gateway_step.StreamResult) ?agent_stream_provider.Failure {
@@ -2689,10 +2742,11 @@ fn processQueuedPromptLoop(
     else
         false;
     var inline_compaction: ?runtime_compaction.Result = null;
-    defer if (inline_compaction) |*result| result.deinit(arena);
+    defer if (inline_compaction) |*result| result.deinit(std.heap.c_allocator);
     var inline_compaction_suffix_start: usize = 0;
     var inline_auto_compaction_pending = false;
     var context_overflow_recovery_used = false;
+    var progress: progress_guard.Guard = .{};
     var step: usize = 0;
     while (agent_steps.allowsStep(config.agent_step_limit, step)) : (step += 1) {
         current_step_index = step + 1;
@@ -2731,6 +2785,8 @@ fn processQueuedPromptLoop(
             &within_turn_suffix,
             null,
         );
+        if (applied_steer_count > 0) progress.reset();
+        const step_messages_start = within_turn_suffix.items.len;
         _ = overlay_arena_state.reset(.retain_capacity);
         const overlay_arena = overlay_arena_state.allocator();
         var ephemeral_overlay: std.ArrayList(ChatMessage) = .empty;
@@ -3041,7 +3097,7 @@ fn processQueuedPromptLoop(
                     },
                 );
                 defer compaction_tools.deinit(overlay_arena);
-                const compacted = try runtime_compaction.compact(arena, .{
+                const compacted = try runtime_compaction.compact(std.heap.c_allocator, .{
                     .remote_provider = deps.responses_compaction_provider,
                     .local_provider = deps.agent_stream_provider,
                     .credential_source = job.credential_source,
@@ -3066,7 +3122,7 @@ fn processQueuedPromptLoop(
                     .usage_allocator = deps.usage_allocator,
                     .cancel_flag = config.cancel_flag,
                 });
-                if (inline_compaction) |*previous| previous.deinit(arena);
+                if (inline_compaction) |*previous| previous.deinit(std.heap.c_allocator);
                 const used_remote = compacted.strategy == .remote;
                 inline_compaction = compacted;
                 inline_compaction_suffix_start = within_turn_suffix.items.len;
@@ -7015,6 +7071,28 @@ fn processQueuedPromptLoop(
             &step_batch,
         );
         post_tool_decision_pending = true;
+        switch (try progress.observeBatch(overlay_arena, within_turn_suffix.items[step_messages_start..])) {
+            .proceed => {},
+            .remind => {
+                try deps.push_system_notice(deps.ctx, progress_guard.warning);
+                try within_turn_suffix.append(arena, .{ .role = .system, .content = progress_guard.warning });
+            },
+            .stop => {
+                try finishFailedTurnWithNotice(
+                    deps,
+                    finalization,
+                    arena,
+                    job,
+                    within_turn_suffix.items,
+                    &summary_accumulator,
+                    stop_state,
+                    &finish_trace,
+                    progress_guard.stopped,
+                    "unchanged_inspection_loop",
+                );
+                return;
+            },
+        }
         if (config.exec_mode == .claude and last_yielded_command != null) {
             const notice = "Command continues in the background. This turn is released; completion will start a separate continuation.";
             try deps.push_system_notice(deps.ctx, notice);

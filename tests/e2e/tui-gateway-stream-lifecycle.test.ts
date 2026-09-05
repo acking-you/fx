@@ -1355,6 +1355,34 @@ async function launchRouteRecoveryTui(
 }
 
 describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
+  test("repeated inspections stop with saved history and allow a useful follow-up", async () => {
+    const responses = Array.from({ length: 128 }, (_, step) => fakeGatewaySse([
+      ...responseFunctionCall(`read_${step}`, "read_file", { path: "evidence.txt" }),
+      ...responseFunctionCall(`glob_${step}`, "glob_files", { pattern: "*.txt" }, 1),
+      responseCompleted(3, 5),
+    ]));
+    const { queuedGateway, stderrPath } = await launchRouteRecoveryTui(
+      "fx-tui-inspection-loop-",
+      [...responses, fakeGatewayFinalText("USEFUL_FOLLOW_UP_COMPLETED")],
+      { settings: { max_agent_steps: 0 } },
+    );
+    writeFileSync(join(root!, "workspace", "evidence.txt"), "unchanged evidence\n");
+    await session!.sendText("Inspect this workspace and finish the task.");
+    await session!.waitForText("Repeated inspections are returning the same evidence", 90_000);
+    await session!.waitForText("Stopped after repeated inspections", 90_000);
+    await session!.waitForComposer(TIMEOUT);
+    expect(queuedGateway.requests).toHaveLength(128);
+    const sessions = join(root!, "home", ".fx", "sessions");
+    const ids = readdirSync(sessions).filter(id => existsSync(join(sessions, id, "events.jsonl")));
+    expect(ids).toHaveLength(1);
+    expect(readFileSync(join(sessions, ids[0], "events.jsonl"), "utf8")).toContain("Stopped after repeated inspections");
+    await session!.sendText("Use the collected results and finish now.");
+    await session!.waitForText("USEFUL_FOLLOW_UP_COMPLETED", TIMEOUT);
+    expect(queuedGateway.requests).toHaveLength(129);
+    expect(session!.isAlive()).toBe(true);
+    expect(readFileSync(stderrPath, "utf8")).toBe("");
+  }, 180_000);
+
   test(
     "live token counter includes submitted input, reasoning, and streamed text",
     async () => {

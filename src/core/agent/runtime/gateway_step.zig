@@ -63,14 +63,19 @@ pub fn streamModelCompletion(
     };
     var request = request_value;
     request.admission = .{ .context = &admission, .admit_fn = InvocationAdmission.admit };
-    var result = provider.stream(alloc, request) catch |err| {
+    // Request serialization, HTTP buffers and response parsing die together on
+    // success, cancellation and error. Only the completion escapes to the turn.
+    var scratch = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+    defer scratch.deinit();
+    const request_alloc = scratch.allocator();
+    var result = provider.stream(request_alloc, request) catch |err| {
         runtime_telemetry.recordGatewayCallMetric(request.model, started_at_ms, 0, 0, 0, 0, request.trace_ctx.turn_id, request.trace_ctx.step_id, request.trace_ctx.subagent_id, @errorName(err), "");
         if (admission.observation) |observation| try observation.fail(
             if (request.delivery.load() == .possibly_sent) .ambiguous_delivery else .unbilled,
         );
         return err;
     };
-    errdefer result.deinit(alloc);
+    defer result.deinit(request_alloc);
     const observation = admission.observation orelse
         return agent_stream_provider.failResult(error.ProviderAdmissionMissing);
 
@@ -84,7 +89,10 @@ pub fn streamModelCompletion(
             completed.usage,
         ),
     }
-    return result;
+    return switch (result) {
+        .completed => |value| if (value.ownership == .borrowed) result else try result.dupe(alloc),
+        .failed => |value| if (value.ownership == .borrowed) result else try result.dupe(alloc),
+    };
 }
 
 fn recordProviderResultMetric(
@@ -129,6 +137,67 @@ fn recordProviderResultMetric(
         "",
         terminal_stop_reason,
     );
+}
+
+test "gateway request scratch is released across success failure cancellation and retries" {
+    const Fake = struct {
+        mode: usize = 0,
+
+        fn stream(raw: ?*anyopaque, alloc: Allocator, request: agent_stream_provider.ModelRequest) !StreamResult {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            try request.admission.admit();
+            const payload = try alloc.alloc(u8, 64 * 1024);
+            defer alloc.free(payload);
+            @memset(payload, 'x');
+            const content = try alloc.dupe(u8, "owned response");
+            if (self.mode == 1 or self.mode == 2) {
+                defer alloc.free(content);
+                return if (self.mode == 1) error.ConnectionResetByPeer else error.Cancelled;
+            }
+            if (self.mode == 3) return .{ .failed = .{ .kind = .server_error, .detail = content, .ownership = .owned } };
+            return .{ .completed = .{ .completion = .{ .content = content }, .ownership = .owned } };
+        }
+
+        fn emit(_: *anyopaque, _: agent_stream_provider.Event) void {}
+    };
+    var turn = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer turn.deinit();
+    var fake: Fake = .{};
+    var cancel: std.atomic.Value(bool) = .init(false);
+    for (0..1000) |attempt| {
+        fake.mode = attempt % 4;
+        var delivery = DeliveryCertainty.init();
+        var evidence: AttemptEvidence = .{};
+        const result = streamModelCompletion(.{ .context = &fake, .stream_fn = Fake.stream }, turn.allocator(), .{
+            .credential = .{ .secret = "fixture-key" },
+            .model = "fixture-model",
+            .retry_count = 1,
+            .messages = &.{},
+            .tool_choice = .auto,
+            .provider_options = .{},
+            .trace_ctx = .{},
+            .content_capture_limit = null,
+            .delivery = &delivery,
+            .attempt_evidence = &evidence,
+            .events = .{ .context = &fake, .emit_fn = Fake.emit },
+            .cancel_flag = &cancel,
+            .provider_attempt_owner = .agent,
+        }, null, std.testing.allocator);
+        if (fake.mode == 1) {
+            try std.testing.expectError(error.ConnectionResetByPeer, result);
+        } else if (fake.mode == 2) {
+            try std.testing.expectError(error.Cancelled, result);
+        } else {
+            var owned = try result;
+            defer owned.deinit(turn.allocator());
+            const content = switch (owned) {
+                .completed => |completed| completed.completion.content.?,
+                .failed => |failure| failure.detail.?,
+            };
+            try std.testing.expectEqualStrings("owned response", content);
+        }
+        try std.testing.expect(turn.queryCapacity() < 128 * 1024);
+    }
 }
 
 fn failureMetricCode(kind: agent_stream_provider.FailureKind) u16 {
