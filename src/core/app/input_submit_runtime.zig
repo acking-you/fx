@@ -1188,6 +1188,14 @@ pub fn SubmitRuntime(comptime App: type) type {
             max_prompt_history: usize,
             command: []const u8,
         ) void {
+            // Provider configuration includes a secret even if validation fails.
+            var tokens = std.mem.tokenizeAny(u8, command, " \t\r\n");
+            if (tokens.next()) |name| {
+                if (std.mem.eql(u8, name, "/provider")) {
+                    _ = tokens.next();
+                    if (tokens.next() != null) return;
+                }
+            }
             recordComposerHistory(
                 app,
                 max_prompt_history,

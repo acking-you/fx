@@ -108,8 +108,8 @@ pub const top_level_specs = [_]TopLevelSpec{
     .{
         .kind = .logout,
         .token = "logout",
-        .usage = "logout <codex|grok>",
-        .summary = "Sign out of a Codex or Grok session",
+        .usage = "logout <codex|grok|gateway>",
+        .summary = "Remove a saved provider login or Gateway binding",
     },
     .{
         .kind = .status,
@@ -144,7 +144,7 @@ pub const top_level_specs = [_]TopLevelSpec{
     .{
         .kind = .provider,
         .token = "provider",
-        .usage = "provider <gateway|codex|grok>",
+        .usage = "provider <gateway|codex|grok> [base-url api-key]",
         .summary = "Choose the model provider used by fx",
     },
     .{
@@ -383,8 +383,8 @@ pub const slash_specs = [_]SlashSpec{
     .{ .kind = .rename_session, .command = "/rename", .help_entry = "/rename <title>", .completion_description = "rename the current session", .presentation_category = .session, .has_args = true, .accepts_payload = true },
     .{ .kind = .setup, .command = "/setup", .help_entry = "/setup", .completion_description = "import existing provider logins", .presentation_category = .account, .show_in_welcome = true },
     .{ .kind = .login, .command = "/login", .help_entry = "/login", .completion_description = "choose a provider sign-in", .presentation_category = .account },
-    .{ .kind = .provider, .command = "/provider", .help_entry = "/provider [gateway|codex|grok]", .completion_description = "show or switch the active provider", .presentation_category = .account, .has_args = true, .accepts_payload = true },
-    .{ .kind = .logout, .command = "/logout", .help_entry = "/logout <codex|grok>", .completion_description = "sign out of a provider session", .presentation_category = .account, .has_args = true, .accepts_payload = true },
+    .{ .kind = .provider, .command = "/provider", .help_entry = "/provider [gateway|codex|grok] [base-url api-key]", .completion_description = "show or switch the active provider", .presentation_category = .account, .has_args = true, .accepts_payload = true },
+    .{ .kind = .logout, .command = "/logout", .help_entry = "/logout <codex|grok|gateway>", .completion_description = "sign out of a provider session", .presentation_category = .account, .has_args = true, .accepts_payload = true },
     .{ .kind = .stats, .command = "/stats", .help_entry = "/stats", .completion_description = "show token and turn statistics", .presentation_category = .account },
     .{ .kind = .usage, .command = "/usage", .aliases = &.{"/cost"}, .help_entry = "/usage (/cost)", .completion_description = "show local fx tokens, models, and spend", .presentation_category = .account },
     .{ .kind = .status, .command = "/status", .help_entry = "/status", .completion_description = "show runtime configuration", .presentation_category = .general, .show_in_welcome = true },

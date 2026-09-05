@@ -32,6 +32,8 @@ const TransportPublicationOutcome = tool_contracts.TransportPublicationOutcome;
 pub const LiveToolAuthority = tool_contracts.LiveToolAuthority;
 
 pub const RecoveryCheckpointEffect = struct {
+    /// Borrows checkpoint only until return, including on failure. A sink that
+    /// retains it must synchronously duplicate it with its own allocator.
     set: *const fn (ctx: *anyopaque, checkpoint: session_codec.RecoveryCheckpoint) anyerror!void,
 };
 

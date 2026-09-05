@@ -1,6 +1,7 @@
 const std = @import("std");
 const provider_oauth = @import("provider_oauth.zig");
 const chatgpt_session = @import("chatgpt_session.zig");
+const gateway_session = @import("gateway_session.zig");
 const grok_session = @import("grok_session.zig");
 const debug_trace = @import("../shared/debug_trace.zig");
 const host = @import("../hosts/host.zig");
@@ -233,7 +234,14 @@ pub fn resolvePreferring(
         debug_trace.logf("auth", "preferred source unavailable source={t}; using precedence", .{source});
     }
 
-    if (try loadSource(alloc, transport, secret_store, .openai_api_key)) |credential| return .{ .credential = credential };
+    const gateway = loadSource(alloc, transport, secret_store, .openai_api_key) catch |err| {
+        if (err == error.OutOfMemory) return err;
+        // Discovery must leave the app usable when the profile cannot be read.
+        // Do not fall back to an environment key after a stored-binding error.
+        debug_trace.logf("auth", "Gateway credential discovery failed err={s}", .{@errorName(err)});
+        return .{};
+    };
+    if (gateway) |credential| return .{ .credential = credential };
     return .{};
 }
 
@@ -267,7 +275,7 @@ pub fn loadSource(
     source: Source,
 ) !?Credential {
     return switch (source) {
-        .openai_api_key => loadEnvCredential(alloc, "OPENAI_API_KEY", source),
+        .openai_api_key => loadGatewayCredential(alloc, source),
         .chatgpt_subscription => loadChatGptCredential(alloc, transport, .if_needed),
         .grok_subscription => loadGrokCredential(alloc, transport, .if_needed),
     };
@@ -279,7 +287,7 @@ pub fn sourceExists(
     source: Source,
 ) !bool {
     return switch (source) {
-        .openai_api_key => nonEmptyEnvValue("OPENAI_API_KEY") != null,
+        .openai_api_key => gateway_session.hasStoredBinding() or nonEmptyEnvValue("OPENAI_API_KEY") != null,
         .chatgpt_subscription => provider_oauth.sourceExists(.codex, alloc),
         .grok_subscription => provider_oauth.sourceExists(.grok, alloc),
     };
@@ -290,13 +298,23 @@ pub fn sourcePresence(
     source: Source,
 ) host.SecretStorePresence {
     return switch (source) {
-        .openai_api_key => if (nonEmptyEnvValue("OPENAI_API_KEY") != null)
+        .openai_api_key => if (gateway_session.hasStoredBinding() or nonEmptyEnvValue("OPENAI_API_KEY") != null)
             .present
         else
             .missing,
         .chatgpt_subscription => chatgpt_session.presence(),
         .grok_subscription => grok_session.presence(),
     };
+}
+
+fn loadGatewayCredential(alloc: std.mem.Allocator, source: Source) !?Credential {
+    if (try gateway_session.copyStoredApiKeyAlloc(alloc)) |token| {
+        return .{
+            .token = token,
+            .source = source,
+        };
+    }
+    return loadEnvCredential(alloc, "OPENAI_API_KEY", source);
 }
 
 fn loadEnvCredential(
@@ -491,6 +509,8 @@ const CredentialTestEnv = struct {
 
 test "BYOK credential resolution loads OPENAI_API_KEY" {
     const alloc = std.testing.allocator;
+    gateway_session.resetProcessBindingForTests();
+    defer gateway_session.resetProcessBindingForTests();
     const env = try CredentialTestEnv.install(alloc, &.{
         .{ "OPENAI_API_KEY", "api-key" },
     });
@@ -506,6 +526,8 @@ test "BYOK credential resolution loads OPENAI_API_KEY" {
 
 test "no remembered choice resolves exactly as plain precedence" {
     const alloc = std.testing.allocator;
+    gateway_session.resetProcessBindingForTests();
+    defer gateway_session.resetProcessBindingForTests();
     const env = try CredentialTestEnv.install(alloc, &.{
         .{ "OPENAI_API_KEY", "api-key" },
     });
@@ -518,4 +540,49 @@ test "no remembered choice resolves exactly as plain precedence" {
 
     try std.testing.expectEqual(plain.credential.?.source, preferred.credential.?.source);
     try std.testing.expectEqualStrings(plain.credential.?.token, preferred.credential.?.token);
+}
+
+test "BYOK credential resolution loads persisted Gateway API key" {
+    const alloc = std.testing.allocator;
+    gateway_session.resetProcessBindingForTests();
+    defer gateway_session.resetProcessBindingForTests();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
+    defer alloc.free(home);
+    const env = try CredentialTestEnv.install(alloc, &.{
+        .{ "HOME", home },
+    });
+    defer env.deinit();
+
+    try gateway_session.saveAndActivate(alloc, "https://gateway.example.test/v1", "persisted-key");
+    gateway_session.resetProcessBindingForTests();
+
+    const resolution = try resolve(alloc, oauth_transport.unavailable_provider, host.unavailable_secret_store, .refresh_if_needed);
+    var startup = resolution.credential orelse return error.TestExpectedCredential;
+    defer startup.deinit(alloc);
+    try std.testing.expectEqualStrings("persisted-key", startup.token);
+    try std.testing.expectEqual(Source.openai_api_key, startup.source);
+    try std.testing.expect(try sourceExists(alloc, host.unavailable_secret_store, .openai_api_key));
+}
+
+test "unreadable Gateway profile leaves discovery unauthenticated without environment fallback" {
+    const alloc = std.testing.allocator;
+    gateway_session.resetProcessBindingForTests();
+    defer gateway_session.resetProcessBindingForTests();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var profile = try tmp.dir.createFile(std.testing.io, ".fx", .{});
+    profile.close(std.testing.io);
+    const home = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
+    defer alloc.free(home);
+    const env = try CredentialTestEnv.install(alloc, &.{
+        .{ "HOME", home },
+        .{ "OPENAI_API_KEY", "unrelated-environment-key" },
+    });
+    defer env.deinit();
+
+    const resolution = try resolve(alloc, oauth_transport.unavailable_provider, host.unavailable_secret_store, .refresh_if_needed);
+    try std.testing.expect(resolution.credential == null);
 }

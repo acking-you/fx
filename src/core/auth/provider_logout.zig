@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const chatgpt_oauth = @import("chatgpt_oauth.zig");
 const chatgpt_session = @import("chatgpt_session.zig");
+const gateway_session = @import("gateway_session.zig");
 const grok_oauth = @import("grok_oauth.zig");
 const model_provider = @import("../config/model_provider.zig");
 const oauth_transport = @import("oauth_transport.zig");
@@ -12,6 +13,7 @@ const Allocator = std.mem.Allocator;
 pub const Outcome = union(enum) {
     codex: chatgpt_session.DeleteOutcome,
     grok: grok_oauth.LogoutResult,
+    gateway: gateway_session.DeleteOutcome,
     failed: anyerror,
 };
 
@@ -48,7 +50,7 @@ fn runLogout(
     return switch (target) {
         .codex => .{ .codex = chatgpt_oauth.logout() catch |err| return .{ .failed = err } },
         .grok => .{ .grok = grok_oauth.logout(alloc, transport) catch |err| return .{ .failed = err } },
-        .gateway => unreachable,
+        .gateway => .{ .gateway = gateway_session.deleteStoredSession() catch |err| return .{ .failed = err } },
     };
 }
 
@@ -86,7 +88,6 @@ pub const Runtime = struct {
         transport: oauth_transport.Provider,
         retry_lock_busy: bool,
     ) !bool {
-        std.debug.assert(target != .gateway);
         self.mutex.lockUncancelable(io_mod.getIo());
         if (self.running or self.completion != null or self.thread != null) {
             self.mutex.unlock(io_mod.getIo());

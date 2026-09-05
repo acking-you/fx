@@ -20,10 +20,11 @@ pub const ProviderSwitchFacts = struct {
     intent: ProviderSwitchIntent,
     stream_active: bool,
     queued_prompts: usize,
+    force_prepare: bool = false,
 };
 
 pub fn decideProviderSwitch(facts: ProviderSwitchFacts) ProviderSwitchDecision {
-    if (facts.intent == .manual and facts.current == facts.target and facts.target_credential_ready) {
+    if (facts.intent == .manual and facts.current == facts.target and facts.target_credential_ready and !facts.force_prepare) {
         return .no_change;
     }
     if (facts.stream_active or facts.queued_prompts > 0) return .busy;
@@ -60,6 +61,15 @@ test "provider switch decisions are pure and provider keyed" {
         .intent = .manual,
         .stream_active = false,
         .queued_prompts = 0,
+    }));
+    try std.testing.expectEqual(ProviderSwitchDecision.prepare, decideProviderSwitch(.{
+        .current = .gateway,
+        .target = .gateway,
+        .target_credential_ready = true,
+        .intent = .manual,
+        .stream_active = false,
+        .queued_prompts = 0,
+        .force_prepare = true,
     }));
     try std.testing.expectEqual(ProviderSwitchDecision.busy, decideProviderSwitch(.{
         .current = .gateway,

@@ -1,6 +1,7 @@
 const std = @import("std");
 const types = @import("../shared/types.zig");
 const io_mod = @import("../shared/io.zig");
+const gateway_session = @import("../auth/gateway_session.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -217,6 +218,11 @@ pub const EndpointOverrides = struct {
     codex_base_url: ?[]const u8 = null,
 
     pub fn fromEnvironment() EndpointOverrides {
+        if (gateway_session.hasStoredBinding()) {
+            return .{
+                .codex_base_url = io_mod.getenv(codex_base_url_env),
+            };
+        }
         return .{
             .responses_base_url = io_mod.getenv(responses_base_url_env),
             .openai_base_url = io_mod.getenv(openai_base_url_env),
@@ -289,9 +295,21 @@ pub fn resolveBaseUrlAlloc(
     route: ProviderRoute,
     overrides: EndpointOverrides,
 ) ResolveEndpointError![]u8 {
+    const owned_stored = switch (route) {
+        .openai_responses_byok => if (overrides.responses_base_url == null and overrides.openai_base_url == null)
+            gateway_session.copyStoredBaseUrlAlloc(alloc) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => null,
+            }
+        else
+            null,
+        .codex_responses_oauth => null,
+    };
+    defer if (owned_stored) |value| alloc.free(value);
     const base_url = switch (route) {
         .openai_responses_byok => overrides.responses_base_url orelse
             overrides.openai_base_url orelse
+            owned_stored orelse
             openai_base_url,
         .codex_responses_oauth => overrides.codex_base_url orelse codex_base_url,
     };
@@ -695,4 +713,27 @@ test "Responses base URL rejects userinfo and insecure origins" {
         error.InvalidBaseUrl,
         appendResponsesEndpointAlloc(alloc, "https://example.test/v1\n"),
     );
+}
+
+test "Responses endpoint uses process Gateway binding when overrides are empty" {
+    const alloc = std.testing.allocator;
+    gateway_session.resetProcessBindingForTests();
+    defer gateway_session.resetProcessBindingForTests();
+
+    var session = gateway_session.Session{
+        .base_url = try alloc.dupe(u8, "https://overlay.example.test/v1"),
+        .api_key = try alloc.dupe(u8, "overlay-key"),
+    };
+    defer session.deinit(alloc);
+    try gateway_session.setProcessBinding(session);
+
+    const stored = try resolveEndpointAlloc(alloc, .openai_responses_byok, .{});
+    defer alloc.free(stored);
+    try std.testing.expectEqualStrings("https://overlay.example.test/v1/responses", stored);
+
+    const explicit = try resolveEndpointAlloc(alloc, .openai_responses_byok, .{
+        .responses_base_url = "https://explicit.example.test/v1",
+    });
+    defer alloc.free(explicit);
+    try std.testing.expectEqualStrings("https://explicit.example.test/v1/responses", explicit);
 }

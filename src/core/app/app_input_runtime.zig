@@ -11044,6 +11044,7 @@ const FakeSubmitApp = struct {
     pub const input_byte_limit: usize = 4096;
 
     alloc: std.mem.Allocator,
+    slash_registry: command_specs.SlashRegistry = routing_test_slash_registry,
     workspace_root: []const u8 = "/tmp/workspace",
     input_runtime: core_input_runtime.Runtime = .{},
     prompt_history: prompt_history_runtime.PromptHistoryRuntime = .{},
@@ -11178,8 +11179,8 @@ const FakeSubmitApp = struct {
     fail_command_after_pending_clear: bool = false,
     snapshot_dir: ?[]const u8 = null,
 
-    pub fn slashRegistry(_: *const FakeSubmitApp) command_specs.SlashRegistry {
-        return routing_test_slash_registry;
+    pub fn slashRegistry(self: *const FakeSubmitApp) command_specs.SlashRegistry {
+        return self.slash_registry;
     }
 
     fn deinit(self: *FakeSubmitApp) void {
@@ -13228,6 +13229,38 @@ test "app_input_runtime persists slash commands in durable prompt history" {
         "/help",
         app.input_runtime.composer_history.entryText(0).?,
     );
+}
+
+test "app_input_runtime excludes provider credentials from both input histories" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
+    defer alloc.free(home);
+    var app = FakeSubmitApp{ .alloc = alloc };
+    defer app.deinit();
+    app.slash_registry = .{ .commands = &.{.{
+        .kind = .provider,
+        .command = "/provider",
+        .help_entry = "/provider",
+        .completion_description = "configure provider",
+        .presentation_category = .account,
+        .has_args = true,
+        .accepts_payload = true,
+    }} };
+    _ = try app.prompt_history.initialize(alloc, home, true, true);
+    for ([_][]const u8{
+        "/provider gateway https://example.test/v1 history-secret",
+        "/provider gateway invalid-url history-secret",
+    }) |command| {
+        try app.input_runtime.edit_state.input.appendSlice(alloc, command);
+        app.input_runtime.edit_state.cursor = app.input_runtime.edit_state.input.items.len;
+        try Runtime(FakeSubmitApp).submit(&app, 100);
+    }
+    const entries = try app.prompt_history.loadRecent(alloc, app.workspace_root, 100);
+    defer prompt_history_store.freeLoadedEntries(alloc, entries);
+    try std.testing.expectEqual(@as(usize, 0), entries.len);
+    try std.testing.expectEqual(@as(usize, 0), app.input_runtime.composer_history.count());
 }
 
 test "app_input_runtime excludes image-bearing prompts from durable history" {

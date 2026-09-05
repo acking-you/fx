@@ -46,5 +46,7 @@ test {
     _ = @import("runtime/tests/interruption_flow.zig");
     _ = @import("runtime/tests/finalization_flow.zig");
     _ = @import("runtime/orchestrator.zig");
+    _ = @import("runtime/progress_guard.zig");
+    _ = @import("runtime/gateway_step.zig");
     _ = @import("runtime/vision_contracts.zig");
 }

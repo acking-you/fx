@@ -120,7 +120,7 @@ saved in the same private profile file used by the native CLI. Use
 `fx/provider/switch` afterward to activate its catalog for the process or active
 session.
 
-### Connection-scoped BYOK configuration
+### Profile-persisted BYOK configuration
 
 Configure and validate a Responses-compatible API root and API key directly:
 
@@ -133,20 +133,21 @@ provided key, and activates the gateway provider only after validation. Remote
 URLs must use HTTPS. Loopback HTTP is allowed only with an explicit port.
 
 ```json
-{"jsonrpc":"2.0","id":24,"result":{"provider":"gateway","model":"gpt-5","responseUrl":"https://gateway.example.com/v1/responses","credentialPersistence":"connection"}}
+{"jsonrpc":"2.0","id":24,"result":{"provider":"gateway","model":"gpt-5","responseUrl":"https://gateway.example.com/v1/responses","credentialPersistence":"profile"}}
 ```
 
-The API key is never echoed. This ACP method keeps it only in the current fx
-process and does not write it to `settings.json` or a session log. Start a new
-ACP connection or call the method again to replace it. Use environment or
-profile-owned credential configuration when persistence across process restarts
-is required. The response URL and key remain one connection-scoped binding when
-you temporarily switch to Codex or Grok; switching back to `gateway` restores
-both. Ordinary model requests, automatic permission reviews, and manual or
-automatic remote compaction all use that same binding. Persistent subagents
-also retain the provider and connection route captured for each child turn.
-Changing the parent provider does not reroute an existing child, and replacing
-the connection binding does not alter a child turn already in progress.
+The API key is never echoed. After validation, fx writes the URL and key to
+`~/.fx/gateway-auth.json` as one private profile binding. Later TUI, CLI, and
+ACP processes reuse that pair without environment variables. Call the method
+again to replace it, or use `fx logout gateway` to remove it. Environment
+variables are used only when that file is absent. The response URL and key
+remain one binding when you temporarily switch to Codex or Grok; switching back
+to `gateway` restores both. Ordinary model requests, automatic permission
+reviews, and manual or automatic remote compaction all use that same binding.
+Persistent subagents also retain the provider and connection route captured for
+each child turn. Changing the parent provider does not reroute an existing
+child, and replacing the connection binding does not alter a child turn already
+in progress.
 
 ## Compact a session
 
