@@ -6,8 +6,8 @@ const types = @import("../core/shared/types.zig");
 const Allocator = std.mem.Allocator;
 
 /// Parses the standard OpenAI `GET /v1/models` response into Fx's owned
-/// catalog contract. The endpoint does not publish capability metadata, so
-/// only exact model IDs with controls maintained by Fx receive those controls.
+/// catalog contract. Compatible endpoints may publish capability metadata;
+/// explicit metadata takes precedence over the standard OpenAI defaults.
 pub fn parse(
     alloc: Allocator,
     json_text: []const u8,
@@ -47,22 +47,33 @@ fn parseFull(
         errdefer alloc.free(model_type);
         const reasoning_model = isReasoningModel(id);
         const text_model = isTextModel(id);
+        const object = raw.object;
+        const supports_reasoning = try optionalBool(object, &.{ "supports_reasoning_effort", "supportsReasoningEffort" });
         var reasoning_efforts: std.ArrayList(types.ReasoningEffort) = .empty;
         errdefer reasoning_efforts.deinit(alloc);
-        if (hasKnownGpt56Controls(id)) {
+        const advertised_efforts = try aliasedValue(object, &.{ "reasoning_efforts", "reasoningEfforts" });
+        const default_effort = if (advertised_efforts) |efforts|
+            try parseReasoningEfforts(alloc, &reasoning_efforts, efforts, object)
+        else
+            types.ReasoningEffort.auto;
+        if (advertised_efforts == null and supports_reasoning != false and hasKnownGpt56Controls(id)) {
             try reasoning_efforts.appendSlice(alloc, &gpt56_reasoning_efforts);
         }
+        if (supports_reasoning == false) reasoning_efforts.clearRetainingCapacity();
         try candidates.append(alloc, .{
             .id = id,
             .model_type = model_type,
             .released = optionalInteger(raw.object.get("created")),
-            .has_tool_use = text_model,
-            .has_reasoning = reasoning_model,
+            .has_tool_use = try optionalBool(object, &.{ "supports_tool_use", "supportsToolUse" }) orelse text_model,
+            .has_reasoning = supports_reasoning orelse (reasoning_model or reasoning_efforts.items.len > 0),
             .reasoning_efforts = reasoning_efforts,
-            .supports_fast_mode = hasKnownGpt56Controls(id),
-            .has_vision = text_model,
-            .has_file_input = text_model,
-            .has_web_search = text_model,
+            .default_reasoning_effort = if (supports_reasoning == false) .auto else default_effort,
+            .supports_fast_mode = try optionalBool(object, &.{ "supports_fast_mode", "supportsFastMode" }) orelse hasKnownGpt56Controls(id),
+            .has_vision = try optionalBool(object, &.{ "supports_vision", "supportsVision" }) orelse text_model,
+            .has_file_input = try optionalBool(object, &.{ "supports_file_input", "supportsFileInput" }) orelse text_model,
+            .has_web_search = try optionalBool(object, &.{ "supports_backend_search", "supportsBackendSearch" }) orelse text_model,
+            .context_window = try optionalLimit(object, &.{ "context_window", "contextWindow" }),
+            .max_tokens = try optionalLimit(object, &.{ "max_output_tokens", "max_completion_tokens", "maxCompletionTokens" }),
         });
     }
     sort_utils.sort(
@@ -72,6 +83,79 @@ fn parseFull(
         model_catalog.compareModelCatalogEntries,
     );
     return candidates;
+}
+
+fn aliasedValue(object: std.json.ObjectMap, keys: []const []const u8) !?std.json.Value {
+    var found: ?std.json.Value = null;
+    for (keys) |key| {
+        if (object.get(key)) |value| {
+            // Conflicting aliases must not silently enable a denied capability.
+            if (found) |prior| {
+                const equal = switch (prior) {
+                    .bool => value == .bool and prior.bool == value.bool,
+                    .integer => value == .integer and prior.integer == value.integer,
+                    .string => value == .string and std.mem.eql(u8, prior.string, value.string),
+                    else => false,
+                };
+                if (!equal) return error.MalformedResponse;
+            } else found = value;
+        }
+    }
+    return found;
+}
+
+fn optionalBool(object: std.json.ObjectMap, keys: []const []const u8) !?bool {
+    const value = try aliasedValue(object, keys) orelse return null;
+    if (value != .bool) return error.MalformedResponse;
+    return value.bool;
+}
+
+fn optionalLimit(object: std.json.ObjectMap, keys: []const []const u8) !u32 {
+    const value = try aliasedValue(object, keys) orelse return 0;
+    if (value != .integer) return error.MalformedResponse;
+    return std.math.cast(u32, value.integer) orelse error.MalformedResponse;
+}
+
+fn parseReasoningEfforts(
+    alloc: Allocator,
+    out: *std.ArrayList(types.ReasoningEffort),
+    value: std.json.Value,
+    object: std.json.ObjectMap,
+) !types.ReasoningEffort {
+    if (value != .array or value.array.items.len > types.ReasoningEffort.max_options) return error.MalformedResponse;
+    var default: types.ReasoningEffort = .auto;
+    for (value.array.items) |entry| {
+        const name = switch (entry) {
+            .string => entry,
+            .object => try aliasedValue(entry.object, &.{ "value", "effort" }) orelse return error.MalformedResponse,
+            else => return error.MalformedResponse,
+        };
+        if (name != .string) return error.MalformedResponse;
+        const effort = types.ReasoningEffort.parse(name.string) orelse return error.MalformedResponse;
+        if (effort.isDefault()) continue;
+        const is_default = if (entry == .object) try optionalBool(entry.object, &.{"default"}) orelse false else false;
+        if (is_default) {
+            if (!default.isDefault() and !default.eql(effort)) return error.MalformedResponse;
+            default = effort;
+        }
+        for (out.items) |existing| {
+            if (existing.eql(effort)) break;
+        } else try out.append(alloc, effort);
+    }
+    if (default.isDefault()) {
+        if (try aliasedValue(object, &.{ "reasoning_effort", "reasoningEffort" })) |raw| {
+            if (raw != .string) return error.MalformedResponse;
+            const requested = types.ReasoningEffort.parse(raw.string) orelse return error.MalformedResponse;
+            for (out.items) |effort| {
+                if (effort.eql(requested)) {
+                    default = effort;
+                    break;
+                }
+            }
+        }
+    }
+    if (default.isDefault() and out.items.len > 0) default = out.items[0];
+    return default;
 }
 
 const gpt56_reasoning_efforts = [_]types.ReasoningEffort{
@@ -155,10 +239,61 @@ test "OpenAI catalog does not infer maintained controls for custom IDs" {
     }
 }
 
+test "OpenAI catalog honors BYOK search and reasoning metadata independent of model names" {
+    const json_text =
+        \\{"data":[
+        \\ {"id":"claude-custom[1m]","supports_backend_search":true,"supports_tool_use":true,"context_window":1000000,"max_output_tokens":32000,"supports_reasoning_effort":true,"reasoning_efforts":[{"value":"high","default":true},"low","high"]},
+        \\ {"id":"grok-custom","supportsBackendSearch":true,"supportsToolUse":true,"contextWindow":500000,"maxCompletionTokens":16000,"supportsReasoningEffort":true,"reasoningEfforts":["provider-next","low"],"reasoningEffort":"low"},
+        \\ {"id":"gpt-5.6-sol","supports_backend_search":false,"supports_reasoning_effort":false,"reasoning_efforts":["high"],"supports_fast_mode":false,"supports_vision":false,"supports_file_input":false}
+        \\]}
+    ;
+    var catalog = try parse(std.testing.allocator, json_text, .full);
+    defer model_catalog.freeModelCatalog(std.testing.allocator, &catalog);
+    try std.testing.expectEqual(@as(usize, 3), catalog.items.len);
+    // Capabilities are keyed by wire ID; picker ranking may reorder the list.
+    const claude = for (catalog.items) |entry| {
+        if (std.mem.eql(u8, entry.id, "claude-custom[1m]")) break entry;
+    } else return error.TestExpectedModel;
+    try std.testing.expect(claude.has_web_search and claude.has_tool_use and claude.has_reasoning);
+    try std.testing.expectEqual(@as(u32, 1_000_000), claude.context_window);
+    try std.testing.expectEqual(@as(u32, 32_000), claude.max_tokens);
+    try std.testing.expectEqual(@as(usize, 2), claude.reasoning_efforts.items.len);
+    try std.testing.expectEqualStrings("high", claude.default_reasoning_effort.label());
+    const denied = for (catalog.items) |entry| {
+        if (std.mem.eql(u8, entry.id, "gpt-5.6-sol")) break entry;
+    } else return error.TestExpectedModel;
+    try std.testing.expect(!denied.has_web_search and !denied.has_reasoning and !denied.supports_fast_mode);
+    try std.testing.expect(!denied.has_vision and !denied.has_file_input);
+    try std.testing.expectEqual(@as(usize, 0), denied.reasoning_efforts.items.len);
+    const grok = for (catalog.items) |entry| {
+        if (std.mem.eql(u8, entry.id, "grok-custom")) break entry;
+    } else return error.TestExpectedModel;
+    try std.testing.expect(grok.has_web_search and grok.has_tool_use and grok.has_reasoning);
+    try std.testing.expectEqual(@as(u32, 500_000), grok.context_window);
+    try std.testing.expectEqual(@as(u32, 16_000), grok.max_tokens);
+    try std.testing.expectEqualStrings("low", grok.default_reasoning_effort.label());
+    try std.testing.expectEqualStrings("provider-next", grok.reasoning_efforts.items[0].label());
+}
+
+test "OpenAI catalog rejects malformed or conflicting BYOK capability metadata" {
+    for ([_][]const u8{
+        "\"supports_backend_search\":\"true\"",
+        "\"supports_backend_search\":true,\"supportsBackendSearch\":false",
+        "\"context_window\":-1",
+        "\"context_window\":4294967296",
+        "\"reasoning_efforts\":{}",
+        "\"reasoning_efforts\":[{\"value\":\"high\",\"default\":true},{\"value\":\"low\",\"default\":true}]",
+    }) |fields| {
+        const json = try std.fmt.allocPrint(std.testing.allocator, "{{\"data\":[{{\"id\":\"custom\",{s}}}]}}", .{fields});
+        defer std.testing.allocator.free(json);
+        try std.testing.expectError(error.MalformedResponse, parse(std.testing.allocator, json, .full));
+    }
+}
+
 fn checkAllocationFailures(alloc: Allocator) !void {
     var catalog = try parse(
         alloc,
-        "{\"data\":[{\"id\":\"gpt-5.6-sol\",\"object\":\"model\"}]}",
+        "{\"data\":[{\"id\":\"gpt-5.6-sol\",\"object\":\"model\"},{\"id\":\"custom\",\"supports_backend_search\":true,\"reasoning_efforts\":[\"high\",\"low\"]}]}",
         .full,
     );
     defer model_catalog.freeModelCatalog(alloc, &catalog);

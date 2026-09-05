@@ -24,6 +24,7 @@ The tool registry owns the provider-neutral schema and product metadata. `src/co
 
 * Codex subscription replaces the logical declaration with the reserved `web.run` namespace. fx executes those calls through the authenticated standalone search endpoint and preserves its search-session identity across search, open, click, and find operations.
 * Direct Responses routes replace the logical function with `{"type":"web_search"}` when the resolved model capabilities permit native search.
+  BYOK `/models` entries may declare `supports_backend_search` or `supportsBackendSearch`. Both `true` and `false` override name-based OpenAI defaults, including for Claude, Grok, and custom model IDs. A model name alone is not proof that a third-party endpoint implements hosted search. BYOK catalogs can also declare reasoning efforts, context/output limits, and tool/image/file capabilities; fx preserves those fields instead of replacing them with OpenAI model-name assumptions.
 * Grok applies the same hosted declaration only when the authenticated model catalog reports `supportsBackendSearch` or `supports_backend_search`. This matches Grok's provider-owned capability boundary.
 * A provider bundle may attach the configured Responses executor. It is selected only when native search is unavailable. Without either route, `web_search` is omitted from the effective tool projection.
 
