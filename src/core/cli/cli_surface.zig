@@ -4,6 +4,7 @@ const io_mod = @import("../shared/io.zig");
 const app_lifecycle = @import("../app/app_lifecycle.zig");
 const chatgpt_oauth = @import("../auth/chatgpt_oauth.zig");
 const grok_oauth = @import("../auth/grok_oauth.zig");
+const gateway_session = @import("../auth/gateway_session.zig");
 const provider_setup = @import("../auth/provider_setup.zig");
 const acp_runner = @import("acp_runner.zig");
 const cli_ask = @import("cli_ask.zig");
@@ -17,6 +18,7 @@ const debug_trace = @import("../shared/debug_trace.zig");
 const doctor_runtime = @import("doctor_runtime.zig");
 const gateway_provider = @import("../gateway/gateway_provider.zig");
 const model_catalog = @import("../gateway/model_catalog.zig");
+const provider_route = @import("../gateway/provider_route.zig");
 const provider_set = @import("../gateway/provider_set.zig");
 const background_process_provider = @import(
     "../execution/background_process_provider.zig",
@@ -173,6 +175,95 @@ fn parseLoginProvider(rest: []const [:0]const u8) !model_provider.ProviderId {
     const provider = provider_catalog.parse(rest[0]) orelse return error.InvalidLoginProviderArgs;
     if (provider == .gateway) return error.InvalidLoginProviderArgs;
     return provider;
+}
+
+fn parseLogoutProvider(rest: []const [:0]const u8) !model_provider.ProviderId {
+    if (rest.len != 1) return error.InvalidLoginProviderArgs;
+    return provider_catalog.parse(rest[0]) orelse error.InvalidLoginProviderArgs;
+}
+
+fn joinArgWords(alloc: Allocator, words: []const [:0]const u8) ![]u8 {
+    if (words.len == 1) return alloc.dupe(u8, words[0]);
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    errdefer out.deinit();
+    for (words, 0..) |word, index| {
+        if (index != 0) try out.writer.writeByte(' ');
+        try out.writer.writeAll(word);
+    }
+    return out.toOwnedSlice();
+}
+
+fn configureGatewayProvider(
+    alloc: Allocator,
+    cfg: Config,
+    deps: RunDeps,
+    base_url: []const u8,
+    api_key: []const u8,
+) !bool {
+    gateway_session.validate(base_url, api_key) catch {
+        try writeProviderActivationError(alloc, deps, .provider_command, "invalid Gateway base URL or API key");
+        return false;
+    };
+    const models_url = provider_route.appendModelsEndpointAlloc(alloc, base_url) catch |err| {
+        debug_trace.logf("provider", "gateway configure endpoint failed err={s}", .{@errorName(err)});
+        try writeProviderActivationError(alloc, deps, .provider_command, "invalid Gateway base URL");
+        return false;
+    };
+    defer alloc.free(models_url);
+    var credential = credentials.Credential{
+        .token = try alloc.dupe(u8, api_key),
+        .source = .openai_api_key,
+    };
+    defer credential.deinit(alloc);
+    const catalog_provider = cfg.provider_set.select(.gateway).model_catalog orelse {
+        try writeProviderActivationError(alloc, deps, .provider_command, "Gateway model catalog is unavailable");
+        return false;
+    };
+    const fetch_result = model_catalog.fetchCatalog(catalog_provider, alloc, .{
+        .access = credentials.catalogAccessAt(credential, io_mod.milliTimestamp()),
+        .endpoint = models_url,
+        .view = .picker,
+    });
+    var loaded = switch (fetch_result) {
+        .loaded => |loaded| loaded,
+        .failed => |failure| {
+            debug_trace.logf("catalog", "gateway configure catalog failed category={s}", .{@tagName(failure.failure.category)});
+            try writeProviderActivationError(alloc, deps, .provider_command, "could not load the Gateway model catalog");
+            return false;
+        },
+    };
+    defer model_catalog.freeModelCatalog(alloc, &loaded.catalog);
+    if (loaded.catalog.items.len == 0) {
+        try writeProviderActivationError(alloc, deps, .provider_command, "Gateway model catalog is empty");
+        return false;
+    }
+    const workspace_root = try io_mod.realpathAlloc(alloc, ".");
+    defer alloc.free(workspace_root);
+    var settings = try config_runtime.loadMergedSettings(alloc, workspace_root);
+    defer settings.deinit(alloc);
+    const selected_model = selectCatalogModel(loaded.catalog.items, settings.models.get(.gateway)).?;
+    gateway_session.saveAndActivate(alloc, base_url, api_key) catch |err| {
+        debug_trace.logf("provider", "gateway binding persist failed err={s}", .{@errorName(err)});
+        try writeProviderActivationError(alloc, deps, .provider_command, "failed to save Gateway URL and API key");
+        return false;
+    };
+    // The catalog above belongs to the new binding. The startup Config still
+    // contains the old endpoint, and an already-selected Gateway may have a
+    // model that the replacement catalog does not support.
+    var preference = config_runtime.attemptUserPreferences(alloc, .{
+        .provider = .gateway,
+        .model_preference = .{ .provider = .gateway, .model = selected_model },
+    });
+    defer preference.deinit(alloc);
+    switch (preference) {
+        .outcome => {},
+        .failure => {
+            try writeProviderActivationError(alloc, deps, .provider_command, "Gateway binding saved, but provider selection could not be saved");
+            return false;
+        },
+    }
+    try writeStdout(deps, "Gateway URL and API key saved.\n");
+    return true;
 }
 
 fn selectCatalogModel(
@@ -885,8 +976,8 @@ fn runNonInteractiveWithDeps(
             return .handled_success;
         },
         .logout => |rest| {
-            const login_provider = parseLoginProvider(rest) catch {
-                try writeStderr(deps, "usage: fx logout <codex|grok>\n");
+            const login_provider = parseLogoutProvider(rest) catch {
+                try writeStderr(deps, "usage: fx logout <codex|grok|gateway>\n");
                 return .handled_failure;
             };
             if (login_provider == .codex) {
@@ -932,21 +1023,60 @@ fn runNonInteractiveWithDeps(
                     },
                 };
             }
+            if (login_provider == .gateway) {
+                const outcome = gateway_session.deleteStoredSession() catch {
+                    try writeStderr(deps, "fx logout: failed to remove saved Gateway URL and API key\n");
+                    return .handled_failure;
+                };
+                return switch (outcome) {
+                    .deleted => result: {
+                        try writeStdout(deps, "Removed the saved Gateway URL and API key.\n");
+                        break :result .handled_success;
+                    },
+                    .missing => result: {
+                        try writeStdout(deps, "No saved Gateway URL and API key found.\n");
+                        break :result .handled_success;
+                    },
+                    .deleted_not_durable => result: {
+                        try writeStderr(deps, "fx logout: failed to durably remove saved Gateway URL and API key\n");
+                        break :result .handled_failure;
+                    },
+                };
+            }
             unreachable;
         },
         .provider => |rest| {
-            if (rest.len != 1) {
-                try writeStderr(deps, "usage: fx provider <gateway|codex|grok>\n");
-                return .handled_failure;
+            if (rest.len == 1) {
+                const target = model_provider.parse(rest[0]) orelse {
+                    try writeStderr(deps, "fx provider: expected gateway, codex, or grok\n");
+                    return .handled_failure;
+                };
+                return if (try activateProviderSelection(alloc, cfg, deps, target, .provider_command))
+                    .handled_success
+                else
+                    .handled_failure;
             }
-            const target = model_provider.parse(rest[0]) orelse {
-                try writeStderr(deps, "fx provider: expected gateway, codex, or grok\n");
-                return .handled_failure;
-            };
-            return if (try activateProviderSelection(alloc, cfg, deps, target, .provider_command))
-                .handled_success
-            else
-                .handled_failure;
+            if (rest.len >= 3) {
+                const target = model_provider.parse(rest[0]) orelse {
+                    try writeStderr(deps, "usage: fx provider <gateway|codex|grok> [base-url api-key]\n");
+                    return .handled_failure;
+                };
+                if (target != .gateway) {
+                    try writeStderr(deps, "usage: fx provider gateway <base-url> <api-key>\n");
+                    return .handled_failure;
+                }
+                const api_key = joinArgWords(alloc, rest[2..]) catch {
+                    try writeStderr(deps, "fx provider: failed to read API key\n");
+                    return .handled_failure;
+                };
+                defer alloc.free(api_key);
+                return if (try configureGatewayProvider(alloc, cfg, deps, rest[1], api_key))
+                    .handled_success
+                else
+                    .handled_failure;
+            }
+            try writeStderr(deps, "usage: fx provider <gateway|codex|grok> [base-url api-key]\n");
+            return .handled_failure;
         },
         .status => |rest| {
             const opts = parseLocalSurfaceArgs(rest) catch |err| {
@@ -3760,6 +3890,32 @@ test "runIfRequested bare version subcommand remains unknown" {
         runIfRequestedWithDeps(std.testing.allocator, &.{@constCast("version")}, testConfig(), capture.deps()),
     );
     try std.testing.expect(std.mem.startsWith(u8, capture.stderr.written(), "fx: unknown subcommand: version\n\n𝒇x v0.0.0\nFast, native coding agent for the terminal.\n"));
+}
+
+test "runIfRequested provider usage includes gateway URL and key" {
+    var capture = CaptureOutput.init(std.testing.allocator);
+    defer capture.deinit();
+    const result = try runIfRequestedWithDeps(
+        std.testing.allocator,
+        &.{@constCast("provider")},
+        testConfig(),
+        capture.deps(),
+    );
+    try std.testing.expectEqual(RunResult.handled_failure, result);
+    try std.testing.expect(std.mem.find(u8, capture.stderr.written(), "usage: fx provider <gateway|codex|grok> [base-url api-key]") != null);
+}
+
+test "runIfRequested logout usage includes gateway" {
+    var capture = CaptureOutput.init(std.testing.allocator);
+    defer capture.deinit();
+    const result = try runIfRequestedWithDeps(
+        std.testing.allocator,
+        &.{@constCast("logout")},
+        testConfig(),
+        capture.deps(),
+    );
+    try std.testing.expectEqual(RunResult.handled_failure, result);
+    try std.testing.expect(std.mem.find(u8, capture.stderr.written(), "usage: fx logout <codex|grok|gateway>") != null);
 }
 
 test "runIfRequested model fetch failure is handled" {

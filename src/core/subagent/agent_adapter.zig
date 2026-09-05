@@ -15,6 +15,7 @@ const tool_presentation = @import("../tooling/tool_presentation.zig");
 const tool_result_errors = @import("../tooling/tool_result_errors.zig");
 const model_tool_schema = @import("../tooling/model_tool_schema.zig");
 const tool_runtime = @import("../tooling/tool_runtime.zig");
+const web_search_runtime = @import("../tooling/web_search_runtime.zig");
 const context_contract = @import("../workspace/context_contract.zig");
 const hooks = @import("../hooks/hooks.zig");
 const execution_memory = @import("../agent/execution_memory.zig");
@@ -168,13 +169,23 @@ pub fn run(
     routed_config.tool_context.provider = admission.provider;
     routed_config.tool_context.exec_mode = config.tool_context.exec_mode.forPersistentChild();
     routed_config.tool_context.provider_capabilities = config.provider_set.select(admission.provider).capabilities;
-    // The backend points at the parent runtime's credential snapshot. A
-    // cross-provider subagent must not reuse it until subagents own a routed
-    // search runtime of their own.
-    if (admission.provider != config.tool_context.provider) {
-        routed_config.tool_context.web_search_backend = null;
-        routed_config.tool_context.web_search_runtime_ready = false;
-    }
+    // Local search has the same owned turn route as model requests and review.
+    // Never borrow a parent runtime that another turn can reconfigure.
+    const search_provider = provider.web_search.executionProvider(config.resolved_model_capabilities);
+    var child_search = web_search_runtime.Runtime.init(.{
+        .provider = search_provider,
+        .api_key = routed_config.tool_context.api_key,
+        .credential_source = routed_config.tool_context.credential_source,
+        .account_id = routed_config.tool_context.account_id,
+        .worker_model = admission.model,
+        .gateway_retry_count = routed_config.tool_context.gateway_retry_count,
+        .gateway_chat_url = routed_config.tool_context.provider_endpoint_override orelse routed_config.tool_context.gateway_chat_url,
+        .usage = &turn.sessionRuntime().usage,
+        .usage_allocator = turn.alloc,
+    });
+    defer child_search.deinit();
+    routed_config.tool_context.web_search_backend = if (search_provider != null) child_search.dispatchBackend() else null;
+    routed_config.tool_context.web_search_runtime_ready = search_provider != null;
     var context = Context{
         .config = routed_config,
         .turn = turn,

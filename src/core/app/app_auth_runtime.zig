@@ -11,9 +11,11 @@ const provider_activation = @import("../auth/provider_activation.zig");
 const provider_setup = @import("../auth/provider_setup.zig");
 const login_flow = @import("../auth/login_flow.zig");
 const provider_catalog = @import("../auth/provider_catalog.zig");
+const gateway_session = @import("../auth/gateway_session.zig");
 const auth_transition = @import("../auth/auth_transition.zig");
 const model_provider = @import("../config/model_provider.zig");
 const model_catalog = @import("../gateway/model_catalog.zig");
+const provider_route = @import("../gateway/provider_route.zig");
 const provider_runtime = @import("provider_runtime.zig");
 const types = @import("../shared/types.zig");
 
@@ -207,15 +209,36 @@ pub fn Runtime(comptime App: type) type {
                 app.shell.render_requests.request(.footer);
                 return;
             }
-            const provider = provider_catalog.parse(target) orelse {
+            const split = std.mem.indexOfScalar(u8, target, ' ');
+            const provider_token = if (split) |index|
+                std.mem.trim(u8, target[0..index], " \t")
+            else
+                target;
+            const rest = if (split) |index|
+                std.mem.trim(u8, target[index + 1 ..], " \t\r\n")
+            else
+                "";
+            const provider = provider_catalog.parse(provider_token) orelse {
                 try app.writeDomainNotice(.{
                     .topic = "provider",
                     .tone = .warning,
-                    .body = "Usage: /provider [gateway|codex|grok]",
+                    .body = "Usage: /provider [gateway|codex|grok] or /provider gateway <base-url> <api-key>",
                 }, true);
                 return;
             };
-            try switchProvider(app, provider, true, .manual);
+            if (provider == .gateway and rest.len > 0) {
+                const args = gateway_session.parseConfigureArgs(rest) orelse {
+                    try app.writeDomainNotice(.{
+                        .topic = "provider",
+                        .tone = .warning,
+                        .body = "Usage: /provider gateway <base-url> <api-key>",
+                    }, true);
+                    return;
+                };
+                try switchProvider(app, .gateway, false, .manual, args);
+                return;
+            }
+            try switchProvider(app, provider, true, .manual, null);
         }
 
         pub fn runLogoutCommand(app: *App, target: []const u8) !void {
@@ -231,18 +254,10 @@ pub fn Runtime(comptime App: type) type {
                 try writeAuthNotice(app, .{
                     .topic = "auth",
                     .tone = .warning,
-                    .body = "Usage: /logout <codex|grok>",
+                    .body = "Usage: /logout <codex|grok|gateway>",
                 });
                 return;
             };
-            if (logout_provider == .gateway) {
-                try writeAuthNotice(app, .{
-                    .topic = "auth",
-                    .tone = .warning,
-                    .body = "Usage: /logout <codex|grok>",
-                });
-                return;
-            }
             const cancelled_activation = if (comptime @hasField(App, "provider_switch"))
                 app.provider_switch.cancelTarget(logout_provider)
             else
@@ -272,6 +287,8 @@ pub fn Runtime(comptime App: type) type {
                 .tone = .neutral,
                 .body = if (logout_provider == .grok)
                     "Signing out of Grok..."
+                else if (logout_provider == .gateway)
+                    "Removing saved Gateway URL and API key..."
                 else
                     "Signing out of Codex...",
             });
@@ -297,8 +314,22 @@ pub fn Runtime(comptime App: type) type {
                         .tone = .@"error",
                         .body = if (completion.target == .grok)
                             "Could not durably sign out of Grok. The current source is unchanged."
+                        else if (completion.target == .gateway)
+                            "Could not remove the saved Gateway URL and API key. The current source is unchanged."
                         else
                             "Could not durably sign out of Codex. The current source is unchanged.",
+                    });
+                },
+                .gateway => |outcome| {
+                    const changed = if (comptime @hasDecl(@TypeOf(app.auth), "reconcileAfterGatewayLogout"))
+                        try app.auth.reconcileAfterGatewayLogout(app.alloc)
+                    else
+                        false;
+                    applyCredentialChange(app, changed);
+                    try writeAuthNotice(app, switch (outcome) {
+                        .deleted => .{ .topic = "auth", .tone = .neutral, .body = "Removed the saved Gateway URL and API key." },
+                        .missing => .{ .topic = "auth", .tone = .neutral, .body = "No saved Gateway URL and API key found." },
+                        .deleted_not_durable => .{ .topic = "auth", .tone = .warning, .body = "Removed the saved Gateway URL and API key, but could not confirm the profile directory update." },
                     });
                 },
                 .grok => |outcome| {
@@ -346,7 +377,7 @@ pub fn Runtime(comptime App: type) type {
                 return;
             }
             switch (choice) {
-                .provider => |provider| try switchProvider(app, provider, true, .manual),
+                .provider => |provider| try switchProvider(app, provider, true, .manual, null),
                 .source => |source| try applySourceChoice(app, source),
                 .action => |action| switch (action) {
                     .chatgpt_login => try beginChatGptSignIn(app),
@@ -440,7 +471,7 @@ pub fn Runtime(comptime App: type) type {
             )) {
                 .switch_provider => |target| {
                     app.auth.closePicker(app.alloc);
-                    try switchProvider(app, target, false, .post_oauth);
+                    try switchProvider(app, target, false, .post_oauth, null);
                 },
                 .activate_source => |source| {
                     if (!try selectCredentialSource(app, source)) {
@@ -642,6 +673,7 @@ pub fn Runtime(comptime App: type) type {
             target: model_provider.ProviderId,
             allow_login: bool,
             intent: ProviderSwitchIntent,
+            configure: ?gateway_session.ConfigureArgs,
         ) !void {
             if (comptime !provider_runtime.supported(App) or
                 !@hasField(App, "provider_switch") or
@@ -678,6 +710,7 @@ pub fn Runtime(comptime App: type) type {
                 .intent = intent,
                 .stream_active = app.stream.active,
                 .queued_prompts = app.worker.queuedPromptCount(),
+                .force_prepare = configure != null,
             })) {
                 .prepare => {},
                 .no_change => {
@@ -711,6 +744,33 @@ pub fn Runtime(comptime App: type) type {
                 }, true);
                 return;
             };
+            var owned_models_url: ?[]u8 = null;
+            defer if (owned_models_url) |value| app.alloc.free(value);
+            var configure_credential: ?credentials.Credential = null;
+            defer if (configure_credential) |*value| value.deinit(app.alloc);
+            const endpoint = if (configure) |cfg| blk: {
+                provider_route.validateBaseUrl(cfg.base_url) catch {
+                    try app.writeDomainNotice(.{
+                        .topic = "provider",
+                        .tone = .warning,
+                        .body = "Invalid Gateway base URL. Use HTTPS, or loopback HTTP with an explicit port.",
+                    }, true);
+                    return;
+                };
+                owned_models_url = provider_route.appendModelsEndpointAlloc(app.alloc, cfg.base_url) catch {
+                    try app.writeDomainNotice(.{
+                        .topic = "provider",
+                        .tone = .warning,
+                        .body = "Invalid Gateway base URL. Use HTTPS, or loopback HTTP with an explicit port.",
+                    }, true);
+                    return;
+                };
+                configure_credential = .{
+                    .token = try app.alloc.dupe(u8, cfg.api_key),
+                    .source = .openai_api_key,
+                };
+                break :blk owned_models_url.?;
+            } else app.providerCatalogEndpoint();
             if (!try app.provider_switch.start(.{
                 .target = target,
                 .intent = intent,
@@ -718,7 +778,9 @@ pub fn Runtime(comptime App: type) type {
                 .oauth_transport = app.auth.oauthTransport(),
                 .secret_store = app.auth.secretStore(),
                 .catalog_provider = catalog_provider,
-                .endpoint = app.providerCatalogEndpoint(),
+                .endpoint = endpoint,
+                .credential_override = if (configure_credential) |*value| value else null,
+                .gateway_configure_base_url = if (configure) |cfg| cfg.base_url else null,
             })) {
                 try app.writeDomainNotice(.{
                     .topic = "provider",
@@ -729,8 +791,11 @@ pub fn Runtime(comptime App: type) type {
             }
             const body = try std.fmt.allocPrint(
                 app.alloc,
-                "Switching to {s}...",
-                .{provider_catalog.label(target)},
+                "{s} {s}...",
+                .{
+                    if (configure != null) "Configuring" else "Switching to",
+                    provider_catalog.label(target),
+                },
             );
             defer app.alloc.free(body);
             try app.writeDomainNotice(.{ .topic = "provider", .tone = .neutral, .body = body }, true);
@@ -859,6 +924,14 @@ pub fn Runtime(comptime App: type) type {
                 return;
             }
 
+            if (completion.gateway_configure_base_url) |base_url| {
+                // Disk I/O finished on the activation worker. Only publish the
+                // owned process binding after the UI has admitted activation.
+                try gateway_session.setProcessBinding(.{
+                    .base_url = base_url,
+                    .api_key = prepared.credential.token,
+                });
+            }
             const access = credentials.catalogAccessForCredentialAndAccount(
                 prepared.credential.source,
                 prepared.credential.token,
@@ -948,6 +1021,16 @@ pub fn Runtime(comptime App: type) type {
         }
 
         pub fn admitPromptCredential(app: *App) !bool {
+            if (comptime @hasField(App, "provider_switch")) {
+                if (app.provider_switch.isBusy()) {
+                    try app.writeDomainNotice(.{
+                        .topic = "provider",
+                        .tone = .neutral,
+                        .body = "Provider activation is in progress. Your input is kept; submit it after the switch finishes.",
+                    }, true);
+                    return false;
+                }
+            }
             if (comptime !oauthAuthEnabled(App)) {
                 if (app.auth.apiKey() != null) return true;
                 try app.writeDomainNotice(.{

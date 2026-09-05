@@ -1081,6 +1081,103 @@ async function openProviderPicker(pickerSession: TmuxSession): Promise<void> {
   await pickerSession.waitForText("Model provider", TIMEOUT);
 }
 
+tmuxTest("TUI persists replaces and removes Gateway bindings without recording secrets", async () => {
+  home = realpathSync(mkdtempSync(join(tmpdir(), "fx-tui-gateway-binding-")));
+  stderrPath = join(home, "stderr.log");
+  gateway = startFakeGateway([
+    fakeGatewayFinalText("GATEWAY_FIRST_BINDING"),
+    fakeGatewayFinalText("GATEWAY_CLI_BINDING"),
+  ]);
+  let releaseReplacementModels!: () => void;
+  let replacementModelsRequested = false;
+  const replacementModels = new Promise<void>(resolve => { releaseReplacementModels = resolve; });
+  const replacement = startFakeGateway([
+    fakeGatewayFinalText("GATEWAY_REPLACED_BINDING"),
+    fakeGatewayFinalText("GATEWAY_RESTARTED_BINDING"),
+  ], { async models() {
+    replacementModelsRequested = true;
+    await replacementModels;
+    return [{ id: "gpt-5", object: "model" }];
+  } });
+  try {
+    session = await startFxWithoutAuth(home, stderrPath, gateway);
+    await session.sendText(`/provider gateway ${gateway.baseUrl} tui-first-secret`);
+    await session.waitForText("Switched to BYOK Responses API", TIMEOUT);
+    await session.sendText("Exercise the first Gateway binding.");
+    await session.waitForText("GATEWAY_FIRST_BINDING", TIMEOUT);
+    await session.waitForComposer(TIMEOUT);
+    await session.sendText(`/provider gateway ${replacement.baseUrl} tui-second-secret`);
+    const bindingPath = join(home, ".fx", "gateway-auth.json");
+    const deadline = Date.now() + TIMEOUT;
+    while (!replacementModelsRequested) {
+      if (Date.now() >= deadline) throw new Error("Replacement catalog was not requested");
+      await Bun.sleep(25);
+    }
+    await session.sendText("Exercise the replacement Gateway binding.");
+    await session.waitForText("Provider activation is in progress", TIMEOUT);
+    expect(gateway.requests).toHaveLength(1);
+    expect(replacement.requests).toHaveLength(0);
+    releaseReplacementModels();
+    while (!existsSync(bindingPath) || !readFileSync(bindingPath, "utf8").includes("tui-second-secret")) {
+      if (Date.now() >= deadline) throw new Error("Gateway replacement was not persisted");
+      await Bun.sleep(25);
+    }
+    await session.waitForPane(pane => (pane.match(/Switched to BYOK Responses API/g) ?? []).length >= 2, TIMEOUT);
+    await session.sendKeys("Enter");
+    await session.waitForText("GATEWAY_REPLACED_BINDING", TIMEOUT);
+    expect(gateway.requests).toHaveLength(1);
+    expect(replacement.requests.at(-1)?.headers.get("authorization")).toBe("Bearer tui-second-secret");
+    expect(replacement.requests.at(-1)?.body).toContain("Exercise the replacement Gateway binding.");
+    expect(statSync(bindingPath).mode & 0o777).toBe(0o600);
+    await session.waitForComposer(TIMEOUT);
+    await session.sendKeys("C-d");
+    expect(await session.waitForSessionEnd(TIMEOUT)).toBe(true);
+    session = await startFxWithoutAuth(home, stderrPath, gateway);
+    await session.sendText("Exercise the persisted binding after restart.");
+    await session.waitForText("GATEWAY_RESTARTED_BINDING", TIMEOUT);
+    expect(replacement.requests.at(-1)?.headers.get("authorization")).toBe("Bearer tui-second-secret");
+    await session.waitForComposer(TIMEOUT);
+    await session.sendText("/logout gateway");
+    await session.waitForText("Removed the saved Gateway URL and API key", TIMEOUT);
+    expect(existsSync(bindingPath)).toBe(false);
+    const historyPath = join(home, ".fx", "history.jsonl");
+    if (existsSync(historyPath)) expect(readFileSync(historyPath, "utf8")).not.toContain("tui-first-secret");
+    if (existsSync(historyPath)) expect(readFileSync(historyPath, "utf8")).not.toContain("tui-second-secret");
+    expect(readFileSync(stderrPath, "utf8")).toBe("");
+    await session.sendKeys("C-d");
+    expect(await session.waitForSessionEnd(TIMEOUT)).toBe(true);
+    const settingsPath = join(home, ".fx", "settings.json");
+    const settings = JSON.parse(readFileSync(settingsPath, "utf8"));
+    settings.models = { ...settings.models, gateway: "removed-model" };
+    writeFileSync(settingsPath, JSON.stringify(settings));
+    const cliEnv = { HOME: home, OPENAI_API_KEY: undefined, FX_RESPONSES_BASE_URL: undefined, OPENAI_BASE_URL: undefined, FX_MODEL: undefined };
+    const configured = await runFx(["provider", "gateway", gateway.baseUrl, "cli-binding-secret"], { env: cliEnv, timeoutMs: TIMEOUT });
+    expect(configured.code).toBe(0);
+    expect(configured.stdout).not.toContain("cli-binding-secret");
+    expect(JSON.parse(readFileSync(settingsPath, "utf8")).models.gateway).toBe("gpt-5");
+    const cliPrompt = await runFx(["ask", "--json", "Use the CLI binding."], { env: cliEnv, timeoutMs: TIMEOUT });
+    expect(cliPrompt.code).toBe(0);
+    expect(cliPrompt.stdout).toContain("GATEWAY_CLI_BINDING");
+    expect(gateway.requests.at(-1)?.headers.get("authorization")).toBe("Bearer cli-binding-secret");
+    expect((await runFx(["logout", "gateway"], { env: cliEnv, timeoutMs: TIMEOUT })).code).toBe(0);
+    expect(existsSync(bindingPath)).toBe(false);
+    const assertNoSecrets = (directory: string) => {
+      for (const entry of readdirSync(directory, { withFileTypes: true })) {
+        const path = join(directory, entry.name);
+        if (entry.isDirectory()) assertNoSecrets(path);
+        else if (entry.isFile()) {
+          const content = readFileSync(path, "utf8");
+          for (const key of ["tui-first-secret", "tui-second-secret", "cli-binding-secret"]) expect(content).not.toContain(key);
+        }
+      }
+    };
+    assertNoSecrets(join(home, ".fx"));
+  } finally {
+    releaseReplacementModels();
+    replacement.stop();
+  }
+}, TIMEOUT * 3);
+
 tmuxTest(
   "login hub exposes only supported provider and credential actions",
   async () => {

@@ -1242,6 +1242,21 @@ pub const Runtime = struct {
         try self.refreshSourceInventory(alloc);
         return was_active or was_available;
     }
+
+    pub fn reconcileAfterGatewayLogout(self: *Self, alloc: Allocator) !bool {
+        const was_available = self.source_inventory.contains(.openai_api_key);
+        const was_active = self.credentialSource() == .openai_api_key;
+        if (was_active) {
+            if (self.selected_credential) |*credential| credential.deinit(alloc);
+            self.selected_credential = null;
+            self.credential_refresh_failure_source = null;
+        }
+        try self.refreshSourceInventory(alloc);
+        if (was_active) {
+            _ = try self.reselectByPrecedence(alloc);
+        }
+        return was_active or was_available;
+    }
 };
 
 fn probeCredentialSource(raw_context: ?*anyopaque, alloc: Allocator, source: credentials.Source) !bool {

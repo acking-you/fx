@@ -1,4 +1,6 @@
 const std = @import("std");
+const gateway_session = @import("../auth/gateway_session.zig");
+const provider_route = @import("../gateway/provider_route.zig");
 const agent_runtime = @import("../agent/agent_runtime.zig");
 const agent_stream_provider = @import("../agent/stream_provider.zig");
 const command_admission = @import("../permissions/command_admission.zig");
@@ -66,6 +68,8 @@ pub fn Runtime(comptime App: type) type {
             mode: PermissionMode,
             grants: []const PermissionGrant,
             rules: types.PermissionRuleSet,
+            provider: model_provider.ProviderId,
+            model: []const u8,
         };
 
         fn appAccessScope(app: *const App) ?workspace_access.AccessScope {
@@ -147,6 +151,8 @@ pub fn Runtime(comptime App: type) type {
                     .mode = admission.permission_mode,
                     .grants = admission.grants,
                     .rules = admission.rules,
+                    .provider = admission.provider,
+                    .model = admission.model,
                 },
             );
             context.plan_update_ctx = null;
@@ -191,7 +197,9 @@ pub fn Runtime(comptime App: type) type {
                     app_session_runtime.Runtime(App).childCapability(app)
                 else
                     null;
-            const selected_provider = provider_runtime.provider(app);
+            const captured_route = if (authority == null) app.worker.active_gateway_route else null;
+            const selected_provider = if (authority) |snapshot| snapshot.provider else if (captured_route != null) .gateway else provider_runtime.provider(app);
+            const selected_model = if (authority) |snapshot| snapshot.model else if (captured_route) |route| route.model else provider_runtime.model(app);
             const provider_capabilities = if (comptime @hasDecl(App, "providerSet"))
                 app.providerSet().select(selected_provider).capabilities
             else if (selected_provider == .gateway)
@@ -211,13 +219,15 @@ pub fn Runtime(comptime App: type) type {
                 .max_read_file_line_len = max_read_file_line_len,
                 .max_command_output_bytes = max_command_output_bytes,
                 .max_tool_result_bytes = agent_settings.max_tool_result_bytes,
-                .api_key = app.auth.apiKey() orelse "",
-                .agent_stream_provider = if (comptime @hasDecl(App, "agentStreamProvider"))
+                .api_key = if (authority != null) "" else if (captured_route) |route| route.api_key else app.auth.apiKey() orelse "",
+                .agent_stream_provider = if (comptime @hasDecl(App, "providerSet"))
+                    app.providerSet().select(selected_provider).agent_stream_or_unavailable()
+                else if (comptime @hasDecl(App, "agentStreamProvider"))
                     app.agentStreamProvider()
                 else
                     agent_stream_provider.unavailable_provider,
-                .credential_source = app.auth.credentialSource(),
-                .account_id = app.auth.accountId(),
+                .credential_source = if (authority != null) null else if (captured_route != null) .openai_api_key else app.auth.credentialSource(),
+                .account_id = if (authority != null or captured_route != null) null else app.auth.accountId(),
                 .provider = selected_provider,
                 .provider_capabilities = provider_capabilities,
                 .oauth_transport = app.auth.oauthTransport(),
@@ -225,7 +235,7 @@ pub fn Runtime(comptime App: type) type {
                     app.auth.secretStore()
                 else
                     host.unavailable_secret_store,
-                .model = provider_runtime.model(app),
+                .model = selected_model,
                 .gateway_retry_count = gateway_retry_count,
                 .gateway_chat_url = gateway_chat_url,
                 .gateway_models_path = if (comptime @hasField(App, "web_search_models_path")) app.web_search_models_path else "/v1/models",
@@ -268,11 +278,12 @@ pub fn Runtime(comptime App: type) type {
                     .allow_sandboxed => .allow_sandboxed,
                     .prompt => .prompt,
                 } else .none,
-                .permission_reviewer_provider = if (comptime @hasDecl(App, "permissionReviewerProvider")) app.permissionReviewerProvider() else null,
+                .permission_reviewer_provider = if (comptime @hasDecl(App, "providerSet")) app.providerSet().select(selected_provider).permission_reviewer else if (comptime @hasDecl(App, "permissionReviewerProvider")) app.permissionReviewerProvider() else null,
                 .tracker = &app.change_tracker,
                 .lifecycle_view = app.lifecycle_view,
                 .lifecycle_scope = lifecycleContext(app).scope,
             };
+            if (captured_route) |route| ctx.provider_endpoint_override = route.endpoint;
             if (comptime @hasField(App, "web_fetch_runtime")) {
                 ctx.web_fetch_runtime = &app.web_fetch_runtime;
                 ctx.web_fetch_artifact_store = app.session.webFetchArtifactStore();
@@ -281,34 +292,36 @@ pub fn Runtime(comptime App: type) type {
                 ctx.on_web_fetch_progress = app_callbacks.Bindings(App).onWebFetchProgress;
             }
             if (comptime @hasField(App, "web_search_runtime")) {
-                const search_bundle = if (comptime @hasDecl(App, "providerSet"))
-                    app.providerSet().select(selected_provider)
-                else
-                    provider_set.Bundle{
-                        .capabilities = provider_capabilities,
-                        .web_search = .{ .executor = app.web_search_runtime.provider },
-                    };
-                const search_capabilities = if (comptime @hasDecl(App, "resolvedModelCapabilities"))
-                    app.resolvedModelCapabilities(provider_runtime.model(app))
-                else
-                    search_bundle.fallbackModelCapabilities(provider_runtime.model(app));
-                const search_provider = search_bundle.web_search.executionProvider(search_capabilities);
-                if (search_provider != null) {
-                    app.web_search_runtime.configureForProvider(search_provider.?, .{
-                        .api_key = app.auth.apiKey() orelse "",
-                        .credential_source = app.auth.credentialSource(),
-                        .account_id = app.auth.accountId(),
-                        .worker_model = provider_runtime.model(app),
-                        .gateway_retry_count = gateway_retry_count,
-                        .gateway_chat_url = gateway_chat_url,
-                        .usage = &app.session.usage,
-                        .usage_allocator = app.alloc,
-                    });
-                    ctx.web_search_backend = app.web_search_runtime.dispatchBackend();
+                if (authority == null) {
+                    const search_bundle = if (comptime @hasDecl(App, "providerSet"))
+                        app.providerSet().select(selected_provider)
+                    else
+                        provider_set.Bundle{
+                            .capabilities = provider_capabilities,
+                            .web_search = .{ .executor = app.web_search_runtime.provider },
+                        };
+                    const search_capabilities = if (comptime @hasDecl(App, "resolvedModelCapabilities"))
+                        app.resolvedModelCapabilities(selected_model)
+                    else
+                        search_bundle.fallbackModelCapabilities(selected_model);
+                    const search_provider = search_bundle.web_search.executionProvider(search_capabilities);
+                    if (search_provider != null) {
+                        app.web_search_runtime.configureForProvider(search_provider.?, .{
+                            .api_key = ctx.api_key,
+                            .credential_source = ctx.credential_source,
+                            .account_id = ctx.account_id,
+                            .worker_model = selected_model,
+                            .gateway_retry_count = gateway_retry_count,
+                            .gateway_chat_url = ctx.provider_endpoint_override orelse gateway_chat_url,
+                            .usage = &app.session.usage,
+                            .usage_allocator = app.alloc,
+                        });
+                        ctx.web_search_backend = app.web_search_runtime.dispatchBackend();
+                    }
+                    ctx.web_search_runtime_ready = search_provider != null;
+                    ctx.web_search_progress_ctx = @ptrCast(app);
+                    ctx.on_web_search_progress = app_callbacks.Bindings(App).onWebSearchProgress;
                 }
-                ctx.web_search_runtime_ready = search_provider != null;
-                ctx.web_search_progress_ctx = @ptrCast(app);
-                ctx.on_web_search_progress = app_callbacks.Bindings(App).onWebSearchProgress;
             }
             ctx.model_capability_resolver = app_callbacks.Bindings(App).modelCapabilityResolver(app);
             return ctx;
@@ -665,6 +678,13 @@ pub fn Runtime(comptime App: type) type {
             gateway_retry_count: usize,
             gateway_chat_url: []const u8,
         ) !void {
+            const gateway_endpoint = if (job.provider == .gateway and job.credential_source == .openai_api_key)
+                try provider_route.resolveEndpointAlloc(std.heap.c_allocator, .openai_responses_byok, .fromEnvironment())
+            else
+                null;
+            defer if (gateway_endpoint) |endpoint| std.heap.c_allocator.free(endpoint);
+            if (gateway_endpoint) |endpoint| app.worker.active_gateway_route = .{ .api_key = job.api_key, .endpoint = endpoint, .model = job.model };
+            defer app.worker.active_gateway_route = null;
             var snapshot_ownership = worker_runtime.ActivePromptSnapshotOwnership.init(job.images);
             app.worker.beginActivePromptSnapshots(&snapshot_ownership);
             defer app.worker.endActivePromptSnapshots(&snapshot_ownership);
@@ -738,7 +758,7 @@ pub fn Runtime(comptime App: type) type {
 
             const deps = app_callbacks.Bindings(App).agentRuntimeDeps(app);
             const semantic_presentation = app_callbacks.Bindings(App).semanticPresentationSink(app);
-            const config = buildQueuedPromptConfig(
+            var config = buildQueuedPromptConfig(
                 app,
                 job,
                 skills_section,
@@ -748,6 +768,7 @@ pub fn Runtime(comptime App: type) type {
                 &tool_projection,
                 session_child_capability,
             );
+            config.provider_endpoint_override = gateway_endpoint;
             const process_result = agent_runtime.processQueuedPrompt(&deps, semantic_presentation, lifecycleContext(app), config, job);
             if (postflight_context_notices.written().len > 0) {
                 try app_worker_runtime.Runtime(App).pushSemanticNotice(app, .{
@@ -784,6 +805,21 @@ pub fn Runtime(comptime App: type) type {
         ) subagent_execution.ServiceError!subagent_execution.RunOutcome {
             const app: *App = @ptrCast(@alignCast(raw.?));
             const alloc = std.heap.c_allocator;
+            var gateway_binding = if (admission.provider == .gateway)
+                gateway_session.copyStoredBinding(alloc) catch return error.ProviderFailed
+            else
+                null;
+            defer if (gateway_binding) |*binding| binding.deinit(alloc);
+            const gateway_endpoint = if (gateway_binding) |binding|
+                provider_route.appendResponsesEndpointAlloc(alloc, binding.base_url) catch return error.ProviderFailed
+            else
+                null;
+            defer if (gateway_endpoint) |endpoint| alloc.free(endpoint);
+            const gateway_models = if (gateway_binding) |binding|
+                provider_route.appendModelsEndpointAlloc(alloc, binding.base_url) catch return error.ProviderFailed
+            else
+                null;
+            defer if (gateway_models) |endpoint| alloc.free(endpoint);
             var child_projection = app.snapshotSubagentModelToolProjection(
                 alloc,
                 admission.permission_mode,
@@ -838,6 +874,13 @@ pub fn Runtime(comptime App: type) type {
                 .host = app_session_runtime.Runtime(App).subagentHost(app) orelse
                     return error.ProviderFailed,
                 .tool_context = tool_context,
+                .provider_route_override = if (gateway_binding) |binding| .{
+                    .provider = .gateway,
+                    .api_key = binding.api_key,
+                    .credential_source = .openai_api_key,
+                    .endpoint = gateway_endpoint.?,
+                    .models_path = gateway_models.?,
+                } else null,
                 .provider_set = providers,
                 .resolved_model_capabilities = if (comptime @hasDecl(App, "resolvedModelCapabilitiesForProvider"))
                     app.resolvedModelCapabilitiesForProvider(
@@ -2210,6 +2253,11 @@ test "subagent tool context uses immutable admission authority" {
     defer admission.deinit(alloc);
 
     const ctx = app.subagentToolContextForAdmission(admission);
+    try std.testing.expectEqualStrings("", ctx.api_key);
+    try std.testing.expect(ctx.credential_source == null);
+    try std.testing.expect(ctx.account_id == null);
+    try std.testing.expectEqualStrings(admission.model, ctx.model);
+    try std.testing.expect(ctx.web_search_backend == null);
     try std.testing.expectEqual(PermissionMode.auto, ctx.permission_mode);
     try std.testing.expectEqual(@as(usize, 1), ctx.permission_rules.rules.len);
     try std.testing.expectEqualStrings(

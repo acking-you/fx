@@ -14,6 +14,7 @@ const app_runtime_setup = @import("../core/app/app_runtime_setup.zig");
 const builtin_skills = @import("../builtins/skills.zig");
 const builtin_tools = @import("../builtins/tools.zig");
 const credentials = @import("../core/auth/credentials.zig");
+const gateway_session = @import("../core/auth/gateway_session.zig");
 const provider_oauth = @import("../core/auth/provider_oauth.zig");
 const secret = @import("../core/auth/secret.zig");
 const auth_runtime = @import("../core/auth/auth_runtime.zig");
@@ -445,9 +446,10 @@ pub const ServerState = struct {
     }
 };
 
-/// One connection-scoped custom Gateway route. The endpoint pair and key are
-/// owned together so switching temporarily to a subscription provider cannot
-/// leave a custom origin paired with an unrelated credential.
+/// One custom Gateway route for this ACP connection. The endpoint pair and key
+/// are owned together so switching temporarily to a subscription provider cannot
+/// leave a custom origin paired with an unrelated credential. A successful
+/// configure also persists that pair to the profile.
 const GatewayConnectionBinding = struct {
     chat_url: []u8,
     models_url: []u8,
@@ -476,6 +478,42 @@ pub const GatewayRouteSnapshot = struct {
         self.* = undefined;
     }
 };
+
+fn installStoredGatewayBinding(state: *ServerState) !void {
+    if (state.gateway_binding != null) return;
+    var session = (try gateway_session.copyStoredBinding(state.alloc)) orelse return;
+    defer session.deinit(state.alloc);
+    const chat_url = provider_route.appendResponsesEndpointAlloc(state.alloc, session.base_url) catch |err| {
+        debug_trace.logf("provider", "stored gateway binding chat url failed err={s}", .{@errorName(err)});
+        return;
+    };
+    const models_url = provider_route.appendModelsEndpointAlloc(state.alloc, session.base_url) catch |err| {
+        debug_trace.logf("provider", "stored gateway binding models url failed err={s}", .{@errorName(err)});
+        state.alloc.free(chat_url);
+        return;
+    };
+    var credential = cloneServerCredential(state.alloc, .{
+        .token = session.api_key,
+        .source = .openai_api_key,
+    }) catch |err| {
+        state.alloc.free(chat_url);
+        state.alloc.free(models_url);
+        return err;
+    };
+    state.gateway_binding_mutex.lockUncancelable(io_mod.getIo());
+    defer state.gateway_binding_mutex.unlock(io_mod.getIo());
+    if (state.gateway_binding != null) {
+        state.alloc.free(chat_url);
+        state.alloc.free(models_url);
+        credential.deinit(state.alloc);
+        return;
+    }
+    state.gateway_binding = .{
+        .chat_url = chat_url,
+        .models_url = models_url,
+        .credential = credential,
+    };
+}
 
 pub fn snapshotGatewayRoute(
     state: *ServerState,
@@ -1435,6 +1473,7 @@ fn handleInitialize(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message
     if (credential) |resolved| {
         if (resolved.token.len > 0) adoptServerCredential(state, resolved);
     }
+    try installStoredGatewayBinding(state);
 
     state.permission_mode = startup.permission_mode;
     state.permission_rules = startup.takePermissionRules();
@@ -1585,6 +1624,7 @@ fn handleProviderSwitch(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Mes
         providerCatalogEndpoint(state, target),
         null,
         if (current_credential) |*value| value else null,
+        null,
     );
     if (!started) {
         return state.writer.writeError(alloc, msg.id, .{
@@ -1627,6 +1667,10 @@ fn handleProviderConfigure(state: *ServerState, alloc: Allocator, msg: *jsonrpc.
         .code = ErrorCode.invalid_params,
         .message = "apiKey must not be empty",
     });
+    gateway_session.validate(base_url, api_key) catch return state.writer.writeError(alloc, msg.id, .{
+        .code = ErrorCode.invalid_params,
+        .message = "Invalid Gateway baseUrl or apiKey",
+    });
 
     const chat_url = provider_route.appendResponsesEndpointAlloc(alloc, base_url) catch |err|
         return state.writer.writeError(alloc, msg.id, .{
@@ -1655,6 +1699,7 @@ fn handleProviderConfigure(state: *ServerState, alloc: Allocator, msg: *jsonrpc.
         models_url,
         chat_url,
         &credential,
+        base_url,
     )) {
         return state.writer.writeError(alloc, msg.id, .{
             .code = ErrorCode.invalid_request,
@@ -1962,6 +2007,7 @@ const ProviderJob = struct {
     models_url_transferred: bool = false,
     chat_url: ?[]u8 = null,
     credential_override: ?credentials.Credential = null,
+    persist_base_url: ?[]u8 = null,
 
     fn init(
         state: *ServerState,
@@ -1971,6 +2017,7 @@ const ProviderJob = struct {
         models_url: []const u8,
         chat_url: ?[]const u8,
         credential_override: ?*const credentials.Credential,
+        persist_base_url: ?[]const u8,
     ) !ProviderJob {
         const owned_models_url = try state.alloc.dupe(u8, models_url);
         errdefer state.alloc.free(owned_models_url);
@@ -1981,6 +2028,8 @@ const ProviderJob = struct {
         else
             null;
         errdefer if (owned_credential) |*value| value.deinit(state.alloc);
+        const owned_persist_base_url = if (persist_base_url) |value| try state.alloc.dupe(u8, value) else null;
+        errdefer if (owned_persist_base_url) |value| state.alloc.free(value);
         return .{
             .state = state,
             .msg = try cloneMessage(state.alloc, msg),
@@ -1989,6 +2038,7 @@ const ProviderJob = struct {
             .models_url = owned_models_url,
             .chat_url = owned_chat_url,
             .credential_override = owned_credential,
+            .persist_base_url = owned_persist_base_url,
         };
     }
 
@@ -1997,6 +2047,7 @@ const ProviderJob = struct {
         if (!self.models_url_transferred) self.state.alloc.free(self.models_url);
         if (self.chat_url) |value| self.state.alloc.free(value);
         if (self.credential_override) |*value| value.deinit(self.state.alloc);
+        if (self.persist_base_url) |value| self.state.alloc.free(value);
         self.* = undefined;
     }
 };
@@ -2024,6 +2075,7 @@ fn startProviderJob(
     models_url: []const u8,
     chat_url: ?[]const u8,
     credential_override: ?*const credentials.Credential,
+    persist_base_url: ?[]const u8,
 ) !bool {
     reapProviderJob(state, false);
     if (state.provider_job_running.load(.seq_cst) or state.provider_job_thread != null) return false;
@@ -2038,6 +2090,7 @@ fn startProviderJob(
         models_url,
         chat_url,
         credential_override,
+        persist_base_url,
     );
     errdefer job.deinit();
 
@@ -2119,6 +2172,17 @@ fn providerJobMain(job: *ProviderJob) void {
         }) catch {};
         return;
     };
+
+    if (job.persist_base_url) |base_url| {
+        gateway_session.saveAndActivate(state.alloc, base_url, prepared.credential.token) catch |err| {
+            debug_trace.logf("provider", "ACP gateway binding persist failed err={s}", .{@errorName(err)});
+            state.writer.writeError(state.alloc, job.msg.id, .{
+                .code = ErrorCode.internal_error,
+                .message = "Failed to save Gateway URL and API key",
+            }) catch {};
+            return;
+        };
+    }
 
     if (state.active_session) |*active| {
         commitActiveSessionProvider(
@@ -2221,7 +2285,7 @@ fn writeProviderOperationResponse(job: *ProviderJob, model: []const u8) !void {
     if (job.kind == .configure_byok) {
         try out.writer.writeAll(",\"responseUrl\":");
         try writeJsonStr(gatewayChatUrl(job.state), &out.writer);
-        try out.writer.writeAll(",\"credentialPersistence\":\"connection\"");
+        try out.writer.writeAll(",\"credentialPersistence\":\"profile\"");
     }
     try out.writer.writeByte('}');
     try job.state.writer.writeResponse(job.state.alloc, job.msg.id, out.writer.buffered());
@@ -2339,6 +2403,7 @@ fn handleSetConfigOption(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Me
                 providerCatalogEndpoint(state, target),
                 null,
                 if (current_credential) |*credential| credential else null,
+                null,
             )) {
                 return state.writer.writeError(alloc, msg.id, .{
                     .code = ErrorCode.invalid_request,

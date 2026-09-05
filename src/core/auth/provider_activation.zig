@@ -7,6 +7,7 @@ const model_provider = @import("../config/model_provider.zig");
 const oauth_transport = @import("oauth_transport.zig");
 const secret = @import("secret.zig");
 const io_mod = @import("../shared/io.zig");
+const gateway_session = @import("gateway_session.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -19,6 +20,7 @@ pub const Request = struct {
     catalog_provider: model_catalog.Provider,
     endpoint: []const u8,
     credential_override: ?*const credentials.Credential = null,
+    gateway_configure_base_url: ?[]const u8 = null,
 };
 
 pub const Failure = union(enum) {
@@ -59,9 +61,11 @@ pub const Completion = struct {
     intent: auth_transition.ProviderSwitchIntent,
     allow_login: bool,
     outcome: Outcome,
+    gateway_configure_base_url: ?[]u8 = null,
 
     pub fn deinit(self: *Completion, alloc: Allocator) void {
         self.outcome.deinit(alloc);
+        if (self.gateway_configure_base_url) |value| alloc.free(value);
         self.* = undefined;
     }
 };
@@ -122,6 +126,21 @@ pub fn prepare(
         credential.deinit(alloc);
         return .{ .failed = .empty_catalog };
     }
+    if (cancel_flag.load(.seq_cst)) {
+        model_catalog.freeModelCatalog(alloc, &catalog);
+        credential.deinit(alloc);
+        return .{ .failed = .cancelled };
+    }
+    if (request.gateway_configure_base_url) |base_url| {
+        gateway_session.saveNewSession(alloc, .{
+            .base_url = @constCast(base_url),
+            .api_key = credential.token,
+        }) catch |err| {
+            model_catalog.freeModelCatalog(alloc, &catalog);
+            credential.deinit(alloc);
+            return .{ .failed = .{ .credential = err } };
+        };
+    }
     return .{ .prepared = .{
         .credential = credential,
         .catalog = catalog,
@@ -135,6 +154,7 @@ pub const Runtime = struct {
         request: Request,
         endpoint: []u8,
         credential_override: ?credentials.Credential,
+        gateway_configure_base_url: ?[]u8,
 
         fn init(alloc: Allocator, request: Request) !OwnedRequest {
             const endpoint = try alloc.dupe(u8, request.endpoint);
@@ -144,6 +164,11 @@ pub const Runtime = struct {
             else
                 null;
             errdefer if (credential_override) |*credential| credential.deinit(alloc);
+            const gateway_configure_base_url = if (request.gateway_configure_base_url) |value|
+                try alloc.dupe(u8, value)
+            else
+                null;
+            errdefer if (gateway_configure_base_url) |value| alloc.free(value);
             return .{
                 .request = .{
                     .target = request.target,
@@ -157,14 +182,17 @@ pub const Runtime = struct {
                     // its final address. Pointing at the local optional here would
                     // leave Request with a dangling stack pointer after the move.
                     .credential_override = null,
+                    .gateway_configure_base_url = gateway_configure_base_url,
                 },
                 .endpoint = endpoint,
                 .credential_override = credential_override,
+                .gateway_configure_base_url = gateway_configure_base_url,
             };
         }
 
         fn deinit(self: *OwnedRequest, alloc: Allocator) void {
             if (self.credential_override) |*credential| credential.deinit(alloc);
+            if (self.gateway_configure_base_url) |value| alloc.free(value);
             alloc.free(self.endpoint);
             self.* = undefined;
         }
@@ -265,6 +293,12 @@ pub const Runtime = struct {
         return self.running;
     }
 
+    pub fn isBusy(self: *Self) bool {
+        self.mutex.lockUncancelable(io_mod.getIo());
+        defer self.mutex.unlock(io_mod.getIo());
+        return self.running or self.completion != null or self.thread != null;
+    }
+
     pub fn takeCompletion(self: *Self) ?Completion {
         self.mutex.lockUncancelable(io_mod.getIo());
         const completion = self.completion orelse {
@@ -301,7 +335,9 @@ pub const Runtime = struct {
             .intent = request.intent,
             .allow_login = request.allow_login,
             .outcome = prepare(self.alloc, request, &self.cancel_requested),
+            .gateway_configure_base_url = owned.gateway_configure_base_url,
         };
+        owned.gateway_configure_base_url = null;
         self.mutex.lockUncancelable(io_mod.getIo());
         const discard = self.discard_completion;
         if (!discard) self.completion = completion;

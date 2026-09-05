@@ -1254,6 +1254,8 @@ describe("acp: model-independent", () => {
         finalText("ACP_BYOK_RESTORED"),
         fileToolCall("custom_binding_review", reviewedTarget, "after"),
         finalText("ACP_BYOK_REVIEWED"),
+        Response.json({ output: [{ id: "cmp_byok", type: "compaction", encrypted_content: "opaque-byok-checkpoint" }], usage: { input_tokens: 12, output_tokens: 3 } }),
+        finalText("ACP_BYOK_RESTARTED"),
       ], {
         async models() {
           await releaseModels.promise;
@@ -1309,7 +1311,7 @@ describe("acp: model-independent", () => {
           provider: "gateway",
           model: FAKE_GATEWAY_MODEL,
           responseUrl: `${gateway.baseUrl}/responses`,
-          credentialPersistence: "connection",
+          credentialPersistence: "profile",
         });
         expect(JSON.stringify(configured)).not.toContain("acp-runtime-key");
 
@@ -1359,12 +1361,49 @@ describe("acp: model-independent", () => {
           "Bearer acp-runtime-key",
         );
         expect(readFileSync(reviewedTarget, "utf8")).toBe("after");
+        const compacted = await runPrompt(client, "/compact", TIMEOUT);
+        expect(compacted.promptResult.result.stopReason).toBe("end_turn");
+        expect(JSON.stringify(compacted.messages)).toContain("Context compacted with the active Responses provider.");
+        expect(gateway.requests.at(-1)?.headers.get("authorization")).toBe("Bearer acp-runtime-key");
+        const bindingPath = join(root.home, ".fx", "gateway-auth.json");
+        const bindingBefore = readFileSync(bindingPath, "utf8");
+        const lockPath = join(root.home, ".fx", "gateway-auth.lock");
+        rmSync(lockPath);
+        mkdirSync(lockPath);
+        const rejected = await client.request("fx/provider/configure", { baseUrl: gateway.baseUrl, apiKey: "rejected-new-key" }, 8) as any;
+        expect(rejected.error.message).toBe("Failed to save Gateway URL and API key");
+        expect(readFileSync(bindingPath, "utf8")).toBe(bindingBefore);
+        rmSync(lockPath, { recursive: true });
         const settingsPath = join(root.home, ".fx", "settings.json");
         if (existsSync(settingsPath)) {
           expect(readFileSync(settingsPath, "utf8")).not.toContain("acp-runtime-key");
         }
         expect(prompted.promptResult.result.stopReason).toBe("end_turn");
         expect(client.stderr).toBe("");
+        const saved = JSON.parse(readFileSync(join(root.home, ".fx", "gateway-auth.json"), "utf8"));
+        expect(saved).toMatchObject({ base_url: gateway.baseUrl, api_key: "acp-runtime-key" });
+        await client.close();
+        client = await AcpClient.create({
+          cwd: root.workspace,
+          env: {
+            HOME: root.home,
+            OPENAI_API_KEY: "unrelated-environment-key",
+            OPENAI_BASE_URL: "https://unrelated.invalid/v1",
+            FX_RESPONSES_BASE_URL: undefined,
+            FX_MODEL: FAKE_GATEWAY_MODEL,
+          },
+        });
+        await client.request("initialize", { protocolVersion: 1 }, 1);
+        await client.request("session/new", {}, 2);
+        await client.readLine();
+        const restarted = await runPrompt(client, "Use the persisted Gateway binding.", TIMEOUT);
+        expect(restarted.promptResult.result.stopReason).toBe("end_turn");
+        expect(gateway.requests.at(-1)?.headers.get("authorization")).toBe("Bearer acp-runtime-key");
+        expect(client.stderr).toBe("");
+        await client.close();
+        const logout = await runFx(["logout", "gateway"], { cwd: root.workspace, env: { HOME: root.home }, timeoutMs: TIMEOUT });
+        expect(logout.code).toBe(0);
+        expect(existsSync(join(root.home, ".fx", "gateway-auth.json"))).toBe(false);
       } finally {
         releaseModels.resolve(undefined);
         await client?.close();
