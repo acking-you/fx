@@ -371,6 +371,9 @@ pub const ServerState = struct {
     credential_source: ?types.CredentialSource = null,
     account_id: ?[]u8 = null,
     gateway_binding_mutex: std.Io.Mutex = .init,
+    /// Protects credential borrows used by nonblocking usage snapshots while a
+    /// provider worker publishes a new binding. No remote I/O runs under it.
+    credential_mutex: std.Io.Mutex = .init,
     gateway_binding: ?GatewayConnectionBinding = null,
     selected_model: []u8 = &.{},
     provider: model_provider.ProviderId = .gateway,
@@ -620,6 +623,12 @@ fn borrowedCredentialForProvider(
 }
 
 fn adoptServerCredential(state: *ServerState, credential: *credentials.Credential) void {
+    state.credential_mutex.lockUncancelable(io_mod.getIo());
+    defer state.credential_mutex.unlock(io_mod.getIo());
+    adoptServerCredentialLocked(state, credential);
+}
+
+fn adoptServerCredentialLocked(state: *ServerState, credential: *credentials.Credential) void {
     state.logged_out[@intFromEnum(state.provider)] = false;
     if (state.active_session) |*active| active.api_key = &.{};
     if (state.api_key.len > 0) secret.zeroAndFree(state.alloc, state.api_key);
@@ -722,6 +731,8 @@ fn publishRefreshedSubscriptionToken(
     source: types.CredentialSource,
     expected_account_id: ?[]const u8,
 ) !void {
+    state.credential_mutex.lockUncancelable(io_mod.getIo());
+    defer state.credential_mutex.unlock(io_mod.getIo());
     const expected = expected_account_id orelse return error.ChatGptAccountChanged;
     const state_account = state.account_id orelse return error.ChatGptAccountChanged;
     if (!std.mem.eql(u8, expected, state_account)) return error.ChatGptAccountChanged;
@@ -1667,6 +1678,8 @@ fn handleRemoveSession(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Mess
 }
 
 fn handleProviderStatus(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message) !void {
+    state.credential_mutex.lockUncancelable(io_mod.getIo());
+    defer state.credential_mutex.unlock(io_mod.getIo());
     const payload = try std.json.Stringify.valueAlloc(alloc, .{
         .provider = @tagName(state.provider),
         .model = state.selected_model,
@@ -2036,6 +2049,9 @@ fn handleProviderUsage(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Mess
     };
     defer params.parsed.deinit();
 
+    state.credential_mutex.lockUncancelable(io_mod.getIo());
+    defer state.credential_mutex.unlock(io_mod.getIo());
+
     const provider = if (params.provider) |value|
         model_provider.parse(value) orelse return state.writer.writeError(alloc, msg.id, .{
             .code = ErrorCode.invalid_params,
@@ -2242,6 +2258,8 @@ fn providerJobMain(job: *ProviderJob) void {
             state.writer.writeError(state.alloc, job.msg.id, .{ .code = ErrorCode.internal_error, .message = "Provider logout failed" }) catch {};
             return;
         }
+        state.credential_mutex.lockUncancelable(io_mod.getIo());
+        defer state.credential_mutex.unlock(io_mod.getIo());
         state.logged_out[@intFromEnum(job.target)] = true;
         if (job.target == .gateway) {
             state.gateway_binding_mutex.lockUncancelable(io_mod.getIo());
@@ -2368,6 +2386,8 @@ fn providerJobMain(job: *ProviderJob) void {
         }) catch {};
         return;
     };
+    state.credential_mutex.lockUncancelable(io_mod.getIo());
+    defer state.credential_mutex.unlock(io_mod.getIo());
     if (state.selected_model.len > 0) state.alloc.free(state.selected_model);
     state.selected_model = selected_copy;
     state.provider = job.target;
@@ -2389,7 +2409,7 @@ fn providerJobMain(job: *ProviderJob) void {
     }
 
     state.capability_resolver.adoptOwnedCatalog(state.alloc, &prepared.catalog);
-    adoptServerCredential(state, &prepared.credential);
+    adoptServerCredentialLocked(state, &prepared.credential);
 
     switch (job.kind) {
         .config_option => writeConfigOptionsResponse(state, state.alloc, job.msg.id) catch {},
