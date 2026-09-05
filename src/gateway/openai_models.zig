@@ -249,17 +249,25 @@ test "OpenAI catalog honors BYOK search and reasoning metadata independent of mo
     ;
     var catalog = try parse(std.testing.allocator, json_text, .full);
     defer model_catalog.freeModelCatalog(std.testing.allocator, &catalog);
-    const claude = catalog.items[0];
+    try std.testing.expectEqual(@as(usize, 3), catalog.items.len);
+    // Capabilities are keyed by wire ID; picker ranking may reorder the list.
+    const claude = for (catalog.items) |entry| {
+        if (std.mem.eql(u8, entry.id, "claude-custom[1m]")) break entry;
+    } else return error.TestExpectedModel;
     try std.testing.expect(claude.has_web_search and claude.has_tool_use and claude.has_reasoning);
     try std.testing.expectEqual(@as(u32, 1_000_000), claude.context_window);
     try std.testing.expectEqual(@as(u32, 32_000), claude.max_tokens);
     try std.testing.expectEqual(@as(usize, 2), claude.reasoning_efforts.items.len);
     try std.testing.expectEqualStrings("high", claude.default_reasoning_effort.label());
-    const denied = catalog.items[1];
+    const denied = for (catalog.items) |entry| {
+        if (std.mem.eql(u8, entry.id, "gpt-5.6-sol")) break entry;
+    } else return error.TestExpectedModel;
     try std.testing.expect(!denied.has_web_search and !denied.has_reasoning and !denied.supports_fast_mode);
     try std.testing.expect(!denied.has_vision and !denied.has_file_input);
     try std.testing.expectEqual(@as(usize, 0), denied.reasoning_efforts.items.len);
-    const grok = catalog.items[2];
+    const grok = for (catalog.items) |entry| {
+        if (std.mem.eql(u8, entry.id, "grok-custom")) break entry;
+    } else return error.TestExpectedModel;
     try std.testing.expect(grok.has_web_search and grok.has_tool_use and grok.has_reasoning);
     try std.testing.expectEqual(@as(u32, 500_000), grok.context_window);
     try std.testing.expectEqual(@as(u32, 16_000), grok.max_tokens);
