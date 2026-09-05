@@ -3627,6 +3627,34 @@ test "processQueuedPrompt acknowledges parent delivery after ambiguous send fail
     );
 }
 
+test "processQueuedPrompt reports invalid provider usage after text without retrying" {
+    const alloc = std.testing.allocator;
+    const chunks = [_][]const u8{"Complete provider answer"};
+    const completions = [_]FakeCompletion{.{
+        .content = "Complete provider answer",
+        .chunks = &chunks,
+        .usage = .{ .input_tokens = 4, .cached_input_tokens = 26_201, .output_tokens = 20 },
+        .exact_usage_provider = .gateway,
+    }};
+    var gateway = FakeGateway.init(alloc, &completions);
+    defer gateway.deinit();
+    var hooks = FakeAgentRuntimeDeps.init(alloc);
+    defer hooks.deinit();
+    var usage = session_usage.Usage.initFresh();
+    defer usage.deinit(alloc);
+    hooks.usage = &usage;
+    var fixture = PromptFixture{};
+
+    try std.testing.expectError(error.InvalidGenerationRecord, runFakePrompt(&gateway, &hooks, fixture.config(), fixture.job()));
+    try std.testing.expectEqual(@as(usize, 1), gateway.request_models.items.len);
+    try std.testing.expectEqual(@as(usize, 1), hooks.system_notices.items.len);
+    try std.testing.expect(std.mem.find(u8, hooks.system_notices.items[0], "Invalid provider usage") != null);
+    try std.testing.expectEqualStrings("Complete provider answer", hooks.history_turns.items[0].interrupted.assistant.?);
+    try std.testing.expectEqual(session_usage.Availability.incomplete, usage.billing);
+    try std.testing.expectEqual(@as(u64, 0), usage.input_tokens);
+    try std.testing.expectEqual(@as(u64, 1), usage.settled_through_sequence);
+}
+
 test "processQueuedPrompt delivers parent context created between tool steps" {
     const alloc = std.testing.allocator;
     const calls = [_]ToolCall{toolCall("call_read", "read_file", "{\"path\":\"a\"}")};

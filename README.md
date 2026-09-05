@@ -155,6 +155,8 @@ A successful remote response is stored as the provider's complete opaque replace
 
 fx consumes each model catalog's context-budget metadata for every provider. The effective context display reserves model-declared headroom, defaulting to 95% of the raw window, and automatic compaction starts when the latest provider-reported total usage reaches the model limit, defaulting to 90% of the raw window. The TUI reports when automatic compaction starts and settles; the background task owns the activity row until the chosen replacement is installed, while ordinary input remains queued for the next turn.
 
+BYOK Responses catalogs can explicitly advertise hosted search with `supports_backend_search` (or `supportsBackendSearch`), independent of model naming. Explicit capability denials are respected. Catalog `reasoning_efforts`, `context_window`, and output limits also apply to custom model IDs. Invalid provider token counts are reported as an accounting error without silently inventing usage or retrying the completed request.
+
 Run fx from a project:
 
 ```bash

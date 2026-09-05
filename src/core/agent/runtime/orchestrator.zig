@@ -3581,6 +3581,15 @@ fn processQueuedPromptLoop(
                         .diagnostic = failure_diagnostic,
                     });
                     pending_auto_retry_status = null;
+                } else {
+                    // First-attempt local/protocol failures have no recovery
+                    // status to replace. Surface their cause before saving the
+                    // partial turn; otherwise the user only sees "failed".
+                    const notice = if (err == error.InvalidGenerationRecord)
+                        "Invalid provider usage: token counts are inconsistent. Usage accounting is incomplete; the request was not retried."
+                    else
+                        try std.fmt.allocPrint(arena, "Request failed: {s}", .{failure_diagnostic.view()});
+                    try deps.push_system_notice(deps.ctx, notice);
                 }
                 try runtime_assistant_stream.flushAssistantStream(&stream_ctx);
                 const failed_assistant_source = stream_ctx.raw_text.items;

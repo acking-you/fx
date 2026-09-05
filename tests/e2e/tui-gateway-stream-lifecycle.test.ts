@@ -1355,6 +1355,92 @@ async function launchRouteRecoveryTui(
 }
 
 describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
+  for (const model of ["claude-custom[1m]", "grok-custom", "private/codex"]) {
+    test(`BYOK hosted search and cached usage survive consecutive turns for ${model}`, async () => {
+      const catalog = {
+        id: model,
+        supports_backend_search: true,
+        supports_tool_use: true,
+        supports_reasoning_effort: true,
+        reasoning_efforts: [{ value: "high", default: true }, { value: "low" }],
+        context_window: 1_000_000,
+        max_output_tokens: 32_000,
+      };
+      const search = {
+        type: "web_search_call", id: "ws_byok", status: "completed",
+        action: { type: "search", query: "Zig release", sources: [{ type: "url", url: "https://ziglang.org/download/" }] },
+      };
+      const message = {
+        type: "message", id: "msg_byok", role: "assistant", status: "completed",
+        content: [{ type: "output_text", text: "BYOK_SEARCH_COMPLETE", annotations: [{ type: "url_citation", start_index: 0, end_index: 4, url: "https://ziglang.org/download/", title: "Zig downloads" }] }],
+      };
+      const { queuedGateway, stderrPath } = await launchRouteRecoveryTui(
+        "fx-tui-byok-search-",
+        [fakeGatewaySse([
+          { type: "response.output_item.added", output_index: 0, item: { ...search, status: "in_progress" } },
+          { type: "response.output_item.done", output_index: 0, item: search },
+          { type: "response.output_text.delta", item_id: "msg_byok", output_index: 1, content_index: 0, delta: "BYOK_SEARCH_COMPLETE" },
+          { type: "response.output_item.done", output_index: 1, item: message },
+          { type: "response.completed", response: {
+            id: "resp_byok", status: "completed", output: [search, message],
+            usage: { input_tokens: 26_541, input_tokens_details: { cached_tokens: 26_201, cache_write_tokens: 336 }, output_tokens: 20, total_tokens: 26_561 },
+          } },
+        ]), fakeGatewayFinalText("BYOK_SEARCH_REPLAY_COMPLETE")],
+        { model, models: [catalog], settings: { effort: "high" } },
+      );
+      await session!.sendText("Search the web for the Zig release.");
+      await session!.waitForText("Searched web Zig release", TIMEOUT);
+      await session!.waitForText("BYOK_SEARCH_COMPLETE", TIMEOUT);
+      await session!.waitForComposer(TIMEOUT);
+      expect(queuedGateway.requests).toHaveLength(1);
+      const first = JSON.parse(queuedGateway.requests[0]!.body);
+      expect(first.model).toBe(model);
+      expect(first.reasoning.effort).toBe("high");
+      expect(first.tools.filter((tool: { type: string }) => tool.type === "web_search")).toEqual([{ type: "web_search" }]);
+      expect(first.tools.some((tool: { name?: string }) => tool.name === "web_search")).toBe(false);
+
+      await session!.sendText("Use the previous search evidence and finish.");
+      await session!.waitForText("BYOK_SEARCH_REPLAY_COMPLETE", TIMEOUT);
+      await session!.waitForComposer(TIMEOUT);
+      expect(queuedGateway.requests).toHaveLength(2);
+      const second = JSON.parse(queuedGateway.requests[1]!.body);
+      expect(second.input.some((item: { type: string; id: string }) => item.type === "web_search_call" && item.id === "ws_byok")).toBe(true);
+      expect(JSON.stringify(second.input)).toContain("https://ziglang.org/download/");
+      const sessionsDir = join(root!, "home", ".fx", "sessions");
+      await waitForCondition(() => {
+        const ids = readdirSync(sessionsDir).filter(id => existsSync(join(sessionsDir, id, "usage-v2.json")));
+        if (ids.length !== 1) return false;
+        const usage = JSON.parse(readFileSync(join(sessionsDir, ids[0]!, "usage-v2.json"), "utf8")).snapshot;
+        return usage.billing === "complete" && usage.request_count === 2 &&
+          usage.input_tokens === 26_544 && usage.output_tokens === 25 &&
+          usage.cache_read_tokens === 26_201 && usage.cache_write_tokens === 336;
+      }, "complete cached BYOK accounting");
+      expect(session!.isAlive()).toBe(true);
+      expect(readFileSync(stderrPath, "utf8")).toBe("");
+    }, 60_000);
+  }
+
+  test("invalid BYOK usage explains the failure and does not retry the generated answer", async () => {
+    const { queuedGateway, stderrPath } = await launchRouteRecoveryTui(
+      "fx-tui-invalid-byok-usage-",
+      [fakeGatewaySse([
+        responseTextDelta("ACCOUNTING_ANSWER_PRESERVED"),
+        { type: "response.completed", response: { status: "completed", usage: {
+          input_tokens: 4, input_tokens_details: { cached_tokens: 26_201 }, output_tokens: 20, total_tokens: 26_225,
+        } } },
+      ]), fakeGatewayFinalText("ACCOUNTING_FOLLOW_UP_COMPLETE")],
+    );
+    await session!.sendText("Reply once.");
+    await session!.waitForText("Invalid provider usage", TIMEOUT);
+    expect(await session!.capturePane()).toContain("ACCOUNTING_ANSWER_PRESERVED");
+    expect(queuedGateway.requests).toHaveLength(1);
+    await session!.sendText("Continue with a fresh request.");
+    await session!.waitForText("ACCOUNTING_FOLLOW_UP_COMPLETE", TIMEOUT);
+    expect(queuedGateway.requests).toHaveLength(2);
+    expect(session!.isAlive()).toBe(true);
+    expect(readFileSync(stderrPath, "utf8")).toBe("");
+  }, 60_000);
+
   test("repeated inspections stop with saved history and allow a useful follow-up", async () => {
     const responses = Array.from({ length: 128 }, (_, step) => fakeGatewaySse([
       ...responseFunctionCall(`read_${step}`, "read_file", { path: "evidence.txt" }),
