@@ -3696,6 +3696,7 @@ test "ACP model commits honor the active session write boundary" {
 test "ACP publishes an account-bound refreshed Codex token for later prompts" {
     const alloc = std.testing.allocator;
     var state: ServerState = undefined;
+    state.credential_mutex = .init;
     state.alloc = alloc;
     state.api_key = try alloc.dupe(u8, "stale-token");
     state.account_id = try alloc.dupe(u8, "acct-1");
@@ -3724,6 +3725,7 @@ test "ACP publishes an account-bound refreshed Codex token for later prompts" {
 test "ACP rejects refreshed Codex tokens for another account" {
     const alloc = std.testing.allocator;
     var state: ServerState = undefined;
+    state.credential_mutex = .init;
     state.alloc = alloc;
     state.api_key = try alloc.dupe(u8, "stale-token");
     state.account_id = try alloc.dupe(u8, "acct-1");
