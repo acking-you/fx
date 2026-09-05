@@ -1,3 +1,4 @@
+const io_mod = @import("io.zig");
 const std = @import("std");
 const builtin = @import("builtin");
 
@@ -166,7 +167,7 @@ test "Windows AFD listener accepts a connection arriving during the wait" {
         }
     };
     var state = ConnectState{ .io = io, .address = server.socket.address };
-    const connector = try std.Thread.spawn(.{}, ConnectState.run, .{&state});
+    const connector = try io_mod.spawn(.{}, ConnectState.run, .{&state});
     defer connector.join();
 
     var accepted = (try accept_with_timeout(io, &server, 1_000)) orelse

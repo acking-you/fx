@@ -912,7 +912,7 @@ const SessionPickerLoad = struct {
             .workspace_root = workspace_root,
             .request = owned_request,
         };
-        task.thread = std.Thread.spawn(.{}, threadMain, .{task}) catch |err| {
+        task.thread = io_mod.spawn(.{}, threadMain, .{task}) catch |err| {
             task.request.deinit();
             alloc.free(task.workspace_root);
             alloc.free(task.home_dir);
@@ -1243,7 +1243,7 @@ const CompactionTaskRuntime = struct {
         }
         // Ownership transfers only after spawn succeeds. This makes every
         // snapshot-construction failure follow one caller-owned cleanup path.
-        task.thread = try std.Thread.spawn(.{}, threadMain, .{task});
+        task.thread = try io_mod.spawn(.{}, threadMain, .{task});
         self.active = task;
         self.started_ms = io_mod.milliTimestamp();
     }

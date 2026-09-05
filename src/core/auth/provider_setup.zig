@@ -405,7 +405,7 @@ pub const Runtime = struct {
             self.threadMain();
             return true;
         }
-        const thread = std.Thread.spawn(.{}, threadMain, .{self}) catch |err| {
+        const thread = io_mod.spawn(.{}, threadMain, .{self}) catch |err| {
             self.running = false;
             self.mutex.unlock(io_mod.getIo());
             return err;

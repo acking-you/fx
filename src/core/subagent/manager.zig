@@ -6012,7 +6012,7 @@ test "parent continuation acknowledgement survives indeterminate and concurrent 
     };
     var threads: [workers.len]std.Thread = undefined;
     for (&threads, workers) |*thread, worker| {
-        thread.* = try std.Thread.spawn(.{}, Worker.run, .{worker});
+        thread.* = try io_mod.spawn(.{}, Worker.run, .{worker});
     }
     while (ready.load(.seq_cst) != workers.len) std.atomic.spinLoopHint();
     start.store(true, .seq_cst);
@@ -6287,7 +6287,7 @@ test "delivery page and parent boundary revalidate relationship under ordered lo
         .lock_ops = page_probe.ops(),
         .finished = &page_finished,
     };
-    const page_thread = try std.Thread.spawn(.{}, Query.run, .{&page_query});
+    const page_thread = try io_mod.spawn(.{}, Query.run, .{&page_query});
     while (!page_probe.contended.load(.seq_cst) and
         !page_finished.load(.seq_cst))
     {
@@ -6320,7 +6320,7 @@ test "delivery page and parent boundary revalidate relationship under ordered lo
         .lock_ops = boundary_probe.ops(),
         .finished = &boundary_finished,
     };
-    const boundary_thread = try std.Thread.spawn(.{}, Query.run, .{&boundary_query});
+    const boundary_thread = try io_mod.spawn(.{}, Query.run, .{&boundary_query});
     while (!boundary_probe.contended.load(.seq_cst) and
         !boundary_finished.load(.seq_cst))
     {
@@ -6747,8 +6747,8 @@ test "competing thread policy admissions cannot cross the capacity budget" {
         .rejected = &rejected,
         .failed = &failed,
     };
-    const first_thread = try std.Thread.spawn(.{}, Worker.run, .{&first});
-    const second_thread = try std.Thread.spawn(.{}, Worker.run, .{&second});
+    const first_thread = try io_mod.spawn(.{}, Worker.run, .{&first});
+    const second_thread = try io_mod.spawn(.{}, Worker.run, .{&second});
     first_thread.join();
     second_thread.join();
 
@@ -6895,7 +6895,7 @@ test "competing thread interval polls append one durable delivery" {
     };
     var threads: [workers.len]std.Thread = undefined;
     for (&threads, workers) |*thread, worker| {
-        thread.* = try std.Thread.spawn(.{}, PollWorker.run, .{worker});
+        thread.* = try io_mod.spawn(.{}, PollWorker.run, .{worker});
     }
     while (ready.load(.seq_cst) != workers.len) std.atomic.spinLoopHint();
     start.store(true, .seq_cst);
@@ -10864,7 +10864,7 @@ test "concurrent control mutations preserve every queued message" {
     };
     var threads: [workers.len]std.Thread = undefined;
     for (&threads, workers) |*thread, worker| {
-        thread.* = try std.Thread.spawn(.{}, Worker.run, .{worker});
+        thread.* = try io_mod.spawn(.{}, Worker.run, .{worker});
     }
     while (ready.load(.seq_cst) != workers.len) std.atomic.spinLoopHint();
     start.store(true, .seq_cst);
@@ -10989,7 +10989,7 @@ test "concurrent inverse attaches cannot commit a relationship cycle" {
     };
     var threads: [workers.len]std.Thread = undefined;
     for (&threads, workers) |*thread, worker| {
-        thread.* = try std.Thread.spawn(.{}, Worker.run, .{worker});
+        thread.* = try io_mod.spawn(.{}, Worker.run, .{worker});
     }
     while (ready.load(.seq_cst) != workers.len) std.atomic.spinLoopHint();
     start.store(true, .seq_cst);

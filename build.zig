@@ -38,8 +38,9 @@ pub fn build(b: *std.Build) void {
     ) orelse .none;
     const test_filters = testFiltersFromArgs(b);
 
-    const git_commit = readGitCommit(b);
+    const git_commit = b.option([]const u8, "git-revision", "Source revision for archive builds") orelse readGitCommit(b);
     const app_version = readAppVersion(b);
+    addEmbeddedArtifact(b, target, git_commit, app_version);
     const build_options = b.addOptions();
     build_options.addOption([]const u8, "git_commit", git_commit);
     build_options.addOption([]const u8, "app_version", app_version);
@@ -313,6 +314,38 @@ fn addWasmArtifact(
     const wasm_step = b.step(name ++ "-wasm", description);
     wasm_step.dependOn(&install_wasm.step);
     b.getInstallStep().dependOn(&install_wasm.step);
+}
+
+fn addEmbeddedArtifact(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    git_commit: []const u8,
+    app_version: []const u8,
+) void {
+    const options = b.addOptions();
+    options.addOption([]const u8, "git_commit", git_commit);
+    options.addOption([]const u8, "app_version", app_version);
+    const root = b.createModule(.{
+        .root_source_file = b.path("src/c_api_main.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+        .link_libc = true,
+        .pic = true,
+    });
+    root.addImport("build_options", options.createModule());
+    const library = b.addLibrary(.{
+        .name = "fx_core",
+        .linkage = .static,
+        .root_module = root,
+    });
+    library.bundle_compiler_rt = true;
+    const install = b.addInstallArtifact(library, .{});
+    const step = b.step("libfx", "Build the native embedded fx C library");
+    step.dependOn(&install.step);
+    const tests = b.addTest(.{ .root_module = root, .filters = &.{"embedded"} });
+    const run_tests = b.addRunArtifact(tests);
+    const test_step = b.step("test-embedded", "Test the embedded runtime ownership boundaries");
+    test_step.dependOn(&run_tests.step);
 }
 
 fn addNapiArtifact(

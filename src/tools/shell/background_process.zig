@@ -716,7 +716,7 @@ const SpawnedBackgroundHandshake = struct {
         alloc: std.mem.Allocator,
     ) bool {
         self.closeControls();
-        const thread = std.Thread.spawn(
+        const thread = io_mod.spawn(
             .{},
             reapDetachedChild,
             .{self.child},

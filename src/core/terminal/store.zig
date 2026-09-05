@@ -9724,7 +9724,7 @@ test "monitor reconciliation is bounded cancelable and retains its transaction" 
         .observed_attempts = &observed_attempts,
         .cancelled = &cancelled,
     };
-    const cancellation_thread = try std.Thread.spawn(
+    const cancellation_thread = try io_mod.spawn(
         .{},
         ReconciliationCancellation.run,
         .{&cancellation},
@@ -10171,8 +10171,8 @@ test "profile quota serializes concurrent commitments at fixed limits" {
         );
         var first_attempt = ConcurrentAppend{ .session = &first };
         var second_attempt = ConcurrentAppend{ .session = &second };
-        const first_thread = try std.Thread.spawn(.{}, ConcurrentAppend.run, .{&first_attempt});
-        const second_thread = try std.Thread.spawn(.{}, ConcurrentAppend.run, .{&second_attempt});
+        const first_thread = try io_mod.spawn(.{}, ConcurrentAppend.run, .{&first_attempt});
+        const second_thread = try io_mod.spawn(.{}, ConcurrentAppend.run, .{&second_attempt});
         first_thread.join();
         second_thread.join();
         const failures = @as(usize, @intFromBool(first_attempt.result != null)) +
@@ -10204,8 +10204,8 @@ test "profile quota serializes concurrent commitments at fixed limits" {
         defer second.deinit();
         var first_attempt = ConcurrentResize{ .session = &first };
         var second_attempt = ConcurrentResize{ .session = &second };
-        const first_thread = try std.Thread.spawn(.{}, ConcurrentResize.run, .{&first_attempt});
-        const second_thread = try std.Thread.spawn(.{}, ConcurrentResize.run, .{&second_attempt});
+        const first_thread = try io_mod.spawn(.{}, ConcurrentResize.run, .{&first_attempt});
+        const second_thread = try io_mod.spawn(.{}, ConcurrentResize.run, .{&second_attempt});
         first_thread.join();
         second_thread.join();
         const failures = @as(usize, @intFromBool(first_attempt.result != null)) +

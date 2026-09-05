@@ -159,7 +159,13 @@ pub const PreviousAssistantTurn = struct {
 };
 
 /// Context shared by core tool dispatch, validation, and execution.
+pub const HostToolExecutor = struct {
+    context: ?*anyopaque,
+    call_fn: *const fn (?*anyopaque, DispatchContext, []const u8) DispatchError!ToolResult,
+};
+
 pub const DispatchContext = struct {
+    host_tool_executor: ?HostToolExecutor = null,
     allocator: Allocator,
     permission_mode: permission_gate.PermissionMode = .ask,
     permission_decider: ?PermissionDecider = null,
@@ -327,6 +333,7 @@ pub const LabelArgKind = enum {
 pub const PermissionTargetKind = core_permissions.PermissionTargetKind;
 
 pub const ExecutorKind = enum {
+    host,
     glob_files,
     grep_files,
     read_file,

@@ -1,3 +1,4 @@
+const io_mod = @import("../shared/io.zig");
 const std = @import("std");
 const app_worker_runtime = @import("app_worker_runtime.zig");
 const image_attachments = @import("../images/image_attachments.zig");
@@ -8,7 +9,7 @@ const worker_runtime = @import("../agent/worker_runtime.zig");
 pub fn Runtime(comptime App: type) type {
     return struct {
         pub fn startWorkerThread(app: *App) !void {
-            app.worker_thread = try std.Thread.spawn(.{}, workerThreadMain, .{app});
+            app.worker_thread = try io_mod.spawn(.{}, workerThreadMain, .{app});
         }
 
         /// Starts one queued prompt on a single-threaded host. Prompt admission

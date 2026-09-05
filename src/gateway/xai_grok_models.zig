@@ -743,7 +743,7 @@ const CatalogBodyFixture = struct {
     }
 
     fn start(self: *@This()) !void {
-        self.thread = try std.Thread.spawn(.{}, run, .{self});
+        self.thread = try io_mod.spawn(.{}, run, .{self});
     }
 
     fn deinit(self: *@This()) void {

@@ -1497,7 +1497,7 @@ pub const Owner = struct {
         };
         try self.slots.append(self.alloc, slot);
         errdefer _ = self.slots.pop();
-        slot.thread = std.Thread.spawn(.{}, slotMain, .{slot}) catch
+        slot.thread = io_mod.spawn(.{}, slotMain, .{slot}) catch
             return error.ThreadSpawnFailed;
         self.started_any = true;
         return .started;
@@ -2006,7 +2006,7 @@ pub const Owner = struct {
 
     fn ensureReaperLocked(self: *Owner) StartError!void {
         if (self.reaper_thread != null) return;
-        self.reaper_thread = std.Thread.spawn(.{}, reaperMain, .{self}) catch
+        self.reaper_thread = io_mod.spawn(.{}, reaperMain, .{self}) catch
             return error.ThreadSpawnFailed;
     }
 
@@ -2196,7 +2196,7 @@ pub const Owner = struct {
         slot.finished = false;
         slot.finalizer = .none;
         slot.cancel.store(false, .seq_cst);
-        slot.thread = std.Thread.spawn(.{}, slotMain, .{slot}) catch |err| {
+        slot.thread = io_mod.spawn(.{}, slotMain, .{slot}) catch |err| {
             slot.finished = true;
             slot.wake_requested = true;
             slot.restart_failed = true;
@@ -5326,7 +5326,7 @@ test "notification reaper shutdown racing a wake never double polls" {
         }
     };
     var shutdown_started = std.atomic.Value(bool).init(false);
-    const shutdown_thread = try std.Thread.spawn(.{}, Shutdown.run, .{Shutdown{
+    const shutdown_thread = try io_mod.spawn(.{}, Shutdown.run, .{Shutdown{
         .owner = &owner,
         .started = &shutdown_started,
     }});
@@ -5736,7 +5736,7 @@ test "owner shutdown waits for a concurrent caller join without double joining" 
         }
     };
     var join_context = JoinThread{ .owner = &owner, .child_id = child_id };
-    const join_thread = try std.Thread.spawn(.{}, JoinThread.run, .{&join_context});
+    const join_thread = try io_mod.spawn(.{}, JoinThread.run, .{&join_context});
     const deadline = io_mod.milliTimestamp() + 5000;
     while (io_mod.milliTimestamp() < deadline) {
         owner.mutex.lockUncancelable(io_mod.getIo());
@@ -6199,7 +6199,7 @@ test "owner shutdown releases a production permission waiter before joining" {
         .owner = &owner,
         .finished = &finished,
     };
-    const thread = try std.Thread.spawn(.{}, DeinitThread.run, .{&deinit_thread});
+    const thread = try io_mod.spawn(.{}, DeinitThread.run, .{&deinit_thread});
     var joined = false;
     defer if (!joined) {
         execution.requestShutdown();
@@ -6808,14 +6808,14 @@ test "canonical approval wait refreshes revoked authority and races reject relat
         .start = &registration_start,
         .ready = &registration_ready,
     };
-    const admission_thread = try std.Thread.spawn(.{}, AdmissionThread.run, .{&admission});
+    const admission_thread = try io_mod.spawn(.{}, AdmissionThread.run, .{&admission});
     var admission_joined = false;
     defer if (!admission_joined) {
         registration_start.store(true, .seq_cst);
         turn.worker.requestCancel();
         admission_thread.join();
     };
-    const detach_thread = try std.Thread.spawn(.{}, RelationshipThread.run, .{&detach});
+    const detach_thread = try io_mod.spawn(.{}, RelationshipThread.run, .{&detach});
     var detach_joined = false;
     defer if (!detach_joined) {
         registration_start.store(true, .seq_cst);
@@ -6898,13 +6898,13 @@ test "canonical approval wait refreshes revoked authority and races reject relat
         .start = &response_start,
         .ready = &response_ready,
     };
-    const response_thread = try std.Thread.spawn(.{}, ResponseThread.run, .{&response});
+    const response_thread = try io_mod.spawn(.{}, ResponseThread.run, .{&response});
     var response_joined = false;
     defer if (!response_joined) {
         response_start.store(true, .seq_cst);
         response_thread.join();
     };
-    const reparent_thread = try std.Thread.spawn(.{}, RelationshipThread.run, .{&reparent});
+    const reparent_thread = try io_mod.spawn(.{}, RelationshipThread.run, .{&reparent});
     var reparent_joined = false;
     defer if (!reparent_joined) {
         response_start.store(true, .seq_cst);

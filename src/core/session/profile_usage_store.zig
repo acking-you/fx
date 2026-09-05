@@ -1139,7 +1139,7 @@ test "profile usage readers wait for the cross-process writer boundary" {
     };
     var worker = Worker{ .store = &reader };
     var lock = try writer.acquireLock();
-    const thread = try std.Thread.spawn(.{}, Worker.run, .{&worker});
+    const thread = try io_mod.spawn(.{}, Worker.run, .{&worker});
     while (!worker.started.load(.seq_cst)) std.Thread.yield() catch {};
     for (0..100) |_| std.Thread.yield() catch {};
     const blocked_at_boundary = !worker.done.load(.seq_cst);
@@ -1617,8 +1617,8 @@ test "concurrent profile usage writers serialize without losing facts" {
             .total_cost = 0.2,
         },
     };
-    const first_thread = try std.Thread.spawn(.{}, Worker.run, .{&first});
-    const second_thread = try std.Thread.spawn(.{}, Worker.run, .{&second});
+    const first_thread = try io_mod.spawn(.{}, Worker.run, .{&first});
+    const second_thread = try io_mod.spawn(.{}, Worker.run, .{&second});
     first_thread.join();
     second_thread.join();
 

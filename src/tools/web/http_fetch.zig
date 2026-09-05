@@ -3908,7 +3908,7 @@ test "web_fetch poll deadline is not extended by interrupted syscalls" {
     const started_ms = monotonicMillis();
     const deadline_ms = started_ms + 75;
     var stop: std.atomic.Value(bool) = .init(false);
-    const storm = try std.Thread.spawn(
+    const storm = try io_mod.spawn(
         .{},
         PollSignalStorm.run,
         .{PollSignalStorm{

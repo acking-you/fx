@@ -1,3 +1,4 @@
+const io_mod = @import("../../core/shared/io.zig");
 const std = @import("std");
 const builtin = @import("builtin");
 const full_transcript_page = @import("../../core/output/full_transcript_page.zig");
@@ -401,7 +402,7 @@ pub const Load = struct {
             self.task = task;
             return;
         }
-        task.thread = std.Thread.spawn(.{}, Task.run, .{task}) catch |err| {
+        task.thread = io_mod.spawn(.{}, Task.run, .{task}) catch |err| {
             task.source.deinit(std.heap.c_allocator);
             std.heap.c_allocator.destroy(task);
             return err;
@@ -528,7 +529,7 @@ pub const WindowLoad = struct {
             self.task = task;
             return;
         }
-        task.thread = std.Thread.spawn(.{}, WindowTask.run, .{task}) catch |err| {
+        task.thread = io_mod.spawn(.{}, WindowTask.run, .{task}) catch |err| {
             std.heap.c_allocator.destroy(task);
             return err;
         };
