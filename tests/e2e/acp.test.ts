@@ -1350,6 +1350,8 @@ describe("acp: model-independent", () => {
           credentialPersistence: "profile",
         });
         expect(JSON.stringify(configured)).not.toContain("acp-runtime-key");
+        const configuredStatus = await client.request("fx/provider/status", {}, 30) as any;
+        expect(configuredStatus.result).toMatchObject({ provider: "gateway", authenticated: true });
 
         await client.request("session/new", {}, 4);
         await client.readLine();
@@ -1408,6 +1410,8 @@ describe("acp: model-independent", () => {
         mkdirSync(lockPath);
         const rejected = await client.request("fx/provider/configure", { baseUrl: gateway.baseUrl, apiKey: "rejected-new-key" }, 8) as any;
         expect(rejected.error.message).toBe("Failed to save Gateway URL and API key");
+        const rejectedStatus = await client.request("fx/provider/status", {}, 31) as any;
+        expect(rejectedStatus.result).toMatchObject({ provider: "gateway", authenticated: true });
         expect(readFileSync(bindingPath, "utf8")).toBe(bindingBefore);
         rmSync(lockPath, { recursive: true });
         const settingsPath = join(root.home, ".fx", "settings.json");

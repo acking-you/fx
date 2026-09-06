@@ -1,8 +1,14 @@
 # fx
 
-## 0.0.8
+## 0.0.9
 
 <!-- release:start -->
+### Bug Fixes
+
+- **Sequential provider controls:** ACP and embedded SDK clients can immediately query state, start a session, or change providers after a provider operation replies. Successful and failed replies now wait for the operation to settle.
+<!-- release:end -->
+
+## 0.0.8
 
 **fx is now a provider-independent BYOK distribution with one context-compaction pipeline, Codex-style Unified Exec, direct ACP provider control, visible reasoning, and substantially stronger long-session lifecycle guarantees.**
 
@@ -77,8 +83,6 @@
 - **Provider recovery authority**: After restart, fx continues unfinished Codex or Grok work only for the account that started it. If that account cannot be verified, fx preserves completed work and sends nothing.
 - **Sensitive command output**: Command output flagged as sensitive is not saved with the session, including secrets split across output chunks or oversized lines.
 - **OAuth callback validation**: OAuth authorization denials and successes apply only when the callback state matches the active sign-in attempt, and Grok browser callbacks accept only the expected xAI origin.
-
-<!-- release:end -->
 
 ## 0.0.5
 
