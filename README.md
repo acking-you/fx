@@ -57,6 +57,17 @@ Fork changes stay deliberately small and shaped like upstream's own code: diverg
 
 Download the archive for your platform from [GitHub Releases](https://github.com/acking-you/fx/releases), or build this fork from source using the steps in [Build from source](#build-from-source). Windows x86_64 releases are published as `fx-windows-x86_64.zip` and include `fx.exe`.
 
+Starting with v0.0.8, releases also include separate
+`fx-native-<rust-target>.tar.gz` archives for embedding. Each archive contains
+`lib/libfx_core.a` (`lib/fx_core.lib` on Windows), `include/fx.h`, license notices,
+and `manifest.json` with the exact source revision, C ABI version, target,
+minimum system version, and library checksum. A SHA-256 sidecar covers each
+archive. These are static ReleaseSafe libraries built for baseline CPUs;
+applications do not need an installed fx executable or Zig at runtime.
+Linux GNU libraries target glibc 2.28 or newer, macOS libraries target macOS 13
+or newer, and Windows libraries use the dynamic MSVC CRT on Windows 10 or newer.
+
+
 ## Run fx
 
 Use an eligible ChatGPT subscription through OpenAI Codex OAuth:

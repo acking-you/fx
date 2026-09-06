@@ -16,6 +16,9 @@ permissions:
   contents: read
 
 jobs:
+  native-libraries:
+    uses: ./.github/workflows/native-libraries.yml
+
   windows-native:
     name: Native checks (ReleaseSafe, windows-x86_64)
     runs-on: windows-2025

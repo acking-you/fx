@@ -1,6 +1,6 @@
 # fx
 
-## 0.0.7
+## 0.0.8
 
 <!-- release:start -->
 
@@ -15,6 +15,9 @@
 
 ### New Features
 
+- **Embedded native runtime:** Applications can link fx directly through a versioned C interface, with independent runtime instances and shared SDK/ACP control. Precompiled static libraries are available for Linux and macOS on x86_64 and aarch64, and Windows x86_64 MSVC.
+- **Remote subscription login:** Embedded and ACP clients can authenticate Codex and Grok with device codes from another machine, while retaining explicit browser login.
+
 - **Unified Exec commands:** Model turns now use separate `exec_command` and `write_stdin` tools with numeric sessions for long-running and interactive commands. Output remains bounded while processes survive turn boundaries until they finish or the session closes.
 
 - **Unified context compaction:** Manual `/compact`, automatic threshold compaction, context-overflow recovery, TUI, and ACP now use one strategy module. Eligible Responses routes use native remote compaction first, other providers use the active model for a structured full-history summary, and a bounded deterministic summary remains available when provider compaction cannot complete.
@@ -27,6 +30,8 @@
 - **Retained command output**: Captured command output can now be read later with `read_tool_result`, including after a saved session resumes. With `--no-save`, output remains available until fx exits.
 
 ### Improvements
+
+- **Permission-aware tool defaults:** Auto and yolo modes prefer shell-based workspace discovery by default; explicit tool-mode preferences remain available.
 
 - **Non-blocking compaction and streaming:** Manual and automatic compaction run outside the TUI event loop, keep the composer responsive, queue the next prompt safely, persist the settled replacement before reporting success, and preserve immediate streamed token rendering while compacting activity is visible.
 - **Compaction portability:** Remote checkpoints remain bound to the exact provider identity, endpoint, and wire model, while a portable local summary is stored beside opaque provider state. Switching accounts or endpoints never replays an opaque checkpoint to the wrong provider.

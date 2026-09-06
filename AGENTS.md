@@ -504,9 +504,9 @@ To prepare a release by hand:
 2. Bump `pub const version` in `src/main.zig`
 3. Write the changelog entry in `CHANGELOG.md` at the top, under a new `## <version>` heading, wrapped in `<!-- release:start -->` and `<!-- release:end -->` markers. Remove the markers from the previous release entry so only the new release has them.
 4. Update `README.md` install example version
-5. Open a PR and merge to `main`
+5. Open a PR and merge to `byok`
 
-When the PR merges, the release workflow compares the version tag to what exists in git. If the tag is missing, it cross-compiles all platform binaries, creates the git tag, and publishes a GitHub Release with the binaries attached. The release body is extracted from the content between the `<!-- release:start -->` and `<!-- release:end -->` markers in `CHANGELOG.md`.
+When the PR merges, the release workflow compares the version tag to what exists in git. If the tag is missing, it builds all platform binaries and independent native static libraries, creates the git tag, and publishes a GitHub Release with the archives attached. The release workflow runs only on `byok`. The release body is extracted from the content between the `<!-- release:start -->` and `<!-- release:end -->` markers in `CHANGELOG.md`.
 
 ### Writing the changelog
 
