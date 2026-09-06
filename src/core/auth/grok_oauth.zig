@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const browser_callback = @import("browser_callback.zig");
+const device_oauth = @import("device_oauth.zig");
 const grok_session = @import("grok_session.zig");
 const debug_trace = @import("../shared/debug_trace.zig");
 const host = @import("../hosts/host.zig");
@@ -126,6 +127,31 @@ pub fn startSignIn(
             .submit_manual_code = submitBrowserManualCode,
         },
     );
+}
+
+pub fn startDeviceSignIn(runtime: *login_flow.SignInRuntime, alloc: Allocator, transport: oauth_transport.Provider) !bool {
+    return runtime.startPreparing(alloc, transport, prepareDeviceSignIn);
+}
+
+fn prepareDeviceSignIn(alloc: Allocator, transport: oauth_transport.Provider, cancel_flag: *std.atomic.Value(bool)) !login_flow.PreparedSignIn {
+    const configured_issuer = try configuredEndpoint(alloc, e2e_issuer_url_env, issuer_url);
+    defer alloc.free(configured_issuer);
+    const endpoint = try configuredEndpoint(alloc, e2e_token_url_env, token_url);
+    defer alloc.free(endpoint);
+    const prepared = try device_oauth.prepare(alloc, transport, .{ .protocol = .grok, .issuer = configured_issuer, .token_endpoint = endpoint, .client_id = client_id, .scope = browser_scope }, cancel_flag);
+    return .{ .flow = prepared.flow, .deps = .{
+        .ctx = prepared.context,
+        .deinit_ctx = device_oauth.deinitContext,
+        .oauth_transport = transport,
+        .poll = .{ .ctx = prepared.context, .poll_token = device_oauth.poll },
+        .complete = completeDeviceSignIn,
+        .save = saveSignIn,
+    } };
+}
+
+fn completeDeviceSignIn(raw: ?*anyopaque, alloc: Allocator, token: *oauth.TokenSet) !login_flow.SignInCompletion {
+    const context: *device_oauth.Context = @ptrCast(@alignCast(raw.?));
+    return completeSignInWithTransport(alloc, context.transport, token);
 }
 
 fn submitBrowserManualCode(raw: ?*anyopaque, alloc: Allocator, code: []const u8) !void {
@@ -320,8 +346,12 @@ fn completeSignIn(
     token: *oauth.TokenSet,
 ) !login_flow.SignInCompletion {
     const context: *BrowserLoginContext = @ptrCast(@alignCast(raw.?));
+    return completeSignInWithTransport(alloc, context.transport, token);
+}
+
+fn completeSignInWithTransport(alloc: Allocator, transport: oauth_transport.Provider, token: *oauth.TokenSet) !login_flow.SignInCompletion {
     const refresh_token = token.refresh_token orelse return error.GrokRefreshTokenMissing;
-    const account_id = try fetchAccountId(alloc, context.transport, token.access_token);
+    const account_id = try fetchAccountId(alloc, transport, token.access_token);
     errdefer alloc.free(account_id);
     const duration_ms = std.math.mul(i64, token.expires_in, std.time.ms_per_s) catch
         return error.InvalidGrokOAuthResponse;

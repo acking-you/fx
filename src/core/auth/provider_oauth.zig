@@ -60,6 +60,14 @@ pub fn startSignIn(
     alloc: Allocator,
     transport: oauth_transport.Provider,
 ) !bool {
+    return startSignInWithMethod(provider, .browser, runtime, alloc, transport);
+}
+
+pub fn startSignInWithMethod(provider: Provider, method: login_flow.Method, runtime: *login_flow.SignInRuntime, alloc: Allocator, transport: oauth_transport.Provider) !bool {
+    if (method == .device_code) return switch (provider) {
+        .codex => chatgpt_oauth.startDeviceSignIn(runtime, alloc, transport),
+        .grok => grok_oauth.startDeviceSignIn(runtime, alloc, transport),
+    };
     return switch (provider) {
         .codex => chatgpt_oauth.startSignIn(runtime, alloc, transport),
         .grok => grok_oauth.startSignIn(runtime, alloc, transport),

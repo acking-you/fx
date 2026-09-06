@@ -6,6 +6,7 @@ const host_target = @import("../hosts/target.zig");
 const io_mod = @import("../shared/io.zig");
 const oauth = @import("oauth.zig");
 const oauth_transport = @import("oauth_transport.zig");
+const secret = @import("secret.zig");
 
 const Allocator = std.mem.Allocator;
 const poll_wait_slice_ms: u64 = 100;
@@ -26,9 +27,15 @@ pub const SignInState = enum {
 
 pub const SignInSnapshot = struct {
     state: SignInState = .idle,
+    preparing: bool = false,
     authorization_url: []const u8 = "",
+    verification_uri: ?[]const u8 = null,
+    user_code: ?[]const u8 = null,
+    expires_in_seconds: ?i64 = null,
     accepts_manual_code: bool = false,
 };
+
+pub const Method = enum { browser, device_code };
 
 pub const max_manual_code_bytes: usize = 4096;
 
@@ -65,10 +72,15 @@ pub const PreparedLogin = struct {
     authorization_url: []u8,
     expires_in_seconds: i64,
     poll_interval_seconds: i64,
+    verification_uri: ?[]u8 = null,
+    user_code: ?[]u8 = null,
+    delay_first_poll: bool = false,
 
     pub fn deinit(self: *PreparedLogin, alloc: Allocator) void {
         alloc.free(self.token_endpoint);
         alloc.free(self.authorization_url);
+        if (self.verification_uri) |value| alloc.free(value);
+        if (self.user_code) |value| secret.zeroAndFree(alloc, value);
         self.* = undefined;
     }
 };
@@ -91,6 +103,18 @@ pub const SignInRuntimeDeps = struct {
     save: SaveSignInFn = unavailableSaveSignIn,
     submit_manual_code: ?SubmitManualCodeFn = null,
 };
+
+pub const PreparedSignIn = struct {
+    flow: PreparedLogin,
+    deps: SignInRuntimeDeps,
+
+    fn deinit(self: *PreparedSignIn, alloc: Allocator) void {
+        self.flow.deinit(alloc);
+        if (self.deps.deinit_ctx) |deinit_ctx| deinit_ctx(self.deps.ctx, alloc);
+    }
+};
+
+const PrepareSignInFn = *const fn (Allocator, oauth_transport.Provider, *std.atomic.Value(bool)) anyerror!PreparedSignIn;
 
 fn unavailableCompleteSignIn(
     _: ?*anyopaque,
@@ -116,6 +140,60 @@ pub const SignInRuntime = struct {
     failure: ?anyerror = null,
     poll_state: ?LoginPollState = null,
     deps: SignInRuntimeDeps = .{},
+
+    /// Owns preparation and polling on one worker, keeping network I/O off
+    /// the calling control thread. Prepared data is published under the lock.
+    pub fn startPreparing(self: *Self, alloc: Allocator, transport: oauth_transport.Provider, prepare: PrepareSignInFn) !bool {
+        if (comptime host_target.is_wasm) return error.DeviceLoginUnavailable;
+        self.mutex.lockUncancelable(io_mod.getIo());
+        defer self.mutex.unlock(io_mod.getIo());
+        if (self.thread != null or self.state == .polling or self.completion != null) return false;
+        self.state = .polling;
+        self.failure = null;
+        self.deps = .{ .oauth_transport = transport };
+        self.cancel_requested.store(false, .seq_cst);
+        self.thread = io_mod.spawn(.{}, prepareWorkerMain, .{ self, alloc, transport, prepare }) catch |err| {
+            self.state = .idle;
+            self.deps = .{};
+            return err;
+        };
+        return true;
+    }
+
+    fn prepareWorkerMain(self: *Self, alloc: Allocator, transport: oauth_transport.Provider, prepare: PrepareSignInFn) void {
+        defer self.finishCancellation();
+        var prepared = prepare(alloc, transport, &self.cancel_requested) catch |err| {
+            self.publishFailure(err);
+            return;
+        };
+        self.mutex.lockUncancelable(io_mod.getIo());
+        if (self.state != .polling or self.cancel_requested.load(.seq_cst)) {
+            self.mutex.unlock(io_mod.getIo());
+            prepared.deinit(alloc);
+            return;
+        }
+        self.flow = prepared.flow;
+        self.deps = prepared.deps;
+        self.deps.poll.cancel_flag = &self.cancel_requested;
+        self.mutex.unlock(io_mod.getIo());
+        self.workerMain(alloc);
+    }
+
+    /// Request cancellation without joining a worker on the control loop.
+    /// `pollTransition` settles cleanup after the worker publishes completion.
+    pub fn requestCancel(self: *Self) bool {
+        self.mutex.lockUncancelable(io_mod.getIo());
+        defer self.mutex.unlock(io_mod.getIo());
+        if (self.state != .polling) return false;
+        self.cancel_requested.store(true, .seq_cst);
+        return true;
+    }
+
+    fn finishCancellation(self: *Self) void {
+        self.mutex.lockUncancelable(io_mod.getIo());
+        defer self.mutex.unlock(io_mod.getIo());
+        if (self.state == .polling and self.cancel_requested.load(.seq_cst)) self.state = .cancelled;
+    }
 
     pub fn startPrepared(
         self: *Self,
@@ -207,10 +285,13 @@ pub const SignInRuntime = struct {
         const mutable = @constCast(self);
         mutable.mutex.lockUncancelable(io_mod.getIo());
         defer mutable.mutex.unlock(io_mod.getIo());
-        const flow = self.flow orelse return .{ .state = self.state };
+        const flow = self.flow orelse return .{ .state = self.state, .preparing = self.state == .polling };
         return .{
             .state = self.state,
             .authorization_url = flow.authorization_url,
+            .verification_uri = flow.verification_uri,
+            .user_code = flow.user_code,
+            .expires_in_seconds = if (flow.user_code != null) flow.expires_in_seconds else null,
             .accepts_manual_code = self.deps.submit_manual_code != null,
         };
     }
@@ -268,6 +349,7 @@ pub const SignInRuntime = struct {
     }
 
     fn workerMain(self: *Self, alloc: Allocator) void {
+        defer self.finishCancellation();
         const flow = if (self.flow) |*prepared| prepared else return;
         var token = pollForTokenWithDeps(
             alloc,
@@ -438,6 +520,7 @@ fn pollForTokenWithDeps(
     deps: LoginPollDeps,
 ) !oauth.TokenSet {
     var state = try LoginPollState.init(deps, flow.expires_in_seconds, flow.poll_interval_seconds);
+    if (flow.delay_first_poll) try state.scheduleNext(deps.now_ms(deps.ctx));
     while (true) {
         switch (try pollTokenStep(alloc, transport, flow, deps, &state)) {
             .succeeded => |token| return token,
@@ -777,6 +860,22 @@ fn waitForSignInTransition(
         blockingSleep(1);
     }
     return runtime.pollTransition(alloc);
+}
+
+test "device login preparation and cancellation stay off the caller thread" {
+    const Prepare = struct {
+        fn run(_: Allocator, _: oauth_transport.Provider, cancelled: *std.atomic.Value(bool)) anyerror!PreparedSignIn {
+            while (!cancelled.load(.seq_cst)) io_mod.sleep(std.time.ns_per_ms);
+            return error.Cancelled;
+        }
+    };
+    var runtime: SignInRuntime = .{};
+    defer runtime.deinit(std.testing.allocator);
+    try std.testing.expect(try runtime.startPreparing(std.testing.allocator, oauth_transport.unavailable_provider, Prepare.run));
+    try std.testing.expect(runtime.snapshot().preparing);
+    try std.testing.expect(runtime.requestCancel());
+    try std.testing.expectEqual(SignInTransition.cancelled, waitForSignInTransition(&runtime, std.testing.allocator, 2000));
+    try std.testing.expect(!runtime.requestCancel());
 }
 
 test "sign-in runtime releases an owned provider context exactly once" {

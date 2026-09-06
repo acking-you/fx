@@ -70,6 +70,8 @@ jobs:
             --test-filter "bounded native profile file is present" `
             --test-filter "Grok team refresh preserves the principal binding" `
             --test-filter "Grok team principal round trips for refresh" `
+            --test-filter "device OAuth" `
+            --test-filter "device login preparation and cancellation" `
             --test-filter "recovery markers are idempotent and clear durably" `
             --test-filter "cloneEnvironMap converts the native Windows environment to WTF-8" `
             --test-filter "native hosts still load project instruction files"

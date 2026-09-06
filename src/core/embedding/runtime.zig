@@ -160,6 +160,7 @@ pub const Runtime = struct {
             .context_registry = .{ .default_provider = context.provider },
             .mode_registry = modes.registry,
             .provider_override = config.provider,
+            .default_login_method = .device_code,
             .model_override = config.model,
             .home_override = config.home,
             .workspace_root_override = config.workspace_root,

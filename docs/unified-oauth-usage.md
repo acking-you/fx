@@ -18,6 +18,14 @@ fx checks stored OAuth sessions in deterministic order (Codex first, Grok as a
 fallback) without making a network request. An explicit provider remains
 strict: a Codex credential is never sent to Grok and vice versa.
 
+The optional `method` selects `browser` or `device_code`. Device authorization
+uses Codex's device-auth code/PKCE exchange or Grok's OAuth device grant, then
+reuses each provider's account validation and credential persistence. Initial
+code requests and polling run on the sign-in worker. Public status contains
+the verification website and user code, never the private device credential.
+Standalone fx retains browser login by default; the embedded runtime defaults
+to device codes so remote SDK and ACP hosts do not need a local callback.
+
 Usage is represented by `src/core/session/provider_usage.zig`. It is an
 aggregate-only snapshot and never includes access tokens. The TUI footer and
 ACP both consume this same summary. After a turn has reported token usage, the

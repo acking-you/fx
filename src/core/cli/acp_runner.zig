@@ -42,6 +42,7 @@ pub const Config = struct {
     context_registry: context_contract.Registry,
     mode_registry: mode_registry.Registry,
     provider_override: ?model_provider.ProviderId = null,
+    default_login_method: @import("../auth/login_flow.zig").Method = .browser,
     model_override: ?[]const u8 = null,
     credential_override: ?CredentialOverride = null,
     home_override: ?[]const u8 = null,
