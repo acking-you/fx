@@ -15,9 +15,15 @@ pub const Options = struct {
     subagent_available: bool = false,
     web_search_available: bool = true,
     /// Prefer the unified shell for workspace discovery and code search.
-    /// When enabled, the model projection omits the overlapping built-ins and
-    /// adds Codex-style `rg` guidance to the shell contract.
-    bash_first: bool = false,
+    /// When effective, the model projection omits the overlapping built-ins
+    /// and adds Codex-style `rg` guidance to the shell contract. `.auto`
+    /// resolves from `permission_mode`: approval-free modes (`auto`, `yolo`)
+    /// run bash-first by default while `ask` keeps the standard projection.
+    bash_first: types.BashFirstPreference = .auto,
+
+    pub fn bashFirstEffective(self: Options) bool {
+        return self.bash_first.resolve(self.permission_mode);
+    }
 };
 
 const BuildKind = enum { full, read_only };
@@ -611,16 +617,20 @@ fn buildToolProjection(alloc: Allocator, tool_set: tool_set_contract.ToolSet, ki
     errdefer guidance_out.deinit();
 
     var first_custom_guidance = true;
+    // Bash-first only makes sense when the model actually receives the shell it
+    // is told to use. A tool set without an advertised `exec_command` keeps the
+    // specialized discovery tools and skips the `rg` guidance.
+    const bash_first_active = options.bashFirstEffective() and toolSetAdvertisesExecCommand(tool_set, kind, options);
 
     for (tool_set.order) |tool_name| {
         const tool = tool_set.registry.lookup(tool_name) orelse continue;
-        try appendBuiltinTool(alloc, &advertised_names, &advertised_functions, &guidance_out.writer, &first_custom_guidance, tool.*, kind, tool_set, options);
+        try appendBuiltinTool(alloc, &advertised_names, &advertised_functions, &guidance_out.writer, &first_custom_guidance, tool.*, kind, tool_set, options, bash_first_active);
     }
 
     if (kind == .full) {
         for (tool_set.registry.tools) |tool| {
             if (isCanonicalToolName(tool_set, tool.name)) continue;
-            try appendBuiltinTool(alloc, &advertised_names, &advertised_functions, &guidance_out.writer, &first_custom_guidance, tool, kind, tool_set, options);
+            try appendBuiltinTool(alloc, &advertised_names, &advertised_functions, &guidance_out.writer, &first_custom_guidance, tool, kind, tool_set, options, bash_first_active);
         }
     }
 
@@ -648,7 +658,7 @@ fn buildToolProjection(alloc: Allocator, tool_set: tool_set_contract.ToolSet, ki
         );
     }
 
-    if (options.bash_first) {
+    if (bash_first_active) {
         if (!first_custom_guidance) try guidance_out.writer.writeAll("\n\n");
         try guidance_out.writer.writeAll(bash_first_guidance);
     }
@@ -674,19 +684,10 @@ fn appendBuiltinTool(
     kind: BuildKind,
     tool_set: tool_set_contract.ToolSet,
     options: Options,
+    bash_first_active: bool,
 ) !void {
-    if (!tool.model_visible) return;
-    if (options.bash_first and isBashFirstHiddenTool(tool)) return;
-    if (!includeBuiltinForKind(tool.name, kind, tool_set)) return;
-    if ((tool.executor_kind == .exec_command or tool.executor_kind == .write_stdin) and
-        !unifiedExecSupported()) return;
-    if (std.mem.eql(u8, tool.name, "subagent") and !options.subagent_available) return;
-    if (std.mem.eql(u8, tool.name, "vision")) return;
-    if (std.mem.eql(u8, tool.name, "web_search") and !options.web_search_available) return;
-    if (options.permission_mode != .yolo) {
-        if (tool.provider_executed and !providerExecutionIsAllowed(tool.name, options.permission_rules)) return;
-        if (permissions.rulesDenyAllTargetsForTool(options.permission_rules, tool.name)) return;
-    }
+    if (bash_first_active and isBashFirstHiddenTool(tool)) return;
+    if (!passesAdvertisementFilters(tool, kind, tool_set, options)) return;
     try advertised_names.append(alloc, tool.name);
     if (!tool.provider_executed and tool.write_provider_advertisement_fn == null) {
         try advertised_functions.append(alloc, tool.model_schema);
@@ -699,6 +700,32 @@ fn appendBuiltinTool(
         }
         try guidance_writer.writeAll(tool.description);
     }
+}
+
+/// Every advertisement filter except the bash-first hide rule.
+fn passesAdvertisementFilters(
+    tool: tool_dispatch.Tool,
+    kind: BuildKind,
+    tool_set: tool_set_contract.ToolSet,
+    options: Options,
+) bool {
+    if (!tool.model_visible) return false;
+    if (!includeBuiltinForKind(tool.name, kind, tool_set)) return false;
+    if ((tool.executor_kind == .exec_command or tool.executor_kind == .write_stdin) and
+        !unifiedExecSupported()) return false;
+    if (std.mem.eql(u8, tool.name, "subagent") and !options.subagent_available) return false;
+    if (std.mem.eql(u8, tool.name, "vision")) return false;
+    if (std.mem.eql(u8, tool.name, "web_search") and !options.web_search_available) return false;
+    if (options.permission_mode != .yolo) {
+        if (tool.provider_executed and !providerExecutionIsAllowed(tool.name, options.permission_rules)) return false;
+        if (permissions.rulesDenyAllTargetsForTool(options.permission_rules, tool.name)) return false;
+    }
+    return true;
+}
+
+fn toolSetAdvertisesExecCommand(tool_set: tool_set_contract.ToolSet, kind: BuildKind, options: Options) bool {
+    const tool = tool_set.registry.lookup("exec_command") orelse return false;
+    return passesAdvertisementFilters(tool.*, kind, tool_set, options);
 }
 
 fn isBashFirstHiddenTool(tool: tool_dispatch.Tool) bool {
@@ -848,7 +875,7 @@ test "ask keeps advertising locally executed tools" {
 }
 
 test "bash-first projection hides overlapping discovery tools and guides rg" {
-    var projection = try buildTestModelToolProjection(std.testing.allocator, .{ .bash_first = true });
+    var projection = try buildTestModelToolProjection(std.testing.allocator, .{ .bash_first = .on });
     defer projection.deinit(std.testing.allocator);
 
     try expectContainsName(projection.advertised_names, "exec_command");
@@ -874,15 +901,56 @@ test "model tool projection identifies the actual default command shell" {
     try std.testing.expect(std.mem.find(u8, projection.custom_guidance, expected) != null);
 }
 
-test "bash-first leaves the default projection unchanged" {
-    var standard = try buildTestModelToolProjection(std.testing.allocator, .{});
+test "bash-first off leaves the standard projection unchanged" {
+    var standard = try buildTestModelToolProjection(std.testing.allocator, .{ .bash_first = .off });
     defer standard.deinit(std.testing.allocator);
-    var bash_first = try buildTestModelToolProjection(std.testing.allocator, .{ .bash_first = true });
+    var bash_first = try buildTestModelToolProjection(std.testing.allocator, .{ .bash_first = .on });
     defer bash_first.deinit(std.testing.allocator);
 
     try expectContainsName(standard.advertised_names, "grep_files");
     try expectContainsName(standard.advertised_names, "glob_files");
     try std.testing.expect(std.mem.find(u8, standard.custom_guidance, "Bash-first mode") == null);
+}
+
+test "bash-first auto follows the permission mode in the projection" {
+    var ask = try buildTestModelToolProjection(std.testing.allocator, .{ .permission_mode = .ask });
+    defer ask.deinit(std.testing.allocator);
+    try expectContainsName(ask.advertised_names, "grep_files");
+    try expectContainsName(ask.advertised_names, "glob_files");
+    try std.testing.expect(std.mem.find(u8, ask.custom_guidance, "Bash-first mode") == null);
+
+    var auto = try buildTestModelToolProjection(std.testing.allocator, .{ .permission_mode = .auto });
+    defer auto.deinit(std.testing.allocator);
+    try expectNotContainsName(auto.advertised_names, "grep_files");
+    try expectNotContainsName(auto.advertised_names, "glob_files");
+    try std.testing.expect(std.mem.find(u8, auto.custom_guidance, "rg --files") != null);
+
+    var yolo = try buildTestModelToolProjection(std.testing.allocator, .{ .permission_mode = .yolo });
+    defer yolo.deinit(std.testing.allocator);
+    try expectNotContainsName(yolo.advertised_names, "grep_files");
+    try expectContainsName(yolo.advertised_names, "exec_command");
+
+    var yolo_off = try buildTestModelToolProjection(std.testing.allocator, .{ .permission_mode = .yolo, .bash_first = .off });
+    defer yolo_off.deinit(std.testing.allocator);
+    try expectContainsName(yolo_off.advertised_names, "grep_files");
+
+    var ask_on = try buildTestModelToolProjection(std.testing.allocator, .{ .permission_mode = .ask, .bash_first = .on });
+    defer ask_on.deinit(std.testing.allocator);
+    try expectNotContainsName(ask_on.advertised_names, "grep_files");
+}
+
+test "bash-first is inert when the tool set has no exec_command" {
+    const tools = [_]tool_dispatch.Tool{ test_glob_files, test_grep_files, test_read_file };
+    var projection = try buildTestModelToolProjectionForRegistry(std.testing.allocator, &tools, .{
+        .permission_mode = .yolo,
+        .bash_first = .on,
+    });
+    defer projection.deinit(std.testing.allocator);
+
+    try expectNotContainsName(projection.advertised_names, "exec_command");
+    try expectContainsName(projection.advertised_names, "grep_files");
+    try expectContainsName(projection.advertised_names, "glob_files");
+    try std.testing.expectEqualStrings("", projection.custom_guidance);
 }
 
 test "yolo advertisement ignores permission filtering" {

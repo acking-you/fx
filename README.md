@@ -227,7 +227,7 @@ Model shell execution has one Codex-style Unified Exec family: `exec_command` st
 
 `/exec-mode claude` enables an optional session-local detached-loop policy. A command that crosses its yield window finishes the current model turn so the user can continue working. Command completion, failure, or a five-minute running watchdog schedules a separate continuation turn; ordinary user prompts take priority if both are queued. `/exec-mode codex` restores the default. A running turn keeps the mode it captured when it started.
 
-For codebase discovery, `/bash-first` (or ACP `fx/toolMode/set`) hides the overlapping `list_files`, `glob_files`, `grep_files`, and `semantic_search` tools and tells the model to use the unified shell with `rg` and `rg --files`. The setting applies to the next turn and can be toggled back to the standard projection at any time. See [Bash-first workspace mode](docs/bash-first-mode.md).
+For codebase discovery, bash-first mode hides the overlapping `list_files`, `glob_files`, `grep_files`, and `semantic_search` tools and tells the model to use the unified shell with `rg` and `rg --files`. It is on by default whenever the permission mode does not stop for approval (`auto` or `yolo`) and off in `ask`; `/bash-first on|off|auto` (or ACP `fx/toolMode/set`) overrides that. The setting applies to the next turn. See [Bash-first workspace mode](docs/bash-first-mode.md).
 
 The hosted terminal engine remains available for explicit interactive terminal takeover and replay. It is separate from the model-facing command tools and is not used as a shell fallback.
 

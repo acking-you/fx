@@ -1376,17 +1376,21 @@ pub fn Handlers(comptime App: type) type {
             }
 
             const trimmed = std.mem.trim(u8, rest, " \t");
-            const next = if (trimmed.len == 0 or std.mem.eql(u8, trimmed, "toggle"))
-                !app.bash_first
+            const permission_mode = app.permission_engine.mode;
+            const currently_effective = app.bash_first.resolve(permission_mode);
+            const next: types.BashFirstPreference = if (trimmed.len == 0 or std.mem.eql(u8, trimmed, "toggle"))
+                (if (currently_effective) .off else .on)
             else if (std.mem.eql(u8, trimmed, "on"))
-                true
+                .on
             else if (std.mem.eql(u8, trimmed, "off"))
-                false
+                .off
+            else if (std.mem.eql(u8, trimmed, "auto"))
+                .auto
             else {
                 try app.writeDomainNotice(.{
                     .topic = "tool_mode",
                     .tone = .neutral,
-                    .body = "Use: /bash-first [on|off] (no argument toggles the mode).",
+                    .body = "Use: /bash-first [on|off|auto] (no argument toggles the mode; auto follows the permission mode).",
                 }, true);
                 return;
             };
@@ -1394,13 +1398,18 @@ pub fn Handlers(comptime App: type) type {
             app.permission_state.authority_mutex.lockUncancelable(io_mod.getIo());
             app.bash_first = next;
             app.permission_state.authority_mutex.unlock(io_mod.getIo());
+            const effective = next.resolve(permission_mode);
             try app.writeDomainNotice(.{
                 .topic = "tool_mode",
                 .tone = .neutral,
-                .body = if (next)
-                    "Bash-first mode enabled. Workspace search uses exec_command with rg."
-                else
-                    "Bash-first mode disabled. Specialized workspace search tools are available.",
+                .body = switch (next) {
+                    .on => "Bash-first mode enabled. Workspace search uses exec_command with rg.",
+                    .off => "Bash-first mode disabled. Specialized workspace search tools are available.",
+                    .auto => if (effective)
+                        "Bash-first mode set to auto: enabled because the current permission mode does not require approval."
+                    else
+                        "Bash-first mode set to auto: disabled while the permission mode is ask.",
+                },
             }, true);
             app.shell.render_requests.request(.footer);
         }
@@ -1608,7 +1617,8 @@ fn buildTraceReport(app: anytype) ![]u8 {
     try out.writer.print("model: {s}\n", .{provider_runtime.model(app)});
     if (app.fast_mode) try out.writer.writeAll("fast_mode: on\n");
     if (comptime @hasField(App, "bash_first")) {
-        try out.writer.print("bash_first: {s}\n", .{if (app.bash_first) "on" else "off"});
+        const effective = app.bash_first.resolve(app.permission_engine.mode);
+        try out.writer.print("bash_first: {s} ({s})\n", .{ app.bash_first.label(), if (effective) "enabled" else "disabled" });
     }
     const perm_label = permissions.permissionModeLabel(app.permission_engine.mode);
     try out.writer.print("permission_mode: {s}\n", .{perm_label});

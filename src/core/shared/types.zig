@@ -1868,6 +1868,48 @@ pub const PermissionMode = enum {
     yolo,
 };
 
+/// Session/connection-local bash-first tool projection preference.
+///
+/// `auto` derives the effective value from the permission mode: modes that do
+/// not stop for approval (`auto`, `yolo`) run bash-first by default, while
+/// `ask` keeps the standard projection. `on`/`off` are explicit overrides.
+pub const BashFirstPreference = enum {
+    auto,
+    on,
+    off,
+
+    pub fn resolve(self: BashFirstPreference, permission_mode: PermissionMode) bool {
+        return switch (self) {
+            .on => true,
+            .off => false,
+            .auto => permission_mode != .ask,
+        };
+    }
+
+    pub fn label(self: BashFirstPreference) []const u8 {
+        return @tagName(self);
+    }
+
+    pub fn parse(value: []const u8) ?BashFirstPreference {
+        if (std.mem.eql(u8, value, "auto") or std.mem.eql(u8, value, "default")) return .auto;
+        if (std.mem.eql(u8, value, "on") or std.mem.eql(u8, value, "bash-first") or std.mem.eql(u8, value, "bash_first")) return .on;
+        if (std.mem.eql(u8, value, "off") or std.mem.eql(u8, value, "standard")) return .off;
+        return null;
+    }
+};
+
+test "bash-first auto follows the permission mode" {
+    try std.testing.expect(!BashFirstPreference.auto.resolve(.ask));
+    try std.testing.expect(BashFirstPreference.auto.resolve(.auto));
+    try std.testing.expect(BashFirstPreference.auto.resolve(.yolo));
+    try std.testing.expect(BashFirstPreference.on.resolve(.ask));
+    try std.testing.expect(!BashFirstPreference.off.resolve(.yolo));
+    try std.testing.expectEqual(BashFirstPreference.auto, BashFirstPreference.parse("default").?);
+    try std.testing.expectEqual(BashFirstPreference.on, BashFirstPreference.parse("bash-first").?);
+    try std.testing.expectEqual(BashFirstPreference.off, BashFirstPreference.parse("standard").?);
+    try std.testing.expect(BashFirstPreference.parse("maybe") == null);
+}
+
 pub const RuleDecision = enum {
     none,
     allow,

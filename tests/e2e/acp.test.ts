@@ -6686,8 +6686,9 @@ describe.skipIf(!HAS_API_KEY)("acp: model-backed protocol", () => {
         expect(bashFirstOpt).toMatchObject({
           name: "Bash-first mode",
           type: "select",
-          currentValue: "off",
+          currentValue: "auto",
         });
+        expect(bashFirstOpt.options.map((option: any) => option.value)).toEqual(["auto", "off", "on"]);
         const notification = await client.readLine() as any;
         expect(notification.method).toBe("session/update");
         const enabled = await client.request("fx/toolMode/set", { mode: "bash-first" }, 3) as any;
@@ -6699,6 +6700,9 @@ describe.skipIf(!HAS_API_KEY)("acp: model-backed protocol", () => {
           value: "on",
         }, 5) as any;
         expect(configured.result.configOptions.find((o: any) => o.id === "bash_first").currentValue).toBe("on");
+        const restored = await client.request("fx/toolMode/set", { mode: "auto" }, 6) as any;
+        expect(restored.result.mode).toBe("auto");
+        expect(typeof restored.result.bashFirst).toBe("boolean");
       } finally {
         await client?.close();
         gateway.stop();

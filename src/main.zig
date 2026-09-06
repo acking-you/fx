@@ -594,8 +594,9 @@ const App = struct {
     fast_mode: bool = false,
     /// Session-local tool projection preference. In bash-first mode the model
     /// uses the unified shell for discovery and `rg` search instead of the
-    /// overlapping specialized search built-ins.
-    bash_first: bool = false,
+    /// overlapping specialized search built-ins. `.auto` follows the permission
+    /// mode: approval-free modes (`auto`, `yolo`) run bash-first by default.
+    bash_first: types.BashFirstPreference = .auto,
     /// Session-local long-command interaction policy. Captured by each turn so
     /// changing it cannot alter an already running model/tool loop.
     exec_mode: exec_mode.Mode = .codex,

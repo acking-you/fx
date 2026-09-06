@@ -282,7 +282,7 @@ pub const ActivePrompt = struct {
     mode: []const u8,
     permission_mode: types.PermissionMode,
     /// Captured with the prompt so a mid-turn toggle applies only to the next turn.
-    bash_first: bool = false,
+    bash_first: types.BashFirstPreference = .auto,
     thread: if (host_target.is_wasm) void else std.Thread = if (host_target.is_wasm) {} else undefined,
     reapable: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     steer_mutex: std.Io.Mutex = .init,
@@ -388,8 +388,9 @@ pub const ServerState = struct {
     effort: types.ReasoningEffort = .auto,
     first_call_tool_choice: types.ToolChoice = .auto,
     context_enabled: bool = true,
-    /// Connection/session-local tool projection preference.
-    bash_first: bool = false,
+    /// Connection/session-local tool projection preference. `.auto` follows
+    /// the captured permission mode of each prompt.
+    bash_first: types.BashFirstPreference = .auto,
     active_session: ?ActiveSessionState = null,
     active_prompt: ?*ActivePrompt = null,
     subagent_authority_mutex: std.Io.Mutex = .init,
@@ -2660,7 +2661,7 @@ fn handleSetConfigOption(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Me
             session_test_controls.logOptions(),
         ) catch |err| return writeConfigCommitError(state, alloc, msg, err, "Invalid Fast mode");
     } else if (std.mem.eql(u8, config_id, "bash_first")) {
-        const bash_first = parseBashFirstConfig(value) orelse
+        const bash_first = types.BashFirstPreference.parse(value) orelse
             return state.writer.writeError(alloc, msg.id, .{
                 .code = ErrorCode.invalid_params,
                 .message = "Invalid bash-first mode",
@@ -2722,7 +2723,7 @@ fn writeConfigOptionsResponse(
     try out.writer.writeAll(",");
     try sessions.writeFastModeConfigOption(&out.writer, session.fast_mode, current_capabilities.supports_fast_mode);
     try out.writer.writeAll(",");
-    try sessions.writeBashFirstConfigOption(&out.writer, state.bash_first);
+    try sessions.writeBashFirstConfigOption(&out.writer, state.bash_first, session.permission_mode);
     try out.writer.writeAll(",");
     try sessions.writeModeConfigOption(&out.writer, state.cfg.mode_registry, current_mode);
     try out.writer.writeAll("]}");
@@ -2754,12 +2755,6 @@ fn normalizeModelControls(
 fn parseFastModeConfig(value: []const u8) ?bool {
     if (std.mem.eql(u8, value, "normal")) return false;
     if (std.mem.eql(u8, value, "fast")) return true;
-    return null;
-}
-
-fn parseBashFirstConfig(value: []const u8) ?bool {
-    if (std.mem.eql(u8, value, "on") or std.mem.eql(u8, value, "bash-first") or std.mem.eql(u8, value, "bash_first")) return true;
-    if (std.mem.eql(u8, value, "off") or std.mem.eql(u8, value, "standard") or std.mem.eql(u8, value, "default")) return false;
     return null;
 }
 
@@ -2991,17 +2986,17 @@ fn handleToolModeSet(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Messag
         .message = "Expected an object with mode or bashFirst",
     });
 
-    const enabled: bool = if (parsed.value.object.get("bashFirst")) |value| switch (value) {
-        .bool => |flag| flag,
+    const preference: types.BashFirstPreference = if (parsed.value.object.get("bashFirst")) |value| switch (value) {
+        .bool => |flag| if (flag) .on else .off,
         else => return state.writer.writeError(alloc, msg.id, .{
             .code = ErrorCode.invalid_params,
             .message = "bashFirst must be a boolean",
         }),
     } else if (parsed.value.object.get("mode")) |value| switch (value) {
-        .string => |mode| parseBashFirstConfig(mode) orelse
+        .string => |mode| types.BashFirstPreference.parse(mode) orelse
             return state.writer.writeError(alloc, msg.id, .{
                 .code = ErrorCode.invalid_params,
-                .message = "mode must be bash-first or standard",
+                .message = "mode must be bash-first, standard, or auto",
             }),
         else => return state.writer.writeError(alloc, msg.id, .{
             .code = ErrorCode.invalid_params,
@@ -3013,13 +3008,19 @@ fn handleToolModeSet(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Messag
     });
 
     state.subagent_authority_mutex.lockUncancelable(io_mod.getIo());
-    state.bash_first = enabled;
+    state.bash_first = preference;
+    const permission_mode: types.PermissionMode = if (state.active_session) |*session| session.permission_mode else .ask;
     state.subagent_authority_mutex.unlock(io_mod.getIo());
+    const enabled = preference.resolve(permission_mode);
 
     var response: std.Io.Writer.Allocating = .init(alloc);
     defer response.deinit();
     try response.writer.writeAll("{\"mode\":");
-    try writeJsonStr(if (enabled) "bash-first" else "standard", &response.writer);
+    try writeJsonStr(switch (preference) {
+        .on => "bash-first",
+        .off => "standard",
+        .auto => "auto",
+    }, &response.writer);
     try response.writer.print(",\"bashFirst\":{s}}}", .{if (enabled) "true" else "false"});
     try state.writer.writeResponse(alloc, msg.id, response.writer.buffered());
 }

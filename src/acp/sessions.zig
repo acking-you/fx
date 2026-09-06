@@ -227,7 +227,7 @@ fn writeNewSessionResponse(
     try out.writer.writeAll(",");
     try writeFastModeConfigOption(&out.writer, active.fast_mode, active_capabilities.supports_fast_mode);
     try out.writer.writeAll(",");
-    try writeBashFirstConfigOption(&out.writer, state.bash_first);
+    try writeBashFirstConfigOption(&out.writer, state.bash_first, active.permission_mode);
     try out.writer.writeAll(",");
     try writeModeConfigOption(
         &out.writer,
@@ -634,7 +634,7 @@ fn writeLoadSessionResponse(
     try out.writer.writeAll(",");
     try writeFastModeConfigOption(&out.writer, active.fast_mode, active_capabilities.supports_fast_mode);
     try out.writer.writeAll(",");
-    try writeBashFirstConfigOption(&out.writer, state.bash_first);
+    try writeBashFirstConfigOption(&out.writer, state.bash_first, active.permission_mode);
     try out.writer.writeAll(",");
     try writeModeConfigOption(
         &out.writer,
@@ -1027,7 +1027,7 @@ fn buildSlashCommandsJson(alloc: Allocator) ![]u8 {
         .{ .name = "credits", .description = "Show credit balance", .hint = null },
         .{ .name = "skills", .description = "Show installed skills", .hint = null },
         .{ .name = "fast", .description = "Toggle fast mode for supported models", .hint = null },
-        .{ .name = "bash-first", .description = "Prefer exec_command with rg for workspace search", .hint = "on|off" },
+        .{ .name = "bash-first", .description = "Prefer exec_command with rg for workspace search", .hint = "on|off|auto" },
     };
 
     try out.writer.writeAll("[");
@@ -1144,10 +1144,17 @@ pub fn writeFastModeConfigOption(
     try writer.writeAll("]}");
 }
 
-pub fn writeBashFirstConfigOption(writer: *std.Io.Writer, current: bool) !void {
-    try writer.writeAll("{\"id\":\"bash_first\",\"name\":\"Bash-first mode\",\"description\":\"Prefer exec_command with rg for workspace discovery and code search\",\"category\":\"tools\",\"type\":\"select\",\"currentValue\":");
-    try writeJsonStr(if (current) "on" else "off", writer);
-    try writer.writeAll(",\"options\":[{\"value\":\"off\",\"name\":\"Off\"},{\"value\":\"on\",\"name\":\"On\"}]}");
+pub fn writeBashFirstConfigOption(
+    writer: *std.Io.Writer,
+    current: types.BashFirstPreference,
+    permission_mode: types.PermissionMode,
+) !void {
+    const effective = current.resolve(permission_mode);
+    try writer.writeAll("{\"id\":\"bash_first\",\"name\":\"Bash-first mode\",\"description\":\"Prefer exec_command with rg for workspace discovery and code search (auto follows the permission mode; currently ");
+    try writer.writeAll(if (effective) "enabled" else "disabled");
+    try writer.writeAll(")\",\"category\":\"tools\",\"type\":\"select\",\"currentValue\":");
+    try writeJsonStr(current.label(), writer);
+    try writer.writeAll(",\"options\":[{\"value\":\"auto\",\"name\":\"Auto\"},{\"value\":\"off\",\"name\":\"Off\"},{\"value\":\"on\",\"name\":\"On\"}]}");
 }
 
 pub fn writeModeConfigOption(

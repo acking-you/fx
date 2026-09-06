@@ -214,7 +214,7 @@ const AcpContext = struct {
     /// session/set_mode changes never mutate a running turn.
     captured_mode: ?[]const u8 = null,
     captured_permission_mode: ?PermissionMode = null,
-    bash_first: bool = false,
+    bash_first: types.BashFirstPreference = .auto,
 
     fn deinitPublishedToolCalls(self: *AcpContext) void {
         var terminals = self.tool_terminals.valueIterator();
@@ -850,7 +850,7 @@ pub fn handlePrompt(
     msg: *jsonrpc.Message,
     captured_mode: []const u8,
     captured_permission_mode: PermissionMode,
-    bash_first: bool,
+    bash_first: types.BashFirstPreference,
 ) !TerminalOutcome {
     const session = if (state.active_session) |*active| active else return .{
         .rpc_error = no_active_session_rpc_error,
@@ -4279,7 +4279,7 @@ test "ACP prompt propagates context provider errors before pending prompt state"
         AcpContextRegistryFixture.gather_error = expected_error;
         try std.testing.expectError(
             expected_error,
-            handlePrompt(&state, alloc, &msg, "code", .ask, false),
+            handlePrompt(&state, alloc, &msg, "code", .ask, .off),
         );
         try std.testing.expectEqual(@as(usize, 1), AcpContextRegistryFixture.gather_calls);
         try std.testing.expect(state.active_session.?.pending_prompt_id == null);
