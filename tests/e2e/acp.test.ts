@@ -2164,7 +2164,7 @@ describe("acp: model-independent", () => {
   );
 
   test(
-    "ACP sends continuation text normally with the full tool surface",
+    "ACP sends continuation text normally with the active tool surface",
     async () => {
       const root = createIsolatedRoot("fx-acp-continuation-text-");
       const gateway = startFakeGateway([finalText("ACP_CONTINUATION_TEXT_COMPLETE")]);
@@ -6126,6 +6126,9 @@ describe("acp: model-independent", () => {
         client.setPermissionOption("allow_once");
         const second = await runPrompt(client, "Use the latest session mode.", TIMEOUT);
         expect(second.promptResult.result.stopReason).toBe("end_turn");
+        const askTools = serializedToolNames(parseGatewayRequest(gateway.requests[1]!.body));
+        expect(askTools).toContain("glob_files");
+        expect(askTools).toContain("grep_files");
         const permissions = second.messages.filter(
           (message: any) => message.method === "session/request_permission",
         );

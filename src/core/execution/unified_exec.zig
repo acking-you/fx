@@ -2290,18 +2290,36 @@ test "unified exec clamps empty polls and retains head tail bounds" {
 test "unified exec manager cleanup terminates a still-running process group" {
     if (!Manager.supported()) return error.SkipZigTest;
     var manager = Manager.init(std.testing.allocator);
+    var manager_live = true;
+    defer if (manager_live) manager.deinit();
     var running = try manager.exec(std.testing.allocator, .{
         .command = if (builtin.os.tag == .windows)
-            "$child = Start-Process -FilePath ($PSHOME + '\\powershell.exe') -ArgumentList '-NoLogo','-NoProfile','-Command','Start-Sleep -Seconds 30' -NoNewWindow -PassThru; [Console]::Out.Write($child.Id); Wait-Process -Id $child.Id"
+            "$child = Start-Process -FilePath ($PSHOME + '\\powershell.exe') -ArgumentList '-NoLogo','-NoProfile','-Command','Start-Sleep -Seconds 30' -NoNewWindow -PassThru; [Console]::Out.WriteLine($child.Id); Wait-Process -Id $child.Id"
         else
-            "sleep 30 & child=$!; printf '%d' \"$child\"; wait",
+            "sleep 30 & child=$!; printf '%d\\n' \"$child\"; wait",
         .cwd = if (builtin.os.tag == .windows) "." else "/tmp",
         .yield_time_ms = if (builtin.os.tag == .windows) 1_000 else 250,
     });
-    const child_pid = try std.fmt.parseInt(u32, running.stdout, 10);
-    running.deinit(std.testing.allocator);
+    defer running.deinit(std.testing.allocator);
+    // Shell and child startup are not part of the manager's cleanup budget.
+    // Wait for the complete PID line, including when it arrives after yield.
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(std.testing.allocator);
+    try output.appendSlice(std.testing.allocator, running.stdout);
+    const startup_deadline = io_mod.milliTimestamp() + 10_000;
+    while (std.mem.findScalar(u8, output.items, '\n') == null) {
+        try std.testing.expect(io_mod.milliTimestamp() < startup_deadline);
+        try std.testing.expect(output.items.len < 32);
+        const process_id = running.process_id orelse return error.TestExpectedLiveProcess;
+        var polled = try manager.writeStdin(std.testing.allocator, .{ .process_id = process_id });
+        defer polled.deinit(std.testing.allocator);
+        try output.appendSlice(std.testing.allocator, polled.stdout);
+        try std.testing.expectEqualStrings("", polled.stderr);
+    }
+    const child_pid = try std.fmt.parseInt(u32, std.mem.trim(u8, output.items, "\r\n"), 10);
     const started = io_mod.milliTimestamp();
     manager.deinit();
+    manager_live = false;
     const elapsed = io_mod.milliTimestamp() - started;
     try std.testing.expect(elapsed < 2_000);
     const deadline = io_mod.milliTimestamp() + 2_000;

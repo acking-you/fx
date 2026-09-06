@@ -31,7 +31,9 @@ export const VERIFY_SERIALIZED_TOOL_NAMES = [
 ] as const;
 
 export const AUTO_RESPONSES_SERIALIZED_TOOL_NAMES = CANONICAL_BUILTIN_NAMES.filter(
-  (name) => name !== "web_search" && name !== "vision",
+  // Auto permission mode defaults to bash-first on native hosts.
+  (name) => name !== "web_search" && name !== "vision" &&
+    name !== "glob_files" && name !== "grep_files",
 );
 
 // Durable-only tools are capability-gated on a writable session. Unified Exec

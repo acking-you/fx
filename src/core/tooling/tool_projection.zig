@@ -483,7 +483,7 @@ fn latestToolGroupHasTerminalCapabilityNoMatch(
 }
 
 const bash_first_guidance =
-    "Bash-first mode is active. Use exec_command for workspace discovery and code search; prefer `rg` for text and `rg --files` for file lists (fall back only when rg is unavailable). The specialized glob_files and grep_files tools are intentionally hidden in this mode.";
+    "Bash-first mode is active. Use exec_command for workspace discovery and code search; prefer `rg` for text and `rg --files` for file lists (fall back only when rg is unavailable). Specialized workspace discovery tools are intentionally hidden in this mode.";
 
 pub fn containsName(names: []const []const u8, expected: []const u8) bool {
     for (names) |name| if (std.mem.eql(u8, name, expected)) return true;
