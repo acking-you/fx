@@ -257,16 +257,21 @@ Check in the golden file and wire a regression test that re-runs `fx replay` in 
 
 ## Releases
 
-Releases are triggered automatically when the version in `src/main.zig` changes on `main`:
+Releases are triggered automatically when the version in `src/main.zig` changes on `byok`:
 
 1. Edit `pub const version = "X.Y.Z";` in `src/main.zig`
-2. Merge to `main`
-3. The release workflow checks if `vX.Y.Z` tag exists; if not, it builds four platform binaries, creates the git tag, and publishes a GitHub Release with the binaries attached
+2. Merge to `byok`
+3. The release workflow checks if `vX.Y.Z` tag exists; if not, it builds five platform binaries and five native static libraries, creates the git tag, and publishes a GitHub Release with the binaries attached
 
 Release binaries are attached to the tagged GitHub Release. This fork does not
 publish a separate CDN or dev channel.
 
 Release notes are public product copy. Describe user-visible behavior, always spell the product `fx`, and omit contributor attribution, tracker references, repository or website work, delivery infrastructure, CI and test details, branch history, and implementation-only refactors. Use commits and pull requests as research evidence only. Changelog formatting and release-marker rules live in `AGENTS.md`.
+
+Native libraries are built and exercised through
+`python3 scripts/package-native.py --target <rust-target>` on each native runner.
+The same reusable workflow runs in Full CI and release builds. Packaging includes
+the public C header, licenses, exact revision, ABI, target, and SHA-256 checksums.
 
 Do not create tags manually. The workflow owns tag creation.
 

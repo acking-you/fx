@@ -1,6 +1,6 @@
 # fx
 
-## 0.0.7
+## 0.0.8
 
 <!-- release:start -->
 
@@ -15,6 +15,9 @@
 
 ### New Features
 
+- **Embedded native runtime:** Applications can link fx directly through a versioned C interface, with independent runtime instances and shared SDK/ACP control. Precompiled static libraries are available for Linux and macOS on x86_64 and aarch64, and Windows x86_64 MSVC.
+- **Remote subscription login:** Embedded and ACP clients can authenticate Codex and Grok with device codes from another machine, while retaining explicit browser login.
+
 - **Unified Exec commands:** Model turns now use separate `exec_command` and `write_stdin` tools with numeric sessions for long-running and interactive commands. Output remains bounded while processes survive turn boundaries until they finish or the session closes.
 
 - **Unified context compaction:** Manual `/compact`, automatic threshold compaction, context-overflow recovery, TUI, and ACP now use one strategy module. Eligible Responses routes use native remote compaction first, other providers use the active model for a structured full-history summary, and a bounded deterministic summary remains available when provider compaction cannot complete.
@@ -28,6 +31,8 @@
 
 ### Improvements
 
+- **Permission-aware tool defaults:** Auto and yolo modes prefer shell-based workspace discovery by default; explicit tool-mode preferences remain available.
+
 - **Non-blocking compaction and streaming:** Manual and automatic compaction run outside the TUI event loop, keep the composer responsive, queue the next prompt safely, persist the settled replacement before reporting success, and preserve immediate streamed token rendering while compacting activity is visible.
 - **Compaction portability:** Remote checkpoints remain bound to the exact provider identity, endpoint, and wire model, while a portable local summary is stored beside opaque provider state. Switching accounts or endpoints never replays an opaque checkpoint to the wrong provider.
 - **Long-session resource bounds:** Durable file-edit presentation bodies, compaction projections, recovery snapshots, and command output are bounded so large edits and long sessions do not repeatedly inflate checkpoints or replay state.
@@ -37,6 +42,7 @@
 
 - **Auto mode review prompts**: Auto mode now uses fewer tokens when reviewing unresolved actions.
 - **Native release builds**: Every supported archive is produced directly from the same stripped ReleaseSafe build profile.
+- **Download integrity:** CLI archives and independent static libraries are available for Linux and macOS on x86_64/aarch64 and Windows x86_64, with a SHA-256 file beside every package. macOS CLI binaries use Developer ID signing and notarization when Apple credentials are configured, or a verified ad-hoc signature otherwise.
 - **Provider model preferences**: Gateway, Codex, and Grok now keep separate saved model selections, so switching providers no longer replaces another provider's preferred model.
 - **Responsive provider switching**: Provider credential refresh and catalog loading no longer block TUI input or ACP control messages. `/provider` is now the direct interactive provider command, while `/login` remains focused on authentication.
 - **Subscription session longevity**: Codex and Grok sessions remain usable beyond 64 consecutive requests.
@@ -62,13 +68,6 @@
 - **Captured command failures**: Captured command output remains readable after timeout or cancellation. Output-capture failures now fail the tool call instead of returning an incomplete result.
 - **Resumed review labels**: The `Safety caution` and `Review unavailable` labels now survive session resume.
 
-### Fork and Release Maintenance
-
-- **Smaller supported surface:** Removed Vercel-only runtime, setup, account, updater, telemetry, gateway protocol, credential storage, SDK login, release-channel, MCP, and obsolete test/eval code that conflicted with the BYOK product direction. Generic Responses, provider, ACP, image, SDK, and permission boundaries remain supported.
-- **Focused regression ownership:** Kept deterministic coverage for real crashes, recovery, resource limits, security boundaries, provider routing, streaming, TUI rendering, ACP, and process lifecycle while removing brittle layout counts, duplicate scenarios, and tests owned only by removed features.
-- **Release workflow:** Full CI runs once on the exact feature commit and is not repeated after the squash merge. Stable releases only compile, sign, checksum, and package the four native ReleaseSafe binaries; PGSO qualification remains an independently dispatchable size-optimization workflow rather than a release blocker.
-- **Download integrity:** Stable releases provide stripped ReleaseSafe archives for Linux and macOS on x86_64 and arm64, with a SHA-256 file beside every downloadable package. macOS binaries use Developer ID signing and notarization when Apple credentials are configured; fork releases without those credentials use a verified ad-hoc signature and state that notarization was skipped.
-
 ### Security
 
 - **Exact-action reviews**: Auto mode reviews each unresolved action against the current request and relevant results from the current turn. A clear review applies only to that exact unchanged action and is checked again before execution.
@@ -78,6 +77,8 @@
 - **Provider recovery authority**: After restart, fx continues unfinished Codex or Grok work only for the account that started it. If that account cannot be verified, fx preserves completed work and sends nothing.
 - **Sensitive command output**: Command output flagged as sensitive is not saved with the session, including secrets split across output chunks or oversized lines.
 - **OAuth callback validation**: OAuth authorization denials and successes apply only when the callback state matches the active sign-in attempt, and Grok browser callbacks accept only the expected xAI origin.
+
+<!-- release:end -->
 
 ## 0.0.5
 

@@ -2,7 +2,7 @@ name: Release
 
 on:
   push:
-    branches: [main]
+    branches: [byok]
   workflow_dispatch:
 
 permissions:
@@ -14,6 +14,7 @@ concurrency:
 
 jobs:
   check-version:
+    if: github.ref == 'refs/heads/byok'
     runs-on: ubuntu-latest
     outputs:
       needed: ${{ steps.check.outputs.needed }}
@@ -200,8 +201,13 @@ jobs:
             fx-windows-x86_64.zip
             fx-windows-x86_64.zip.sha256
 
+  native-libraries:
+    needs: check-version
+    if: needs.check-version.outputs.needed == 'true'
+    uses: ./.github/workflows/native-libraries.yml
+
   release:
-    needs: [check-version, build-linux, build-macos-x86_64, build-macos-arm64, build-windows-x86_64]
+    needs: [check-version, build-linux, build-macos-x86_64, build-macos-arm64, build-windows-x86_64, native-libraries]
     runs-on: ubuntu-latest
     environment: release
     permissions:

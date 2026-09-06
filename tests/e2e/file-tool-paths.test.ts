@@ -1397,10 +1397,10 @@ describe("filesystem path handling", () => {
             "read_file",
             "write_file",
             "edit_file",
-            "glob_files",
-            "grep_files",
             "exec_command",
           ]));
+          expect(names).not.toContain("glob_files");
+          expect(names).not.toContain("grep_files");
           return toolCall("exec_fallback_1", "exec_command", {
             cmd: command,
             yield_time_ms: 10_000,

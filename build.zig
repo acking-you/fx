@@ -331,6 +331,7 @@ fn addEmbeddedArtifact(
         .optimize = .ReleaseSafe,
         .link_libc = true,
         .pic = true,
+        .strip = b.option(bool, "embedded-strip", "Strip debug information from the embedded library") orelse false,
     });
     root.addImport("build_options", options.createModule());
     const library = b.addLibrary(.{
