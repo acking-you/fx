@@ -2263,19 +2263,45 @@ fn reapProviderJob(state: *ServerState, wait: bool) void {
     state.provider_job_thread = null;
 }
 
+const ProviderJobOutcome = union(enum) {
+    /// Owned by the worker until the terminal response has been written.
+    response: []u8,
+    rpc_error: jsonrpc.RpcError,
+
+    fn deinit(self: ProviderJobOutcome, alloc: Allocator) void {
+        if (self == .response) alloc.free(self.response);
+    }
+};
+
 fn providerJobMain(job: *ProviderJob) void {
     const state = job.state;
-    defer {
-        job.deinit();
-        state.alloc.destroy(job);
-        state.provider_job_running.store(false, .seq_cst);
+    const outcome = runProviderJob(job) catch |err| ProviderJobOutcome{
+        .rpc_error = .{ .code = ErrorCode.internal_error, .message = @errorName(err) },
+    };
+    defer outcome.deinit(state.alloc);
+    var msg = job.msg;
+    job.msg = .{};
+    defer jsonrpc.freeMessage(state.alloc, &msg);
+    job.deinit();
+    state.alloc.destroy(job);
+
+    // As with prompt completion, settle mutation and release credential borrows
+    // before the reply becomes visible. The reader joins this worker before
+    // admitting the next request; only the owned reply remains to publish.
+    state.provider_job_running.store(false, .seq_cst);
+    switch (outcome) {
+        .response => |body| state.writer.writeResponse(state.alloc, msg.id, body) catch {},
+        .rpc_error => |err| state.writer.writeError(state.alloc, msg.id, err) catch {},
     }
+}
+
+fn runProviderJob(job: *ProviderJob) !ProviderJobOutcome {
+    const state = job.state;
 
     if (job.kind == .logout) {
         const outcome = provider_logout.logout(state.alloc, job.target, state.cfg.gateway_provider.oauth_transport);
         if (outcome == .failed) {
-            state.writer.writeError(state.alloc, job.msg.id, .{ .code = ErrorCode.internal_error, .message = "Provider logout failed" }) catch {};
-            return;
+            return .{ .rpc_error = .{ .code = ErrorCode.internal_error, .message = "Provider logout failed" } };
         }
         state.credential_mutex.lockUncancelable(io_mod.getIo());
         defer state.credential_mutex.unlock(io_mod.getIo());
@@ -2298,28 +2324,24 @@ fn providerJobMain(job: *ProviderJob) void {
             state.credential_source = null;
             state.account_id = null;
         }
-        state.writer.writeResponse(state.alloc, job.msg.id, "{\"loggedOut\":true}") catch {};
-        return;
+        return .{ .response = try state.alloc.dupe(u8, "{\"loggedOut\":true}") };
     }
     if (job.kind == .refresh) {
         const provider: provider_oauth.Provider = if (job.target == .codex) .codex else .grok;
         var access = (provider_oauth.loadAccess(provider, state.alloc, state.cfg.gateway_provider.oauth_transport, .force) catch null) orelse {
-            state.writer.writeError(state.alloc, job.msg.id, .{ .code = ErrorCode.invalid_request, .message = "Provider credential refresh failed" }) catch {};
-            return;
+            return .{ .rpc_error = .{ .code = ErrorCode.invalid_request, .message = "Provider credential refresh failed" } };
         };
         defer access.deinit(state.alloc);
         job.credential_override = cloneServerCredential(state.alloc, .{ .token = access.access_token, .source = provider.source(), .account_id = access.account_id }) catch {
-            state.writer.writeError(state.alloc, job.msg.id, .{ .code = ErrorCode.internal_error, .message = "Credential allocation failed" }) catch {};
-            return;
+            return .{ .rpc_error = .{ .code = ErrorCode.internal_error, .message = "Credential allocation failed" } };
         };
     }
 
     const catalog_provider = catalogProviderFor(state, job.target) orelse {
-        state.writer.writeError(state.alloc, job.msg.id, .{
+        return .{ .rpc_error = .{
             .code = ErrorCode.invalid_request,
             .message = "Selected provider is unavailable in this host",
-        }) catch {};
-        return;
+        } };
     };
     var outcome = provider_activation.prepare(state.alloc, .{
         .target = job.target,
@@ -2333,8 +2355,7 @@ fn providerJobMain(job: *ProviderJob) void {
     var prepared = switch (outcome) {
         .prepared => |*value| value,
         .failed => |failure| {
-            writeProviderJobFailure(job, failure);
-            return;
+            return .{ .rpc_error = providerJobFailure(job, failure) };
         },
     };
 
@@ -2343,11 +2364,10 @@ fn providerJobMain(job: *ProviderJob) void {
     else
         config_runtime.loadMergedSettings(state.alloc, state.workspace_root)) catch |err| {
         debug_trace.logf("provider", "ACP provider settings load failed err={s}", .{@errorName(err)});
-        state.writer.writeError(state.alloc, job.msg.id, .{
+        return .{ .rpc_error = .{
             .code = ErrorCode.internal_error,
             .message = "Failed to load provider settings",
-        }) catch {};
-        return;
+        } };
     };
     defer settings.deinit(state.alloc);
 
@@ -2362,21 +2382,19 @@ fn providerJobMain(job: *ProviderJob) void {
         current_model,
         settings.models.get(job.target),
     ) orelse {
-        state.writer.writeError(state.alloc, job.msg.id, .{
+        return .{ .rpc_error = .{
             .code = ErrorCode.invalid_request,
             .message = "Provider returned no supported models",
-        }) catch {};
-        return;
+        } };
     };
 
     if (job.persist_base_url) |base_url| {
         persistGatewayBinding(state, base_url, prepared.credential.token) catch |err| {
             debug_trace.logf("provider", "ACP gateway binding persist failed err={s}", .{@errorName(err)});
-            state.writer.writeError(state.alloc, job.msg.id, .{
+            return .{ .rpc_error = .{
                 .code = ErrorCode.internal_error,
                 .message = "Failed to save Gateway URL and API key",
-            }) catch {};
-            return;
+            } };
         };
     }
 
@@ -2390,20 +2408,18 @@ fn providerJobMain(job: *ProviderJob) void {
         ) catch |err| {
             debug_trace.logf("provider", "ACP provider commit failed err={s}", .{@errorName(err)});
             _ = markIndeterminateCommitTerminal(state, err);
-            state.writer.writeError(state.alloc, job.msg.id, .{
+            return .{ .rpc_error = .{
                 .code = ErrorCode.internal_error,
                 .message = "Failed to persist session provider",
-            }) catch {};
-            return;
+            } };
         };
     }
 
     const selected_copy = state.alloc.dupe(u8, selected_model) catch {
-        state.writer.writeError(state.alloc, job.msg.id, .{
+        return .{ .rpc_error = .{
             .code = ErrorCode.internal_error,
             .message = "Failed to activate provider",
-        }) catch {};
-        return;
+        } };
     };
     state.credential_mutex.lockUncancelable(io_mod.getIo());
     defer state.credential_mutex.unlock(io_mod.getIo());
@@ -2430,11 +2446,11 @@ fn providerJobMain(job: *ProviderJob) void {
     state.capability_resolver.adoptOwnedCatalog(state.alloc, &prepared.catalog);
     adoptServerCredentialLocked(state, &prepared.credential);
 
-    switch (job.kind) {
-        .config_option => writeConfigOptionsResponse(state, state.alloc, job.msg.id) catch {},
-        .explicit_switch, .configure_byok, .refresh => writeProviderOperationResponse(job, selected_model) catch {},
+    return .{ .response = try switch (job.kind) {
+        .config_option => serializeConfigOptionsResponse(state, state.alloc),
+        .explicit_switch, .configure_byok, .refresh => serializeProviderOperationResponse(job, selected_model),
         .logout => unreachable,
-    }
+    } };
 }
 
 fn selectProviderModel(
@@ -2451,7 +2467,7 @@ fn selectProviderModel(
     return if (entries.len > 0) entries[0].id else null;
 }
 
-fn writeProviderJobFailure(job: *ProviderJob, failure: provider_activation.Failure) void {
+fn providerJobFailure(job: *ProviderJob, failure: provider_activation.Failure) jsonrpc.RpcError {
     const message = switch (failure) {
         .cancelled => "Provider operation cancelled",
         .missing_credential => if (job.target == .codex)
@@ -2468,13 +2484,10 @@ fn writeProviderJobFailure(job: *ProviderJob, failure: provider_activation.Failu
             break :message "Failed to prepare provider credential or model catalog";
         },
     };
-    job.state.writer.writeError(job.state.alloc, job.msg.id, .{
-        .code = ErrorCode.invalid_request,
-        .message = message,
-    }) catch {};
+    return .{ .code = ErrorCode.invalid_request, .message = message };
 }
 
-fn writeProviderOperationResponse(job: *ProviderJob, model: []const u8) !void {
+fn serializeProviderOperationResponse(job: *ProviderJob, model: []const u8) ![]u8 {
     var out: std.Io.Writer.Allocating = .init(job.state.alloc);
     defer out.deinit();
     try out.writer.writeAll("{\"provider\":");
@@ -2487,7 +2500,7 @@ fn writeProviderOperationResponse(job: *ProviderJob, model: []const u8) !void {
         try out.writer.writeAll(",\"credentialPersistence\":\"profile\"");
     }
     try out.writer.writeByte('}');
-    try job.state.writer.writeResponse(job.state.alloc, job.msg.id, out.writer.buffered());
+    return out.toOwnedSlice();
 }
 
 fn handleSetConfigOption(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message) !void {
@@ -2692,10 +2705,17 @@ fn writeConfigOptionsResponse(
     alloc: Allocator,
     id: ?jsonrpc.RequestId,
 ) !void {
-    const session = if (state.active_session) |*active| active else return state.writer.writeError(alloc, id, .{
+    if (state.active_session == null) return state.writer.writeError(alloc, id, .{
         .code = ErrorCode.invalid_request,
         .message = "No active session",
     });
+    const body = try serializeConfigOptionsResponse(state, alloc);
+    defer alloc.free(body);
+    try state.writer.writeResponse(alloc, id, body);
+}
+
+fn serializeConfigOptionsResponse(state: *ServerState, alloc: Allocator) ![]u8 {
+    const session = &state.active_session.?;
     const current_model = session.model;
     const current_mode = session.mode;
     const current_capabilities = state.capability_resolver.available(
@@ -2727,7 +2747,7 @@ fn writeConfigOptionsResponse(
     try out.writer.writeAll(",");
     try sessions.writeModeConfigOption(&out.writer, state.cfg.mode_registry, current_mode);
     try out.writer.writeAll("]}");
-    try state.writer.writeResponse(alloc, id, out.writer.buffered());
+    return out.toOwnedSlice();
 }
 
 const SessionPreferenceUpdate = struct {
@@ -3158,6 +3178,75 @@ test "ACP provider job gate leaves control-plane methods responsive" {
     try std.testing.expect(AcpMethod.fx_tool_mode_set.allowedDuringProviderJob());
     try std.testing.expect(!AcpMethod.session_prompt.allowedDuringProviderJob());
     try std.testing.expect(!AcpMethod.fx_provider_switch.allowedDuringProviderJob());
+}
+
+test "ACP provider replies expose settled state before the first response byte" {
+    const Probe = struct {
+        state: *ServerState,
+        writes: usize = 0,
+        settled: bool = false,
+        credential_unlocked: bool = false,
+        success: bool = false,
+
+        fn write(raw: ?*anyopaque, bytes: []const u8) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            self.writes += 1;
+            self.settled = !self.state.provider_job_running.load(.seq_cst);
+            self.credential_unlocked = self.state.credential_mutex.tryLock();
+            if (self.credential_unlocked) self.state.credential_mutex.unlock(std.testing.io);
+            const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
+            defer parsed.deinit();
+            self.success = parsed.value.object.contains("result");
+        }
+
+        fn fetch(_: ?*anyopaque, alloc: Allocator, _: model_catalog.FetchInput) Allocator.Error!model_catalog.ProviderResult {
+            var entries: std.ArrayList(model_catalog.ModelCatalogEntry) = .empty;
+            errdefer model_catalog.freeModelCatalog(alloc, &entries);
+            const id = try alloc.dupe(u8, "fixture-model");
+            errdefer alloc.free(id);
+            const model_type = try alloc.dupe(u8, "language");
+            errdefer alloc.free(model_type);
+            try entries.append(alloc, .{ .id = id, .model_type = model_type });
+            return .{ .catalog = entries };
+        }
+    };
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
+    defer alloc.free(home);
+    var state = ServerState{ .alloc = alloc, .cfg = undefined, .writer = jsonrpc.Writer.init() };
+    defer state.deinit();
+    state.cfg.home_override = home;
+    state.cfg.provider_set = .{ .gateway = .{ .model_catalog = .{ .fetch_fn = Probe.fetch } }, .codex = .{}, .grok = .{} };
+    state.cfg.gateway_provider.oauth_transport = @import("../core/auth/oauth_transport.zig").unavailable_provider;
+    state.cfg.secret_store = @import("../core/hosts/host.zig").unavailable_secret_store;
+    state.workspace_root = try alloc.dupe(u8, home);
+    var probe = Probe{ .state = &state };
+    state.writer = jsonrpc.Writer.initCallback(&probe, Probe.write);
+    const msg = jsonrpc.Message{ .id = .{ .string = "provider-request" }, .method = "fx/provider/switch" };
+    const credential = credentials.Credential{ .token = @constCast("fixture-key"), .source = .openai_api_key };
+
+    // Exercise the real worker, including activation cleanup and the transport
+    // callback boundary. A success reply must release its credential lock too.
+    try std.testing.expect(try startProviderJob(&state, &msg, .gateway, .explicit_switch, "https://fixture.test/models", null, &credential, null));
+    reapProviderJob(&state, true);
+    try std.testing.expectEqual(@as(usize, 1), probe.writes);
+    try std.testing.expect(probe.success);
+    try std.testing.expect(probe.settled);
+    try std.testing.expect(probe.credential_unlocked);
+    try std.testing.expectEqualStrings("fixture-model", state.selected_model);
+
+    // A failed switch must be equally settled, with the previous binding intact.
+    probe = .{ .state = &state };
+    try std.testing.expect(try startProviderJob(&state, &msg, .codex, .explicit_switch, "https://fixture.test/models", null, null, null));
+    reapProviderJob(&state, true);
+    try std.testing.expectEqual(@as(usize, 1), probe.writes);
+    try std.testing.expect(!probe.success);
+    try std.testing.expect(probe.settled);
+    try std.testing.expect(probe.credential_unlocked);
+    try std.testing.expectEqual(model_provider.ProviderId.gateway, state.provider);
+    try std.testing.expectEqualStrings("fixture-key", state.api_key);
 }
 
 test "ACP Gateway discovery and persistence honor explicit home without changing process binding" {
