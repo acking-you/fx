@@ -2180,6 +2180,35 @@ fn waitForBoundedDeadline(deadline: std.Io.Clock.Timestamp) anyerror!void {
 }
 
 const GatewayCancelWatcher = struct {
+    /// The request owner keeps the stream alive until this watcher joins.
+    /// Windows directional shutdown does not complete an already pending AFD
+    /// receive. Abort the connection so cancellation can wake a silent stream.
+    fn interrupt_stream(stream: std.Io.net.Stream) void {
+        const io = io_mod.getIo();
+        if (comptime builtin.os.tag == .windows) {
+            const windows = std.os.windows;
+            const result = io.operate(.{ .device_io_control = .{
+                .file = .{ .handle = stream.socket.handle, .flags = .{ .nonblocking = false } },
+                .code = windows.IOCTL.AFD.PARTIAL_DISCONNECT,
+                .in = @ptrCast(&windows.AFD.PARTIAL_DISCONNECT_INFO{
+                    .DisconnectMode = .{ .ABORTIVE = true },
+                    .Timeout = -1,
+                }),
+            } }) catch |err| {
+                debug_trace.logf("stream", "connection interruption failed: {s}", .{@errorName(err)});
+                return;
+            };
+            const status = result.device_io_control.u.Status;
+            if (status != .SUCCESS) {
+                debug_trace.logf("stream", "connection interruption status: 0x{x}", .{@intFromEnum(status)});
+            }
+        } else {
+            stream.shutdown(io, .both) catch |err| {
+                debug_trace.logf("stream", "connection interruption failed: {s}", .{@errorName(err)});
+            };
+        }
+    }
+
     fn run(
         done: *std.atomic.Value(bool),
         cancel_flag: *std.atomic.Value(bool),
@@ -2192,7 +2221,7 @@ const GatewayCancelWatcher = struct {
         while (!done.load(.seq_cst)) {
             if (cancel_flag.load(.seq_cst)) {
                 if (connected_watch == null or connected_watch.?.win(.cancelled)) {
-                    stream.shutdown(io_mod.getIo(), .both) catch {};
+                    interrupt_stream(stream);
                 }
                 return;
             }
@@ -2200,27 +2229,27 @@ const GatewayCancelWatcher = struct {
             if (system_resumed != null and suspendGapDetected(previous, current)) {
                 if (cancel_flag.load(.seq_cst)) {
                     if (connected_watch == null or connected_watch.?.win(.cancelled)) {
-                        stream.shutdown(io_mod.getIo(), .both) catch {};
+                        interrupt_stream(stream);
                     }
                     return;
                 }
                 if (connected_watch == null or connected_watch.?.win(.system_resumed)) {
                     system_resumed.?.store(true, .seq_cst);
-                    stream.shutdown(io_mod.getIo(), .both) catch {};
+                    interrupt_stream(stream);
                 }
                 return;
             }
             if (deadline) |limit| {
                 const now = std.Io.Clock.Timestamp.now(io_mod.getIo(), .awake);
                 if (!std.Io.Clock.Timestamp.compare(now, .lt, limit)) {
-                    stream.shutdown(io_mod.getIo(), .both) catch {};
+                    interrupt_stream(stream);
                     return;
                 }
             }
             if (connected_watch) |watch| {
                 const now = std.Io.Clock.Timestamp.now(io_mod.getIo(), .awake);
                 if (watch.response_head_expired(now) and watch.win_response_head_timeout()) {
-                    stream.shutdown(io_mod.getIo(), .both) catch {};
+                    interrupt_stream(stream);
                     return;
                 }
                 if (watch.phase.load(.seq_cst) == .completed) return;
