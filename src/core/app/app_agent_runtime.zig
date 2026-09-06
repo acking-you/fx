@@ -2189,7 +2189,7 @@ test "subagent tool projection uses immutable admission permission rules" {
         .admission = admission,
         .cancel = &cancel,
     };
-    const projection_thread = try std.Thread.spawn(.{}, Project.run, .{&project});
+    const projection_thread = try io_mod.spawn(.{}, Project.run, .{&project});
     var joined = false;
     defer if (!joined) {
         barrier.release.store(true, .release);

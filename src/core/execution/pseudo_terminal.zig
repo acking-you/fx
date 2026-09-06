@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const io_mod = @import("../shared/io.zig");
+const environment_scope = @import("../shared/environment_scope.zig");
 
 const Handle = if (supported()) std.posix.fd_t else std.Io.File.Handle;
 
@@ -16,6 +17,7 @@ extern "c" fn forkpty(
     window_size: ?*const anyopaque,
 ) c_int;
 extern "c" fn execv(path: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
+extern "c" fn execve(path: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, envp: [*:null]const ?[*:0]const u8) c_int;
 
 pub fn supported() bool {
     return switch (builtin.os.tag) {
@@ -52,6 +54,12 @@ fn spawnUnix(
     const argv_ptrs = try alloc.allocSentinel(?[*:0]const u8, argv.len, null);
     defer alloc.free(argv_ptrs);
     for (argv_z, 0..) |value, index| argv_ptrs[index] = value.ptr;
+    // Allocate before fork: only async-signal-safe operations run in the child.
+    const scoped_environment = if (environment_scope.current()) |environment|
+        try environment.createPosixBlock(alloc, .{})
+    else
+        null;
+    defer if (scoped_environment) |block| block.deinit(alloc);
 
     // forkpty connects the child to the controlling slave while Unified Exec
     // retains only the parent-side master for readers and write_stdin.
@@ -60,7 +68,11 @@ fn spawnUnix(
     if (pid < 0) return error.PtyUnavailable;
     if (pid == 0) {
         if (std.c.chdir(cwd_z.ptr) != 0) std.c._exit(127);
-        _ = execv(argv_z[0].ptr, argv_ptrs.ptr);
+        if (scoped_environment) |block| {
+            _ = execve(argv_z[0].ptr, argv_ptrs.ptr, block.slice.ptr);
+        } else {
+            _ = execv(argv_z[0].ptr, argv_ptrs.ptr);
+        }
         std.c._exit(127);
     }
     errdefer close(master);

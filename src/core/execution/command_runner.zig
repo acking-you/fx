@@ -3818,7 +3818,7 @@ test "zero-output cancellation remains a bare error" {
             flag.store(true, .seq_cst);
         }
     };
-    const thread = try std.Thread.spawn(
+    const thread = try io_mod.spawn(
         .{},
         Watcher.run,
         .{ ready_path, &cancel, &ready_seen },
@@ -3892,7 +3892,7 @@ test "artifact write failure after cancellation remains a bare error" {
         }
     };
     var ready_seen = std.atomic.Value(bool).init(false);
-    const watcher = try std.Thread.spawn(.{}, Watcher.run, .{ ready_path, &cancel, &ready_seen });
+    const watcher = try io_mod.spawn(.{}, Watcher.run, .{ ready_path, &cancel, &ready_seen });
     defer watcher.join();
 
     const process_group_id = child.id;
@@ -4518,7 +4518,7 @@ test "runtime cancellation observed at the timeout deadline stays graceful" {
             }
         };
         const request_at_ms = started_ms + @as(i64, @intCast(timeout_ms)) - 25;
-        const thread = try std.Thread.spawn(
+        const thread = try io_mod.spawn(
             .{},
             CancelNearDeadline.run,
             .{ &cancel, request_at_ms },
@@ -4619,7 +4619,7 @@ test "supervisor fallback force remains timeout dominant" {
             flag.store(true, .seq_cst);
         }
     };
-    const thread = try std.Thread.spawn(
+    const thread = try io_mod.spawn(
         .{},
         CancelNearDeadline.run,
         .{ &cancel, started_ms + @as(i64, @intCast(timeout_ms)) - 25 },

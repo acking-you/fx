@@ -926,9 +926,9 @@ test "web_search input snapshots stay coherent during parallel reconfiguration" 
     };
     runtime.configure(inputs_a);
 
-    const thread_a = try std.Thread.spawn(.{}, SearchConfigStress.run, .{SearchConfigStress{ .runtime = &runtime, .inputs = inputs_a }});
+    const thread_a = try io_mod.spawn(.{}, SearchConfigStress.run, .{SearchConfigStress{ .runtime = &runtime, .inputs = inputs_a }});
     defer thread_a.join();
-    const thread_b = try std.Thread.spawn(.{}, SearchConfigStress.run, .{SearchConfigStress{ .runtime = &runtime, .inputs = inputs_b }});
+    const thread_b = try io_mod.spawn(.{}, SearchConfigStress.run, .{SearchConfigStress{ .runtime = &runtime, .inputs = inputs_b }});
     defer thread_b.join();
 
     for (0..2000) |_| {

@@ -1,3 +1,4 @@
+const io_mod = @import("io.zig");
 const std = @import("std");
 const builtin = @import("builtin");
 
@@ -759,7 +760,7 @@ test "parallel Darwin spawns isolate descriptors and each output reaches EOF" {
         for (threads[0..started]) |thread| thread.join();
     }
     for (&threads, &workers) |*thread, *worker| {
-        thread.* = try std.Thread.spawn(.{}, ParallelSpawn.run, .{worker});
+        thread.* = try io_mod.spawn(.{}, ParallelSpawn.run, .{worker});
         started += 1;
     }
     for (threads) |_| start.post(io);

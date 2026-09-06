@@ -289,7 +289,7 @@ fn executeDirectReadOnlyWithLimitAndTestControls(
 
     var started_workers: usize = 0;
     while (started_workers < workers.len) : (started_workers += 1) {
-        workers[started_workers].thread = std.Thread.spawn(
+        workers[started_workers].thread = io_mod.spawn(
             .{},
             OutputWorker.run,
             .{&workers[started_workers]},
@@ -876,7 +876,7 @@ test "direct output budget synchronizes concurrent producers and has one trip ow
     };
     var threads: [32]std.Thread = undefined;
     for (&threads) |*thread| {
-        thread.* = try std.Thread.spawn(.{}, Producer.run, .{ &budget, &trip_owners });
+        thread.* = try io_mod.spawn(.{}, Producer.run, .{ &budget, &trip_owners });
     }
     for (threads) |thread| thread.join();
 
@@ -1747,7 +1747,7 @@ test "direct executor cancellation and timeout terminate and reap the process gr
             flag.store(true, .seq_cst);
         }
     };
-    const thread = try std.Thread.spawn(.{}, Flip.run, .{&cancel});
+    const thread = try io_mod.spawn(.{}, Flip.run, .{&cancel});
     defer thread.join();
     try std.testing.expectError(
         error.Cancelled,

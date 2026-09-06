@@ -622,7 +622,7 @@ test "profile runtime serializes publication and snapshots" {
         .generation = fact,
     };
     {
-        const thread = try std.Thread.spawn(.{}, Worker.run, .{&worker});
+        const thread = try io_mod.spawn(.{}, Worker.run, .{&worker});
         defer thread.join();
         for (0..3) |_| {
             var current = try runtime.snapshot(

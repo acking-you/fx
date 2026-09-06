@@ -146,7 +146,7 @@ pub const Runtime = struct {
         };
         errdefer self.alloc.free(owned_account_id);
 
-        self.thread = std.Thread.spawn(
+        self.thread = io_mod.spawn(
             .{},
             loadThreadMain,
             .{

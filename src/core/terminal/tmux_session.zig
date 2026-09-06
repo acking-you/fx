@@ -1089,7 +1089,7 @@ pub fn runLauncher(
         .config = parsed.value,
         .child_pid = child_pid,
     };
-    var control_thread = std.Thread.spawn(
+    var control_thread = io_mod.spawn(
         .{},
         LauncherControl.run,
         .{&control},

@@ -921,7 +921,7 @@ fn runApprovalBridgeScenario(
         .require_grant = decision == .always,
     };
     defer waiter.worker.deinit(alloc);
-    const thread = try std.Thread.spawn(.{}, ApprovalBridgeWaiter.run, .{&waiter});
+    const thread = try io_mod.spawn(.{}, ApprovalBridgeWaiter.run, .{&waiter});
     var joined = false;
     defer if (!joined) {
         waiter.worker.requestShutdown();
@@ -1068,7 +1068,7 @@ fn runTwoApprovalBridgeScenario() !void {
         .require_grant = false,
     };
     defer first_waiter.worker.deinit(alloc);
-    const first_thread = try std.Thread.spawn(.{}, ApprovalBridgeWaiter.run, .{&first_waiter});
+    const first_thread = try io_mod.spawn(.{}, ApprovalBridgeWaiter.run, .{&first_waiter});
     var first_joined = false;
     defer if (!first_joined) {
         first_waiter.worker.requestShutdown();
@@ -1089,7 +1089,7 @@ fn runTwoApprovalBridgeScenario() !void {
         .grant_value = second_grant,
     };
     defer second_waiter.worker.deinit(alloc);
-    const second_thread = try std.Thread.spawn(.{}, ApprovalBridgeWaiter.run, .{&second_waiter});
+    const second_thread = try io_mod.spawn(.{}, ApprovalBridgeWaiter.run, .{&second_waiter});
     var second_joined = false;
     defer if (!second_joined) {
         second_waiter.worker.requestShutdown();

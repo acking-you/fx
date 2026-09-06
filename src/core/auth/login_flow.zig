@@ -169,7 +169,7 @@ pub const SignInRuntime = struct {
         self.mutex.unlock(io_mod.getIo());
 
         if (cooperative) return true;
-        self.thread = std.Thread.spawn(.{}, workerMain, .{ self, alloc }) catch |err| {
+        self.thread = io_mod.spawn(.{}, workerMain, .{ self, alloc }) catch |err| {
             self.mutex.lockUncancelable(io_mod.getIo());
             self.state = .idle;
             self.mutex.unlock(io_mod.getIo());

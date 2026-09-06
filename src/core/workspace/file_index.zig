@@ -338,7 +338,7 @@ pub const FileIndex = struct {
         self.loading_generation = loading;
         self.generation = generation_id;
         self.initial_failed = false;
-        self.thread = std.Thread.spawn(.{}, loaderThreadMain, .{
+        self.thread = io_mod.spawn(.{}, loaderThreadMain, .{
             loading,
             alloc,
             self.roots,
@@ -2584,7 +2584,7 @@ fn testReapThread(attempt: *TestReapAttempt) void {
 
 fn expectReapReturnsDuringCleanup(index: *FileIndex, alloc: Allocator, gate: *TestLoaderGate) !void {
     var attempt: TestReapAttempt = .{ .index = index, .alloc = alloc };
-    const thread = try std.Thread.spawn(.{}, testReapThread, .{&attempt});
+    const thread = try io_mod.spawn(.{}, testReapThread, .{&attempt});
     waitForTestFlag(&attempt.started) catch |err| {
         gate.cleanup_release.store(true, .release);
         thread.join();
@@ -2613,7 +2613,7 @@ fn installTestLoader(
 
     index.loading_generation = generation;
     index.generation = generation_id;
-    index.thread = std.Thread.spawn(.{}, testLoaderThread, .{ generation, gate }) catch |err| {
+    index.thread = io_mod.spawn(.{}, testLoaderThread, .{ generation, gate }) catch |err| {
         index.loading_generation = null;
         return err;
     };
@@ -3116,7 +3116,7 @@ test "deinit cancels and joins one loader while suppressing queued refresh" {
             generation.finish(.canceled);
         }
     };
-    index.thread = try std.Thread.spawn(.{}, WaitForStop.run, .{ loading, &index.stop_requested, &observed_stop });
+    index.thread = try io_mod.spawn(.{}, WaitForStop.run, .{ loading, &index.stop_requested, &observed_stop });
 
     index.deinit(alloc);
 

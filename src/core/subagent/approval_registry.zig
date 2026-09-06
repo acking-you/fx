@@ -804,8 +804,8 @@ test "simultaneous approval surfaces resolve one durable request exactly once" {
         .release = &release,
         .outcome = &second_outcome,
     };
-    const first_thread = try std.Thread.spawn(.{}, Surface.run, .{&first});
-    const second_thread = try std.Thread.spawn(.{}, Surface.run, .{&second});
+    const first_thread = try io_mod.spawn(.{}, Surface.run, .{&first});
+    const second_thread = try io_mod.spawn(.{}, Surface.run, .{&second});
     while (ready.load(.seq_cst) != 2) {
         std.Thread.yield() catch std.atomic.spinLoopHint();
     }
@@ -1020,7 +1020,7 @@ test "child invalidation retires a worker route before a racing response" {
         .registry = &registry,
         .outcome = &invalidation_outcome,
     };
-    const invalidation_thread = try std.Thread.spawn(
+    const invalidation_thread = try io_mod.spawn(
         .{},
         Invalidation.run,
         .{&invalidation},
@@ -1041,7 +1041,7 @@ test "child invalidation retires a worker route before a racing response" {
         .started = &resolution_started,
         .outcome = &resolution_outcome,
     };
-    const resolution_thread = try std.Thread.spawn(
+    const resolution_thread = try io_mod.spawn(
         .{},
         Resolution.run,
         .{&resolution},

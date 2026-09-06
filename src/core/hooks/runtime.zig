@@ -1241,8 +1241,8 @@ test "a frozen view is safe to copy across concurrent invocations" {
     const view = runtime.freeze();
     var failed = std.atomic.Value(bool).init(false);
 
-    const first = try std.Thread.spawn(.{}, ConcurrentRun.run, .{ConcurrentRun{ .view = view, .failed = &failed }});
-    const second = try std.Thread.spawn(.{}, ConcurrentRun.run, .{ConcurrentRun{ .view = view, .failed = &failed }});
+    const first = try io_mod.spawn(.{}, ConcurrentRun.run, .{ConcurrentRun{ .view = view, .failed = &failed }});
+    const second = try io_mod.spawn(.{}, ConcurrentRun.run, .{ConcurrentRun{ .view = view, .failed = &failed }});
     first.join();
     second.join();
 

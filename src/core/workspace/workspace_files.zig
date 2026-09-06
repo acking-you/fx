@@ -1038,7 +1038,7 @@ test "workspace file provider cancellation terminates an active child" {
             stop.store(true, .seq_cst);
         }
     };
-    const stop_thread = try std.Thread.spawn(.{}, RequestStop.run, .{&stop_requested});
+    const stop_thread = try io_mod.spawn(.{}, RequestStop.run, .{&stop_requested});
     defer stop_thread.join();
 
     const started = std.Io.Clock.Timestamp.now(io_mod.getIo(), .awake);

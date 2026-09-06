@@ -155,7 +155,7 @@ pub fn runParallelReadOnlyCalls(
 
     var started: usize = 0;
     for (calls, 0..) |call, index| {
-        slots[index].thread = std.Thread.spawn(.{}, parallelWorkerMain, .{ &slots[index], options, call, index }) catch |err| {
+        slots[index].thread = io_mod.spawn(.{}, parallelWorkerMain, .{ &slots[index], options, call, index }) catch |err| {
             for (slots[0..started]) |*slot| {
                 if (slot.thread) |thread| thread.join();
                 slot.thread = null;

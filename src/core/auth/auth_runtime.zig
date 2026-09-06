@@ -202,7 +202,7 @@ const InventoryRefreshTask = struct {
             task.workerMain();
             return task;
         }
-        task.thread = std.Thread.spawn(.{}, workerMain, .{task}) catch |err| {
+        task.thread = io_mod.spawn(.{}, workerMain, .{task}) catch |err| {
             alloc.destroy(task);
             return err;
         };

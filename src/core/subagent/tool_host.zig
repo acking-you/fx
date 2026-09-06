@@ -1308,7 +1308,7 @@ pub const Runtime = struct {
             }
         }
 
-        self.recovery_thread = std.Thread.spawn(
+        self.recovery_thread = io_mod.spawn(
             .{},
             backgroundRecoveryMain,
             .{ self, timestamp_ms },
@@ -3474,7 +3474,7 @@ test "inspect revalidates target ancestry after a stale attachment snapshot" {
         TestHooks.after_target_authorization = null;
     }
     var worker = PausedInspect{ .host = host };
-    thread = try std.Thread.spawn(.{}, PausedInspect.run, .{&worker});
+    thread = try io_mod.spawn(.{}, PausedInspect.run, .{&worker});
     try barrier.waitUntilEntered();
 
     var reparent = try domain.validateCommand(alloc, .{ .relationship = .{
@@ -3534,7 +3534,7 @@ test "configure revalidates target ancestry after a stale attachment snapshot" {
         TestHooks.after_target_authorization = null;
     }
     var worker = PausedConfigure{ .host = host };
-    thread = try std.Thread.spawn(.{}, PausedConfigure.run, .{&worker});
+    thread = try io_mod.spawn(.{}, PausedConfigure.run, .{&worker});
     try barrier.waitUntilEntered();
 
     var detach = try domain.validateCommand(alloc, .{ .relationship = .{
@@ -3622,7 +3622,7 @@ test "configure revalidates live parent permission before commit" {
         TestHooks.after_target_authorization = null;
     }
     var worker = PausedPermissionConfigure{ .host = host };
-    thread = try std.Thread.spawn(.{}, PausedPermissionConfigure.run, .{&worker});
+    thread = try io_mod.spawn(.{}, PausedPermissionConfigure.run, .{&worker});
     try barrier.waitUntilEntered();
 
     var downgrade_parent = try domain.validateCommand(alloc, .{ .configure = .{
@@ -5381,8 +5381,8 @@ test "concurrent first recovery callers serialize one durable transition" {
         .start = &start,
         .completed = &completed,
     };
-    const first_thread = try std.Thread.spawn(.{}, ConcurrentRecovery.run, .{&first});
-    const second_thread = try std.Thread.spawn(.{}, ConcurrentRecovery.run, .{&second});
+    const first_thread = try io_mod.spawn(.{}, ConcurrentRecovery.run, .{&first});
+    const second_thread = try io_mod.spawn(.{}, ConcurrentRecovery.run, .{&second});
     while (ready.load(.seq_cst) != 2) {
         std.Thread.yield() catch std.atomic.spinLoopHint();
     }
@@ -5536,7 +5536,7 @@ test "background recovery is single flight while manager projection stays readab
         .start = &explicit_start,
         .completed = &explicit_completed,
     };
-    explicit_thread = try std.Thread.spawn(.{}, ConcurrentRecovery.run, .{&explicit});
+    explicit_thread = try io_mod.spawn(.{}, ConcurrentRecovery.run, .{&explicit});
     while (explicit_ready.load(.seq_cst) == 0) {
         std.Thread.yield() catch std.atomic.spinLoopHint();
     }
@@ -5573,7 +5573,7 @@ test "background recovery is single flight while manager projection stays readab
         .target_session_id = root_id,
         .completed = &preparation_completed,
     };
-    preparation_thread = try std.Thread.spawn(
+    preparation_thread = try io_mod.spawn(
         .{},
         ConcurrentParentPreparation.run,
         .{&preparation},
@@ -6561,8 +6561,8 @@ test "concurrent duplicate create calls share one durable reservation" {
         .root_id = root_id,
         .identity_epoch = identity_epoch,
     };
-    const first_thread = try std.Thread.spawn(.{}, ConcurrentCreate.run, .{&first});
-    const second_thread = try std.Thread.spawn(.{}, ConcurrentCreate.run, .{&second});
+    const first_thread = try io_mod.spawn(.{}, ConcurrentCreate.run, .{&first});
+    const second_thread = try io_mod.spawn(.{}, ConcurrentCreate.run, .{&second});
     first_thread.join();
     second_thread.join();
     try std.testing.expect(!first.failed and !second.failed);
@@ -6896,7 +6896,7 @@ test "inspect wait subscribes before reading and returns the settled child" {
         .owner = &host.owner,
         .runner = &runner,
     };
-    const release_thread = try std.Thread.spawn(
+    const release_thread = try io_mod.spawn(
         .{},
         ReleaseAfterWaiterRegistration.run,
         .{&release},
@@ -7024,7 +7024,7 @@ test "inspect wait rechecks durable relationship authority after every wait" {
         .root_id = root_id,
         .child_id = child_id,
     };
-    const waiting_thread = try std.Thread.spawn(
+    const waiting_thread = try io_mod.spawn(
         .{},
         ConcurrentInspectWait.run,
         .{&waiting},

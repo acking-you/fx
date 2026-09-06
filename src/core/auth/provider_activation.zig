@@ -273,7 +273,7 @@ pub const Runtime = struct {
         self.cancel_requested.store(false, .seq_cst);
         self.running = true;
         self.pending_target = request.target;
-        const thread = std.Thread.spawn(.{}, threadMain, .{ self, owned }) catch |err| {
+        const thread = io_mod.spawn(.{}, threadMain, .{ self, owned }) catch |err| {
             self.running = false;
             self.pending_target = null;
             self.mutex.unlock(io_mod.getIo());

@@ -1970,7 +1970,7 @@ const CatalogRefreshTask = struct {
             self.run();
             return;
         }
-        self.thread = try std.Thread.spawn(.{}, run, .{self});
+        self.thread = try io_mod.spawn(.{}, run, .{self});
     }
 
     fn run(self: *CatalogRefreshTask) void {
@@ -4753,7 +4753,7 @@ test "linked metadata FIFO is rejected before descriptor open" {
     defer candidate_dir.close(io_mod.getIo());
     var mark = MarkOpen{};
     var writer = BlockedWriter{ .path = fifo_path_z };
-    const writer_thread = try std.Thread.spawn(.{}, BlockedWriter.run, .{&writer});
+    const writer_thread = try io_mod.spawn(.{}, BlockedWriter.run, .{&writer});
     defer {
         if (!writer.finished.load(.seq_cst)) {
             const reader_fd = std.posix.openatZ(

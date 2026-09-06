@@ -4495,7 +4495,7 @@ test "paused queue admission blocks the next prompt until review resumes" {
     try std.testing.expect(runtime.beginQueueReview(.manual));
 
     var state = QueueTakeThreadState{};
-    const thread = try std.Thread.spawn(.{}, runQueueTake, .{ &state, &runtime });
+    const thread = try io_mod.spawn(.{}, runQueueTake, .{ &state, &runtime });
     var joined = false;
     defer if (!joined) {
         _ = runtime.resumeQueueReview();
@@ -4556,7 +4556,7 @@ test "turn start hold rejects busy worker and blocks take while held" {
 
     try runtime.enqueuePrompt(alloc, try makePrompt(alloc, "held blocked prompt", "model"));
     var state = QueueTakeThreadState{};
-    const thread = try std.Thread.spawn(.{}, runQueueTake, .{ &state, &runtime });
+    const thread = try io_mod.spawn(.{}, runQueueTake, .{ &state, &runtime });
     var joined = false;
     defer if (!joined) {
         runtime.releaseTurnStartHold();
@@ -4855,7 +4855,7 @@ test "enqueuePrompt snapshots settings under the same mutex as sync" {
 
     runtime.worker_mutex.lockUncancelable(io_mod.getIo());
     var state = EnqueueThreadState{};
-    const thread = try std.Thread.spawn(.{}, runEnqueuePrompt, .{ &state, &runtime, "blocked", "model" });
+    const thread = try io_mod.spawn(.{}, runEnqueuePrompt, .{ &state, &runtime, "blocked", "model" });
     try waitForEnqueueThreadStart(&state);
     io_mod.sleep(10 * std.time.ns_per_ms);
     runtime.agent_turn_settings.fast_mode = true;
@@ -5588,7 +5588,7 @@ test "permission blocking handles submit and stop" {
     runtime.worker_processing = true;
 
     var state = PermissionThreadState{};
-    const thread = try std.Thread.spawn(.{}, runPermissionRequest, .{ &state, &runtime, "Allow?" });
+    const thread = try io_mod.spawn(.{}, runPermissionRequest, .{ &state, &runtime, "Allow?" });
     const request_id = try waitForPermissionLabel(&runtime, "Allow?");
     try std.testing.expectEqual(
         PermissionSubmissionResult.accepted,
@@ -5602,7 +5602,7 @@ test "permission blocking handles submit and stop" {
     try std.testing.expect(snapshot.pending_permission_request == null);
 
     var deny_state = PermissionThreadState{};
-    const deny_thread = try std.Thread.spawn(.{}, runPermissionRequest, .{ &deny_state, &runtime, "Deny?" });
+    const deny_thread = try io_mod.spawn(.{}, runPermissionRequest, .{ &deny_state, &runtime, "Deny?" });
     const deny_request_id = try waitForPermissionLabel(&runtime, "Deny?");
     try std.testing.expectEqual(
         PermissionSubmissionResult.accepted,
@@ -5619,7 +5619,7 @@ test "permission blocking handles submit and stop" {
     defer stop_runtime.deinit(alloc);
     stop_runtime.worker_processing = true;
     var stop_state = PermissionThreadState{};
-    const stop_thread = try std.Thread.spawn(.{}, runPermissionRequest, .{ &stop_state, &stop_runtime, "Stop?" });
+    const stop_thread = try io_mod.spawn(.{}, runPermissionRequest, .{ &stop_state, &stop_runtime, "Stop?" });
     _ = try waitForPermissionLabel(&stop_runtime, "Stop?");
     stop_runtime.requestStop();
     stop_thread.join();
@@ -5633,7 +5633,7 @@ test "permission blocking handles submit and stop" {
     defer shutdown_runtime.deinit(alloc);
     shutdown_runtime.worker_processing = true;
     var shutdown_state = PermissionThreadState{};
-    const shutdown_thread = try std.Thread.spawn(.{}, runPermissionRequest, .{ &shutdown_state, &shutdown_runtime, "Shutdown?" });
+    const shutdown_thread = try io_mod.spawn(.{}, runPermissionRequest, .{ &shutdown_state, &shutdown_runtime, "Shutdown?" });
     _ = try waitForPermissionLabel(&shutdown_runtime, "Shutdown?");
     shutdown_runtime.requestShutdown();
     shutdown_thread.join();
@@ -5723,7 +5723,7 @@ test "stale A decisions cannot resolve a newer B request" {
     runtime.worker_processing = true;
 
     var a_state = PermissionThreadState{};
-    const a_thread = try std.Thread.spawn(
+    const a_thread = try io_mod.spawn(
         .{},
         runPermissionRequest,
         .{ &a_state, &runtime, "A" },
@@ -5737,7 +5737,7 @@ test "stale A decisions cannot resolve a newer B request" {
     try std.testing.expectEqual(types.ToolPermissionDecision.once, a_state.decision.?);
 
     var b_state = PermissionThreadState{};
-    const b_thread = try std.Thread.spawn(
+    const b_thread = try io_mod.spawn(
         .{},
         runPermissionRequest,
         .{ &b_state, &runtime, "B" },
@@ -5777,7 +5777,7 @@ test "permission request ids never wrap or reuse zero" {
     runtime.next_permission_request_id = std.math.maxInt(u64);
 
     var last_state = PermissionThreadState{};
-    const last_thread = try std.Thread.spawn(
+    const last_thread = try io_mod.spawn(
         .{},
         runPermissionRequest,
         .{ &last_state, &runtime, "last id" },
@@ -5792,7 +5792,7 @@ test "permission request ids never wrap or reuse zero" {
     try std.testing.expect(last_state.err == null);
 
     var exhausted_state = PermissionThreadState{};
-    const exhausted_thread = try std.Thread.spawn(
+    const exhausted_thread = try io_mod.spawn(
         .{},
         runPermissionRequest,
         .{ &exhausted_state, &runtime, "exhausted" },
@@ -5924,7 +5924,7 @@ test "question batch snapshot answer and cancellation" {
     var runtime = WorkerRuntime{};
     defer runtime.deinit(alloc);
     var state = QuestionThreadState{};
-    const thread = try std.Thread.spawn(.{}, runQuestionRequest, .{ &state, &runtime, &entries });
+    const thread = try io_mod.spawn(.{}, runQuestionRequest, .{ &state, &runtime, &entries });
     var snapshot = try waitForQuestionSnapshot(&runtime);
     defer snapshot.deinit(alloc);
     try std.testing.expectEqualStrings("Continue?", snapshot.entries[0].question);
@@ -5940,7 +5940,7 @@ test "question batch snapshot answer and cancellation" {
     var cancel_runtime = WorkerRuntime{};
     defer cancel_runtime.deinit(alloc);
     var cancel_state = QuestionThreadState{};
-    const cancel_thread = try std.Thread.spawn(.{}, runQuestionRequest, .{ &cancel_state, &cancel_runtime, &entries });
+    const cancel_thread = try io_mod.spawn(.{}, runQuestionRequest, .{ &cancel_state, &cancel_runtime, &entries });
     var cancel_snapshot = try waitForQuestionSnapshot(&cancel_runtime);
     cancel_snapshot.deinit(alloc);
     try cancel_runtime.submitQuestionBatchAnswer(alloc, null);
@@ -5958,7 +5958,7 @@ test "question batch source distinguishes route recovery from agent questions" {
     var route_runtime = WorkerRuntime{};
     defer route_runtime.deinit(alloc);
     var route_state = QuestionThreadState{};
-    const route_thread = try std.Thread.spawn(.{}, runRouteRecoveryRequest, .{ &route_state, &route_runtime, &entries });
+    const route_thread = try io_mod.spawn(.{}, runRouteRecoveryRequest, .{ &route_state, &route_runtime, &entries });
     var route_snapshot = try waitForQuestionSnapshot(&route_runtime);
     defer route_snapshot.deinit(alloc);
     try std.testing.expectEqual(QuestionPromptSource.route_recovery, route_snapshot.source);
@@ -5972,7 +5972,7 @@ test "question batch source distinguishes route recovery from agent questions" {
     var agent_runtime = WorkerRuntime{};
     defer agent_runtime.deinit(alloc);
     var agent_state = QuestionThreadState{};
-    const agent_thread = try std.Thread.spawn(.{}, runQuestionRequest, .{ &agent_state, &agent_runtime, &entries });
+    const agent_thread = try io_mod.spawn(.{}, runQuestionRequest, .{ &agent_state, &agent_runtime, &entries });
     var agent_snapshot = try waitForQuestionSnapshot(&agent_runtime);
     defer agent_snapshot.deinit(alloc);
     try std.testing.expectEqual(QuestionPromptSource.agent_question, agent_snapshot.source);
@@ -5995,7 +5995,7 @@ test "question request queues an ordered boundary after prior assistant text" {
     } });
 
     var state = QuestionThreadState{};
-    const thread = try std.Thread.spawn(.{}, runQuestionRequest, .{ &state, &runtime, &entries });
+    const thread = try io_mod.spawn(.{}, runQuestionRequest, .{ &state, &runtime, &entries });
     var snapshot = try waitForQuestionSnapshot(&runtime);
     defer snapshot.deinit(alloc);
 

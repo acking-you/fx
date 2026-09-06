@@ -1312,6 +1312,9 @@ describe("acp: model-independent", () => {
         const initialized = await client.request("initialize", { protocolVersion: 1 }, 1) as any;
         expect(initialized.result._meta.fx.providerControl).toEqual({
           switch: true,
+          status: true,
+          logout: true,
+          refresh: true,
           login: true,
           setup: true,
           configureByok: true,
@@ -1791,6 +1794,8 @@ describe("acp: model-independent", () => {
           state = status.result.state;
         }
         expect(state).toBe("succeeded");
+        const observedAgain = await client.request("fx/provider/login/status", {}, 111) as any;
+        expect(observedAgain.result.state).toBe("succeeded");
         expect(existsSync(join(root.home, ".fx", "chatgpt-auth.json"))).toBe(true);
         expect(client.stderr).toBe("");
       } finally {

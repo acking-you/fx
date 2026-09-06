@@ -131,7 +131,7 @@ pub const Runtime = struct {
             return err;
         };
         errdefer self.alloc.free(owned_home);
-        self.thread = std.Thread.spawn(
+        self.thread = io_mod.spawn(
             .{},
             loadThreadMain,
             .{ self, provider, owned_home, snapshot_time_ms },

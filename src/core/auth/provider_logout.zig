@@ -54,6 +54,11 @@ fn runLogout(
     };
 }
 
+/// Performs durable logout on a caller-owned worker thread.
+pub fn logout(alloc: Allocator, target: model_provider.ProviderId, transport: oauth_transport.Provider) Outcome {
+    return runLogout(null, alloc, target, transport);
+}
+
 /// Runs durable subscription logout away from the TUI event loop. A provider
 /// refresh can hold the session mutation lock while it performs network I/O;
 /// waiting for that lock here would otherwise freeze input and rendering.
@@ -100,7 +105,7 @@ pub const Runtime = struct {
             self.threadMain(target, transport, retry_lock_busy);
             return true;
         }
-        const thread = std.Thread.spawn(.{}, threadMain, .{
+        const thread = io_mod.spawn(.{}, threadMain, .{
             self,
             target,
             transport,

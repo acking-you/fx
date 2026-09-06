@@ -145,6 +145,9 @@ jobs:
       - name: Run unit tests
         run: zig build test -Doptimize=${{ matrix.optimize }}
 
+      - name: Build and test embedded C ABI
+        run: zig build libfx test-embedded -j1
+
       - name: Smoke test fresh binary
         shell: bash
         run: |

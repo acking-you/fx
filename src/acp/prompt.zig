@@ -561,6 +561,7 @@ const AcpContext = struct {
             });
         }
         const tc: tool_runtime.Context = .{
+            .host_tool_executor = .{ .context = self, .call_fn = executeHostTool },
             .workspace_root = self.state.workspace_root,
             .access_scope = self.state.workspace_access.scope(self.state.workspace_root),
             .ignored_list_entries = self.state.cfg.ignored_list_entries,
@@ -652,6 +653,7 @@ const AcpContext = struct {
 
 fn activeToolSet(state: *const server.ServerState) tool_set_contract.ToolSet {
     if (comptime host_target.is_wasm) return tool_set_contract.empty;
+    if (state.cfg.tool_set_override) |tool_set| return tool_set;
     return if (state.cfg.allow_native_tools) builtin_tools.advertisement_set else tool_set_contract.empty;
 }
 
@@ -2424,6 +2426,42 @@ const TestReviewTurn = struct {
     }
 };
 
+fn executeHostTool(raw_ctx: ?*anyopaque, dispatch: tool_dispatch.DispatchContext, arguments: []const u8) tool_dispatch.DispatchError!tool_dispatch.ToolResult {
+    const ctx: *AcpContext = @ptrCast(@alignCast(raw_ctx.?));
+    const alloc = dispatch.allocator;
+    const request_id = (server.beginOutboundRequest(ctx.state, .request) catch return error.OutOfMemory) orelse
+        return .{ .failure = try alloc.dupe(u8, "Host request capacity exceeded") };
+    defer {
+        server.cancelOutboundRequest(ctx.state, request_id);
+        if (server.awaitOutboundResponse(ctx.state, request_id, .request)) |remaining| {
+            var owned = remaining;
+            owned.deinit(ctx.state.alloc);
+        }
+    }
+    const parsed_args = try std.json.parseFromSlice(std.json.Value, alloc, arguments, .{});
+    defer parsed_args.deinit();
+    const params = try std.json.Stringify.valueAlloc(alloc, .{
+        .sessionId = ctx.session_id,
+        .toolCallId = dispatch.tool_call_id,
+        .name = dispatch.tool_call_name,
+        .arguments = parsed_args.value,
+    }, .{});
+    defer alloc.free(params);
+    ctx.state.writer.writeRequest(alloc, .{ .integer = @intCast(request_id) }, "_harnel/tool/call", params) catch
+        return .{ .failure = try alloc.dupe(u8, "Host tool transport closed") };
+    var response = server.awaitOutboundResponse(ctx.state, request_id, .request) orelse
+        return .{ .failure = try alloc.dupe(u8, "Host tool cancelled") };
+    defer response.deinit(ctx.state.alloc);
+    if (response.cancelled) return .{ .failure = try alloc.dupe(u8, "Host tool cancelled") };
+    if (response.error_json) |_| return .{ .failure = try alloc.dupe(u8, "Host tool request failed") };
+    const result = try std.json.parseFromSlice(struct { output: []const u8, is_error: bool = false }, alloc, response.result_json orelse "{}", .{});
+    defer result.deinit();
+    if (result.value.output.len > dispatch.max_tool_result_bytes)
+        return .{ .failure = try alloc.dupe(u8, "Host tool result exceeds configured limit") };
+    const output = try alloc.dupe(u8, result.value.output);
+    return if (result.value.is_error) .{ .failure = output } else .{ .success = output };
+}
+
 fn requestAcpPermission(
     raw_ctx: *anyopaque,
     alloc: Allocator,
@@ -3163,7 +3201,7 @@ test "ACP usage checkpoints honor the active session write boundary" {
         .snapshot = snapshot,
     };
     state.active_session.?.session_write_mutex.lockUncancelable(io_mod.getIo());
-    const thread = try std.Thread.spawn(.{}, Worker.run, .{&worker});
+    const thread = try io_mod.spawn(.{}, Worker.run, .{&worker});
     while (!worker.started.load(.seq_cst)) std.Thread.yield() catch {};
     for (0..100) |_| std.Thread.yield() catch {};
     const blocked_at_boundary = !worker.done.load(.seq_cst);

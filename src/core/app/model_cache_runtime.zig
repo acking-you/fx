@@ -322,7 +322,7 @@ pub const Runtime = struct {
             return;
         };
 
-        self.thread = std.Thread.spawn(.{}, preloadThreadMain, .{ self, provider, owned_access }) catch {
+        self.thread = io_mod.spawn(.{}, preloadThreadMain, .{ self, provider, owned_access }) catch {
             var failed_access = owned_access;
             const failure = model_catalog.FailedOutcome{
                 .access = .init(failed_access.access),
@@ -1534,7 +1534,7 @@ test "model cache request resolution distinguishes readiness miss failure idle a
         }
     };
     runtime.state = .loading;
-    const transition_thread = try std.Thread.spawn(.{}, ReadyTransition.run, .{&runtime});
+    const transition_thread = try io_mod.spawn(.{}, ReadyTransition.run, .{&runtime});
     defer transition_thread.join();
     const warmed = try runtime.resolveForRequest("provider/new-reasoning-model", &cancel_flag);
     try std.testing.expect(model_capabilities.reasoningEffortSupported(warmed, types.ReasoningEffort.literal("future-tier")));

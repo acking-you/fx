@@ -49,6 +49,8 @@ pub const Property = struct {
 };
 
 pub const ObjectSchema = struct {
+    /// Validated, owned object schema supplied by an embedding host.
+    raw_json: ?[]const u8 = null,
     properties: []const Property = &.{},
     required: []const []const u8 = &.{},
     additional_properties: ?bool = null,
@@ -160,6 +162,7 @@ pub fn writeObjectSchema(
     writer: *std.Io.Writer,
     schema: ObjectSchema,
 ) anyerror!void {
+    if (schema.raw_json) |raw| return writer.writeAll(raw);
     if (schema.one_of.len > 0) {
         if (schema.properties.len > 0 or
             schema.required.len > 0 or

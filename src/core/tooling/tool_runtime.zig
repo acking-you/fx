@@ -105,6 +105,7 @@ test {
 }
 
 pub const Context = struct {
+    host_tool_executor: ?tool_dispatch.HostToolExecutor = null,
     workspace_root: []const u8,
     access_scope: ?workspace_access.AccessScope = null,
     ignored_list_entries: []const []const u8,
@@ -589,6 +590,7 @@ fn typedDispatchContext(ctx: Context, arena: Allocator) tool_dispatch.DispatchCo
     capabilities.web_search_runtime_ready =
         ctx.web_search_runtime_ready and ctx.web_search_backend != null;
     return .{
+        .host_tool_executor = ctx.host_tool_executor,
         .allocator = arena,
         .permission_mode = ctx.permission_mode,
         .workspace_root = ctx.workspace_root,
@@ -2622,7 +2624,7 @@ test "ask_user_question worker bridge preserves allocator ownership" {
         .worker = &worker,
         .entries = &entries,
     };
-    const thread = try std.Thread.spawn(.{}, runQuestionBridge, .{&state});
+    const thread = try io_mod.spawn(.{}, runQuestionBridge, .{&state});
     var thread_joined = false;
     defer if (!thread_joined) {
         worker.requestStop();
@@ -3467,7 +3469,7 @@ test "main file mutation prompts project producer-backed workspace and external 
             .expected_grant_target = case.grant_target,
             .expected_workspace_offer = case.external_scope == null,
         };
-        const thread = try std.Thread.spawn(
+        const thread = try io_mod.spawn(
             .{},
             runFilePermissionOutcome,
             .{ &state, rt.context(), case.call, PermissionMode.ask },
@@ -4394,7 +4396,7 @@ test "configured ask rule prompts the worker" {
     defer rt.deinit(std.testing.allocator);
 
     var state = PermissionThreadState{};
-    const thread = try std.Thread.spawn(.{}, runPermissionRequest, .{ &state, rt.context(), ToolCall{ .id = "1", .name = "glob_files", .arguments_json = "{\"pattern\":\"*.zig\"}" }, PermissionMode.auto });
+    const thread = try io_mod.spawn(.{}, runPermissionRequest, .{ &state, rt.context(), ToolCall{ .id = "1", .name = "glob_files", .arguments_json = "{\"pattern\":\"*.zig\"}" }, PermissionMode.auto });
     var thread_joined = false;
     defer if (!thread_joined) {
         rt.worker.requestShutdown();

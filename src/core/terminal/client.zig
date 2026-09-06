@@ -238,7 +238,7 @@ pub const Runtime = struct {
             return err;
         };
         if (self.thread == null) {
-            self.thread = std.Thread.spawn(.{}, workerMain, .{self}) catch {
+            self.thread = io_mod.spawn(.{}, workerMain, .{self}) catch {
                 var rollback = self.rollbackAdmissionLocked(correlation_id);
                 rollback.deinit(alloc);
                 return error.WorkerStartFailed;
@@ -486,7 +486,7 @@ fn workerMain(runtime: *Runtime) void {
             alloc.destroy(worker);
             continue;
         }
-        var thread = std.Thread.spawn(.{}, RequestWorker.run, .{worker}) catch {
+        var thread = io_mod.spawn(.{}, RequestWorker.run, .{worker}) catch {
             const completion = Completion{
                 .kind = .disconnected,
                 .correlation_id = worker.intent.correlation_id,
@@ -959,7 +959,7 @@ fn launchHost(alloc: Allocator) !void {
         else
             null,
     });
-    var reaper = try std.Thread.spawn(.{}, reapChild, .{child});
+    var reaper = try io_mod.spawn(.{}, reapChild, .{child});
     reaper.detach();
 }
 
@@ -1392,7 +1392,7 @@ test "stalled request cancellation emits only the targeted cancel" {
         .worker = &worker,
         .stream = client_stream,
     };
-    const thread = try std.Thread.spawn(.{}, Exchange.run, .{&exchange_state});
+    const thread = try io_mod.spawn(.{}, Exchange.run, .{&exchange_state});
 
     var host_read_buffer: [4096]u8 = undefined;
     var host_reader = host_stream.reader(io_mod.getIo(), &host_read_buffer);

@@ -4965,7 +4965,7 @@ test "headless ask rejects concurrent and nested interrupt scopes without overwr
         }
     };
     var result = std.atomic.Value(u8).init(0);
-    const thread = try std.Thread.spawn(.{}, ConcurrentAttempt.run, .{&result});
+    const thread = try io_mod.spawn(.{}, ConcurrentAttempt.run, .{&result});
     thread.join();
     try std.testing.expectEqual(@as(u8, 1), result.load(.seq_cst));
 
@@ -5169,7 +5169,7 @@ test "headless ask cross-thread SIGINT teardown and reuse target only the active
     defer std.posix.sigaction(std.posix.SIG.INT, &original_action, null);
 
     var state = CrossThreadSigintState{};
-    const sender = try std.Thread.spawn(.{}, sendRequestedSigints, .{&state});
+    const sender = try io_mod.spawn(.{}, sendRequestedSigints, .{&state});
     defer {
         state.stop.store(true, .seq_cst);
         sender.join();
@@ -7396,7 +7396,7 @@ test "fx ask JSON captures parallel tool results without corrupting records" {
     var failed = std.atomic.Value(bool).init(false);
     var threads: [thread_count]std.Thread = undefined;
     for (&threads) |*thread| {
-        thread.* = try std.Thread.spawn(.{}, CaptureWorker.run, .{CaptureWorker{
+        thread.* = try io_mod.spawn(.{}, CaptureWorker.run, .{CaptureWorker{
             .ctx = &ctx,
             .ready = &ready,
             .start = &start,
