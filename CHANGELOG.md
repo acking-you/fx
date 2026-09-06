@@ -1,12 +1,18 @@
 # fx
 
-## 0.0.9
+## 0.0.10
 
 <!-- release:start -->
 ### Bug Fixes
 
-- **Sequential provider controls:** ACP and embedded SDK clients can immediately query state, start a session, or change providers after a provider operation replies. Successful and failed replies now wait for the operation to settle.
+- **Windows stream cancellation:** Cancelling a model turn now interrupts an outstanding network read even when the provider stops sending data. The same session remains available for the next prompt.
 <!-- release:end -->
+
+## 0.0.9
+
+### Bug Fixes
+
+- **Sequential provider controls:** ACP and embedded SDK clients can immediately query state, start a session, or change providers after a provider operation replies. Successful and failed replies now wait for the operation to settle.
 
 ## 0.0.8
 

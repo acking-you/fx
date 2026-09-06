@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 
@@ -65,6 +66,7 @@ def main():
         config = stage / "config.json"
         config.write_text(json.dumps({"home": str(stage / "home"), "workspace_root": str(stage / "workspace")}))
         subprocess.run([str(executable), str(config), revision], check=True, timeout=30)
+        subprocess.run([sys.executable, "scripts/smoke-native-cancel.py", str(executable), revision], check=True, timeout=60)
         destination = output / f"fx-native-{args.target}.tar.gz"
         with tarfile.open(destination, "w:gz") as bundle:
             for name in ["lib", "include", "LICENSE", "THIRD_PARTY_NOTICES.md", "manifest.json"]:
