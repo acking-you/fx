@@ -1,5 +1,6 @@
 const std = @import("std");
 const browser_callback = @import("browser_callback.zig");
+const device_oauth = @import("device_oauth.zig");
 const chatgpt_session = @import("chatgpt_session.zig");
 const debug_trace = @import("../shared/debug_trace.zig");
 const host = @import("../hosts/host.zig");
@@ -93,6 +94,26 @@ pub fn startSignIn(
             .save = saveSignIn,
         },
     );
+}
+
+pub fn startDeviceSignIn(runtime: *login_flow.SignInRuntime, alloc: Allocator, transport: oauth_transport.Provider) !bool {
+    return runtime.startPreparing(alloc, transport, prepareDeviceSignIn);
+}
+
+fn prepareDeviceSignIn(alloc: Allocator, transport: oauth_transport.Provider, cancel_flag: *std.atomic.Value(bool)) !login_flow.PreparedSignIn {
+    const configured_issuer = try configuredEndpoint(alloc, e2e_issuer_url_env, issuer_url);
+    defer alloc.free(configured_issuer);
+    const endpoint = try configuredEndpoint(alloc, e2e_token_url_env, token_url);
+    defer alloc.free(endpoint);
+    const prepared = try device_oauth.prepare(alloc, transport, .{ .protocol = .codex, .issuer = configured_issuer, .token_endpoint = endpoint, .client_id = client_id }, cancel_flag);
+    return .{ .flow = prepared.flow, .deps = .{
+        .ctx = prepared.context,
+        .deinit_ctx = device_oauth.deinitContext,
+        .oauth_transport = transport,
+        .poll = .{ .ctx = prepared.context, .poll_token = device_oauth.poll },
+        .complete = completeSignIn,
+        .save = saveSignIn,
+    } };
 }
 
 fn prepareBrowserSignIn(alloc: Allocator) !PreparedBrowserLogin {

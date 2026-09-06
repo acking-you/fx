@@ -89,33 +89,45 @@ provider should become active; setup never changes provider selection.
 
 ### Provider login
 
-Start browser login for Codex or Grok:
+Start login for Codex or Grok with an explicit method:
 
 ```json
-{"jsonrpc":"2.0","id":21,"method":"fx/provider/login/start","params":{"provider":"codex"}}
+{"jsonrpc":"2.0","id":21,"method":"fx/provider/login/start","params":{"provider":"codex","method":"device_code"}}
 ```
 
 The `provider` field is optional. When omitted, fx detects a valid stored
 subscription session without network I/O, preferring Codex and falling back to
 Grok. Explicit provider values remain strict and never cross-send credentials.
 
-The result contains `state`, `authorizationUrl`, and `acceptsManualCode`. Open
-the authorization URL in the user's browser, then query completion without
-blocking the ACP connection:
+Both providers support `device_code` and `browser`, advertised through
+`_meta.fx.providerControl.loginMethods`. Standalone fx defaults to `browser`;
+the embedded runtime defaults to `device_code`. Device-code login works without
+a local browser or callback listener. The start response may have
+`state: "preparing"` while a worker requests the code. Once prepared, the
+snapshot contains `verificationUri`, `userCode`, `authorizationUrl` (possibly
+including the code), and `expiresIn` seconds. Display the website and code so
+the user can authorize from another device. The private device credential is
+never returned.
+
+The result also contains `method` and `acceptsManualCode`. For `browser`, open
+`authorizationUrl` in the user's browser. Query completion without blocking
+the ACP connection:
 
 ```json
 {"jsonrpc":"2.0","id":22,"method":"fx/provider/login/status","params":{}}
 ```
 
-Possible states are `idle`, `polling`, `succeeded`, `failed`, and `cancelled`.
-Grok login can accept a manually copied authorization code when
+Possible states are `idle`, `preparing`, `polling`, `succeeded`, `failed`, and
+`cancelled`. Grok browser login can accept a manually copied callback code when
 `acceptsManualCode` is true:
 
 ```json
 {"jsonrpc":"2.0","id":23,"method":"fx/provider/login/submitCode","params":{"code":"COPIED_CODE"}}
 ```
 
-Cancel a pending login with `fx/provider/login/cancel`. A successful login is
+Cancel a pending login with `fx/provider/login/cancel`. Cancellation is
+acknowledged immediately; poll status until `cancelled` before starting a new
+login. Code requests and token polling stay off the ACP read loop. A successful login is
 saved in the same private profile file used by the native CLI. Use
 `fx/provider/switch` afterward to activate its catalog for the process or active
 session.

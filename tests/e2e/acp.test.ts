@@ -1316,6 +1316,7 @@ describe("acp: model-independent", () => {
           logout: true,
           refresh: true,
           login: true,
+          loginMethods: ["device_code", "browser"],
           setup: true,
           configureByok: true,
           usage: true,
@@ -1806,6 +1807,87 @@ describe("acp: model-independent", () => {
     },
     TIMEOUT,
   );
+
+  for (const provider of ["codex", "grok"] as const) {
+    test(`ACP completes ${provider} device-code login without a local callback`, async () => {
+      const root = createIsolatedRoot("fx-acp-device-login-");
+      let approved = false;
+      let polls = 0;
+      const server = Bun.serve({
+        hostname: "127.0.0.1",
+        port: 0,
+        async fetch(request) {
+          const url = new URL(request.url);
+          if (url.pathname.endsWith("/usercode") || url.pathname === "/oauth2/device/code") {
+            return Response.json(provider === "codex" ? {
+              device_auth_id: "private-device-credential", user_code: "TEST-ABCD", interval: "1",
+            } : {
+              device_code: "private-device-credential", user_code: "TEST-ABCD",
+              verification_uri: `${url.origin}/device`, expires_in: 900, interval: 1,
+            });
+          }
+          if (url.pathname === "/codex/device" || url.pathname === "/device") {
+            expect(url.searchParams.get("user_code")).toBe("TEST-ABCD");
+            approved = true;
+            return Response.json({ approved });
+          }
+          if (url.pathname === "/userinfo") return Response.json({ sub: "acct_acp_login" });
+          if (url.pathname === "/api/accounts/deviceauth/token") {
+            expect(await request.json()).toEqual({ device_auth_id: "private-device-credential", user_code: "TEST-ABCD" });
+            polls += 1;
+            if (!approved) return Response.json({ error: "authorization_pending" }, { status: 403 });
+            return Response.json({ authorization_code: "device-code", code_verifier: "device-verifier" });
+          }
+          if (url.pathname === "/token") {
+            const body = new URLSearchParams(await request.text());
+            if (provider === "grok") {
+              expect(body.get("grant_type")).toBe("urn:ietf:params:oauth:grant-type:device_code");
+              expect(body.get("device_code")).toBe("private-device-credential");
+              polls += 1;
+              if (!approved) return Response.json({ error: "authorization_pending" }, { status: 400 });
+            } else {
+              expect(body.get("redirect_uri")).toBe(`${url.origin}/deviceauth/callback`);
+              expect(body.get("code_verifier")).toBe("device-verifier");
+            }
+            return Response.json({ access_token: acpChatGptAccessToken("acct_acp_login"), refresh_token: "device-refresh", expires_in: 3600 });
+          }
+          return new Response("not found", { status: 404 });
+        },
+      });
+      const issuer = `http://127.0.0.1:${server.port}`;
+      try {
+        client = await AcpClient.create({ cwd: root.workspace, env: {
+          HOME: root.home, OPENAI_API_KEY: undefined, FX_API_KEY: undefined,
+          FX_E2E_CHATGPT_ISSUER_URL: issuer, FX_E2E_CHATGPT_TOKEN_URL: `${issuer}/token`,
+          FX_E2E_GROK_ISSUER_URL: issuer, FX_E2E_GROK_TOKEN_URL: `${issuer}/token`,
+          FX_E2E_GROK_USERINFO_URL: `${issuer}/userinfo`,
+        } });
+        await client.request("initialize", { protocolVersion: 1 }, 1);
+        let reply = await client.request("fx/provider/login/start", { provider, method: "device_code" }, 2) as any;
+        const deadline = Date.now() + TIMEOUT;
+        while (reply.result.state === "preparing" && Date.now() < deadline) {
+          await Bun.sleep(10);
+          reply = await client.request("fx/provider/login/status", {}, 3) as any;
+        }
+        expect(reply.result).toMatchObject({ state: "polling", method: "device_code", userCode: "TEST-ABCD", acceptsManualCode: false, expiresIn: 900 });
+        // Observe a pending poll before granting approval from another HTTP client.
+        await waitForCondition("pending device authorization", () => polls > 0, TIMEOUT);
+        expect((await fetch(`${reply.result.verificationUri}?user_code=TEST-ABCD`)).ok).toBe(true);
+        do {
+          await Bun.sleep(25);
+          reply = await client.request("fx/provider/login/status", {}, 4) as any;
+        } while (reply.result.state === "polling" && Date.now() < deadline);
+        expect(reply.result.state).toBe("succeeded");
+        expect(existsSync(join(root.home, ".fx", provider === "codex" ? "chatgpt-auth.json" : "grok-auth.json"))).toBe(true);
+        expect(client.rawLines.join("\n")).not.toContain("private-device-credential");
+        expect(client.stderr).toBe("");
+      } finally {
+        await client?.close();
+        server.stop(true);
+        rmSync(root.root, { recursive: true, force: true });
+      }
+    }, TIMEOUT);
+  }
 
   test(
     "session/new omits the removed summary command",

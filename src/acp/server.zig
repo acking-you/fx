@@ -403,6 +403,7 @@ pub const ServerState = struct {
     provider_job_cancel: std.atomic.Value(bool) = .init(false),
     provider_login: login_flow.SignInRuntime = .{},
     provider_login_provider: ?provider_oauth.Provider = null,
+    provider_login_method: login_flow.Method = .browser,
     provider_login_terminal: ?login_flow.SignInState = null,
     provider_login_error: ?[]const u8 = null,
     provider_setup: provider_setup.Runtime = provider_setup.Runtime.init(std.heap.c_allocator),
@@ -1933,6 +1934,10 @@ fn handleProviderLoginStart(state: *ServerState, alloc: Allocator, msg: *jsonrpc
     };
     defer params.parsed.deinit();
     const auto_provider = params.provider == null;
+    const method = if (params.parsed.value.object.get("method")) |value| method: {
+        if (value == .string) if (std.meta.stringToEnum(login_flow.Method, value.string)) |parsed| break :method parsed;
+        return state.writer.writeError(alloc, msg.id, .{ .code = ErrorCode.invalid_params, .message = "method must be device_code or browser" });
+    } else state.cfg.default_login_method;
     var provider = if (params.provider) |value|
         provider_oauth.Provider.parse(value) orelse return state.writer.writeError(alloc, msg.id, .{
             .code = ErrorCode.invalid_params,
@@ -1941,13 +1946,14 @@ fn handleProviderLoginStart(state: *ServerState, alloc: Allocator, msg: *jsonrpc
     else
         (provider_oauth.detectStored(alloc) catch null) orelse .codex;
     const started = started_login: {
-        break :started_login provider_oauth.startSignIn(
+        break :started_login provider_oauth.startSignInWithMethod(
             provider,
+            method,
             &state.provider_login,
             alloc,
             state.cfg.gateway_provider.oauth_transport,
         ) catch |err| {
-            if (!auto_provider or provider != .codex) return err;
+            if (!auto_provider or provider != .codex or method != .browser) return err;
             // Browser callback setup can fail locally (for example when the
             // preferred callback port is occupied). In auto mode only, retry
             // the other OAuth implementation before surfacing the error.
@@ -1965,9 +1971,10 @@ fn handleProviderLoginStart(state: *ServerState, alloc: Allocator, msg: *jsonrpc
         .message = "Provider login already in progress",
     });
     state.provider_login_provider = provider;
+    state.provider_login_method = method;
     state.provider_login_terminal = null;
     state.provider_login_error = null;
-    try writeProviderLoginSnapshot(state, alloc, msg.id, state.provider_login.snapshot(), null);
+    try handleProviderLoginStatus(state, alloc, msg);
 }
 
 fn handleProviderLoginStatus(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message) !void {
@@ -2027,7 +2034,7 @@ fn handleProviderLoginSubmitCode(state: *ServerState, alloc: Allocator, msg: *js
 }
 
 fn handleProviderLoginCancel(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message) !void {
-    const cancelled = state.provider_login.cancel(alloc);
+    const cancelled = state.provider_login.requestCancel();
     try state.writer.writeResponse(
         alloc,
         msg.id,
@@ -2104,11 +2111,22 @@ fn writeProviderLoginSnapshot(
     var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();
     try out.writer.writeAll("{\"state\":");
-    try writeJsonStr(@tagName(snapshot.state), &out.writer);
+    try writeJsonStr(if (snapshot.preparing) "preparing" else @tagName(snapshot.state), &out.writer);
+    try out.writer.writeAll(",\"method\":");
+    try writeJsonStr(@tagName(state.provider_login_method), &out.writer);
     if (snapshot.authorization_url.len > 0) {
         try out.writer.writeAll(",\"authorizationUrl\":");
         try writeJsonStr(snapshot.authorization_url, &out.writer);
     }
+    if (snapshot.verification_uri) |uri| {
+        try out.writer.writeAll(",\"verificationUri\":");
+        try writeJsonStr(uri, &out.writer);
+    }
+    if (snapshot.user_code) |code| {
+        try out.writer.writeAll(",\"userCode\":");
+        try writeJsonStr(code, &out.writer);
+    }
+    if (snapshot.expires_in_seconds) |seconds| try out.writer.print(",\"expiresIn\":{d}", .{seconds});
     if (state.provider_login_provider) |provider| {
         try out.writer.writeAll(",\"provider\":");
         try writeJsonStr(provider.label(), &out.writer);
