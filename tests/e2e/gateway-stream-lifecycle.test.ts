@@ -3294,6 +3294,80 @@ describe("gateway stream lifecycle", () => {
     }
   }, 30_000);
 
+  test("ask subagent message inspections survive checkpoint polling and completion", async () => {
+    const root = createFixtureRoot("subagent-inspection-memory");
+    const tracePath = join(root.root, "trace.log");
+    const childPrompt = "Read the checkpoint evidence, then wait for completion.";
+    writeFileSync(join(root.workspace, "checkpoint-evidence.txt"), "checkpoint evidence\n".repeat(4096));
+    let childId = "";
+    let signalChildReady!: () => void;
+    const childReady = new Promise<void>((resolve) => { signalChildReady = resolve; });
+    let releaseChild!: (response: Response) => void;
+    const childCompletion = new Promise<Response>((resolve) => { releaseChild = resolve; });
+    const inspect = (callId: string, timeoutMs: number) => fakeGatewayToolCall(callId, "subagent", {
+      command: {
+        inspect: {
+          id: childId,
+          sections: ["status", "messages"],
+          limit: 5,
+          wait: { until: "settled", timeout_ms: timeoutMs },
+        },
+      },
+    });
+    const gateway = startDynamicFakeGateway(async (body) => {
+      if (hasCurrentToolResult(body, "memory_inspect_completed")) {
+        const outcome = subagentOutcome(body, "memory_inspect_completed");
+        expect(outcome).toMatchObject({ ok: true, child_id: childId, status: "idle" });
+        expect(outcome.requested).toMatchObject({ history_len: 1 });
+        expect(JSON.stringify(outcome.requested)).toContain("Child checkpoint work completed.");
+        expect(subagentOutcome(body, "memory_inspect_wait").status).toBe("wait_timed_out");
+        return fakeGatewayFinalText("Inspections preserved the completed child history.");
+      }
+      if (hasCurrentToolResult(body, "memory_inspect_wait")) {
+        const outcome = subagentOutcome(body, "memory_inspect_wait");
+        expect(outcome).toMatchObject({ ok: true, child_id: childId, status: "wait_timed_out" });
+        expect(outcome.requested).toMatchObject({ status: "running", history_len: 0 });
+        releaseChild(fakeGatewayFinalText("Child checkpoint work completed."));
+        return inspect("memory_inspect_completed", 5_000);
+      }
+      if (hasCurrentToolResult(body, "memory_child_read")) {
+        signalChildReady();
+        return childCompletion;
+      }
+      if (hasCurrentToolResult(body, "memory_child_create")) {
+        childId = subagentOutcome(body, "memory_child_create").child_id ?? "";
+        expect(childId.length).toBeGreaterThan(0);
+        await childReady;
+        const events = readFileSync(join(root.home, ".fx", "sessions", childId, "events.jsonl"), "utf8");
+        expect(events).toContain("recovery_checkpoint_set");
+        return inspect("memory_inspect_wait", 500);
+      }
+      if (body.includes(childPrompt)) {
+        return fakeGatewayToolCall("memory_child_read", "read_file", { path: "checkpoint-evidence.txt" });
+      }
+      return fakeGatewayToolCall("memory_child_create", "subagent", {
+        command: { create: { name: "checkpoint-reader", mode: "persistent", prompt: childPrompt } },
+      });
+    }, {
+      classifierDecision: "clear",
+      models: [{ id: MODEL, object: "model" }],
+    });
+    try {
+      const result = await runFx(["ask", "--json", "--auto", "Inspect a child while it works, then collect its history."], {
+        cwd: root.workspace,
+        env: fixtureEnv(root, gateway, tracePath),
+        timeoutMs: 20_000,
+      });
+      expect(result.code).toBe(0);
+      expect(result.stderr).not.toMatch(/error:|panic|segmentation fault/i);
+      expect(parseAskJson(result.stdout).output).toContain("Inspections preserved the completed child history.");
+    } finally {
+      releaseChild(fakeGatewayFinalText("Child checkpoint work completed."));
+      gateway.stop();
+      rmSync(root.root, { recursive: true, force: true });
+    }
+  }, 25_000);
+
   test("ask fake Gateway exercises the complete bounded subagent branch matrix", async () => {
     const root = createFixtureRoot("subagent-branch-matrix");
     const tracePath = join(root.root, "trace.log");

@@ -82,6 +82,31 @@ There was no heap snapshot from the WSL crash. These allocation defects and
 their growth are reproduced; their exact shares of the incident's approximately
 35.3 GiB anonymous RSS and 8.1 GiB swapped memory cannot be reconstructed.
 
+## Subagent inspection lifetime
+
+Model-facing `subagent inspect` also receives the parent turn allocator. An
+inspection selecting `messages` loads the child's durable session, including
+recovery checkpoints and event replay, before projecting a bounded history
+page. A `wait` repeats this work after each notification or 100 ms poll interval.
+Using the turn arena for those temporary allocations retained every replay,
+even when the child had no completed history and each inspection returned only
+a few kilobytes. The earlier provider and checkpoint-write fixes did not cover
+this read path.
+
+Each inspection now uses the host runtime's freeing allocator for manager
+results and session replay. Cleanup runs after every poll, including timeout,
+completion and error exits. The encoded final tool result still belongs to the
+caller's allocator, so subsequent model steps can safely retain it. Polling,
+authorization checks, history limits and returned data are unchanged.
+
+The regression keeps a child active with four 256 KiB recovery checkpoints,
+performs repeated `messages` inspections using one parent turn arena, waits for
+a timeout, and then reads the completed child history. The parent arena must
+stay below 256 KiB and earlier results must remain valid. A native fake-Gateway
+scenario also exercises checkpoint polling, timeout and completion through the
+built binary. It remains in the existing training-classified gateway lifecycle
+E2E owner.
+
 ## Progress guard
 
 The guard keeps 256 bounded evidence fingerprints. It compares returned
