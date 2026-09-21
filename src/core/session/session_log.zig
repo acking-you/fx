@@ -1256,6 +1256,20 @@ pub const Root = struct {
         session_id: []const u8,
         options: Options,
     ) !ReadBoundary {
+        var captured = try self.captureReadState(alloc, session_id, options);
+        captured.state.deinit(alloc);
+        return captured.boundary;
+    }
+
+    // Validate and retain the state from the same opened log and watermark
+    // under the commit lock. Read-only loads can use this replay directly;
+    // boundary-only callers still receive a fully validated boundary.
+    fn captureReadState(
+        self: *Root,
+        alloc: Allocator,
+        session_id: []const u8,
+        options: Options,
+    ) !struct { boundary: ReadBoundary, state: session_codec.DurableSessionState } {
         if (self.sessions == null) return error.SessionNotFound;
         try session_layout.validateSessionId(session_id);
         var session_dir = openSessionDir(
@@ -1289,22 +1303,26 @@ pub const Root = struct {
         var log_file = try openManagedFile(&session_dir, events_file, .read_only);
         errdefer log_file.close(io_mod.getIo());
         const generation = try session_replay.readFirstGeneration(alloc, log_file);
-        const position = try loadAndValidateWatermark(
+        const position = try loadWatermarkPosition(
             alloc,
             &session_dir,
             session_id,
             generation,
-            log_file,
         );
+        var state = try session_replay.replayBoundary(alloc, log_file, position);
+        errdefer state.deinit(alloc);
         const usage_sidecar = try session_usage_sidecar.capture(
             alloc,
             &session_dir,
         );
         return .{
-            .log_file = log_file,
-            .position = position,
-            .usage_sidecar = usage_sidecar,
-            .alloc = alloc,
+            .boundary = .{
+                .log_file = log_file,
+                .position = position,
+                .usage_sidecar = usage_sidecar,
+                .alloc = alloc,
+            },
+            .state = state,
         };
     }
 
@@ -1314,18 +1332,14 @@ pub const Root = struct {
         session_id: []const u8,
         options: Options,
     ) !session_codec.DurableSessionState {
-        var boundary = try self.captureReadBoundary(alloc, session_id, options);
-        defer boundary.deinit();
-        var state = try session_replay.replayBoundary(
-            alloc,
-            boundary.log_file,
-            boundary.position,
-        );
+        var captured = try self.captureReadState(alloc, session_id, options);
+        defer captured.boundary.deinit();
+        var state = captured.state;
         errdefer state.deinit(alloc);
         if (state.usage) |*usage| {
             _ = try session_usage_sidecar.restoreCaptured(
                 alloc,
-                boundary.usage_sidecar,
+                captured.boundary.usage_sidecar,
                 state.id,
                 state.updated_at_ms,
                 usage,
@@ -5834,6 +5848,52 @@ test "authority creation resolves an exact proposed marker and canonical pair" {
     )));
 }
 
+test "read-only checkpoint load stays within one validated replay allocation budget" {
+    const alloc = std.testing.allocator;
+    var temp = try TempRoot.init(alloc);
+    defer temp.deinit(alloc);
+    var initial = try testState(alloc, "session-read-allocation-budget", 10);
+    defer initial.deinit(alloc);
+    var loaded = try temp.root.startWritableSession(alloc, initial, .{});
+    defer loaded.deinit(alloc);
+    const source = try alloc.alloc(u8, 256 * 1024);
+    defer alloc.free(source);
+    @memset(source, 'x');
+    for (0..4) |index| {
+        _ = try loaded.appendEvent(alloc, .{ .recovery_checkpoint_set = .{ .checkpoint = .{
+            .turn_id = 1,
+            .user = .{ .text = @constCast("unfinished turn") },
+            .assistant_source = source,
+            .cause = .network_interrupted,
+            .action = .retrying_request,
+            .authority = .{ .provider = .gateway, .model = @constCast("test/model") },
+            .requested_fast_mode = false,
+            .fast_mode = false,
+            .max_provider_attempts = 10,
+            .consumed_provider_attempts = index + 1,
+        } } }, @intCast(20 + index), .retry_expected_tail, .{});
+    }
+
+    // Compare allocation traffic against the public boundary validation for
+    // exactly the same log. Loading must reuse that work, with room for small
+    // metadata changes, rather than materializing the whole state twice.
+    var validation_alloc = std.testing.FailingAllocator.init(alloc, .{});
+    var boundary = try temp.root.captureReadBoundary(validation_alloc.allocator(), initial.id, .{});
+    boundary.deinit();
+    try std.testing.expectEqual(validation_alloc.allocated_bytes, validation_alloc.freed_bytes);
+
+    var read_alloc = std.testing.FailingAllocator.init(alloc, .{});
+    {
+        var state = try temp.root.loadReadOnly(read_alloc.allocator(), initial.id, .{});
+        defer state.deinit(read_alloc.allocator());
+        try std.testing.expectEqual(@as(usize, 0), state.history.len);
+        try std.testing.expectEqualStrings(source, state.recovery_checkpoint.?.assistant_source);
+        try std.testing.expectEqual(@as(usize, 4), state.recovery_checkpoint.?.consumed_provider_attempts);
+        try std.testing.expect(read_alloc.allocated_bytes < validation_alloc.allocated_bytes + 256 * 1024);
+    }
+    try std.testing.expectEqual(read_alloc.allocated_bytes, read_alloc.freed_bytes);
+}
+
 test "commit boundary hides synced bytes until watermark publication" {
     const alloc = std.testing.allocator;
     var temp = try TempRoot.init(alloc);
@@ -6123,6 +6183,14 @@ test "writable resume preserves the event log when the watermark is invalid" {
     loaded.deinit(alloc);
     loaded_owned = false;
 
+    try std.testing.expectError(
+        error.InvalidSessionFormat,
+        temp.root.loadReadOnly(alloc, initial.id, .{}),
+    );
+    try std.testing.expectError(
+        error.InvalidSessionFormat,
+        temp.root.captureReadBoundary(alloc, initial.id, .{}),
+    );
     try std.testing.expectError(
         error.InvalidSessionFormat,
         temp.root.resumeForWrite(alloc, initial.id, .{}),

@@ -43,6 +43,25 @@ jobs:
             zig build run-bench-ui-activity -Doptimize=ReleaseSafe
           done
 
+      - name: Measure subagent inspection peak memory
+        run: >-
+          python3 benchmarks/subagent_inspect_memory.py
+          --output "${{ runner.temp }}/subagent-inspect-memory"
+          --max-peak-mib 64
+
+      - name: Upload subagent inspection memory evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: subagent-inspect-memory
+          path: |
+            ${{ runner.temp }}/subagent-inspect-memory/summary.json
+            ${{ runner.temp }}/subagent-inspect-memory/**/measurements.json
+            ${{ runner.temp }}/subagent-inspect-memory/**/stderr.log
+            ${{ runner.temp }}/subagent-inspect-memory/**/stdout.json
+            ${{ runner.temp }}/subagent-inspect-memory/**/resource-usage.txt
+          if-no-files-found: warn
+
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
 

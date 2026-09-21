@@ -107,6 +107,80 @@ scenario also exercises checkpoint polling, timeout and completion through the
 built binary. It remains in the existing training-classified gateway lifecycle
 E2E owner.
 
+### Inspection loading and peak-memory benchmark
+
+Read-only session loading now retains the state produced while validating the
+commit boundary. Previously, boundary capture replayed the entire committed log
+and freed the state, then the read loaded that same boundary again. The single
+replay still checks the generation, sequence, event identity, committed byte
+boundary and frame contents under the commit lock. Authority/publication fences
+and the usage-sidecar snapshot keep their existing semantics. Boundary-only
+callers still receive a validated boundary. This does not introduce a live-state
+cache or skip recovery-checkpoint events.
+
+`benchmarks/subagent_inspect_memory.py` exercises the actual native binary with
+a local Responses server. A persistent child executes four reads; each response
+also contributes 64 KiB of assistant text. It then blocks on its next response,
+with nine recovery-checkpoint events, about 1.28 MiB of event-log data, and no
+committed history. The parent performs twelve `status,messages` inspections with
+`limit: 5` in one turn. Finally, the fixture releases the child, waits for it to
+settle, and verifies the returned committed history. Both parent and child run
+inside the measured fx process; the Python HTTP server is excluded.
+
+```bash
+zig build -Doptimize=ReleaseSafe
+python3 benchmarks/subagent_inspect_memory.py --output /tmp/fx-inspect-memory
+
+# Build each revision separately, then compare the native binaries:
+python3 benchmarks/subagent_inspect_memory.py \
+  --binary before=/tmp/fx-before/zig-out/bin/fx \
+  --binary allocator=/tmp/fx-allocator/zig-out/bin/fx \
+  --binary optimized=./zig-out/bin/fx \
+  --runs 5 --output /tmp/fx-inspect-comparison
+```
+
+The Linux benchmark uses GNU time to record the kernel's process peak RSS, plus
+sampled RSS, per-inspection observations, binary SHA-256, workload parameters,
+stdout/stderr and isolated session files. Peak RSS includes startup, both agent
+runtimes, inspections and child completion. It is neither cumulative allocation
+traffic nor parent-arena capacity. Runs use fresh processes and profiles and
+rotate binary order. GNU time measures its own `prlimit`/fx child so Python's
+pre-exec memory is excluded. GNU time and util-linux `prlimit` are required.
+The default address-space limit is 2 GiB and the deadline is 120 seconds per
+process.
+
+Five ReleaseSafe runs per version on Linux x86_64 / WSL2 (Zig 0.16.0,
+2026-09-22) produced the following process high-water marks:
+
+| Implementation | Full replays per history load | Median peak RSS | Peak RSS range |
+| --- | ---: | ---: | ---: |
+| Before either fix (`e0ae4808`) | 2 | 183.95 MiB | 183.59–196.36 MiB |
+| Freeing inspection allocator (`af733b54`) | 2 | 21.88 MiB | 21.62–22.41 MiB |
+| Freeing allocator and one validated replay | 1 | 22.11 MiB | 21.97–22.20 MiB |
+
+The five raw peaks for each row, in KiB, were:
+
+```text
+before:    188364, 188416, 188064, 201072, 188000
+allocator:  22948,  22688,  22136,  22408,  22352
+optimized:  22600,  22500,  22640,  22640,  22728
+```
+
+The fixed RSS ranges overlap. Removing the second, sequential replay does not
+halve simultaneous memory: the first replay was already freed before the next
+one. The allocation regression measures its separate benefit: cumulative
+requested bytes for one checkpoint load fall from 11,886,167 to 5,959,409,
+about 50%. These allocation figures are not peak RSS. No further RSS reduction
+or wall-clock speedup is inferred from the native runs, and the Linux figures
+are not a macOS measurement.
+
+The Benchmarks workflow runs three repetitions with a 64 MiB peak-RSS budget
+and uploads the evidence. A focused allocation regression separately compares
+loading four 256 KiB checkpoints against validating the same boundary: loading
+must stay within one replay's allocation traffic, with a 256 KiB allowance for
+metadata. Existing history-page allocation-failure and corruption tests cover
+ownership cleanup and invalid commit boundaries.
+
 ## Progress guard
 
 The guard keeps 256 bounded evidence fingerprints. It compares returned
