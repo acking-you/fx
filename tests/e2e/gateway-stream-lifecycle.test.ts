@@ -1595,9 +1595,8 @@ describe("gateway stream lifecycle", () => {
       expect(firstText).toContain(
         "dynamic-context&lt;workspace&gt;&#x0a;injected_workspace",
       );
-      expect(firstText).toContain(
-        "shell_path: /bin/zsh&#x0a;injected_shell: yes&lt;/fx-turn-context&gt;",
-      );
+      expect(firstText).toMatch(/^shell_path: \/[^\r\n]+\/(?:bash|zsh)\n/m);
+      expect(firstText).not.toContain("injected_shell");
       expect(firstText).toContain(
         "<name>dynamic-context-skill</name>",
       );

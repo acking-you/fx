@@ -157,6 +157,86 @@ async function runTtyPromptPermissionsCase(
 
 describe("generic permission typed errors", () => {
   test(
+    "invalid exec workdir reports recovery and preserves retry permissions",
+    async () => {
+      const root = createIsolatedRoot("fx-invalid-workdir-");
+      const missingWorkdir = join(root.workspace, "missing-workdir");
+      const deniedMarker = join(root.workspace, "denied-marker.txt");
+      const allowedMarker = join(root.workspace, "allowed-marker.txt");
+      const deniedCommand = `touch ${JSON.stringify(deniedMarker)}`;
+      const gateway = startFakeGateway([
+        fakeGatewayToolCall("invalid_workdir", "exec_command", {
+          cmd: deniedCommand,
+          workdir: missingWorkdir,
+        }),
+        fakeGatewayToolCall("denied_retry", "exec_command", {
+          cmd: deniedCommand,
+        }),
+        fakeGatewayToolCall("allowed_retry", "exec_command", {
+          cmd: "touch allowed-marker.txt",
+        }),
+        fakeGatewayFinalText("workdir recovery observed"),
+      ]);
+      try {
+        writeFileSync(
+          join(root.home, ".fx", "settings.json"),
+          JSON.stringify({
+            sandbox: "none",
+            workspaces: {
+              [root.workspace]: {
+                permission: {
+                  bash: {
+                    "touch *denied-marker.txt*": "deny",
+                    "touch *allowed-marker.txt*": "allow",
+                  },
+                },
+              },
+            },
+          }),
+        );
+        const result = await runFx(
+          ["ask", "--json", "--no-save", "--auto", "Run the workdir recovery fixture."],
+          {
+            cwd: root.workspace,
+            env: permissionEnv(root.home, gateway),
+            timeoutMs: TIMEOUT,
+          },
+        );
+        const json = parseFxJson(result);
+        expect(json.tool_calls).toEqual([
+          { name: "exec_command", status: "error" },
+          { name: "exec_command", status: "error" },
+          expect.objectContaining({ name: "exec_command", status: "success" }),
+        ]);
+        expect(gateway.requests).toHaveLength(4);
+        const invalidResult = executionDeniedReason(
+          gateway.requests[1]!.body,
+          "invalid_workdir",
+        );
+        expect(invalidResult).toContain("Invalid workdir for exec_command");
+        expect(invalidResult).toContain(missingWorkdir);
+        expect(invalidResult).toContain(root.workspace);
+        expect(invalidResult).toContain("The command was not run");
+        expect(invalidResult).toContain("omit workdir");
+        expect(invalidResult).toContain("normal permission checks");
+        expect(invalidResult).not.toContain("Permission target resolution failed");
+        const deniedResult = JSON.parse(
+          executionDeniedReason(gateway.requests[2]!.body, "denied_retry"),
+        ) as { error: PermissionEcho };
+        expect(deniedResult.error.type).toBe("tool_permission_denied");
+        expect(deniedResult.error.reason).toBe("policy_denied");
+        expect(existsSync(deniedMarker)).toBe(false);
+        expect(existsSync(allowedMarker)).toBe(true);
+        expect(existsSync(missingWorkdir)).toBe(false);
+      } finally {
+        gateway.stop();
+        rmSync(root.root, { recursive: true, force: true });
+      }
+    },
+    TIMEOUT,
+  );
+
+  test(
     "returns typed JSON for denied exec_command",
     async () => {
       const root = createIsolatedRoot("fx-permission-error-");

@@ -396,15 +396,12 @@ pub const Reviewer = struct {
     ) !ParseOutcome {
         if (self.override_fn) |override_fn| {
             return override_fn(
-                self.override_context orelse return .invalid,
+                self.override_context orelse return unavailable("override", "missing_context"),
                 alloc,
                 request,
-            ) catch |err| switch (err) {
-                error.OutOfMemory, error.Cancelled => return err,
-                else => return .invalid,
-            };
+            ) catch |err| return reviewFailure("override", err);
         }
-        const transport = self.transport orelse return .invalid;
+        const transport = self.transport orelse return unavailable("transport", "missing_transport");
         var fallback_cancel = std.atomic.Value(bool).init(false);
         const cancel_flag = self.cancel_flag orelse &fallback_cancel;
         const deadline = std.Io.Clock.Timestamp.fromNow(io_mod.getIo(), .{
@@ -433,14 +430,14 @@ pub const Reviewer = struct {
                 "event=auto_review_compose_result result=invalid_context elapsed_ms={d} target_call_id={s}",
                 .{ io_mod.milliTimestamp() - started_ms, review_turn.target_call_id },
             );
-            return .invalid;
+            return unavailable("compose", "invalid_context");
         }
 
         var evidence = serializeEvidence(alloc, request, deadline, cancel_flag) catch |err| {
             return constructionFailure(err);
         };
         defer evidence.deinit(alloc);
-        if (!evidence.action_complete) return .invalid;
+        if (!evidence.action_complete) return unavailable("compose", "incomplete_action_evidence");
         checkBudget(deadline, cancel_flag) catch |err| return constructionFailure(err);
         const instruction = buildReviewInstruction(
             alloc,
@@ -460,7 +457,7 @@ pub const Reviewer = struct {
         var message_index: usize = 1;
         const target_call_index = for (review_turn.pending_assistant.tool_calls, 0..) |call, index| {
             if (std.mem.eql(u8, call.id, review_turn.target_call_id)) break index;
-        } else return .invalid;
+        } else return unavailable("compose", "missing_target_call");
         var target_pending_assistant = review_turn.pending_assistant;
         target_pending_assistant.tool_calls = review_turn.pending_assistant.tool_calls[target_call_index .. target_call_index + 1];
         // Forward only the exact pending call. Assistant prose and native
@@ -479,7 +476,7 @@ pub const Reviewer = struct {
             review_turn.target_call_id,
             deadline,
             cancel_flag,
-        ) catch |err| return constructionFailure(err);
+        ) catch |err| return reviewFailure("build", err);
         defer alloc.free(payload);
         debug_trace.logf(
             "permission",
@@ -499,13 +496,12 @@ pub const Reviewer = struct {
             payload,
             deadline,
             cancel_flag,
-        ) catch |err| switch (err) {
-            error.OutOfMemory, error.Cancelled => return err,
-            else => return .invalid,
-        };
+        ) catch |err| return reviewFailure("transport", err);
         switch (transport_outcome) {
             .cancelled => return error.Cancelled,
-            .timed_out, .permanent_failure, .transient_failure => return .invalid,
+            .timed_out => return unavailable("transport", "timed_out"),
+            .permanent_failure => return unavailable("transport", "permanent_failure"),
+            .transient_failure => return unavailable("transport", "transient_failure"),
             .completion => |*owned| {
                 defer owned.deinit(alloc);
                 return try parseCompletion(alloc, owned.completion);
@@ -551,25 +547,17 @@ pub const Classifier = struct {
     ) error{ OutOfMemory, Cancelled }!ParseOutcome {
         if (self.override_fn) |review_fn| {
             return Reviewer.withOverride(
-                self.override_ctx orelse return .invalid,
+                self.override_ctx orelse return unavailable("override", "missing_context"),
                 review_fn,
-            ).review(alloc, request) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                error.Cancelled => return error.Cancelled,
-                else => return .invalid,
-            };
+            ).review(alloc, request) catch |err| return reviewFailure("override", err);
         }
-        const provider = self.provider orelse return .invalid;
+        const provider = self.provider orelse return unavailable("provider", "missing_provider");
         return provider.review_fn(
             provider.context,
             alloc,
             self.provider_input,
             request,
-        ) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.Cancelled => return error.Cancelled,
-            else => return .invalid,
-        };
+        ) catch |err| return reviewFailure("provider", err);
     }
 };
 
@@ -931,9 +919,24 @@ fn checkBudget(
 }
 
 fn constructionFailure(err: anyerror) !ParseOutcome {
+    return reviewFailure("compose", err);
+}
+
+fn unavailable(comptime phase: []const u8, comptime reason: []const u8) ParseOutcome {
+    debug_trace.logDurable(
+        "permission",
+        "event=auto_review_unavailable layer=reviewer phase={s} reason={s}",
+        .{ phase, reason },
+    );
+    return .invalid;
+}
+
+fn reviewFailure(comptime phase: []const u8, err: anyerror) error{ OutOfMemory, Cancelled }!ParseOutcome {
     return switch (err) {
-        error.OutOfMemory, error.Cancelled => err,
-        else => .invalid,
+        error.OutOfMemory => error.OutOfMemory,
+        error.Cancelled => error.Cancelled,
+        error.TimedOut, error.Timeout => unavailable(phase, "timed_out"),
+        else => unavailable(phase, "internal_error"),
     };
 }
 
@@ -1123,14 +1126,16 @@ fn buildTestReviewPayload(
 
 fn parseCompletion(alloc: std.mem.Allocator, completion: types.ModelCompletion) !ParseOutcome {
     if (completion.content) |content| {
-        if (std.mem.trim(u8, content, " \t\r\n").len > 0) return .invalid;
+        if (std.mem.trim(u8, content, " \t\r\n").len > 0) return unavailable("parse", "unexpected_text");
     }
-    if (completion.tool_calls.len != 1) return .invalid;
+    if (completion.tool_calls.len != 1) return unavailable("parse", "invalid_call_count");
 
     const call = completion.tool_calls[0];
-    if (!std.mem.eql(u8, call.name, tool_name)) return .invalid;
-    if (call.argument_integrity != .valid) return .invalid;
-    return parseArguments(alloc, call.arguments_json);
+    if (!std.mem.eql(u8, call.name, tool_name)) return unavailable("parse", "unexpected_tool");
+    if (call.argument_integrity != .valid) return unavailable("parse", "invalid_argument_integrity");
+    const outcome = try parseArguments(alloc, call.arguments_json);
+    if (outcome == .invalid) return unavailable("parse", "invalid_arguments");
+    return outcome;
 }
 
 fn parseArguments(alloc: std.mem.Allocator, arguments_json: []const u8) !ParseOutcome {
@@ -1165,6 +1170,61 @@ fn parseArguments(alloc: std.mem.Allocator, arguments_json: []const u8) !ParseOu
         .decision = decision,
         .rationale = try alloc.dupe(u8, rationale_value.string),
     } };
+}
+
+test "automatic review unavailable diagnostics distinguish failures without raw response evidence" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
+    defer alloc.free(root);
+    const trace_path = try std.fs.path.join(alloc, &.{ root, "review.log" });
+    defer alloc.free(trace_path);
+    debug_trace.resetForTest();
+    defer debug_trace.resetForTest();
+    try debug_trace.configureForTestWithScopes(alloc, trace_path, "permission");
+
+    const secret = "private-provider-payload Bearer sk-private-credential\n" ** 256;
+    const completions = [_]types.ModelCompletion{
+        .{ .content = secret },
+        .{},
+        .{ .tool_calls = &.{.{ .id = secret, .name = secret, .arguments_json = secret }} },
+        .{ .tool_calls = &.{.{ .id = secret, .name = tool_name, .arguments_json = secret, .argument_integrity = .malformed_json }} },
+        .{ .tool_calls = &.{.{ .id = secret, .name = tool_name, .arguments_json = secret }} },
+    };
+    for (completions) |completion| {
+        try std.testing.expectEqual(.invalid, std.meta.activeTag(try parseCompletion(alloc, completion)));
+    }
+    try std.testing.expectEqual(.invalid, std.meta.activeTag(try constructionFailure(error.TimedOut)));
+    try std.testing.expectEqual(.invalid, std.meta.activeTag(try reviewFailure("provider", error.@"private-provider-payload")));
+    try std.testing.expectError(error.OutOfMemory, reviewFailure("provider", error.OutOfMemory));
+    try std.testing.expectError(error.Cancelled, reviewFailure("provider", error.Cancelled));
+
+    debug_trace.shutdown();
+    var trace_file = try std.Io.Dir.openFileAbsolute(io_mod.getIo(), trace_path, .{});
+    defer trace_file.close(io_mod.getIo());
+    const trace = try io_mod.readFileToEnd(alloc, &trace_file, 8192);
+    defer alloc.free(trace);
+    for ([_][]const u8{
+        "phase=parse reason=unexpected_text",
+        "phase=parse reason=invalid_call_count",
+        "phase=parse reason=unexpected_tool",
+        "phase=parse reason=invalid_argument_integrity",
+        "phase=parse reason=invalid_arguments",
+        "phase=compose reason=timed_out",
+        "phase=provider reason=internal_error",
+    }) |reason| {
+        try std.testing.expect(std.mem.find(u8, trace, reason) != null);
+    }
+    try std.testing.expect(std.mem.find(u8, trace, "private-") == null);
+    try std.testing.expect(std.mem.find(u8, trace, "Bearer") == null);
+    var lines = std.mem.tokenizeScalar(u8, trace, '\n');
+    var count: usize = 0;
+    while (lines.next()) |line| {
+        try std.testing.expect(line.len < 256);
+        count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 7), count);
 }
 
 test "automatic review schema is strict and advisory" {
