@@ -114,10 +114,15 @@ def run_once(binary, root, args):
             require(child_ready.wait(args.timeout), "child never reached its blocked request")
             completed = sum(f"inspect_{index}" in results for index in range(args.inspections))
             if completed:
-                outcome = json.loads(results[f"inspect_{completed - 1}"])
-                require(outcome["ok"] and outcome["status"] == "running", "inspect failed")
-                require(outcome["requested"]["history_len"] == 0, "child completed too early")
-                require(outcome["requested"].get("history_error") is None, "history load failed")
+                raw_output = results[f"inspect_{completed - 1}"]
+                try:
+                    outcome = json.loads(raw_output)
+                    require(outcome["ok"] and outcome["status"] == "running", "inspect failed")
+                    require(outcome["requested"]["history_len"] == 0, "child completed too early")
+                    require(outcome["requested"].get("history_error") is None, "history load failed")
+                except Exception:
+                    fixture["failed_inspection"] = {"number": completed, "output": raw_output[:65536]}
+                    raise
                 observations.append({"inspection": completed, "output_bytes": len(results[f"inspect_{completed - 1}"].encode()),
                                      "seconds": time.monotonic() - inspect_started,
                                      **rss_status(fx_pid)})
@@ -217,7 +222,15 @@ def run_once(binary, root, args):
                     break
                 samples.append({"seconds": time.monotonic() - started, **rss_status(fx_pid)})
                 if time.monotonic() - started > args.timeout or errors:
-                    os.killpg(proc.pid, signal.SIGKILL)
+                    if not errors:
+                        errors.append("benchmark deadline exceeded")
+                    # Leave GNU time alive so even a failed/OOM workload has
+                    # a kernel peak measurement. This fixture starts no shell
+                    # descendants: both agents live in the measured process.
+                    try:
+                        os.kill(fx_pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
                     proc.wait()
                     break
                 time.sleep(0.01)
@@ -229,6 +242,7 @@ def run_once(binary, root, args):
             server.shutdown()
             server.server_close()
     stderr = (root / "stderr.log").read_text()
+    stdout = (root / "stdout.json").read_text()
     usage = usage_path.read_text().split() if usage_path.exists() else []
     if len(usage) != 4:
         errors.append("missing kernel peak RSS: measured process did not exit normally")
@@ -238,11 +252,19 @@ def run_once(binary, root, args):
               "user_seconds": float(usage[1]) if len(usage) == 4 else None,
               "system_seconds": float(usage[2]) if len(usage) == 4 else None, "fixture": fixture,
               "observations": observations, "errors": errors, "samples": samples}
+    report["completed_inspections"] = len(observations)
+    try:
+        report["product_error"] = json.loads(stdout).get("error")
+    except (json.JSONDecodeError, AttributeError):
+        report["product_error"] = None
+    report["oom_detected"] = bool(re.search(r"OutOfMemory|out.of.memory|memory allocation failed",
+                                            stderr + stdout + json.dumps(fixture.get("failed_inspection")),
+                                            re.IGNORECASE))
     report["passed"] = (proc.returncode == 0 and not errors
                         and not re.search(r"error:|panic|segmentation fault|OutOfMemory", stderr, re.IGNORECASE)
                         and len(observations) == args.inspections
                         and fixture.get("completed_history_verified", False)
-                        and PARENT_DONE in (root / "stdout.json").read_text())
+                        and PARENT_DONE in stdout)
     (root / "measurements.json").write_text(json.dumps(report, indent=2) + "\n")
     return report
 
@@ -296,6 +318,10 @@ def main():
                    "peak_rss_mib_median": (statistics.median(item["peak_rss_kib"] for item in runs) / 1024
                                            if all(item["peak_rss_kib"] is not None for item in runs) else None),
                    "peak_rss_kib_runs": [item["peak_rss_kib"] for item in runs],
+                   "completed_inspections_runs": [item["completed_inspections"] for item in runs],
+                   "exit_codes": [item["code"] for item in runs],
+                   "oom_detected_runs": [item["oom_detected"] for item in runs],
+                   "product_errors": [item["product_error"] for item in runs],
                    "inspection_seconds_runs": [item["fixture"].get("inspection_seconds") for item in runs],
                    "passed": all(item["passed"] for item in runs)} for label, runs in reports.items()}}
     (root / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")

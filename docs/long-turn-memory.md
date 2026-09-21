@@ -181,6 +181,61 @@ must stay within one replay's allocation traffic, with a 256 KiB allowance for
 metadata. Existing history-page allocation-failure and corruption tests cover
 ownership cleanup and invalid commit boundaries.
 
+### GB-scale inspection stress
+
+The larger workload uses the same production path with 256 KiB of assistant
+text per child response and 64 parent inspections. The blocked child has nine
+checkpoint events and about 5.03 MiB of event-log data. A 12 GiB virtual-address
+limit lets the original implementation finish so all variants can be compared
+at the same completed work count. Three fresh processes per variant on the same
+Linux host produced:
+
+| Implementation | Median peak RSS | Peak RSS range | Completed inspections |
+| --- | ---: | ---: | ---: |
+| Before either fix | **3,100.39 MiB (3.03 GiB)** | 3,091.84–3,101.16 MiB | 64/64 |
+| Freeing inspection allocator | **40.93 MiB** | 40.50–40.94 MiB | 64/64 |
+| Freeing allocator and one validated replay | **40.63 MiB** | 40.35–40.65 MiB | 64/64 |
+
+Every run also verified the completed child history. The raw peaks in KiB were:
+
+```text
+before:    3174804, 3175588, 3166044
+allocator:   41472,   41916,   41920
+optimized:   41316,   41624,   41604
+```
+
+```bash
+python3 benchmarks/subagent_inspect_memory.py \
+  --binary before=/tmp/fx-before/zig-out/bin/fx \
+  --binary allocator=/tmp/fx-allocator/zig-out/bin/fx \
+  --binary optimized=./zig-out/bin/fx \
+  --runs 3 --inspections 64 --text-bytes 262144 \
+  --limit-mib 12288 --timeout 600 --output /tmp/fx-inspect-gib
+```
+
+Repeating the same workload with `--runs 1 --limit-mib 2048` and a fresh output
+directory reproduced an explicit
+`OutOfMemory` result from the original fx process: it completed 17 inspections,
+failed on the eighteenth, and exited with code 1. Both fixed variants completed
+all 64 inspections and verified the final history under that same limit.
+
+| Implementation | Peak RSS with 2 GiB address-space limit | Result |
+| --- | ---: | --- |
+| Before either fix | 831.66 MiB | `OutOfMemory`, 17/64 completed, exit 1 |
+| Freeing inspection allocator | 40.68 MiB | 64/64 completed, exit 0 |
+| Freeing allocator and one validated replay | 40.66 MiB | 64/64 completed, exit 0 |
+
+These are single-run failure/completion checks. The baseline failed at the same
+inspection on a second run (833.88 MiB peak). `RLIMIT_AS` bounds virtual address
+space, so an allocation can fail with RSS below 2 GiB. This reproduces fx's
+allocation failure without relying on a machine-wide OOM kill.
+
+The CI stress gate uses this larger workload once, with a 2 GiB virtual-address
+limit and a 96 MiB peak-RSS budget. The benchmark records completed inspection
+counts, exit codes and explicit OOM diagnostics, and preserves GNU time's peak
+measurement if the fixture must stop a failed run. A failed variant makes the
+comparison command exit nonzero while still writing all measurement reports.
+
 ## Progress guard
 
 The guard keeps 256 bounded evidence fingerprints. It compares returned
