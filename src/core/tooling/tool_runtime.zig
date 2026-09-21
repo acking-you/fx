@@ -3262,10 +3262,11 @@ test "main file mutation producer rejects wildcard-bearing grant roots before pr
                     },
                 );
                 switch (preflight) {
-                    .tool_failure => |reason| try std.testing.expectEqualStrings(
-                        "file mutation permission scope could not be represented safely",
-                        reason,
-                    ),
+                    .tool_failure => |reason| {
+                        try std.testing.expect(std.mem.startsWith(u8, reason, "file mutation permission scope could not be represented safely (UnsupportedFileGrantOffer)"));
+                        try std.testing.expect(std.mem.find(u8, reason, "The file was not changed") != null);
+                        try std.testing.expect(std.mem.find(u8, reason, "Do not bypass permission checks") != null);
+                    },
                     else => return error.TestExpectedToolFailure,
                 }
             }

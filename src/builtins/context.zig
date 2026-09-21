@@ -7,6 +7,7 @@ const io_mod = @import("../core/shared/io.zig");
 const model_context_encoding = @import("../core/shared/model_context_encoding.zig");
 const pathing = @import("../core/workspace/pathing.zig");
 const text_utils = @import("../core/shared/text_utils.zig");
+const shell_resolver = @import("../core/terminal/shell_resolver.zig");
 const types = @import("../core/shared/types.zig");
 const context_contract = @import("../core/workspace/context_contract.zig");
 const context_limits = @import("../core/config/context_limits.zig");
@@ -106,6 +107,8 @@ const tools_and_verification_section =
     \\# Tools and verification
     \\
     \\- Choose the smallest suitable available capability.
+    \\- The advertised tools define the current tool contract. Do not assume tools or shell helpers from another agent are installed. Use the available file-editing tools for changes.
+    \\- Use runtime workspace paths and match commands to the reported OS and shell. Never invent a container directory; omit optional working directories unless a different observed directory is needed.
     \\- After code changes, verify the relevant behavior with direct checks such as formatting, a focused test, build, CLI run, or eval before claiming it works. Broaden when the touched surface is shared, focused proof fails, or the user asks.
     \\- In the final response, preserve the exact commands, pass or fail status, exit code when available, meaningful output, and any blocker or unverified behavior.
 ;
@@ -2018,10 +2021,11 @@ const Date = struct {
 };
 
 fn buildTurnContextFragment(arena: Allocator, workspace_root: []const u8) ![]const u8 {
-    const cwd = currentWorkingDirectory(arena) catch "(unavailable)";
+    const cwd = if (workspace_root.len > 0) workspace_root else "(unavailable)";
     const os_text = try host.operatingSystemText(arena);
     const date_text = try todayUtcText(arena);
-    const shell = shellPath() orelse "(unknown)";
+    var shell_buffer: [4096]u8 = undefined;
+    const shell = shell_resolver.configuredOrDefaultLoginShellInto(&shell_buffer);
     const home = homeDir() orelse "(unknown)";
     const git = collectGitInfo(arena, workspace_root) catch GitInfo{};
 
@@ -2089,14 +2093,6 @@ fn buildTurnContextFragmentForHost(
             "</fx-turn-context>",
     );
     return try out.toOwnedSlice();
-}
-
-fn currentWorkingDirectory(arena: Allocator) ![]const u8 {
-    return std.process.currentPathAlloc(io_mod.getIo(), arena);
-}
-
-fn shellPath() ?[]const u8 {
-    return io_mod.getenv("SHELL") orelse io_mod.getenv("COMSPEC");
 }
 
 fn homeDir() ?[]const u8 {
@@ -2747,6 +2743,29 @@ test "turn context reports unknown git worktree outside git repos" {
     try std.testing.expect(std.mem.find(u8, fragment, "git_worktree: unknown") != null);
 }
 
+test "turn context uses the tool workspace and resolved execution shell" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const workspace = try io_mod.dirRealpathAlloc(arena, tmp.dir, ".");
+    const process_cwd = try std.process.currentPathAlloc(io_mod.getIo(), arena);
+    try std.testing.expect(!std.mem.eql(u8, workspace, process_cwd));
+
+    const fragment = try buildTurnContextFragment(arena, workspace);
+    var expected: std.Io.Writer.Allocating = .init(arena);
+    defer expected.deinit();
+    try expected.writer.writeAll("current_directory: ");
+    try model_context_encoding.writeScalar(&expected.writer, workspace);
+    try expected.writer.writeByte('\n');
+    try expectContains(fragment, expected.written());
+
+    var shell_buffer: [4096]u8 = undefined;
+    const shell = shell_resolver.configuredOrDefaultLoginShellInto(&shell_buffer);
+    try expectContains(fragment, try std.fmt.allocPrint(arena, "shell_path: {s}\n", .{shell}));
+}
+
 test "turn context selection is byte identical on the native path" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
@@ -3239,6 +3258,9 @@ test "gateway_system_prompt: safety and permission boundaries" {
 
 test "gateway_system_prompt: focused tools and live verification" {
     try expectDefaultPromptContains("Choose the smallest suitable available capability.");
+    try expectDefaultPromptContains("advertised tools define the current tool contract");
+    try expectDefaultPromptContains("Do not assume tools or shell helpers from another agent are installed");
+    try expectDefaultPromptContains("Never invent a container directory");
     try expectDefaultPromptContains("verify the relevant behavior with direct checks");
     try expectDefaultPromptContains("Broaden when the touched surface is shared");
     try expectDefaultPromptContains("preserve the exact commands, pass or fail status, exit code when available, meaningful output");

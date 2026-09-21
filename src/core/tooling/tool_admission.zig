@@ -527,7 +527,14 @@ pub fn preflightPreparedFileMutation(
         error.OutOfMemory => return error.OutOfMemory,
         error.UnsupportedFileGrantOffer,
         error.ScopeProjectionTooLarge,
-        => return .{ .tool_failure = "file mutation permission scope could not be represented safely" },
+        => return .{ .tool_failure = try std.fmt.allocPrint(
+            arena,
+            "file mutation permission scope could not be represented safely ({s}). " ++
+                "The file was not changed. Verify the target against the current workspace; " ++
+                "use a workspace-relative path when that is the intended target. " ++
+                "Do not bypass permission checks to retry the same mutation.",
+            .{@errorName(err)},
+        ) },
     };
     input_owned = false;
     policy_targets_owned = false;
@@ -1228,6 +1235,17 @@ fn requestPermissionOutcomeResolved(
     const permission_name = try permissionNameForCall(input, arena, call);
     const target_kind = try permissionTargetKindForCall(input, arena, call);
     var targets = permissionTargetsForCall(input, arena, call) catch |err| {
+        if (command_call and (err == error.FileNotFound or err == error.NotDir)) {
+            const args = try tool_args.parseToolArgsObject(arena, call.arguments_json);
+            const workdir = tool_args.nullablePlaceholderStringArg(args, "workdir") orelse ".";
+            return .{ .tool_failure = try std.fmt.allocPrint(
+                arena,
+                "Invalid workdir for {s}: {s} ({s}). Relative paths are resolved from the default working directory: {s}. " ++
+                    "The command was not run. Retry with an existing directory, or omit workdir to use the default working directory. " ++
+                    "The retry is subject to normal permission checks.",
+                .{ call.name, workdir, @errorName(err), input.workspace_root },
+            ) };
+        }
         if (try permissionTargetResolutionFailureMessage(arena, call.name, err)) |failure| {
             return .{ .tool_failure = failure };
         }
@@ -2355,6 +2373,79 @@ test "permission target resolution reports a missing home" {
     )).?;
     defer std.testing.allocator.free(failure);
     try std.testing.expect(std.mem.find(u8, failure, "HomeNotSet") != null);
+}
+
+test "command admission reports invalid workdir with default cwd recovery" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var file = try tmp.dir.createFile(std.testing.io, "not-a-directory", .{});
+    file.close(std.testing.io);
+    var arena_state = std.heap.ArenaAllocator.init(alloc);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const workspace = try io_mod.dirRealpathAlloc(arena, tmp.dir, ".");
+    const absolute_missing = try std.fs.path.join(arena, &.{ workspace, "missing-absolute" });
+    var worker: WorkerRuntime = .{};
+    defer worker.deinit(alloc);
+    var recording = RecordingPrompter{};
+    var input = testInputWithClassifier(&worker, permission_auto_classifier.Classifier.disabled());
+    input.workspace_root = workspace;
+    input.permission_prompter = recording.prompter();
+
+    for ([_][]const u8{ "missing-relative", absolute_missing, "not-a-directory/child" }) |workdir| {
+        const call: ToolCall = .{
+            .id = "invalid-workdir",
+            .name = "exec_command",
+            .arguments_json = try std.json.Stringify.valueAlloc(arena, .{
+                .cmd = "touch should-not-run.txt",
+                .workdir = workdir,
+            }, .{}),
+        };
+        for ([_]PermissionMode{ .ask, .auto, .yolo }) |mode| {
+            const outcome = try requestPermissionOutcome(input, arena, call, mode, &.{});
+            const failure = outcome.tool_failure orelse return error.TestExpectedWorkdirFailure;
+            try std.testing.expect(std.mem.find(u8, failure, "Invalid workdir for exec_command") != null);
+            try std.testing.expect(std.mem.find(u8, failure, workdir) != null);
+            try std.testing.expect(std.mem.find(u8, failure, workspace) != null);
+            try std.testing.expect(std.mem.find(u8, failure, "The command was not run") != null);
+            try std.testing.expect(std.mem.find(u8, failure, "omit workdir") != null);
+            try std.testing.expect(std.mem.find(u8, failure, "normal permission checks") != null);
+            try std.testing.expect(outcome.execution_authority == null);
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), recording.calls);
+}
+
+test "command admission default cwd recovery still requires permission" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena_state = std.heap.ArenaAllocator.init(alloc);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var worker: WorkerRuntime = .{};
+    defer worker.deinit(alloc);
+    var input = testInputWithClassifier(&worker, permission_auto_classifier.Classifier.disabled());
+    input.workspace_root = try io_mod.dirRealpathAlloc(arena, tmp.dir, ".");
+    const call: ToolCall = .{
+        .id = "default-cwd-retry",
+        .name = "exec_command",
+        .arguments_json = "{\"cmd\":\"touch generated.txt\"}",
+    };
+    const context = try commandContext(input, arena, call);
+    try std.testing.expectEqualStrings(input.workspace_root, context.resolved_cwd);
+    const outcome = try requestPermissionOutcome(input, arena, call, .ask, &.{});
+    try std.testing.expectEqual(ToolPermissionDecision.permission_required, outcome.decision);
+    try std.testing.expect(outcome.tool_failure == null);
+    try std.testing.expect(outcome.execution_authority == null);
+
+    var recording = RecordingPrompter{ .decision = .deny };
+    input.permission_prompter = recording.prompter();
+    const denied = try requestPermissionOutcome(input, arena, call, .ask, &.{});
+    try std.testing.expectEqual(ToolPermissionDecision.deny, denied.decision);
+    try std.testing.expect(denied.execution_authority == null);
+    try std.testing.expectEqual(@as(usize, 1), recording.calls);
 }
 
 test "interactive Vision path approval names every canonical image" {
