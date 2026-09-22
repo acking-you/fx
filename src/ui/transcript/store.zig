@@ -17,6 +17,8 @@
 //   writeTranscriptClassified
 
 const std = @import("std");
+const shared_theme = @import("../../core/shared/theme.zig");
+const theme_retint = @import("../theme_retint.zig");
 const debug_trace = @import("../../core/shared/debug_trace.zig");
 const io_mod = @import("../../core/shared/io.zig");
 const types = @import("../../core/shared/types.zig");
@@ -2868,10 +2870,10 @@ pub fn streamAssistantChunk(
 pub fn retintEntriesForTheme(
     self: anytype,
     alloc: Allocator,
-    from_light: bool,
-    to_light: bool,
+    from: shared_theme.Theme,
+    to: shared_theme.Theme,
 ) !void {
-    if (from_light == to_light) return;
+    if (std.meta.eql(from, to)) return;
     try self.assertCanMutateTranscript();
 
     var shadow = try cloneMutationState(self, alloc);
@@ -2881,18 +2883,28 @@ pub fn retintEntriesForTheme(
         switch (entry.*) {
             .raw_bytes => |*raw| {
                 if (!themeOwnsRawEntry(raw.class)) continue;
-                if (try retintThemeBytes(alloc, raw.bytes, from_light, to_light)) |replacement| {
+                if (try theme_retint.bytes(alloc, raw.bytes, from, to)) |replacement| {
                     alloc.free(raw.bytes);
                     raw.bytes = replacement;
                 }
             },
             .assistant_turn => |*assistant| {
-                if (try retintThemeBytes(alloc, assistant.segments.text.items, from_light, to_light)) |replacement| {
+                if (try theme_retint.bytes(alloc, assistant.segments.text.items, from, to)) |replacement| {
                     assistant.segments.text.deinit(alloc);
                     assistant.segments.text = .fromOwnedSlice(replacement);
                 }
             },
-            .semantic_notice, .user_turn, .assistant_table, .assistant_code_block, .assistant_thematic_rule => {},
+            .assistant_table => |*assistant| {
+                for (assistant.table.rows) |row| {
+                    for (row.cells) |*cell| {
+                        if (try theme_retint.bytes(alloc, cell.*, from, to)) |replacement| {
+                            alloc.free(cell.*);
+                            cell.* = replacement;
+                        }
+                    }
+                }
+            },
+            .semantic_notice, .user_turn, .assistant_code_block, .assistant_thematic_rule => {},
         }
     }
 
@@ -2913,29 +2925,6 @@ pub fn retintEntriesForTheme(
     );
 }
 
-const ThemeToken = struct {
-    from: []const u8,
-    to: []const u8,
-};
-
-const dark_to_light_theme_tokens = [_]ThemeToken{
-    .{ .from = "\x1b[1;38;5;255m", .to = "\x1b[1;38;5;235m" },
-    .{ .from = "\x1b[38;5;255m", .to = "\x1b[38;5;235m" },
-    .{ .from = "\x1b[1;38;5;252m", .to = "\x1b[1;38;5;238m" },
-    .{ .from = "\x1b[38;5;252m", .to = "\x1b[38;5;238m" },
-    .{ .from = "\x1b[38;5;250m", .to = "\x1b[38;5;241m" },
-    .{ .from = "\x1b[38;5;245m", .to = "\x1b[38;5;247m" },
-};
-
-const light_to_dark_theme_tokens = [_]ThemeToken{
-    .{ .from = "\x1b[1;38;5;235m", .to = "\x1b[1;38;5;255m" },
-    .{ .from = "\x1b[38;5;235m", .to = "\x1b[38;5;255m" },
-    .{ .from = "\x1b[1;38;5;238m", .to = "\x1b[1;38;5;252m" },
-    .{ .from = "\x1b[38;5;238m", .to = "\x1b[38;5;252m" },
-    .{ .from = "\x1b[38;5;241m", .to = "\x1b[38;5;250m" },
-    .{ .from = "\x1b[38;5;247m", .to = "\x1b[38;5;245m" },
-};
-
 fn themeOwnsRawEntry(class: RawEntryClass) bool {
     return switch (class) {
         .welcome,
@@ -2947,39 +2936,6 @@ fn themeOwnsRawEntry(class: RawEntryClass) bool {
         => true,
         .command_output, .unknown_raw => false,
     };
-}
-
-fn retintThemeBytes(
-    alloc: Allocator,
-    bytes: []const u8,
-    from_light: bool,
-    to_light: bool,
-) !?[]u8 {
-    if (from_light == to_light) return null;
-    const tokens = if (to_light) dark_to_light_theme_tokens[0..] else light_to_dark_theme_tokens[0..];
-    var out: std.Io.Writer.Allocating = .init(alloc);
-    errdefer out.deinit();
-
-    var changed = false;
-    var index: usize = 0;
-    while (index < bytes.len) {
-        for (tokens) |token| {
-            if (!std.mem.startsWith(u8, bytes[index..], token.from)) continue;
-            try out.writer.writeAll(token.to);
-            index += token.from.len;
-            changed = true;
-            break;
-        } else {
-            try out.writer.writeByte(bytes[index]);
-            index += 1;
-        }
-    }
-
-    if (!changed) {
-        out.deinit();
-        return null;
-    }
-    return try out.toOwnedSlice();
 }
 
 pub fn appendReplaceableTranscriptLine(self: anytype, alloc: Allocator, metrics: *Metrics, text: []const u8) !u32 {

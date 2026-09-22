@@ -498,11 +498,11 @@ pub const MarkdownProcessor = struct {
             try out.appendSlice(alloc, parsed.indent);
             if (bp.parseTaskListItem(parsed.content)) |task| {
                 try block_render.writeTaskListMarker(alloc, out, task);
-                try inline_render.writeInline(alloc, tu.withoutTerminalHardBreakMarker(task.content, line_has_lf), out, false, &fs, &link_id_counter);
+                try inline_render.writeInline(alloc, tu.withoutTerminalHardBreakMarker(task.content, line_has_lf), out, .{}, &fs, &link_id_counter);
                 return;
             }
             try ansi.writeDim(alloc, out, ansi.bullet_marker);
-            try inline_render.writeInline(alloc, tu.withoutTerminalHardBreakMarker(parsed.content, line_has_lf), out, false, &fs, &link_id_counter);
+            try inline_render.writeInline(alloc, tu.withoutTerminalHardBreakMarker(parsed.content, line_has_lf), out, .{}, &fs, &link_id_counter);
             return;
         }
 
@@ -512,14 +512,14 @@ pub const MarkdownProcessor = struct {
             try out.append(alloc, ' ');
             if (bp.parseTaskListItem(parsed.content)) |task| {
                 try block_render.writeTaskListMarker(alloc, out, task);
-                try inline_render.writeInline(alloc, tu.withoutTerminalHardBreakMarker(task.content, line_has_lf), out, false, &fs, &link_id_counter);
+                try inline_render.writeInline(alloc, tu.withoutTerminalHardBreakMarker(task.content, line_has_lf), out, .{}, &fs, &link_id_counter);
                 return;
             }
-            try inline_render.writeInline(alloc, tu.withoutTerminalHardBreakMarker(parsed.content, line_has_lf), out, false, &fs, &link_id_counter);
+            try inline_render.writeInline(alloc, tu.withoutTerminalHardBreakMarker(parsed.content, line_has_lf), out, .{}, &fs, &link_id_counter);
             return;
         }
 
-        try inline_render.writeInline(alloc, tu.withoutTerminalHardBreakMarker(line, line_has_lf), out, false, &fs, &link_id_counter);
+        try inline_render.writeInline(alloc, tu.withoutTerminalHardBreakMarker(line, line_has_lf), out, .{}, &fs, &link_id_counter);
     }
 
     fn finalizePipeBlock(
@@ -682,10 +682,65 @@ test "markdown link is blue and underlined inside its OSC 8 scope" {
     var expected_buf: [256]u8 = undefined;
     const expected = try std.fmt.bufPrint(
         &expected_buf,
-        "see \x1b]8;id=fx-{d};https://example.com\x1b\\\x1b[4mdocs\x1b[24m\x1b]8;;\x1b\\ please\n",
+        "see \x1b]8;id=fx-{d};https://example.com\x1b\\\x1b[38;5;75m\x1b[4mdocs\x1b[24m\x1b[39m\x1b]8;;\x1b\\ please\n",
         .{id_before},
     );
     try std.testing.expectEqualStrings(expected, out.items);
+}
+
+test "markdown link destination keeps balanced parentheses" {
+    const alloc = std.testing.allocator;
+    var processor = MarkdownProcessor{};
+    defer processor.deinit(alloc);
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(alloc);
+
+    const id_before = link_id_counter;
+    try processor.push(alloc, "[w](https://en.wikipedia.org/wiki/Foo_(bar)) tail\n", &out);
+
+    var expected_buf: [256]u8 = undefined;
+    const expected = try std.fmt.bufPrint(
+        &expected_buf,
+        "\x1b]8;id=fx-{d};https://en.wikipedia.org/wiki/Foo_(bar)\x1b\\\x1b[38;5;75m\x1b[4mw\x1b[24m\x1b[39m\x1b]8;;\x1b\\ tail\n",
+        .{id_before},
+    );
+    try std.testing.expectEqualStrings(expected, out.items);
+}
+
+test "markdown link drops its title and unwraps angle destinations" {
+    const alloc = std.testing.allocator;
+    var processor = MarkdownProcessor{};
+    defer processor.deinit(alloc);
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(alloc);
+
+    const id_before = link_id_counter;
+    try processor.push(
+        alloc,
+        "[t](https://example.com \"Title text\") [s](https://example.com/s 'single') [a](<https://example.com/a b>)\n",
+        &out,
+    );
+
+    var expected_buf: [512]u8 = undefined;
+    const expected = try std.fmt.bufPrint(
+        &expected_buf,
+        "\x1b]8;id=fx-{d};https://example.com\x1b\\\x1b[38;5;75m\x1b[4mt\x1b[24m\x1b[39m\x1b]8;;\x1b\\ " ++
+            "\x1b]8;id=fx-{d};https://example.com/s\x1b\\\x1b[38;5;75m\x1b[4ms\x1b[24m\x1b[39m\x1b]8;;\x1b\\ " ++
+            "\x1b]8;id=fx-{d};https://example.com/a b\x1b\\\x1b[38;5;75m\x1b[4ma\x1b[24m\x1b[39m\x1b]8;;\x1b\\\n",
+        .{ id_before, id_before + 1, id_before + 2 },
+    );
+    try std.testing.expectEqualStrings(expected, out.items);
+}
+
+test "markdown link with unbalanced or spaced destination stays literal" {
+    const alloc = std.testing.allocator;
+    var processor = MarkdownProcessor{};
+    defer processor.deinit(alloc);
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(alloc);
+
+    try processor.push(alloc, "[u](https://e.com/(x) [v](https://e.com/a b) [w](https://e.com \"open)\n", &out);
+    try std.testing.expectEqualStrings("[u](https://e.com/(x) [v](https://e.com/a b) [w](https://e.com \"open)\n", out.items);
 }
 
 test "markdown image renders its alt text with an image marker inside one OSC 8 scope" {
@@ -701,7 +756,7 @@ test "markdown image renders its alt text with an image marker inside one OSC 8 
     var expected_buf: [512]u8 = undefined;
     const expected = try std.fmt.bufPrint(
         &expected_buf,
-        "see \x1b]8;id=fx-{d};https://example.com/diagram.png\x1b\\\x1b[4m▧ architecture diagram\x1b[24m\x1b]8;;\x1b\\ please\n",
+        "see \x1b]8;id=fx-{d};https://example.com/diagram.png\x1b\\\x1b[38;5;75m\x1b[4m▧ architecture diagram\x1b[24m\x1b[39m\x1b]8;;\x1b\\ please\n",
         .{id_before},
     );
     try std.testing.expectEqualStrings(expected, out.items);
@@ -720,7 +775,7 @@ test "markdown image uses a stable fallback for empty alt text" {
     var expected_buf: [256]u8 = undefined;
     const expected = try std.fmt.bufPrint(
         &expected_buf,
-        "\x1b]8;id=fx-{d};https://example.com/diagram.png\x1b\\\x1b[4m▧ image\x1b[24m\x1b]8;;\x1b\\\n",
+        "\x1b]8;id=fx-{d};https://example.com/diagram.png\x1b\\\x1b[38;5;75m\x1b[4m▧ image\x1b[24m\x1b[39m\x1b]8;;\x1b\\\n",
         .{id_before},
     );
     try std.testing.expectEqualStrings(expected, out.items);
@@ -739,7 +794,7 @@ test "markdown image unescapes alt punctuation through the existing link emitter
     var expected_buf: [256]u8 = undefined;
     const expected = try std.fmt.bufPrint(
         &expected_buf,
-        "\x1b]8;id=fx-{d};https://example.com/diagram.png\x1b\\\x1b[4m▧ architecture *diagram*\x1b[24m\x1b]8;;\x1b\\\n",
+        "\x1b]8;id=fx-{d};https://example.com/diagram.png\x1b\\\x1b[38;5;75m\x1b[4m▧ architecture *diagram*\x1b[24m\x1b[39m\x1b]8;;\x1b\\\n",
         .{id_before},
     );
     try std.testing.expectEqualStrings(expected, out.items);
@@ -802,7 +857,7 @@ test "markdown images preserve code isolation, chunk buffering, and heading unde
     var expected_buf: [512]u8 = undefined;
     const expected = try std.fmt.bufPrint(
         &expected_buf,
-        "\x1b[4mbefore \x1b]8;id=fx-{d};https://example.com/diagram.png\x1b\\\x1b[4m▧ diagram\x1b[24m\x1b]8;;\x1b\\\x1b[4m after\x1b[24m\n",
+        "\x1b[4mbefore \x1b]8;id=fx-{d};https://example.com/diagram.png\x1b\\\x1b[38;5;75m\x1b[4m▧ diagram\x1b[24m\x1b[39m\x1b]8;;\x1b\\\x1b[4m after\x1b[24m\n",
         .{id_before},
     );
     try std.testing.expectEqualStrings(expected, out.items);
@@ -869,7 +924,7 @@ test "bare URL is underlined and leaves sentence punctuation literal" {
     var expected_buf: [256]u8 = undefined;
     const expected = try std.fmt.bufPrint(
         &expected_buf,
-        "visit \x1b]8;id=fx-{d};https://example.com/docs\x1b\\\x1b[4mhttps://example.com/docs\x1b[24m\x1b]8;;\x1b\\, now\n",
+        "visit \x1b]8;id=fx-{d};https://example.com/docs\x1b\\\x1b[38;5;75m\x1b[4mhttps://example.com/docs\x1b[24m\x1b[39m\x1b]8;;\x1b\\, now\n",
         .{id_before},
     );
     try std.testing.expectEqualStrings(expected, out.items);
@@ -890,7 +945,7 @@ test "bare URL is recognized after streamed input chunks" {
     var expected_buf: [256]u8 = undefined;
     const expected = try std.fmt.bufPrint(
         &expected_buf,
-        "visit \x1b]8;id=fx-{d};https://example.com/docs\x1b\\\x1b[4mhttps://example.com/docs\x1b[24m\x1b]8;;\x1b\\\n",
+        "visit \x1b]8;id=fx-{d};https://example.com/docs\x1b\\\x1b[38;5;75m\x1b[4mhttps://example.com/docs\x1b[24m\x1b[39m\x1b]8;;\x1b\\\n",
         .{id_before},
     );
     try std.testing.expectEqualStrings(expected, out.items);
@@ -913,9 +968,9 @@ test "angle autolinks use literal URI and email labels" {
     var expected_buf: [1024]u8 = undefined;
     const expected = try std.fmt.bufPrint(
         &expected_buf,
-        "see \x1b]8;id=fx-{d};https://example.com/docs\\_literal\x1b\\\x1b[4mhttps://example.com/docs\\_literal\x1b[24m\x1b]8;;\x1b\\ and " ++
-            "\x1b]8;id=fx-{d};mailto:dev@example.com\x1b\\\x1b[4mdev@example.com\x1b[24m\x1b]8;;\x1b\\ plus " ++
-            "\x1b]8;id=fx-{d};git+ssh://example.com/repo\x1b\\\x1b[4mgit+ssh://example.com/repo\x1b[24m\x1b]8;;\x1b\\\n",
+        "see \x1b]8;id=fx-{d};https://example.com/docs\\_literal\x1b\\\x1b[38;5;75m\x1b[4mhttps://example.com/docs\\_literal\x1b[24m\x1b[39m\x1b]8;;\x1b\\ and " ++
+            "\x1b]8;id=fx-{d};mailto:dev@example.com\x1b\\\x1b[38;5;75m\x1b[4mdev@example.com\x1b[24m\x1b[39m\x1b]8;;\x1b\\ plus " ++
+            "\x1b]8;id=fx-{d};git+ssh://example.com/repo\x1b\\\x1b[38;5;75m\x1b[4mgit+ssh://example.com/repo\x1b[24m\x1b[39m\x1b]8;;\x1b\\\n",
         .{ id_before, id_before +% 1, id_before +% 2 },
     );
     try std.testing.expectEqualStrings(expected, out.items);
@@ -1026,9 +1081,9 @@ test "bare URLs leave closing emphasis delimiters for the inline scanner" {
     var expected_buf: [1024]u8 = undefined;
     const expected = try std.fmt.bufPrint(
         &expected_buf,
-        "\x1b[1m\x1b]8;id=fx-{d};https://bold.example\x1b\\\x1b[4mhttps://bold.example\x1b[24m\x1b]8;;\x1b\\\x1b[22m " ++
-            "\x1b[3m\x1b]8;id=fx-{d};https://italic.example\x1b\\\x1b[4mhttps://italic.example\x1b[24m\x1b]8;;\x1b\\\x1b[23m " ++
-            "\x1b[9m\x1b]8;id=fx-{d};https://strike.example\x1b\\\x1b[4mhttps://strike.example\x1b[24m\x1b]8;;\x1b\\\x1b[29m tail\n",
+        "\x1b[1m\x1b]8;id=fx-{d};https://bold.example\x1b\\\x1b[38;5;75m\x1b[4mhttps://bold.example\x1b[24m\x1b[39m\x1b]8;;\x1b\\\x1b[22m " ++
+            "\x1b[3m\x1b]8;id=fx-{d};https://italic.example\x1b\\\x1b[38;5;75m\x1b[4mhttps://italic.example\x1b[24m\x1b[39m\x1b]8;;\x1b\\\x1b[23m " ++
+            "\x1b[9m\x1b]8;id=fx-{d};https://strike.example\x1b\\\x1b[38;5;75m\x1b[4mhttps://strike.example\x1b[24m\x1b[39m\x1b]8;;\x1b\\\x1b[29m tail\n",
         .{ id_before, id_before +% 1, id_before +% 2 },
     );
     try std.testing.expectEqualStrings(expected, out.items);
@@ -1059,7 +1114,7 @@ test "heading underline resumes after a link closes its local underline" {
     var expected_buf: [512]u8 = undefined;
     const expected = try std.fmt.bufPrint(
         &expected_buf,
-        "\x1b[4mbefore \x1b]8;id=fx-{d};https://example.com\x1b\\\x1b[4mlink\x1b[24m\x1b]8;;\x1b\\\x1b[4m after\x1b[24m\nbody\n",
+        "\x1b[4mbefore \x1b]8;id=fx-{d};https://example.com\x1b\\\x1b[38;5;75m\x1b[4mlink\x1b[24m\x1b[39m\x1b]8;;\x1b\\\x1b[4m after\x1b[24m\nbody\n",
         .{id_before},
     );
     try std.testing.expectEqualStrings(expected, out.items);
@@ -1287,7 +1342,7 @@ test "link labels unescape visible punctuation" {
     var expected_buf: [256]u8 = undefined;
     const expected = try std.fmt.bufPrint(
         &expected_buf,
-        "\x1b]8;id=fx-{d};https://example.com\x1b\\\x1b[4mdocs *literal*\x1b[24m\x1b]8;;\x1b\\\n",
+        "\x1b]8;id=fx-{d};https://example.com\x1b\\\x1b[38;5;75m\x1b[4mdocs *literal*\x1b[24m\x1b[39m\x1b]8;;\x1b\\\n",
         .{id_before},
     );
     try std.testing.expectEqualStrings(expected, out.items);
@@ -1408,8 +1463,8 @@ test "underscore formatted bare URLs retain path underscores and matching closer
     var expected_buf: [1024]u8 = undefined;
     const expected = try std.fmt.bufPrint(
         &expected_buf,
-        "\x1b[3m\x1b]8;id=fx-{d};https://example.com/snake_case\x1b\\\x1b[4mhttps://example.com/snake_case\x1b[24m\x1b]8;;\x1b\\\x1b[23m tail " ++
-            "\x1b[1m\x1b]8;id=fx-{d};https://example.com/snake_case\x1b\\\x1b[4mhttps://example.com/snake_case\x1b[24m\x1b]8;;\x1b\\\x1b[22m tail\n",
+        "\x1b[3m\x1b]8;id=fx-{d};https://example.com/snake_case\x1b\\\x1b[38;5;75m\x1b[4mhttps://example.com/snake_case\x1b[24m\x1b[39m\x1b]8;;\x1b\\\x1b[23m tail " ++
+            "\x1b[1m\x1b]8;id=fx-{d};https://example.com/snake_case\x1b\\\x1b[38;5;75m\x1b[4mhttps://example.com/snake_case\x1b[24m\x1b[39m\x1b]8;;\x1b\\\x1b[22m tail\n",
         .{ id_before, id_before +% 1 },
     );
     try std.testing.expectEqualStrings(expected, out.items);

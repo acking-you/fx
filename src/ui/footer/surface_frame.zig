@@ -1419,7 +1419,6 @@ fn footerGeometryForRows(rows: FooterRows, activity: ActivityPlacement) footer_v
         .bottom_divider = rows.bottom_divider,
         .hint = rows.hint,
         .activity_row = activity.row(),
-        .activity_reserved_rows = activity.reservedFooterRows(),
     };
 }
 
@@ -2797,7 +2796,6 @@ fn surfaceTestRetargetPaintPlan(top: u16) PaintPlan {
         .footer_clean_allowed = true,
         .synchronized_update = true,
         .cursor_target = .{ .row = top + 1, .col = 4, .visible = true },
-        .footer_reservation_source = .none,
         .bottom_reserved_rows = 0,
         .preserve_scrollback = true,
     };

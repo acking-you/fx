@@ -1,4 +1,5 @@
 const std = @import("std");
+const shared_theme = @import("../../shared/theme.zig");
 const Allocator = std.mem.Allocator;
 
 pub const bold_open = "\x1b[1m";
@@ -9,20 +10,11 @@ pub const dim_open = "\x1b[2m";
 pub const dim_close = "\x1b[22m";
 pub const underline_open = "\x1b[4m";
 pub const underline_close = "\x1b[24m";
-const task_completed_dark_open = "\x1b[38;5;252m";
-const task_completed_light_open = "\x1b[38;5;238m";
-pub var task_completed_open: []const u8 = task_completed_dark_open;
-pub const task_completed_close = "\x1b[39m";
 pub const strike_open = "\x1b[9m";
 pub const strike_close = "\x1b[29m";
-const inline_code_dark_open = "\x1b[38;5;245m";
-const inline_code_light_open = "\x1b[38;5;247m";
-pub var inline_code_open: []const u8 = inline_code_dark_open;
-pub const inline_code_close = "\x1b[39m";
 
 pub fn setInlineCodeTheme(light: bool) void {
-    inline_code_open = if (light) inline_code_light_open else inline_code_dark_open;
-    task_completed_open = if (light) task_completed_light_open else task_completed_dark_open;
+    shared_theme.activate(shared_theme.builtin(light));
 }
 
 // Keeps table intersections aligned with row separators.

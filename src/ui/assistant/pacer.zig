@@ -3,6 +3,7 @@ const Allocator = std.mem.Allocator;
 
 const debug_trace = @import("../../core/shared/debug_trace.zig");
 const display_width = @import("../../core/shared/display_width.zig");
+const shared_theme = @import("../../core/shared/theme.zig");
 const types = @import("../../core/shared/types.zig");
 const HistoryTurn = types.HistoryTurn;
 const FinishedPrompt = types.FinishedPrompt;
@@ -37,6 +38,7 @@ pub const SgrState = struct {
         none,
         dark,
         light,
+        themed,
     };
 
     bold: bool = false,
@@ -45,9 +47,10 @@ pub const SgrState = struct {
     underline: bool = false,
     strike: bool = false,
     code_fg: CodeForeground = .none,
+    link_fg: bool = false,
 
     pub fn isActive(self: SgrState) bool {
-        return self.bold or self.dim or self.italic or self.underline or self.strike or self.code_fg != .none;
+        return self.bold or self.dim or self.italic or self.underline or self.strike or self.code_fg != .none or self.link_fg;
     }
 
     /// Update based on a complete ANSI sequence (including `\x1b[` prefix and
@@ -72,12 +75,24 @@ pub const SgrState = struct {
             self.dim = false;
         } else if (std.mem.eql(u8, body, "23")) self.italic = false else if (std.mem.eql(u8, body, "24")) self.underline = false else if (std.mem.eql(u8, body, "29")) self.strike = false else if (std.mem.eql(u8, body, "39")) {
             self.code_fg = .none;
-        } else if (std.mem.eql(u8, body, "38;5;245")) self.code_fg = .dark else if (std.mem.eql(u8, body, "38;5;247")) self.code_fg = .light;
+            self.link_fg = false;
+        } else if (std.mem.eql(u8, body, "38;5;245")) self.code_fg = .dark else if (std.mem.eql(u8, body, "38;5;247")) self.code_fg = .light else if (std.mem.eql(u8, seq, shared_theme.current().inline_code_open)) {
+            // Theme-supplied inline-code opens track as the themed variant and
+            // re-emit whatever the active theme holds at restore time.
+            self.code_fg = .themed;
+        } else if (std.mem.eql(u8, seq, shared_theme.current().link_style)) {
+            // The themed link color tracks the same way, so a link that opens
+            // a row still carries its color after the row-start restore.
+            self.link_fg = true;
+        }
     }
 
     /// Serialize open codes for the currently-active attributes into `buf`.
-    /// Returns the number of bytes written (always fits in 31 bytes: five
-    /// 4-byte attribute opens and the 11-byte code-foreground open).
+    /// Returns the number of bytes written. The caller sizes `buf` for five
+    /// 4-byte attribute opens plus the active code-foreground open (the theme
+    /// builder bounds slot escapes); an oversized open is truncated by the
+    /// bounds check, degrading restore to pre-fix behavior rather than
+    /// corrupting the frame.
     pub fn writeOpens(self: SgrState, buf: []u8) usize {
         var n: usize = 0;
         const append = struct {
@@ -97,7 +112,9 @@ pub const SgrState = struct {
             .none => {},
             .dark => append(buf, &n, "\x1b[38;5;245m"),
             .light => append(buf, &n, "\x1b[38;5;247m"),
+            .themed => append(buf, &n, shared_theme.current().inline_code_open),
         }
+        if (self.link_fg) append(buf, &n, shared_theme.current().link_style);
         return n;
     }
 };
@@ -159,8 +176,11 @@ pub const AssistantPacer = struct {
             }
         }
 
-        if (self.sgr.code_fg != .none) {
-            self.sgr.code_fg = if (light) .light else .dark;
+        switch (self.sgr.code_fg) {
+            // Themed opens re-emit from the active theme at restore time, so
+            // there is nothing to rewrite here.
+            .none, .themed => {},
+            .dark, .light => self.sgr.code_fg = if (light) .light else .dark,
         }
     }
 
@@ -293,7 +313,7 @@ pub const AssistantPacer = struct {
 
         // Restore tracked SGR state because other renderers may reset it between ticks.
         if (self.sgr.isActive()) {
-            var prefix_buf: [48]u8 = undefined;
+            var prefix_buf: [96]u8 = undefined;
             const reset = "\x1b[0m";
             @memcpy(prefix_buf[0..reset.len], reset);
             const opens_len = self.sgr.writeOpens(prefix_buf[reset.len..]);
@@ -833,6 +853,31 @@ test "incomplete ANSI sequence at tail is held until completion arrives" {
     try std.testing.expectEqualStrings("x\x1b[1my", cap.emitted.items);
 }
 
+test "theme-supplied inline code color is restored across rendered blocks" {
+    const alloc = std.testing.allocator;
+    const previous = shared_theme.current();
+    defer shared_theme.activate(previous);
+    var custom = shared_theme.fx_dark;
+    custom.inline_code_open = "\x1b[38;2;130;210;206m";
+    shared_theme.activate(custom);
+
+    var pacer = AssistantPacer{};
+    defer pacer.deinit(alloc);
+    var cap = TestCapture{};
+    defer cap.deinit();
+
+    try pacer.enqueue(alloc, "\x1b[38;2;130;210;206mcode");
+    try pacer.tick(alloc, 0, cap.callbacks());
+    try pacer.enqueue(alloc, "\x1b[39m done");
+    try pacer.tick(alloc, 1, cap.callbacks());
+
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        cap.emitted.items,
+        "code\x1b[0m\x1b[38;2;130;210;206m\x1b[39m done",
+    ) != null);
+}
+
 test "code style is restored across rendered blocks" {
     const alloc = std.testing.allocator;
     var pacer = AssistantPacer{};
@@ -968,4 +1013,24 @@ test "tick on empty pacer without deferred finish is a no-op" {
     try pacer.tick(alloc, 1_000_000_000, cap.callbacks());
     try std.testing.expectEqual(@as(usize, 0), cap.emitted.items.len);
     try std.testing.expectEqual(@as(usize, 0), cap.finish_count);
+}
+
+test "link color is tracked and restored like the themed inline-code color" {
+    const link_open = shared_theme.current().link_style;
+    var sgr: SgrState = .{};
+    sgr.apply("\x1b[4m");
+    sgr.apply(link_open);
+    try std.testing.expect(sgr.link_fg);
+    try std.testing.expect(sgr.isActive());
+
+    var opens: [96]u8 = undefined;
+    const opens_len = sgr.writeOpens(&opens);
+    const serialized = opens[0..opens_len];
+    try std.testing.expect(std.mem.indexOf(u8, serialized, "\x1b[4m") != null);
+    try std.testing.expect(std.mem.indexOf(u8, serialized, link_open) != null);
+
+    sgr.apply("\x1b[39m");
+    try std.testing.expect(!sgr.link_fg);
+    sgr.apply("\x1b[24m");
+    try std.testing.expect(!sgr.isActive());
 }

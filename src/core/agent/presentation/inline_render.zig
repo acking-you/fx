@@ -3,12 +3,63 @@ const Allocator = std.mem.Allocator;
 const ansi = @import("ansi.zig");
 const tu = @import("text_util.zig");
 const payload = @import("payload.zig");
+const shared_theme = @import("../../shared/theme.zig");
+
+test "custom theme link and code closers preserve enclosing emphasis" {
+    const previous = shared_theme.current();
+    defer shared_theme.activate(previous);
+    var theme = shared_theme.fx_dark;
+    theme.link_style = "\x1b[1;3;38;5;75m";
+    theme.inline_code_open = theme.link_style;
+    shared_theme.activate(theme);
+    const alloc = std.testing.allocator;
+    const cases = [_]struct { input: []const u8, restore: []const u8 }{
+        .{ .input = "**before [link](https://example.com) tail**", .restore = ansi.bold_open },
+        .{ .input = "*before [link](https://example.com) tail*", .restore = ansi.italic_open },
+        .{ .input = "__before <https://example.com> tail__", .restore = ansi.bold_open },
+        .{ .input = "_before ![image](https://example.com) tail_", .restore = ansi.italic_open },
+        .{ .input = "**before https://example.com tail**", .restore = ansi.bold_open },
+    };
+    for (cases) |case| {
+        var out: std.ArrayList(u8) = .empty;
+        defer out.deinit(alloc);
+        var link_id: u32 = 0;
+        try writeInline(alloc, case.input, &out, .{}, null, &link_id);
+        const suffix = try std.fmt.allocPrint(alloc, "\x1b[23m\x1b]8;;\x1b\\{s} tail", .{case.restore});
+        defer alloc.free(suffix);
+        try std.testing.expect(std.mem.find(u8, out.items, suffix) != null);
+    }
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(alloc);
+    var link_id: u32 = 0;
+    try writeInline(alloc, "**before `code` tail**", &out, .{}, null, &link_id);
+    try std.testing.expect(std.mem.find(u8, out.items, "\x1b[23m\x1b[1m tail") != null);
+    out.clearRetainingCapacity();
+    try writeInlineNoBold(alloc, "[link](https://example.com) tail", &out, .{ .bold = true, .dim = true, .underline = true }, null, &link_id);
+    try std.testing.expect(std.mem.find(u8, out.items, "\x1b]8;;\x1b\\\x1b[1m\x1b[2m\x1b[4m tail") != null);
+}
+
+pub const EnclosingStyle = struct {
+    bold: bool = false,
+    italic: bool = false,
+    dim: bool = false,
+    underline: bool = false,
+
+    fn restore(self: EnclosingStyle, alloc: Allocator, out: *std.ArrayList(u8), close: []const u8) !void {
+        if (std.mem.find(u8, close, ansi.bold_close) != null) {
+            if (self.bold) try out.appendSlice(alloc, ansi.bold_open);
+            if (self.dim) try out.appendSlice(alloc, ansi.dim_open);
+        }
+        if (self.italic and std.mem.find(u8, close, ansi.italic_close) != null)
+            try out.appendSlice(alloc, ansi.italic_open);
+    }
+};
 
 pub fn writeInlineNoBold(
     alloc: Allocator,
     text: []const u8,
     out: *std.ArrayList(u8),
-    restore_underline_after_link: bool,
+    enclosing: EnclosingStyle,
     footnotes: ?*const payload.FootnoteSink,
     link_id: *u32,
 ) !void {
@@ -45,17 +96,20 @@ pub fn writeInlineNoBold(
         i += 1;
     }
 
-    try writeInline(alloc, stripped.items, out, restore_underline_after_link, footnotes, link_id);
+    try writeInline(alloc, stripped.items, out, enclosing, footnotes, link_id);
 }
 
 pub fn writeInline(
     alloc: Allocator,
     text: []const u8,
     out: *std.ArrayList(u8),
-    restore_underline_after_link: bool,
+    enclosing: EnclosingStyle,
     footnotes: ?*const payload.FootnoteSink,
     link_id: *u32,
 ) !void {
+    // One synchronized snapshot owns every themed open/close in this render.
+    const theme = shared_theme.current();
+    const code_close = shared_theme.closingFor(theme.inline_code_open);
     var i: usize = 0;
     var in_bold: bool = false;
     var in_italic: bool = false;
@@ -67,13 +121,20 @@ pub fn writeInline(
 
     while (i < text.len) {
         const c = text[i];
+        const active_style: EnclosingStyle = .{
+            .bold = enclosing.bold or in_bold or in_underscore_bold,
+            .italic = enclosing.italic or in_italic or in_underscore_italic,
+            .dim = enclosing.dim,
+            .underline = enclosing.underline,
+        };
 
         if (c == '`') {
             if (in_code) {
-                try out.appendSlice(alloc, ansi.inline_code_close);
+                try out.appendSlice(alloc, code_close);
+                try active_style.restore(alloc, out, code_close);
                 in_code = false;
             } else {
-                try out.appendSlice(alloc, ansi.inline_code_open);
+                try out.appendSlice(alloc, theme.inline_code_open);
                 in_code = true;
             }
             i += 1;
@@ -113,7 +174,7 @@ pub fn writeInline(
 
         if (i >= link_admission_suppressed_until and c == '!' and i + 1 < text.len and text[i + 1] == '[') {
             if (parseInlineImage(text, i)) |image| {
-                try emitInlineLink(alloc, out, image, restore_underline_after_link, "▧ ", link_id);
+                try emitInlineLink(alloc, out, image, active_style, theme.link_style, "▧ ", link_id);
                 i = image.end;
                 continue;
             }
@@ -135,7 +196,7 @@ pub fn writeInline(
 
         if (i >= link_admission_suppressed_until and c == '[') {
             if (parseInlineLink(text, i)) |link| {
-                try emitInlineLink(alloc, out, link, restore_underline_after_link, null, link_id);
+                try emitInlineLink(alloc, out, link, active_style, theme.link_style, null, link_id);
                 i = link.end;
                 continue;
             }
@@ -146,7 +207,7 @@ pub fn writeInline(
 
         if (i >= link_admission_suppressed_until and c == '<') {
             if (parseAngleAutolink(text, i)) |link| {
-                try emitInlineLink(alloc, out, link, restore_underline_after_link, null, link_id);
+                try emitInlineLink(alloc, out, link, active_style, theme.link_style, null, link_id);
                 i = link.end;
                 continue;
             }
@@ -158,7 +219,7 @@ pub fn writeInline(
 
         if (i >= link_admission_suppressed_until) {
             if (parseBareUrl(text, i, in_bold, in_italic, in_underscore_bold, in_underscore_italic, in_strike)) |link| {
-                try emitInlineLink(alloc, out, link, restore_underline_after_link, null, link_id);
+                try emitInlineLink(alloc, out, link, active_style, theme.link_style, null, link_id);
                 i = link.end;
                 continue;
             }
@@ -287,7 +348,7 @@ pub fn writeInline(
     if (in_underscore_bold) try out.appendSlice(alloc, ansi.bold_close);
     if (in_underscore_italic) try out.appendSlice(alloc, ansi.italic_close);
     if (in_strike) try out.appendSlice(alloc, ansi.strike_close);
-    if (in_code) try out.appendSlice(alloc, ansi.inline_code_close);
+    if (in_code) try out.appendSlice(alloc, code_close);
 }
 
 const ParsedFootnoteReference = struct {
@@ -321,7 +382,8 @@ fn emitInlineLink(
     alloc: Allocator,
     out: *std.ArrayList(u8),
     link: InlineLink,
-    restore_underline_after_link: bool,
+    enclosing: EnclosingStyle,
+    link_style: []const u8,
     visible_prefix: ?[]const u8,
     link_id: *u32,
 ) !void {
@@ -333,6 +395,8 @@ fn emitInlineLink(
     try out.appendSlice(alloc, link.destination_prefix);
     try out.appendSlice(alloc, link.url);
     try out.appendSlice(alloc, "\x1b\\");
+    // Link text carries the theme's link color in addition to the underline.
+    try out.appendSlice(alloc, link_style);
     try out.appendSlice(alloc, ansi.underline_open);
     if (visible_prefix) |prefix| try out.appendSlice(alloc, prefix);
     const visible_text = if (link.text.len == 0 and visible_prefix != null) "image" else link.text;
@@ -341,8 +405,11 @@ fn emitInlineLink(
         .literal => try out.appendSlice(alloc, visible_text),
     }
     try out.appendSlice(alloc, ansi.underline_close);
+    const close = shared_theme.closingFor(link_style);
+    try out.appendSlice(alloc, close);
     try out.appendSlice(alloc, "\x1b]8;;\x1b\\");
-    if (restore_underline_after_link) try out.appendSlice(alloc, ansi.underline_open);
+    try enclosing.restore(alloc, out, close);
+    if (enclosing.underline) try out.appendSlice(alloc, ansi.underline_open);
 }
 
 /// Rejects control bytes so a URL cannot terminate its OSC 8 wrapper.
@@ -363,16 +430,90 @@ fn parseInlineBracketDestination(text: []const u8, start: usize, allow_empty_tex
     const text_end = j;
     if (!allow_empty_text and text_end == start + 1) return null;
     if (text_end + 1 >= text.len or text[text_end + 1] != '(') return null;
-    var k = text_end + 2;
-    while (k < text.len and text[k] != ')' and text[k] != '\n') : (k += 1) {}
-    if (k >= text.len or text[k] != ')') return null;
-    const url = text[text_end + 2 .. k];
-    if (!isValidLinkUrl(url)) return null;
+    const destination = parseLinkDestination(text, text_end + 2) orelse return null;
+    if (!isValidLinkUrl(destination.url)) return null;
     return .{
         .text = text[start + 1 .. text_end],
-        .url = url,
-        .end = k + 1,
+        .url = destination.url,
+        .end = destination.end,
     };
+}
+
+const LinkDestination = struct {
+    url: []const u8,
+    /// Index just past the closing `)`.
+    end: usize,
+};
+
+/// Parses `(destination "optional title")` starting just after the `(`.
+/// The destination is either `<...>` or a run without spaces whose
+/// parentheses balance; the title is validated and dropped.
+fn parseLinkDestination(text: []const u8, start: usize) ?LinkDestination {
+    var k = skipInlineSpaces(text, start);
+    if (k >= text.len) return null;
+
+    var url: []const u8 = undefined;
+    if (text[k] == '<') {
+        const close = std.mem.findScalarPos(u8, text, k + 1, '>') orelse return null;
+        url = text[k + 1 .. close];
+        for (url) |byte| if (byte == '<' or byte == '\n') return null;
+        k = close + 1;
+    } else {
+        const url_start = k;
+        var depth: usize = 0;
+        while (k < text.len) : (k += 1) {
+            const byte = text[k];
+            if (byte == '\\' and k + 1 < text.len) {
+                k += 1;
+                continue;
+            }
+            if (byte <= ' ' or byte == 0x7f) break;
+            if (byte == '(') {
+                depth += 1;
+            } else if (byte == ')') {
+                if (depth == 0) break;
+                depth -= 1;
+            }
+        }
+        if (depth != 0 or k == url_start) return null;
+        url = text[url_start..k];
+    }
+
+    const after_url = k;
+    k = skipInlineSpaces(text, k);
+    if (k > after_url and k < text.len and text[k] != ')') {
+        k = linkTitleEnd(text, k) orelse return null;
+        k = skipInlineSpaces(text, k);
+    }
+    if (k >= text.len or text[k] != ')') return null;
+    return .{ .url = url, .end = k + 1 };
+}
+
+fn skipInlineSpaces(text: []const u8, start: usize) usize {
+    var k = start;
+    while (k < text.len and (text[k] == ' ' or text[k] == '\t')) : (k += 1) {}
+    return k;
+}
+
+/// Returns the index just past a `"..."`, `'...'`, or `(...)` link title.
+fn linkTitleEnd(text: []const u8, start: usize) ?usize {
+    if (start >= text.len) return null;
+    const closer: u8 = switch (text[start]) {
+        '"' => '"',
+        '\'' => '\'',
+        '(' => ')',
+        else => return null,
+    };
+    var k = start + 1;
+    while (k < text.len) : (k += 1) {
+        if (text[k] == '\\' and k + 1 < text.len) {
+            k += 1;
+            continue;
+        }
+        if (text[k] == '\n') return null;
+        if (text[k] == closer) return k + 1;
+    }
+    return null;
 }
 
 fn parseAngleAutolink(text: []const u8, start: usize) ?InlineLink {

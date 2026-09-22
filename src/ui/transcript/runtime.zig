@@ -1,4 +1,5 @@
 const std = @import("std");
+const shared_theme = @import("../../core/shared/theme.zig");
 const debug_trace = @import("../../core/shared/debug_trace.zig");
 const display_width = @import("../../core/shared/display_width.zig");
 const input_action = @import("../../core/input/input_action.zig");
@@ -3934,7 +3935,7 @@ test "retintEntriesForTheme rewrites owned presentation without touching externa
     const segments = runtime.lookupAssistantSegments(assistant_id).?;
     try segments.text.appendSlice(alloc, "\x1b[38;5;245mcode\x1b[39m \x1b[38;5;252m✓\x1b[39m\n");
 
-    try runtime.retintEntriesForTheme(alloc, false, true);
+    try runtime.retintEntriesForTheme(alloc, shared_theme.builtin(false), shared_theme.builtin(true));
 
     try std.testing.expectEqual(owned_id, runtime.entries.items[0].id());
     try std.testing.expectEqual(command_id, runtime.entries.items[1].id());
@@ -3956,6 +3957,36 @@ test "retintEntriesForTheme rewrites owned presentation without touching externa
         "\x1b[38;5;247mcode\x1b[39m \x1b[38;5;238m✓\x1b[39m\n",
         runtime.entries.items[3].assistant_turn.segments.text.items,
     );
+}
+
+test "retintEntriesForTheme updates custom palette assistant text and table cells" {
+    const alloc = std.testing.allocator;
+    const previous = shared_theme.current();
+    defer shared_theme.activate(previous);
+    var from = shared_theme.fx_dark;
+    from.inline_code_open = "\x1b[38;2;12;34;56m";
+    var to = shared_theme.fx_light;
+    to.inline_code_open = "\x1b[38;2;65;43;21m";
+    shared_theme.activate(from);
+    var runtime = TranscriptRuntime{ .layout = .{
+        .rows = 24,
+        .cols = 80,
+        .content_bottom = 20,
+        .divider_top_row = 21,
+        .input_row = 22,
+        .divider_bottom_row = 23,
+        .hint_row = 24,
+    }, .owned_top_row = 1 };
+    defer runtime.deinit(alloc);
+    const assistant_id = try runtime.appendAssistantTurnEntry(alloc);
+    try runtime.lookupAssistantSegments(assistant_id).?.text.appendSlice(alloc, "\x1b[38;2;12;34;56mcode\x1b[39m");
+    const table = try @import("../../core/agent/assistant_presentation.zig").parseTablePayload(alloc, "| header |\n| --- |\n| `cell` |\n");
+    _ = try runtime.appendAssistantTableOwned(alloc, table);
+    try runtime.retintEntriesForTheme(alloc, from, to);
+    try std.testing.expectEqualStrings("\x1b[38;2;65;43;21mcode\x1b[39m", runtime.lookupAssistantSegments(assistant_id).?.text.items);
+    const cell = runtime.entries.items[1].assistant_table.table.rows[1].cells[0];
+    try std.testing.expect(std.mem.find(u8, cell, to.inline_code_open) != null);
+    try std.testing.expect(std.mem.find(u8, cell, from.inline_code_open) == null);
 }
 
 pub fn wrapAssistantText(alloc: Allocator, text: []const u8, cols: u16) ![]u8 {
@@ -6135,10 +6166,10 @@ pub const TranscriptRuntime = struct {
     pub fn retintEntriesForTheme(
         self: *TranscriptRuntime,
         alloc: Allocator,
-        from_light: bool,
-        to_light: bool,
+        from: shared_theme.Theme,
+        to: shared_theme.Theme,
     ) !void {
-        return transcript_store.retintEntriesForTheme(self, alloc, from_light, to_light);
+        return transcript_store.retintEntriesForTheme(self, alloc, from, to);
     }
 
     pub fn setTranscriptPresentationDepth(
@@ -11984,7 +12015,7 @@ test "terminal reset drops stale mid-scrollback footer clear before reanchor" {
         .footer_clean_allowed = false,
         .synchronized_update = false,
         .cursor_target = null,
-        .footer_reservation_source = .none,
+
         .bottom_reserved_rows = 0,
         .preserve_scrollback = true,
     };
@@ -12269,7 +12300,7 @@ test "measured recovery rebases from accepted projection before retiring resize 
             .col = prepared.cursor.cursor_col,
             .visible = true,
         },
-        .footer_reservation_source = .none,
+
         .bottom_reserved_rows = 0,
         .preserve_scrollback = true,
     };
@@ -12429,7 +12460,7 @@ test "source rewrite replays unchanged history prefix after footer projection re
             .col = prepared.cursor.cursor_col,
             .visible = true,
         },
-        .footer_reservation_source = .none,
+
         .bottom_reserved_rows = 0,
         .preserve_scrollback = true,
     };

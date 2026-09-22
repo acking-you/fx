@@ -1,0 +1,61 @@
+diff --git a/build.zig b/build.zig
+index b19b9fed..7ec2cc0b 100644
+--- a/build.zig
++++ b/build.zig
+@@ -80,0 +81 @@ pub fn build(b: *std.Build) void {
++        .filters = &.{"upstream subagent read allocation probe"},
+diff --git a/src/core/subagent/tool_host.zig b/src/core/subagent/tool_host.zig
+index 2a5c6696..296137d1 100644
+--- a/src/core/subagent/tool_host.zig
++++ b/src/core/subagent/tool_host.zig
+@@ -2171,0 +2172,50 @@ pub fn captureHostAuthorityWithMcpView(
++
++test "upstream subagent read allocation probe" {
++    const alloc = std.testing.allocator;
++    var tmp = std.testing.tmpDir(.{});
++    defer tmp.cleanup();
++    const home = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
++    defer alloc.free(home);
++    var sessions = try session_store.Store.initFromHome(alloc, home, home);
++    defer sessions.deinit(alloc);
++    const large_text = try alloc.alloc(u8, 1024 * 1024);
++    defer alloc.free(large_text);
++    @memset(large_text, 'x');
++    var history = [_]types.HistoryTurn{
++        .{ .assistant = .{ .user = .{ .text = @constCast("old task"), .work_id = @constCast("old-work") }, .assistant = large_text } },
++        .{ .assistant = .{ .user = .{ .text = @constCast("new task"), .work_id = @constCast("target-work") }, .assistant = @constCast("SMALL_RESULT") } },
++    };
++    var loaded = try sessions.startWritableSession(alloc, .{
++        .id = @constCast("memory-probe-child"),
++        .origin_workspace_root = @constCast(home),
++        .workspace_root = @constCast(home),
++        .created_at_ms = 1,
++        .updated_at_ms = 1,
++        .conversation_language = session.ConversationLanguage.literal("en"),
++        .preferences = .{ .model = @constCast("test"), .effort = .auto, .fast_mode = false },
++        .history = &history,
++        .total_input_tokens = 0,
++        .total_output_tokens = 0,
++    });
++    defer loaded.deinit(alloc);
++    var runtime = Runtime{ .alloc = alloc, .sessions = &sessions, .root_id = undefined, .host_authority = undefined, .child_runner = undefined, .approvals = undefined, .authority_resolver = undefined, .managed = undefined };
++    var turn = std.heap.ArenaAllocator.init(alloc);
++    defer turn.deinit();
++    var first_capacity: usize = 0;
++    for (0..16) |i| {
++        const result = (try runtime.managedResultText(turn.allocator(), "memory-probe-child", "target-work")).?;
++        try std.testing.expectEqualStrings("SMALL_RESULT", result);
++        turn.allocator().free(result);
++        if (i == 0) first_capacity = turn.queryCapacity();
++    }
++    const final_capacity = turn.queryCapacity();
++    std.debug.print("UPSTREAM_MEMORY_PROBE history_bytes={d} reads=16 returned_bytes=12 arena_after_1={d} arena_after_16={d}\n", .{large_text.len, first_capacity, final_capacity});
++    try std.testing.expect(final_capacity > first_capacity * 4);
++    // The same private production helper also accepts an allocator that can
++    // free each decoded state immediately. The testing allocator checks cleanup.
++    for (0..16) |_| {
++        const result = (try runtime.managedResultText(alloc, "memory-probe-child", "target-work")).?;
++        try std.testing.expectEqualStrings("SMALL_RESULT", result);
++        alloc.free(result);
++    }
++}
