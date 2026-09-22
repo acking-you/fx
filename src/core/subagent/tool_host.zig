@@ -521,12 +521,14 @@ pub const Runtime = struct {
             }
             runAfterTargetAuthorizationTestHook();
 
-            var result = try self.manager.execute(alloc, command, .{
+            // Session replay must release temporary allocations after each poll.
+            // The caller may use a turn arena; only the encoded result belongs there.
+            var result = try self.manager.execute(self.alloc, command, .{
                 .actor_id = options.caller_id,
                 .target_authorization = .{ .attached_to_root = self.root_id },
                 .timestamp_ms = options.timestamp_ms,
             });
-            defer result.deinit(alloc);
+            defer result.deinit(self.alloc);
 
             const requested_wait = wait orelse return self.encodeResult(
                 alloc,
@@ -6709,6 +6711,7 @@ const ReleasableLiveChild = struct {
     entered: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
     completed: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
     release: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    checkpoint_bytes: usize = 0,
 
     fn run(
         raw: ?*anyopaque,
@@ -6718,6 +6721,26 @@ const ReleasableLiveChild = struct {
         cancel: *std.atomic.Value(bool),
     ) execution.ServiceError!execution.RunOutcome {
         const self: *ReleasableLiveChild = @ptrCast(@alignCast(raw.?));
+        if (self.checkpoint_bytes != 0) {
+            const source = turn.alloc.alloc(u8, self.checkpoint_bytes) catch
+                return error.OutOfMemory;
+            defer turn.alloc.free(source);
+            @memset(source, 'x');
+            for (0..4) |_| {
+                turn.setRecoveryCheckpoint(.{
+                    .turn_id = 1,
+                    .user = .{ .text = message.content },
+                    .assistant_source = source,
+                    .cause = .network_interrupted,
+                    .action = .retrying_request,
+                    .authority = .{ .provider = .gateway, .model = @constCast("test/model") },
+                    .requested_fast_mode = false,
+                    .fast_mode = false,
+                    .max_provider_attempts = 10,
+                    .consumed_provider_attempts = 1,
+                }, io_mod.milliTimestamp()) catch return error.ProviderFailed;
+            }
+        }
         turn.appendLiveText(message.content);
         turn.toolActivityRecorder().record(
             "call-live",
@@ -6924,6 +6947,70 @@ test "inspect wait subscribes before reading and returns the settled child" {
     try std.testing.expect(std.mem.find(u8, inspected, "\"status\":\"idle\"") != null);
     try std.testing.expect(std.mem.find(u8, inspected, "wait_timed_out") == null);
     try std.testing.expect(std.mem.find(u8, inspected, "complete after the parent subscribes") != null);
+}
+
+test "inspect messages keep session replay out of the caller turn arena" {
+    const alloc = std.testing.allocator;
+    const root_id = "01J00000000000000000000000";
+    var env = try TestEnvironment.init(alloc);
+    defer env.deinit(alloc);
+    try env.createSession(alloc, root_id);
+    var runner = ReleasableLiveChild{ .checkpoint_bytes = 256 * 1024 };
+    var test_authority = TestAuthority{ .root_id = root_id };
+    const host = try Runtime.create(
+        alloc,
+        &env.store,
+        root_id,
+        test_authority.resolver(),
+        .{ .context = &runner, .run_fn = ReleasableLiveChild.run },
+    );
+    defer host.deinit();
+
+    var create = try domain.validateCommand(alloc, .{ .create = .{
+        .name = "checkpoint-worker",
+        .mode = .persistent,
+        .prompt = "finish after the parent inspects the recovery checkpoints",
+    } });
+    defer create.deinit(alloc);
+    const created = try host.execute(alloc, &create, testOptions(root_id, "create-checkpoint-worker"));
+    defer alloc.free(created);
+    const child_id = try resultChildIdAlloc(alloc, created);
+    defer alloc.free(child_id);
+    try runner.waitFor(&runner.entered, 1);
+
+    var inspect = try domain.validateCommand(alloc, .{ .inspect = .{
+        .id = child_id,
+        .sections = &.{ .status, .messages },
+        .limit = 5,
+    } });
+    defer inspect.deinit(alloc);
+    var turn = std.heap.ArenaAllocator.init(alloc);
+    defer turn.deinit();
+    const result_alloc = turn.allocator();
+    var first_output: ?[]const u8 = null;
+    for (0..12) |_| {
+        const inspected = try host.execute(result_alloc, &inspect, testOptions(root_id, "inspect-checkpoints"));
+        if (first_output == null) first_output = inspected;
+        try std.testing.expect(std.mem.find(u8, inspected, "\"status\":\"running\"") != null);
+        try std.testing.expect(std.mem.find(u8, inspected, "\"history_len\":0") != null);
+        try std.testing.expect(turn.queryCapacity() < 256 * 1024);
+    }
+
+    inspect.inspect.wait = .{ .until = .settled, .timeout_ms = 350, .after_generation = null };
+    const timed_out = try host.execute(result_alloc, &inspect, testOptions(root_id, "wait-for-checkpoints"));
+    try std.testing.expect(std.mem.find(u8, timed_out, "wait_timed_out") != null);
+    try std.testing.expect(turn.queryCapacity() < 256 * 1024);
+
+    runner.release.store(true, .seq_cst);
+    try runner.waitFor(&runner.completed, 1);
+    inspect.inspect.wait = .{ .until = .settled, .timeout_ms = 2_000, .after_generation = null };
+    const completed = try host.execute(result_alloc, &inspect, testOptions(root_id, "read-completed-history"));
+    try std.testing.expect(std.mem.find(u8, completed, "\"history_len\":1") != null);
+    try std.testing.expect(std.mem.find(u8, completed, "finish after the parent inspects") != null);
+    try std.testing.expect(turn.queryCapacity() < 256 * 1024);
+    // Earlier results must survive later inspections and child completion.
+    try std.testing.expect(std.mem.find(u8, first_output.?, "\"status\":\"running\"") != null);
+    try std.testing.expect(std.mem.find(u8, timed_out, "wait_timed_out") != null);
 }
 
 test "inspect wait timeout returns the latest authoritative inspection" {
