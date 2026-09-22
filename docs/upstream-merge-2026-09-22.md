@@ -32,7 +32,7 @@ feature: the following inventory records the actual resulting behavior.
 | Question resolution | Wrap complete questions and answers into hanging continuation rows instead of truncating them. Keep the existing permission/question owner. |
 | Search evidence | Normalize absent/empty search roots to `.` while preserving the fork's durable execution-memory masking and tool semantics. |
 | PGSO tooling | Accept profile/link qualification, artifact provenance, bounded symbol-output capture, and process-exit timing. Retain the fork's native runners, corpus owners, and release routing. |
-| Shared cleanup | Accept unused-field/declaration removals where fork callers do not need them, and retain compatible render-lab/native-clear coverage. |
+| Shared cleanup | Accept unused-field/declaration removals where fork callers do not need them, and retain compatible render-lab coverage. Port the native-clear probe guard for alternate screens so typing in Ctrl+O does not reset the transcript. |
 
 ## Preserved architecture and explicit follow-ups
 
@@ -59,7 +59,10 @@ training owner; no root E2E owner or shard entry is orphaned.
 
 ## Local evidence
 
-- ReleaseSafe build; formatting, public-surface audit, and whitespace checks.
+- ReleaseSafe native build and Windows x86_64 cross-build; formatting,
+  public-surface audit, and whitespace checks. Cache permission and file-handle
+  handling uses BYOK's existing portable helpers; Windows CI also runs the
+  cache round-trip/tampering test.
 - Focused Zig coverage for themes, file indexing, links/images, inline code,
   highlighting, questions, search evidence, and both PR #44 allocation guards.
 - Fresh native binary: seven custom-theme TUI cases plus a 128-step inspection
@@ -68,8 +71,10 @@ training owner; no root E2E owner or shard entry is orphaned.
 - File-picker TUI: 15 deterministic cases passed, including rapid refresh,
   large indexes, scope/path changes, and two process-resume cycles. One existing
   credentialed live-provider case was skipped.
-- PGSO Python suite: 190 of 192 passed initially; the corpus and exit-timing
-  mismatches were repaired and all 46 tests in those two modules then passed.
+- Native-clear TUI: all five cases passed, including typing inside Ctrl+O;
+  three focused question/approval wrapping cases also passed.
+- PGSO Python suite: all 192 tests passed after reconciling the corpus and
+  process-exit timing checks.
 - PGSO artifact harness: 13 portable checks passed. The two native macOS arm64
   artifact workloads cannot run on this Linux host and are not claimed as
   qualified release evidence.

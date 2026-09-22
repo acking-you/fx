@@ -2397,6 +2397,9 @@ const App = struct {
     fn nativeClearProbeEligible(self: *const App, byte: u8) bool {
         if (byte < 32 or byte == 127) return false;
         if (io_mod.getenv("TMUX") != null) return false;
+        // An alternate-screen surface owns the cursor; comparing it with the
+        // main-grid footer would incorrectly report a native terminal clear.
+        if (self.terminal.alternate_screen_owner != .none) return false;
         if (self.terminal_input_runtime.native_clear_probe.disabled() or
             self.terminal_input_runtime.native_clear_probe.active() or
             self.input_runtime.paste.active() or

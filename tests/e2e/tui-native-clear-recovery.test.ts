@@ -183,13 +183,10 @@ tmuxTest("typing inside the ctrl+o full transcript never starts the native-clear
     stderrPath: stderr_path,
     env: {
       HOME: dir,
-      AI_GATEWAY_API_KEY: "fake-native-clear-key",
-      VERCEL_OIDC_TOKEN: undefined,
+      OPENAI_API_KEY: "fake-native-clear-key",
       FX_THEME: undefined,
-      FX_GATEWAY_BASE_URL: gateway.baseUrl,
-      FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+      FX_RESPONSES_BASE_URL: gateway.baseUrl,
       FX_MODEL: FAKE_GATEWAY_MODEL,
-      FX_AUTO_UPGRADE: "0",
       TMUX: undefined,
       FX_TRACE_LOG: trace_path,
       FX_TRACE_SCOPES: "native_clear",
@@ -213,7 +210,7 @@ tmuxTest("typing inside the ctrl+o full transcript never starts the native-clear
     // While the full transcript owns the alternate screen, the terminal cursor
     // no longer reflects the main-grid footer row, so the probe must not begin.
     await session.sendKeys("C-o");
-    await session.waitForText("ctrl+o close", 10_000);
+    await session.waitForText("ctrl o close", 10_000);
     await session.sendLiteral("j");
 
     // The typed byte still reaches the composer through the modal fallthrough.

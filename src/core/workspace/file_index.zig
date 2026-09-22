@@ -99,7 +99,6 @@ const LoaderOutcome = union(enum) {
 
 const Generation = struct {
     id: usize,
-    scope_epoch: u64 = 0,
     /// Cache-sourced generations publish fast from the persisted index and
     /// always trigger one real scan behind them.
     from_cache: bool = false,
