@@ -74,6 +74,8 @@ training owner; no root E2E owner or shard entry is orphaned.
   credentialed live-provider case was skipped.
 - Native-clear TUI: all five cases passed, including typing inside Ctrl+O;
   three focused question/approval wrapping cases also passed.
+- Streamed ANSI/OSC-8 snapshot and same-shell render-lab relaunch passed after
+  updating link-color expectations and retaining BYOK's notice text.
 - PGSO Python suite: all 192 tests passed after reconciling the corpus and
   process-exit timing checks.
 - Existing native inspect benchmark: 64/64 completed under a 2 GiB address-space
