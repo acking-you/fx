@@ -48,6 +48,7 @@ claim that it is available in BYOK.
 | Shared gateway connection pool | Keep current transport ownership. Port only with the custom endpoint lifetime, provider switching, permission reviewer, compaction, and child route snapshots accounted for. |
 | Managed `run`/`message` subagents and their status/model-override wiring | Keep persistent `create`/`send`/`inspect` control, authority checks, approval ownership, and manager UI. Preserve PR #44's allocator and single-replay fixes unchanged. |
 | Autonomous response recovery, reviewer transport retries, new embedded SDK steering/tool/image wiring | Keep the fork's current runtime, same-turn steering, single compaction strategy, exact-action review policy, and Responses/ACP host contracts. These changes require owner-specific ports rather than parallel policy paths. |
+| Standalone upstream PGSO artifact comparison | Defer `benchmarks/pgso_artifacts.test.ts`: it hard-codes `vercel-labs/fx` artifacts on `main`, Vercel gateway credentials, and the deferred autonomous-recovery scenario. It has no BYOK workflow caller. Keep the existing fork PGSO pipeline and the PR #44 inspection memory/latency benchmark. |
 | Notice glyph/casing and streaming delimiter changes | Keep fork plan, reasoning, permission, cancellation, and existing presentation semantics; custom themes and link colors are integrated separately. |
 | MCP, Vercel onboarding, old shell tools, automatic vendor upgrade, Slack installer | Keep the removed or unsupported product slices absent. No executable `run_command`/second shell backend, MCP configuration/transport, or Vercel login route is restored. |
 | Upstream release versions and release workflow | Keep the fork's version and `byok` release owner; this sync is not a fork release. |
@@ -75,9 +76,6 @@ training owner; no root E2E owner or shard entry is orphaned.
   three focused question/approval wrapping cases also passed.
 - PGSO Python suite: all 192 tests passed after reconciling the corpus and
   process-exit timing checks.
-- PGSO artifact harness: 13 portable checks passed. The two native macOS arm64
-  artifact workloads cannot run on this Linux host and are not claimed as
-  qualified release evidence.
 - Existing native inspect benchmark: 64/64 completed under a 2 GiB address-space
   limit, 40.46 MiB peak RSS, 8.47 ms mean tool span and 10 ms P95. This is one
   regression run during concurrent build activity, not a new controlled
