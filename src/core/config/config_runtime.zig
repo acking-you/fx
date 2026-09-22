@@ -50,6 +50,7 @@ pub const Settings = struct {
     collapse_tool_calls: ?bool = null,
     startup_scrollback: ?bool = null,
     prompt_history_enabled: ?bool = null,
+    theme: ?[]const u8 = null,
     effort: ?types.ReasoningEffort = null,
     statusline_context: ?bool = null,
     statusline_session: ?bool = null,
@@ -61,6 +62,7 @@ pub const Settings = struct {
     has_permission_rules: bool = false,
 
     pub fn deinit(self: *Settings, alloc: Allocator) void {
+        if (self.theme) |value| alloc.free(value);
         self.models.deinit(alloc);
         self.permission_rules.deinit(alloc);
         self.* = .{};
@@ -556,6 +558,7 @@ fn isProfileOnlySettingKey(key: []const u8) bool {
         "context_limits",
         "skill_match_fuzzy",
         "first_call_tool_choice",
+        "theme",
         "permission_mode",
         "credential_source",
         "yolo_acknowledged",
@@ -1261,6 +1264,10 @@ fn parseProfileOnlyFields(
     parse_workspace_statusline: bool,
 ) !void {
     if (root.object.contains("skill_match_fuzzy")) return error.RetiredSkillMatchFuzzy;
+    if (root.object.get("theme")) |value| {
+        if (value != .string) return error.InvalidThemeType;
+        if (value.string.len > 0) settings.theme = try alloc.dupe(u8, value.string);
+    }
     if (root.object.get("model")) |model_value| {
         const value = model_value;
         if (value != .string) return error.InvalidModelType;
@@ -1447,6 +1454,11 @@ fn mergeSettings(target: *Settings, incoming: *Settings, alloc: Allocator) void 
     if (incoming.max_agent_steps) |value| target.max_agent_steps = value;
     if (incoming.max_tool_result_bytes) |value| target.max_tool_result_bytes = value;
     target.context_limits.merge(incoming.context_limits);
+    if (incoming.theme) |value| {
+        if (target.theme) |old| alloc.free(old);
+        target.theme = value;
+        incoming.theme = null;
+    }
     if (incoming.first_call_tool_choice) |value| target.first_call_tool_choice = value;
     if (incoming.context) |value| target.context = value;
     if (incoming.fast_mode) |value| target.fast_mode = value;
@@ -3524,4 +3536,34 @@ test "malformed or duplicate additional directories do not discard sibling setti
         }
         try std.testing.expect(found_diagnostic);
     }
+}
+
+test "theme setting parses from profile settings and project theme is ignored" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io_mod.getIo(), "home/.fx");
+    try tmp.dir.createDirPath(io_mod.getIo(), "workspace");
+    try writeFixtureFile(tmp.dir, "home/.fx/settings.json", "{\"theme\":\"cursor-dark\"}\n");
+    try writeFixtureFile(tmp.dir, "workspace/.fx.json", "{\"theme\":\"project-theme\"}\n");
+
+    const home_root = try io_mod.dirRealpathAlloc(std.testing.allocator, tmp.dir, "home");
+    defer std.testing.allocator.free(home_root);
+    const workspace_root = try io_mod.dirRealpathAlloc(std.testing.allocator, tmp.dir, "workspace");
+    defer std.testing.allocator.free(workspace_root);
+
+    var result = try loadMergedSettingsDetailedFromHome(std.testing.allocator, home_root, workspace_root);
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("cursor-dark", result.settings.theme.?);
+    try expectIgnoredProjectKey(result.diagnostics, "theme");
+}
+
+test "theme setting rejects non-string values" {
+    try std.testing.expectError(
+        error.InvalidThemeType,
+        parseSettingsJson(std.testing.allocator, "{\"theme\":3}"),
+    );
+    var parsed = try parseSettingsJson(std.testing.allocator, "{\"theme\":\"cursor-light\"}");
+    defer parsed.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("cursor-light", parsed.theme.?);
 }

@@ -3,6 +3,7 @@ const Allocator = std.mem.Allocator;
 const ansi = @import("ansi.zig");
 const tu = @import("text_util.zig");
 const payload = @import("payload.zig");
+const shared_theme = @import("../../shared/theme.zig");
 
 pub fn writeInlineNoBold(
     alloc: Allocator,
@@ -333,6 +334,9 @@ fn emitInlineLink(
     try out.appendSlice(alloc, link.destination_prefix);
     try out.appendSlice(alloc, link.url);
     try out.appendSlice(alloc, "\x1b\\");
+    // Link text carries the theme's link color in addition to the underline.
+    const link_style = shared_theme.current().link_style;
+    try out.appendSlice(alloc, link_style);
     try out.appendSlice(alloc, ansi.underline_open);
     if (visible_prefix) |prefix| try out.appendSlice(alloc, prefix);
     const visible_text = if (link.text.len == 0 and visible_prefix != null) "image" else link.text;
@@ -341,6 +345,7 @@ fn emitInlineLink(
         .literal => try out.appendSlice(alloc, visible_text),
     }
     try out.appendSlice(alloc, ansi.underline_close);
+    try out.appendSlice(alloc, shared_theme.closingFor(link_style));
     try out.appendSlice(alloc, "\x1b]8;;\x1b\\");
     if (restore_underline_after_link) try out.appendSlice(alloc, ansi.underline_open);
 }
@@ -363,16 +368,90 @@ fn parseInlineBracketDestination(text: []const u8, start: usize, allow_empty_tex
     const text_end = j;
     if (!allow_empty_text and text_end == start + 1) return null;
     if (text_end + 1 >= text.len or text[text_end + 1] != '(') return null;
-    var k = text_end + 2;
-    while (k < text.len and text[k] != ')' and text[k] != '\n') : (k += 1) {}
-    if (k >= text.len or text[k] != ')') return null;
-    const url = text[text_end + 2 .. k];
-    if (!isValidLinkUrl(url)) return null;
+    const destination = parseLinkDestination(text, text_end + 2) orelse return null;
+    if (!isValidLinkUrl(destination.url)) return null;
     return .{
         .text = text[start + 1 .. text_end],
-        .url = url,
-        .end = k + 1,
+        .url = destination.url,
+        .end = destination.end,
     };
+}
+
+const LinkDestination = struct {
+    url: []const u8,
+    /// Index just past the closing `)`.
+    end: usize,
+};
+
+/// Parses `(destination "optional title")` starting just after the `(`.
+/// The destination is either `<...>` or a run without spaces whose
+/// parentheses balance; the title is validated and dropped.
+fn parseLinkDestination(text: []const u8, start: usize) ?LinkDestination {
+    var k = skipInlineSpaces(text, start);
+    if (k >= text.len) return null;
+
+    var url: []const u8 = undefined;
+    if (text[k] == '<') {
+        const close = std.mem.findScalarPos(u8, text, k + 1, '>') orelse return null;
+        url = text[k + 1 .. close];
+        for (url) |byte| if (byte == '<' or byte == '\n') return null;
+        k = close + 1;
+    } else {
+        const url_start = k;
+        var depth: usize = 0;
+        while (k < text.len) : (k += 1) {
+            const byte = text[k];
+            if (byte == '\\' and k + 1 < text.len) {
+                k += 1;
+                continue;
+            }
+            if (byte <= ' ' or byte == 0x7f) break;
+            if (byte == '(') {
+                depth += 1;
+            } else if (byte == ')') {
+                if (depth == 0) break;
+                depth -= 1;
+            }
+        }
+        if (depth != 0 or k == url_start) return null;
+        url = text[url_start..k];
+    }
+
+    const after_url = k;
+    k = skipInlineSpaces(text, k);
+    if (k > after_url and k < text.len and text[k] != ')') {
+        k = linkTitleEnd(text, k) orelse return null;
+        k = skipInlineSpaces(text, k);
+    }
+    if (k >= text.len or text[k] != ')') return null;
+    return .{ .url = url, .end = k + 1 };
+}
+
+fn skipInlineSpaces(text: []const u8, start: usize) usize {
+    var k = start;
+    while (k < text.len and (text[k] == ' ' or text[k] == '\t')) : (k += 1) {}
+    return k;
+}
+
+/// Returns the index just past a `"..."`, `'...'`, or `(...)` link title.
+fn linkTitleEnd(text: []const u8, start: usize) ?usize {
+    if (start >= text.len) return null;
+    const closer: u8 = switch (text[start]) {
+        '"' => '"',
+        '\'' => '\'',
+        '(' => ')',
+        else => return null,
+    };
+    var k = start + 1;
+    while (k < text.len) : (k += 1) {
+        if (text[k] == '\\' and k + 1 < text.len) {
+            k += 1;
+            continue;
+        }
+        if (text[k] == '\n') return null;
+        if (text[k] == closer) return k + 1;
+    }
+    return null;
 }
 
 fn parseAngleAutolink(text: []const u8, start: usize) ?InlineLink {

@@ -20,12 +20,6 @@ pub const LineRef = struct {
     }
 };
 
-pub const HardLinePolicy = enum {
-    eof_after_trailing_newline_is_cursor_only,
-};
-
-pub const hard_line_policy: HardLinePolicy = .eof_after_trailing_newline_is_cursor_only;
-
 pub const HardLineStarts = struct {
     starts: []usize,
     ends_with_newline: bool,

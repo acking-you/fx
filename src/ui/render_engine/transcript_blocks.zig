@@ -2,6 +2,8 @@ const std = @import("std");
 const build_checkpoint = @import("build_checkpoint.zig");
 const debug_trace = @import("../../core/shared/debug_trace.zig");
 const display_width = @import("../../core/shared/display_width.zig");
+const shared_theme = @import("../../core/shared/theme.zig");
+const ui_render = @import("../render.zig");
 const types = @import("../../core/shared/types.zig");
 const command_output_content = @import("../../core/tooling/command_output_content.zig");
 const assistant_wrap = @import("assistant_wrap.zig");
@@ -11,8 +13,8 @@ const input_visual_layout = @import("../input/visual_layout.zig");
 const vt_emulator = @import("../../core/terminal/engine.zig");
 const assistant_presentation = @import("../../core/agent/assistant_presentation.zig");
 const thought_presentation = @import("../../core/output/thought_presentation.zig");
-const code_highlight = @import("code_highlight.zig");
-const code_highlight_languages = @import("code_highlight_languages.zig");
+const code_highlight = @import("../../core/agent/presentation/code_highlight.zig");
+const code_highlight_languages = @import("../../core/agent/presentation/code_highlight_languages.zig");
 const mermaid_renderer = @import("mermaid.zig");
 
 const Allocator = std.mem.Allocator;
@@ -931,7 +933,10 @@ fn renderCodeBlockForTranscriptWithTheme(
     else
         "";
     const styled_code = if (profile) |resolved|
-        try code_highlight.highlight(alloc, block.code, resolved, theme)
+        if (resolved.diff_lines)
+            try code_highlight.highlightDiff(alloc, block.code, theme, ui_render.diff_added_marker_style, ui_render.diff_removed_marker_style)
+        else
+            try code_highlight.highlight(alloc, block.code, resolved, theme, null)
     else
         null;
     defer if (styled_code) |code| alloc.free(code);
@@ -1005,7 +1010,7 @@ const CodeStyle = struct {
 
     fn applySequence(self: *CodeStyle, sequence: []const u8) void {
         if (sequence.len < 4 or sequence[0] != 0x1b or sequence[1] != '[' or sequence[sequence.len - 1] != 'm') return;
-        if (std.mem.startsWith(u8, sequence, "\x1b[38;5;")) {
+        if (shared_theme.sgrHasParam(sequence, "38")) {
             self.foreground = sequence;
         } else if (std.mem.eql(u8, sequence, "\x1b[39m") or std.mem.eql(u8, sequence, "\x1b[0m")) {
             self.foreground = null;

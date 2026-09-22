@@ -1,4 +1,5 @@
 const std = @import("std");
+const shared_theme = @import("../shared/theme.zig");
 const question_prompt = @import("../agent/question_prompt.zig");
 const input_completion_runtime = @import("input_completion_runtime.zig");
 const input_queue_runtime = @import("input_queue_runtime.zig");
@@ -499,7 +500,21 @@ pub fn Runtime(comptime App: type) type {
                 return;
             };
             app.pacer.rethemeInlineCode(light);
-            ui_render.initTheme(light, rgb);
+            if (shared_theme.sourceName() orelse ui_render.explicitThemeName()) |name| {
+                // Custom themes re-resolve on live flips: sibling swap or
+                // builtin fallback, same rule as startup.
+                const custom = shared_theme.resolveNamed(app.alloc, name, light, .{ .truecolor = ui_render.truecolorIsEnabled() }) catch |err| blk: {
+                    debug_trace.logf("theme", "live_theme_resolve_failed name={s} err={s}", .{ name, @errorName(err) });
+                    break :blk null;
+                };
+                if (custom) |resolved| {
+                    ui_render.applyTheme(resolved, rgb);
+                } else {
+                    ui_render.initTheme(light, rgb);
+                }
+            } else {
+                ui_render.initTheme(light, rgb);
+            }
             app.shell.setCommandOutputRenderPolicy(shellStyles());
             try app.shell.requestTerminalReset(&app.metrics);
             app.shell.render_requests.request(.transcript);
@@ -3978,7 +3993,7 @@ test "core.app_render_runtime rejects prepared transcript outside final plan ban
         .footer_clean_allowed = true,
         .synchronized_update = true,
         .cursor_target = .{ .row = 43, .col = 3, .visible = true },
-        .footer_reservation_source = .transient_activity,
+
         .bottom_reserved_rows = 2,
         .preserve_scrollback = true,
     };

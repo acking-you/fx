@@ -10,14 +10,12 @@ const assistant_presentation = @import("../core/agent/assistant_presentation.zig
 const main = @import("../main.zig");
 const theme_detection = @import("terminal/theme_detection.zig");
 const theme_protocol = @import("terminal/theme_protocol.zig");
+const shared_theme = @import("../core/shared/theme.zig");
 const visual_layout = @import("input/visual_layout.zig");
 
-pub const input_prefix = "❯ ";
 pub const TerminalRgb = user_message_card.Rgb;
 pub const reset_style = "\x1b[0m";
 pub const bold_style = "\x1b[1m";
-pub const app_name = "fx";
-pub const right_tag = "/fx";
 pub const ask_activity_label = "⏺ Asking";
 
 const user_message_card = @import("assistant/user_message_card.zig");
@@ -25,35 +23,27 @@ const user_message_card = @import("assistant/user_message_card.zig");
 pub const welcome_message_reserved_rows: u16 = 11;
 
 pub var is_light: bool = false;
-pub var divider_style: []const u8 = "\x1b[38;5;240m";
-pub var hint_style: []const u8 = "\x1b[38;5;255m";
-pub var statusline_style: []const u8 = "\x1b[38;5;245m";
-pub var tag_style: []const u8 = "\x1b[1;38;5;255m";
-pub var subtitle_style: []const u8 = "\x1b[1;38;5;255m";
-pub var system_notice_label_style: []const u8 = "\x1b[1;38;5;252m";
-pub var system_notice_text_style: []const u8 = "\x1b[38;5;250m";
+pub var divider_style: []const u8 = shared_theme.fx_dark.divider_style;
+pub var hint_style: []const u8 = shared_theme.fx_dark.hint_style;
+pub var statusline_style: []const u8 = shared_theme.fx_dark.statusline_style;
+pub var tag_style: []const u8 = shared_theme.fx_dark.tag_style;
+pub var subtitle_style: []const u8 = shared_theme.fx_dark.subtitle_style;
+pub var system_notice_label_style: []const u8 = shared_theme.fx_dark.system_notice_label_style;
+pub var system_notice_text_style: []const u8 = shared_theme.fx_dark.system_notice_text_style;
+pub var dim_style: []const u8 = shared_theme.fx_dark.dim_style;
+pub var warning_style: []const u8 = shared_theme.fx_dark.warning_style;
+pub var green_style: []const u8 = shared_theme.fx_dark.green_style;
+pub var red_style: []const u8 = shared_theme.fx_dark.red_style;
+pub var diff_added_style: []const u8 = shared_theme.fx_dark.diff_added_style;
+pub var diff_removed_style: []const u8 = shared_theme.fx_dark.diff_removed_style;
+pub var diff_added_marker_style: []const u8 = shared_theme.fx_dark.diff_added_marker_fallback;
+pub var diff_removed_marker_style: []const u8 = shared_theme.fx_dark.diff_removed_marker_fallback;
+pub var approval_button_active_style: []const u8 = shared_theme.fx_dark.approval_button_active_style;
+pub var approval_button_inactive_style: []const u8 = shared_theme.fx_dark.approval_button_inactive_style;
+pub var selected_completion_style: []const u8 = shared_theme.fx_dark.selected_completion_style;
 pub var reasoning_summary_style: []const u8 = "\x1b[3;38;5;245m";
-pub var dim_style: []const u8 = "\x1b[38;5;245m";
-pub var warning_style: []const u8 = "\x1b[38;5;252m";
-pub var green_style: []const u8 = "\x1b[38;5;252m";
-pub var red_style: []const u8 = "\x1b[38;5;252m";
-pub var diff_added_style: []const u8 = "\x1b[38;5;252m";
-pub var diff_removed_style: []const u8 = "\x1b[38;5;252m";
-// The line number and +/- sign carry the only color in an otherwise
-// monochrome diff: green for additions (#30A46C), red for deletions
-// (#E5484D). The line text stays neutral. Truecolor when the terminal
-// supports it, 256-color fallback otherwise.
-const diff_added_marker_truecolor = "\x1b[38;2;48;164;108m";
-const diff_removed_marker_truecolor = "\x1b[38;2;229;72;77m";
-const diff_added_marker_fallback = "\x1b[38;5;71m";
-const diff_removed_marker_fallback = "\x1b[38;5;167m";
-pub var diff_added_marker_style: []const u8 = diff_added_marker_fallback;
-pub var diff_removed_marker_style: []const u8 = diff_removed_marker_fallback;
-pub var approval_button_active_style: []const u8 = "\x1b[48;5;255m\x1b[38;5;235m\x1b[1m";
-pub var approval_button_inactive_style: []const u8 = "\x1b[48;5;239m\x1b[38;5;255m";
-pub var selected_completion_style: []const u8 = "\x1b[1;38;5;255m";
 // Statusbar permissions "auto": a step brighter than the statusline gray.
-pub var permission_auto_style: []const u8 = "\x1b[38;5;252m";
+pub var permission_auto_style: []const u8 = shared_theme.fx_dark.permission_auto_style;
 var active_terminal_background: ?TerminalRgb = null;
 
 var truecolor_enabled: bool = true;
@@ -62,61 +52,56 @@ pub fn setTruecolorSupport(enabled: bool) void {
     truecolor_enabled = enabled;
 }
 
+// A configured light|dark pin (FX_THEME or the settings "theme" key) locks the
+// variant. Custom themes keep the live monitor so terminal mode flips
+// re-resolve the theme pair without a restart.
+pub fn themeInputLocked() bool {
+    return explicitThemeOverride() != null or shared_theme.variantPinned();
+}
+
+pub fn truecolorIsEnabled() bool {
+    return truecolor_enabled;
+}
+
 pub fn initTheme(light: bool, terminal_bg: ?TerminalRgb) void {
-    is_light = light;
+    applyTheme(shared_theme.builtin(light), terminal_bg);
+}
+
+pub fn applyTheme(theme: shared_theme.Theme, terminal_bg: ?TerminalRgb) void {
+    shared_theme.activate(theme);
+    is_light = theme.light;
     active_terminal_background = terminal_bg;
-    assistant_presentation.setInlineCodeTheme(light);
-    if (light) {
-        divider_style = "\x1b[38;5;250m";
-        hint_style = "\x1b[38;5;235m";
-        statusline_style = "\x1b[38;5;241m";
-        tag_style = "\x1b[1;38;5;235m";
-        subtitle_style = "\x1b[1;38;5;235m";
-        system_notice_label_style = "\x1b[1;38;5;238m";
-        system_notice_text_style = "\x1b[38;5;241m";
-        reasoning_summary_style = "\x1b[3;38;5;247m";
-        dim_style = "\x1b[38;5;247m";
-        warning_style = "\x1b[38;5;238m";
-        green_style = "\x1b[38;5;238m";
-        red_style = "\x1b[38;5;238m";
-        diff_added_style = "\x1b[38;5;238m";
-        diff_removed_style = "\x1b[38;5;238m";
-        approval_button_active_style = "\x1b[48;5;236m\x1b[38;5;255m\x1b[1m";
-        approval_button_inactive_style = "\x1b[48;5;251m\x1b[38;5;237m";
-        selected_completion_style = "\x1b[1;38;5;235m";
-        permission_auto_style = "\x1b[38;5;238m";
-    } else {
-        divider_style = "\x1b[38;5;240m";
-        hint_style = "\x1b[38;5;255m";
-        statusline_style = "\x1b[38;5;245m";
-        tag_style = "\x1b[1;38;5;255m";
-        subtitle_style = "\x1b[1;38;5;255m";
-        system_notice_label_style = "\x1b[1;38;5;252m";
-        system_notice_text_style = "\x1b[38;5;250m";
-        reasoning_summary_style = "\x1b[3;38;5;245m";
-        dim_style = "\x1b[38;5;245m";
-        warning_style = "\x1b[38;5;252m";
-        green_style = "\x1b[38;5;252m";
-        red_style = "\x1b[38;5;252m";
-        diff_added_style = "\x1b[38;5;252m";
-        diff_removed_style = "\x1b[38;5;252m";
-        approval_button_active_style = "\x1b[48;5;255m\x1b[38;5;235m\x1b[1m";
-        approval_button_inactive_style = "\x1b[48;5;239m\x1b[38;5;255m";
-        selected_completion_style = "\x1b[1;38;5;255m";
-        permission_auto_style = "\x1b[38;5;252m";
-    }
+    assistant_presentation.applyTheme(theme);
+    divider_style = theme.divider_style;
+    hint_style = theme.hint_style;
+    statusline_style = theme.statusline_style;
+    tag_style = theme.tag_style;
+    subtitle_style = theme.subtitle_style;
+    system_notice_label_style = theme.system_notice_label_style;
+    system_notice_text_style = theme.system_notice_text_style;
+    dim_style = theme.dim_style;
+    warning_style = theme.warning_style;
+    green_style = theme.green_style;
+    red_style = theme.red_style;
+    diff_added_style = theme.diff_added_style;
+    diff_removed_style = theme.diff_removed_style;
+    approval_button_active_style = theme.approval_button_active_style;
+    approval_button_inactive_style = theme.approval_button_inactive_style;
+    selected_completion_style = theme.selected_completion_style;
+    permission_auto_style = theme.permission_auto_style;
+    reasoning_summary_style = if (is_light) "\x1b[3;38;5;247m" else "\x1b[3;38;5;245m";
 
-    // The diff marker green/red reads the same on light and dark, so it is set
-    // once here rather than per-theme.
+    // The diff marker green/red reads the same on light and dark, so both
+    // capability variants ship in every theme; the terminal picks which applies.
     if (truecolor_enabled) {
-        diff_added_marker_style = diff_added_marker_truecolor;
-        diff_removed_marker_style = diff_removed_marker_truecolor;
+        diff_added_marker_style = theme.diff_added_marker_truecolor;
+        diff_removed_marker_style = theme.diff_removed_marker_truecolor;
     } else {
-        diff_added_marker_style = diff_added_marker_fallback;
-        diff_removed_marker_style = diff_removed_marker_fallback;
+        diff_added_marker_style = theme.diff_added_marker_fallback;
+        diff_removed_marker_style = theme.diff_removed_marker_fallback;
     }
 
-    user_message_card.setStyle(light, terminal_bg);
+    user_message_card.applyTheme(theme, terminal_bg);
 }
 
 pub fn themeNeedsUpdate(light: bool, terminal_bg: ?TerminalRgb) bool {
@@ -127,9 +112,8 @@ pub fn themeNeedsUpdate(light: bool, terminal_bg: ?TerminalRgb) bool {
 }
 
 // Explicit theme overrides skip OSC 11, leaving `rgb` null for fallback shading.
-pub const ThemeDetection = theme_detection.Detection;
-pub const TerminalBackground = theme_protocol.Background;
 pub const explicitThemeOverride = theme_detection.explicitThemeOverride;
+pub const explicitThemeName = theme_detection.explicitThemeName;
 pub const detectTheme = theme_detection.detectTheme;
 pub const parseOsc11Response = theme_protocol.parseOsc11Response;
 pub const truecolorSupportedForValues = theme_protocol.truecolorSupportedForValues;

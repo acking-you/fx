@@ -105,9 +105,7 @@ pub const FooterPlannerInput = struct {
 pub const FooterFramePlan = struct {
     paint: PaintPlan,
     resolved_activity: ActivityPlacement,
-    banner_activity: ActivityPlacement,
     bottom_reservation_reason: BottomReservationReason,
-    overlay_suppressed: bool,
 };
 
 const FooterReservationPlan = struct {
@@ -443,12 +441,6 @@ pub noinline fn planFooterPaint(shell: *TranscriptRuntime, input: FooterPlannerI
             .bottom = @min(rows.hint, shell.layout.rows),
         });
     }
-    const footer_reservation_source: engine_paint_plan.FooterReservationSource = switch (reservation.reason) {
-        .none => .footer_layout,
-        .transient_midline => .transient_activity,
-        .idle_footer_gap => .idle_footer_gap,
-    };
-
     return .{
         .paint = .{
             .layout = shell.layout,
@@ -465,15 +457,12 @@ pub noinline fn planFooterPaint(shell: *TranscriptRuntime, input: FooterPlannerI
             .footer_clean_allowed = invalidation.isEmpty(),
             .synchronized_update = true,
             .cursor_target = .{ .row = cursor_row, .col = cursor_col, .visible = input.input_visible },
-            .footer_reservation_source = footer_reservation_source,
             .bottom_reserved_rows = reservation.bottom_reserved_rows,
             .preserve_scrollback = !shell.pending_scroll_compact,
             .reset_terminal = shell.terminal_reset_pending,
         },
         .resolved_activity = resolved_activity,
-        .banner_activity = banner_activity,
         .bottom_reservation_reason = reservation.reason,
-        .overlay_suppressed = overlay_suppressed,
     };
 }
 

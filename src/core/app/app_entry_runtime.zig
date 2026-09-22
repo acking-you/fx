@@ -291,6 +291,7 @@ fn runInteractiveWithDeps(comptime App: type, comptime cooperative: bool, alloc:
             return err;
         };
         app.startModelCacheWarmup();
+        if (@hasDecl(App, "startSessionCatalogPreload")) app.startSessionCatalogPreload();
     }
 
     app.run() catch |err| {

@@ -59,8 +59,6 @@ const InputEscapeAction = input_action.Action;
 const MouseInput = escape_parser.MouseInput;
 
 pub const shortcutFromControlByte = shortcuts.fromControlByte;
-pub const shortcutFromFocusedEditorControlByte = shortcuts.fromFocusedEditorControlByte;
-pub const shortcutFromEscapeAction = shortcuts.fromEscapeAction;
 
 pub fn approvalActionFromByte(byte: u8) ?approval_decision.Action {
     return switch (byte) {

@@ -14,7 +14,6 @@ pub const approval_panel_rows_compact: u16 = 8;
 pub const approval_panel_rows_spacious: u16 = 11;
 pub const approval_spacious_min_terminal_rows: u16 = 34;
 pub const approval_once_label = "1. Yes";
-pub const approval_always_file_label = "2. Yes, and don't ask again for this request";
 pub const approval_deny_label = "3. No";
 pub const approval_hint = "1–3 Choose now    ↑↓ or Tab Options    Enter Confirm    Esc Cancel";
 pub const approval_amendment_hint = "1–3 Choose now    ↑↓ Options    Tab Amend    Enter Confirm    Esc Cancel";

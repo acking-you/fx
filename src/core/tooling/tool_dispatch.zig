@@ -181,7 +181,6 @@ pub const DispatchContext = struct {
     max_tool_result_bytes: usize = tool_result_limits.default_max_tool_result_bytes,
     skills_dir: []const u8 = "",
     context_limits: context_limits.Values = .{},
-    permission_ctx: ?*const PermissionContext = null,
     read_tracker: ?*read_tracker_mod.ReadTracker = null,
     change_tracker: ?*change_tracker.ChangeTracker = null,
     cancel_flag: ?*std.atomic.Value(bool) = null,
@@ -245,22 +244,6 @@ pub const AskQuestionBatchFn = *const fn (
 
 /// Function pointer used to override permission decisions in tests and callers.
 pub const PermissionDecider = *const fn (*const Tool, ToolInput, DispatchContext) permission_gate.Decision;
-
-/// Rule-engine lookup function carried through dispatch for test injection.
-pub const PermissionRuleLookup = *const fn (
-    Allocator,
-    core_types.PermissionRuleSet,
-    []const u8,
-    []const u8,
-    []const u8,
-    PermissionTargetKind,
-) anyerror!core_permissions.RuleDecision;
-
-/// Permission state shared by a noninteractive turn.
-pub const PermissionContext = struct {
-    rules: ?*const core_types.PermissionRuleSet = null,
-    rule_lookup: PermissionRuleLookup = core_permissions.ruleDecisionFor,
-};
 
 /// Function pointer that decodes JSON arguments into a concrete input.
 pub const DecodeFn = *const fn (DispatchContext, []const u8) DispatchError!DecodeResult;

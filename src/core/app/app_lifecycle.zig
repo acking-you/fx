@@ -1,4 +1,5 @@
 const std = @import("std");
+const shared_theme = @import("../shared/theme.zig");
 const io_mod = @import("../shared/io.zig");
 const agent_steps = @import("../config/agent_steps.zig");
 const config_runtime = @import("../config/config_runtime.zig");
@@ -144,8 +145,10 @@ pub const StartupState = struct {
     notification_attention_required: bool = false,
     notification_max: bool = false,
     theme_monitor_enabled: bool = false,
+    theme: ?[]const u8 = null,
 
     pub fn deinit(self: *StartupState, alloc: Allocator) void {
+        if (self.theme) |value| alloc.free(value);
         self.workspace_access.deinit(alloc);
         if (self.workspace_root.len > 0) alloc.free(self.workspace_root);
         if (self.credential) |*credential| credential.deinit(alloc);
@@ -388,6 +391,7 @@ fn loadStartupStateFromOwnedWorkspace(
     state.config_diagnostics = detailed.diagnostics;
     detailed.diagnostics = &.{};
     state.prompt_history_enabled = settings.prompt_history_enabled orelse true;
+    state.theme = if (settings.theme) |value| try alloc.dupe(u8, value) else null;
     state.prompt_history_store_allowed = detailed.prompt_history_store_allowed;
     if (credential_mode) |mode| {
         const resolution = try credentials.resolveForProvider(
@@ -476,9 +480,45 @@ pub fn bootstrapInteractiveApp(cfg: BootstrapConfig) !StartupState {
         io_mod.getenv("COLORTERM"),
         io_mod.getenv("TERM_PROGRAM"),
     ));
-    const theme = ui_render.detectTheme(cfg.alloc, cfg.terminal);
-    ui_render.initTheme(theme.light, theme.rgb);
-    state.theme_monitor_enabled = ui_render.explicitThemeOverride() == null;
+    // Theme selection: FX_THEME wins over the settings "theme" key; an empty
+    // FX_THEME counts as unset per the codebase convention. light/dark pin the
+    // builtin variant and skip the OSC 11 probe; any other value names a theme
+    // file under ~/.fx/themes.
+    var configured_theme: ?[]const u8 = state.theme;
+    if (io_mod.getenv("FX_THEME")) |value| {
+        if (value.len > 0) configured_theme = value;
+    }
+    if (if (configured_theme) |value| shared_theme.classifyValue(value) else null) |choice| {
+        switch (choice) {
+            .pin_light, .pin_dark => {
+                const light = choice == .pin_light;
+                // The flag marks "pinned", not the direction: any configured
+                // pin locks live theme updates out.
+                shared_theme.setSource(null, true);
+                ui_render.initTheme(light, null);
+            },
+            .custom => |name| {
+                shared_theme.setSource(name, false);
+                const detected = ui_render.detectTheme(cfg.alloc, cfg.terminal);
+                const custom_theme = shared_theme.resolveNamed(cfg.alloc, name, detected.light, .{ .truecolor = ui_render.truecolorIsEnabled() }) catch |err| blk: {
+                    debug_trace.logf("theme", "custom_theme_resolve_failed name={s} err={s}", .{ name, @errorName(err) });
+                    break :blk null;
+                };
+                if (custom_theme) |resolved| {
+                    ui_render.applyTheme(resolved, detected.rgb);
+                } else {
+                    ui_render.initTheme(detected.light, detected.rgb);
+                }
+            },
+        }
+    } else {
+        shared_theme.setSource(null, false);
+        const detected = ui_render.detectTheme(cfg.alloc, cfg.terminal);
+        ui_render.initTheme(detected.light, detected.rgb);
+    }
+    // Custom themes keep live monitoring: terminal mode flips re-resolve the
+    // theme pair. Only a configured light/dark pin locks updates out.
+    state.theme_monitor_enabled = !ui_render.themeInputLocked();
 
     const cursor = cfg.terminal.queryCursorPosition() catch blk: {
         break :blk CursorPosition{

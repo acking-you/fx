@@ -817,7 +817,7 @@ fn transcriptOnlyPlan(
             .col = prepared.cursor.cursor_col,
             .visible = true,
         },
-        .footer_reservation_source = .none,
+
         .bottom_reserved_rows = prepared.bottom_reserved_rows,
         .preserve_scrollback = !shell.pending_scroll_compact,
         .reset_terminal = shell.terminal_reset_pending,

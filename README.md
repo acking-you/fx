@@ -252,6 +252,16 @@ JSON and quiet requests stay noninteractive by default. Add `--prompt-permission
 
 Inside a saved session, `/permissions remember <allow|deny> <tool-name> <arguments-json>` stores an exact confirmed rule without running the action. `/permissions` lists stable rule IDs, and `/permissions revoke <rule-id>` removes a stored rule even when its original workspace or file state has changed.
 
+### Terminal themes
+
+fx follows the terminal's light or dark mode. Set `FX_THEME=light` or
+`FX_THEME=dark` to pin a variant. For a custom palette, save a native fx or
+VS Code JSON theme as `~/.fx/themes/<name>.json`, then select it with
+`"theme": "<name>"` in `~/.fx/settings.json` or `FX_THEME=<name>`.
+The environment variable takes precedence. Theme settings are profile-owned
+and ignored in project `.fx.json` files. A custom dark or light theme switches
+to its matching sibling when available, or the built-in matching variant.
+
 ## Embed fx
 
 fx builds as a native binary or WebAssembly. Applications embedding fx can provide network transport, session storage, configuration, permission handling, and terminal I/O.

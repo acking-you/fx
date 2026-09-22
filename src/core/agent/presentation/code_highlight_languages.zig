@@ -22,6 +22,7 @@ pub const Detection = enum {
     dockerfile_from,
     go_package,
     rust_function,
+    diff_patch,
 };
 
 pub const Profile = struct {
@@ -30,6 +31,23 @@ pub const Profile = struct {
     line_comments: []const []const u8 = &.{},
     block_comment: ?BlockComment = null,
     quotes: []const u8 = &.{},
+    /// Characters colored as operator runs in the keyword color.
+    operators: []const u8 = &.{},
+    /// `$name`-style variables take the keyword color.
+    dollar_vars: bool = false,
+    /// A dash at a word boundary opens a flag token (`-n`, `--json`) in the
+    /// number color.
+    dash_flags: bool = false,
+    /// The first word of each command (after start, a pipe or logical
+    /// operator, `;`, `&`, `$(`, or a control keyword) takes the keyword
+    /// color. Mirrors how the bash grammar scopes command words vs arguments.
+    command_words: bool = false,
+    /// When false, bare number arguments stay plain and only file
+    /// descriptors glued to a redirect take the number color.
+    bare_numbers: bool = true,
+    /// Diff patches paint line-wise (+/-, hunks, file headers) instead of
+    /// running the tokenizer.
+    diff_lines: bool = false,
     keywords: []const []const u8 = &.{},
     literals: []const []const u8 = &.{},
     keyword_case: KeywordCase = .sensitive,
@@ -67,11 +85,15 @@ const profiles = [_]Profile{
     },
     .{
         .label = "sh",
-        .aliases = &.{ "sh", "bash", "zsh", "shell" },
+        .aliases = &.{ "sh", "bash", "zsh", "shell", "shellscript" },
         .line_comments = &.{"#"},
-        .quotes = shell_quotes,
-        .keywords = &.{ "if", "then", "fi", "for", "do", "done", "in", "case", "esac", "function", "local", "export", "readonly", "return" },
-        .literals = &.{ "true", "false", "null" },
+        // Backticks are code, not strings, in shell.
+        .quotes = double_single_quotes,
+        .operators = "&|;<>*",
+        .dollar_vars = true,
+        .dash_flags = true,
+        .command_words = true,
+        .bare_numbers = false,
         .detection = .shell_shebang,
     },
     .{
@@ -139,7 +161,7 @@ const profiles = [_]Profile{
     },
     .{
         .label = "c",
-        .aliases = &.{ "c", "h" },
+        .aliases = &.{ "c", "h", "m", "mm" },
         .line_comments = &.{"//"},
         .block_comment = .{ .start = "/*", .end = "*/" },
         .quotes = double_single_quotes,
@@ -229,7 +251,7 @@ const profiles = [_]Profile{
     },
     .{
         .label = "html",
-        .aliases = &.{ "html", "htm" },
+        .aliases = &.{ "html", "htm", "vue", "svelte" },
         .block_comment = .{ .start = "<!--", .end = "-->" },
         .quotes = double_single_quotes,
         .keywords = &.{ "html", "head", "body", "main", "header", "footer", "section", "article", "div", "span", "a", "p", "script", "style", "link", "meta", "title", "button", "input", "form", "img", "ul", "li" },
@@ -256,6 +278,117 @@ const profiles = [_]Profile{
         .quotes = double_single_quotes,
         .keywords = &.{ "resource", "module", "variable", "output", "provider", "terraform", "locals", "data", "dynamic", "for_each", "count" },
         .literals = &.{ "true", "false", "null" },
+    },
+    .{
+        .label = "make",
+        .aliases = &.{ "make", "makefile", "mk" },
+        .line_comments = &.{"#"},
+        .dollar_vars = true,
+    },
+    .{
+        .label = "ini",
+        .aliases = &.{ "ini", "conf", "cfg", "editorconfig" },
+        .line_comments = &.{ "#", ";" },
+    },
+    .{
+        .label = "dotenv",
+        .aliases = &.{ "dotenv", "env" },
+        .line_comments = &.{"#"},
+    },
+    .{
+        .label = "graphql",
+        .aliases = &.{ "graphql", "gql" },
+        .line_comments = &.{"#"},
+        .quotes = double_quote,
+        .keywords = &.{ "query", "mutation", "subscription", "fragment", "on", "type", "input", "interface", "enum", "union", "scalar", "schema", "extend", "implements", "directive" },
+        .literals = &.{ "true", "false", "null" },
+    },
+    .{
+        .label = "dart",
+        .aliases = &.{"dart"},
+        .line_comments = &.{"//"},
+        .block_comment = .{ .start = "/*", .end = "*/" },
+        .quotes = double_single_quotes,
+        .keywords = &.{ "const", "final", "var", "class", "extends", "with", "implements", "mixin", "enum", "if", "else", "for", "while", "return", "async", "await", "new", "static", "import", "export", "void" },
+        .literals = &.{ "true", "false", "null" },
+    },
+    .{
+        .label = "scala",
+        .aliases = &.{ "scala", "sc" },
+        .line_comments = &.{"//"},
+        .block_comment = .{ .start = "/*", .end = "*/" },
+        .quotes = double_quote,
+        .keywords = &.{ "val", "var", "def", "class", "object", "trait", "extends", "with", "package", "import", "if", "else", "for", "while", "yield", "match", "case", "return", "new", "type", "given", "override" },
+        .literals = &.{ "true", "false", "null" },
+    },
+    .{
+        .label = "elixir",
+        .aliases = &.{ "elixir", "ex", "exs" },
+        .line_comments = &.{"#"},
+        .quotes = double_quote,
+        .keywords = &.{ "def", "defmodule", "defp", "defmacro", "defguard", "do", "end", "fn", "if", "else", "unless", "case", "cond", "when", "with", "for", "try", "rescue", "after", "alias", "import", "require", "use" },
+        .literals = &.{ "true", "false", "nil" },
+    },
+    .{
+        .label = "haskell",
+        .aliases = &.{ "haskell", "hs" },
+        .line_comments = &.{"--"},
+        .block_comment = .{ .start = "{-", .end = "-}" },
+        .quotes = double_quote,
+        .keywords = &.{ "module", "where", "import", "data", "type", "newtype", "class", "instance", "deriving", "if", "then", "else", "case", "of", "do", "let", "in", "infix", "infixl", "infixr" },
+        .literals = &.{ "True", "False" },
+    },
+    .{
+        .label = "perl",
+        .aliases = &.{ "perl", "pl", "pm" },
+        .line_comments = &.{"#"},
+        .quotes = shell_quotes,
+        .dollar_vars = true,
+        .keywords = &.{ "my", "our", "sub", "use", "package", "if", "else", "elsif", "unless", "while", "for", "foreach", "return", "local", "state", "say", "print", "die", "warn", "eval", "do", "require" },
+        .literals = &.{"undef"},
+    },
+    .{
+        .label = "r",
+        .aliases = &.{"r"},
+        .line_comments = &.{"#"},
+        .quotes = double_single_quotes,
+        .keywords = &.{ "function", "if", "else", "for", "while", "repeat", "break", "next", "return", "in", "library", "require" },
+        .literals = &.{ "TRUE", "FALSE", "NULL", "NA" },
+    },
+    .{
+        .label = "groovy",
+        .aliases = &.{ "groovy", "gradle" },
+        .line_comments = &.{"//"},
+        .block_comment = .{ .start = "/*", .end = "*/" },
+        .quotes = double_single_quotes,
+        .keywords = &.{ "def", "class", "interface", "enum", "if", "else", "for", "while", "return", "new", "try", "catch", "finally", "throw", "package", "import", "extends", "implements", "static", "final", "void" },
+        .literals = &.{ "true", "false", "null" },
+    },
+    .{
+        .label = "nginx",
+        .aliases = &.{"nginx"},
+        .line_comments = &.{"#"},
+        .keywords = &.{ "server", "location", "listen", "root", "proxy_pass", "set", "return", "rewrite", "if", "error_page", "access_log", "include", "upstream", "worker_processes", "events", "http" },
+    },
+    .{
+        // Inline code spans color as strings; prose numbers stay plain.
+        .label = "markdown",
+        .aliases = &.{ "md", "markdown", "mdx" },
+        .block_comment = .{ .start = "<!--", .end = "-->" },
+        .quotes = &.{'`'},
+        .bare_numbers = false,
+    },
+    .{
+        // Explicit opt-out of highlighting; kept byte-identical.
+        .label = "text",
+        .aliases = &.{ "text", "txt", "plain", "plaintext" },
+        .bare_numbers = false,
+    },
+    .{
+        .label = "diff",
+        .aliases = &.{ "diff", "patch" },
+        .diff_lines = true,
+        .detection = .diff_patch,
     },
 };
 
@@ -286,7 +419,14 @@ fn matchesDetection(alloc: Allocator, detection: Detection, source: []const u8) 
         .dockerfile_from => startsWithIgnoreCase(firstNonblankLine(source), "from "),
         .go_package => startsWith(firstNonblankLine(source), "package ") and containsLineStart(source, "func "),
         .rust_function => matchesRustFunction(source),
+        .diff_patch => matchesDiffPatch(source),
     };
+}
+
+fn matchesDiffPatch(source: []const u8) bool {
+    const line = firstNonblankLine(source);
+    if (std.mem.startsWith(u8, line, "diff --git ") or std.mem.startsWith(u8, line, "@@ ")) return true;
+    return std.mem.startsWith(u8, line, "--- ") and std.mem.indexOf(u8, source, "\n+++ ") != null;
 }
 
 fn matchesTypeScriptAssertion(source: []const u8) bool {
@@ -399,7 +539,8 @@ test "supported code fence labels resolve case insensitively" {
     };
     for (cases) |case| try std.testing.expectEqualStrings(case.profile, resolve(case.label).?.label);
     try std.testing.expect(resolve("") == null);
-    try std.testing.expect(resolve("text") == null);
+    // text resolves to a deliberate plain profile; rendering stays byte-identical.
+    try std.testing.expectEqualStrings("text", resolve("text").?.label);
 }
 
 test "expanded code fence labels resolve through the language registry" {
@@ -450,4 +591,38 @@ test "aliases do not collide across profiles" {
             }
         }
     }
+}
+
+test "resolve covers the added languages and aliases" {
+    const cases = [_]struct { alias: []const u8, label: []const u8 }{
+        .{ .alias = "makefile", .label = "make" },
+        .{ .alias = "conf", .label = "ini" },
+        .{ .alias = "env", .label = "dotenv" },
+        .{ .alias = "gql", .label = "graphql" },
+        .{ .alias = "dart", .label = "dart" },
+        .{ .alias = "sc", .label = "scala" },
+        .{ .alias = "exs", .label = "elixir" },
+        .{ .alias = "hs", .label = "haskell" },
+        .{ .alias = "pl", .label = "perl" },
+        .{ .alias = "r", .label = "r" },
+        .{ .alias = "gradle", .label = "groovy" },
+        .{ .alias = "nginx", .label = "nginx" },
+        .{ .alias = "md", .label = "markdown" },
+        .{ .alias = "txt", .label = "text" },
+        .{ .alias = "patch", .label = "diff" },
+        .{ .alias = "shellscript", .label = "sh" },
+        .{ .alias = "mm", .label = "c" },
+        .{ .alias = "vue", .label = "html" },
+    };
+    for (cases) |case| {
+        const profile = resolve(case.alias).?;
+        try std.testing.expectEqualStrings(case.label, profile.label);
+    }
+}
+
+test "infer detects diff patches without a fence label" {
+    const alloc = std.testing.allocator;
+    const profile = infer(alloc, "--- a/main.zig\n+++ b/main.zig\n@@ -1 +1 @@\n-old\n+new").?;
+    try std.testing.expectEqualStrings("diff", profile.label);
+    try std.testing.expect(infer(alloc, "plain prose about --- things") == null);
 }

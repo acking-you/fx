@@ -275,7 +275,7 @@ async function runSameShellRelaunch(outRoot: string, runNumber: number): Promise
         `SHELL_A_BEFORE_FIRST_${runId}`,
         `SHELL_A_BETWEEN_LAUNCHES_${runId}`,
       ],
-      submitted: ["permission_mode", "● Version:", "/help"],
+      submitted: ["permission_mode", "* version:", "/help"],
     },
     frames: [],
     failures: [],
@@ -331,7 +331,7 @@ async function runSameShellRelaunch(outRoot: string, runNumber: number): Promise
     );
 
     await launchFx(context, session, "second");
-    await submitSlashCommand(context, session, "/version", "● Version:", "second-version-visible");
+    await submitSlashCommand(context, session, "/version", "* version:", "second-version-visible");
     await resize(context, session, 72, 24, "second-resize-narrow");
     await resize(context, session, 132, 42, "second-resize-wide");
     await resize(context, session, 120, 40, "second-resize-restored");

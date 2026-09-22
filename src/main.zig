@@ -2568,7 +2568,7 @@ const App = struct {
 
         // FX_THEME forces colors via detectTheme; keep owning protocol bytes
         // (monitor started) but never query or apply live theme updates.
-        if (ui_render.explicitThemeOverride() != null) {
+        if (ui_render.themeInputLocked()) {
             _ = self.terminal_input_runtime.terminal_theme_monitor.takeSettledUpdate();
             return;
         }

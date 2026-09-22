@@ -279,7 +279,7 @@ fn testPaintPlan(
         .footer_clean_allowed = true,
         .synchronized_update = true,
         .cursor_target = .{ .row = selection.bottom_row, .col = 1, .visible = true },
-        .footer_reservation_source = .none,
+
         .bottom_reserved_rows = 0,
         .preserve_scrollback = true,
     };

@@ -11984,7 +11984,7 @@ test "terminal reset drops stale mid-scrollback footer clear before reanchor" {
         .footer_clean_allowed = false,
         .synchronized_update = false,
         .cursor_target = null,
-        .footer_reservation_source = .none,
+
         .bottom_reserved_rows = 0,
         .preserve_scrollback = true,
     };
@@ -12269,7 +12269,7 @@ test "measured recovery rebases from accepted projection before retiring resize 
             .col = prepared.cursor.cursor_col,
             .visible = true,
         },
-        .footer_reservation_source = .none,
+
         .bottom_reserved_rows = 0,
         .preserve_scrollback = true,
     };
@@ -12429,7 +12429,7 @@ test "source rewrite replays unchanged history prefix after footer projection re
             .col = prepared.cursor.cursor_col,
             .visible = true,
         },
-        .footer_reservation_source = .none,
+
         .bottom_reserved_rows = 0,
         .preserve_scrollback = true,
     };
