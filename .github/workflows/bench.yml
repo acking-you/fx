@@ -49,12 +49,16 @@ jobs:
           --output "${{ runner.temp }}/subagent-inspect-memory"
           --max-peak-mib 64
 
+      - name: Check inspection latency accounting
+        run: python3 -m unittest discover -s benchmarks -p subagent_inspect_memory_test.py
+
       - name: Stress subagent inspection memory
         run: >-
           python3 benchmarks/subagent_inspect_memory.py
           --output "${{ runner.temp }}/subagent-inspect-stress"
           --runs 1 --inspections 64 --text-bytes 262144
           --limit-mib 2048 --max-peak-mib 96 --timeout 180
+          --tool-latency
 
       - name: Upload subagent inspection memory evidence
         if: always()
@@ -72,6 +76,7 @@ jobs:
             ${{ runner.temp }}/subagent-inspect-stress/**/stderr.log
             ${{ runner.temp }}/subagent-inspect-stress/**/stdout.json
             ${{ runner.temp }}/subagent-inspect-stress/**/resource-usage.txt
+            ${{ runner.temp }}/subagent-inspect-stress/**/tool-trace.log
           if-no-files-found: warn
 
       - name: Setup Bun

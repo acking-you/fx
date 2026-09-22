@@ -171,7 +171,7 @@ halve simultaneous memory: the first replay was already freed before the next
 one. The allocation regression measures its separate benefit: cumulative
 requested bytes for one checkpoint load fall from 11,886,167 to 5,959,409,
 about 50%. These allocation figures are not peak RSS. No further RSS reduction
-or wall-clock speedup is inferred from the native runs, and the Linux figures
+or wall-clock speedup is inferred from these memory-only comparisons, and the Linux figures
 are not a macOS measurement.
 
 The Benchmarks workflow runs three repetitions with a 64 MiB peak-RSS budget
@@ -235,6 +235,52 @@ limit and a 96 MiB peak-RSS budget. The benchmark records completed inspection
 counts, exit codes and explicit OOM diagnostics, and preserves GNU time's peak
 measurement if the fixture must stop a failed run. A failed variant makes the
 comparison command exit nonzero while still writing all measurement reports.
+
+### Inspection latency
+
+Pass `--tool-latency` to measure the native inspection operation separately
+from the complete model/tool loop. This enables the existing `tool` trace scope
+and pairs `before_tool_execution` with `after_tool_execution` by turn, step,
+subagent and call identity. Only `inspect_0` through `inspect_63` enter the
+64-call sample; child reads, creation and the final settled wait are excluded.
+Missing, duplicate or mismatched spans fail the measurement instead of silently
+changing the sample count. The binary needs no instrumentation patch.
+
+The native span includes tool dispatch, session loading/replay, result encoding
+and tool-result lifecycle handling. It excludes surrounding model requests and
+parent recovery-checkpoint persistence. It is an operation latency, not an
+isolated JSON-parser timer. Trace timestamps use the existing millisecond wall
+clock, and tracing itself has overhead; all compared versions must enable it.
+Small sub-millisecond differences are not meaningful. The child just wrote its
+log, so these measurements represent repeated inspection with a warm file cache,
+not cold-storage latency.
+
+`measurements.json` records each call's `tool_latency_ms` and a `tool_latency`
+summary containing count, sum, mean, P50, nearest-rank P95 and maximum.
+`summary.json` preserves every run's summary and reports the median across
+runs for each statistic. Separately, `inspection_seconds_runs` and
+`inspection_seconds_median` measure the complete 64-call fixture loop, including
+HTTP, model-step processing and parent persistence. A reduction in tool latency
+must not be presented as the same percentage reduction in that complete loop.
+
+```bash
+python3 -m unittest discover -s benchmarks -p subagent_inspect_memory_test.py
+python3 benchmarks/subagent_inspect_memory.py \
+  --binary before=/tmp/fx-before/zig-out/bin/fx \
+  --binary allocator=/tmp/fx-allocator/zig-out/bin/fx \
+  --binary optimized=./zig-out/bin/fx \
+  --runs 5 --inspections 64 --text-bytes 262144 --tool-latency \
+  --limit-mib 12288 --timeout 180 --output /tmp/fx-inspect-latency
+```
+
+Each run uses a fresh process and rotates variant order, retaining all 64 calls
+without discarding slow samples. The comparison uses the same GB-scale workload
+and binary revisions as the memory comparison. The measured comparison table is
+recorded in [PR #44](https://github.com/acking-you/fx/pull/44).
+CI enables latency collection on the stress workload and uploads the native
+trace alongside its timing and RSS measurements. It checks complete timing
+coverage and the existing memory budget; it does not impose a timing threshold
+on shared runners.
 
 ## Progress guard
 

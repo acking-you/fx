@@ -4,12 +4,15 @@
 Linux only; uses a local Responses fixture, isolated profiles, and no credentials.
 GNU time records fx's kernel RSS high-water mark, not sampled RSS or cumulative
 allocation traffic. Each binary/run gets a fresh process and identical workload.
+Optional native tool traces measure inspection latency separately from the
+fixture's complete model/tool loop; no product instrumentation patch is needed.
 """
 
 import argparse
 import hashlib
 import http.server
 import json
+import math
 import os
 from pathlib import Path
 import platform
@@ -69,6 +72,45 @@ def rss_status(pid):
     except FileNotFoundError:
         pass
     return fields
+
+
+def inspection_latencies(trace, count):
+    """Pair native tool spans, excluding child reads, create, and settled wait."""
+    pending, completed = {}, {}
+    for line in trace.splitlines():
+        match = re.match(r"^(\d+) \[tool\] (.*)$", line)
+        if not match:
+            continue
+        fields = dict(re.findall(r"(\w+)=([^ ]+)", match[2]))
+        call_id = fields.get("call_id", "")
+        if fields.get("name") != "subagent" or not re.fullmatch(r"inspect_\d+", call_id):
+            continue
+        event = fields.get("event")
+        if event not in ("before_tool_execution", "after_tool_execution"):
+            continue
+        key = (fields.get("turn_id"), fields.get("step_id"), fields.get("subagent_id"), call_id)
+        timestamp = int(match[1])
+        if event == "before_tool_execution":
+            require(key not in pending, f"duplicate inspection start: {call_id}")
+            pending[key] = timestamp
+        else:
+            require(key in pending, f"unmatched inspection end: {call_id}")
+            elapsed = timestamp - pending.pop(key)
+            require(elapsed >= 0, f"trace clock moved backwards: {call_id}")
+            require(call_id not in completed, f"duplicate inspection span: {call_id}")
+            completed[call_id] = elapsed
+    require(not pending, "incomplete inspection trace spans")
+    require(set(completed) == {f"inspect_{index}" for index in range(count)},
+            "inspection trace does not cover the requested workload")
+    return [completed[f"inspect_{index}"] for index in range(count)]
+
+
+def latency_summary(samples):
+    ordered = sorted(samples)
+    return {"count": len(samples), "total_ms": sum(samples),
+            "mean_ms": statistics.mean(samples), "p50_ms": statistics.median(samples),
+            "p95_ms": ordered[math.ceil(len(samples) * 0.95) - 1],
+            "max_ms": max(samples)}
 
 
 def run_once(binary, root, args):
@@ -191,6 +233,8 @@ def run_once(binary, root, args):
            if not key.startswith(("FX_", "OPENAI_", "GROK_", "XAI_"))}
     env.update(HOME=str(home), OPENAI_API_KEY="fixture-key", FX_MODEL="fixture-model",
                FX_RESPONSES_BASE_URL=f"http://127.0.0.1:{server.server_port}/v1", FX_MAX_AGENT_STEPS="0")
+    if args.tool_latency:
+        env.update(FX_TRACE_LOG=str(root / "tool-trace.log"), FX_TRACE_SCOPES="tool")
 
     started = time.monotonic()
     samples = []
@@ -260,6 +304,13 @@ def run_once(binary, root, args):
     report["oom_detected"] = bool(re.search(r"OutOfMemory|out.of.memory|memory allocation failed",
                                             stderr + stdout + json.dumps(fixture.get("failed_inspection")),
                                             re.IGNORECASE))
+    if args.tool_latency:
+        try:
+            samples_ms = inspection_latencies((root / "tool-trace.log").read_text(), args.inspections)
+            report["tool_latency_ms"] = samples_ms
+            report["tool_latency"] = latency_summary(samples_ms)
+        except (OSError, RuntimeError) as error:
+            errors.append(f"tool latency: {error}")
     report["passed"] = (proc.returncode == 0 and not errors
                         and not re.search(r"error:|panic|segmentation fault|OutOfMemory", stderr, re.IGNORECASE)
                         and len(observations) == args.inspections
@@ -280,6 +331,8 @@ def main():
     parser.add_argument("--limit-mib", type=int, default=2048)
     parser.add_argument("--max-peak-mib", type=float, help="optional peak RSS regression budget")
     parser.add_argument("--timeout", type=int, default=120)
+    parser.add_argument("--tool-latency", action="store_true",
+                        help="measure native before/after tool trace spans (1 ms clock resolution)")
     args = parser.parse_args()
     if platform.system() != "Linux":
         parser.error("this benchmark uses Linux /proc and GNU time RSS units")
@@ -323,6 +376,12 @@ def main():
                    "oom_detected_runs": [item["oom_detected"] for item in runs],
                    "product_errors": [item["product_error"] for item in runs],
                    "inspection_seconds_runs": [item["fixture"].get("inspection_seconds") for item in runs],
+                   "inspection_seconds_median": (statistics.median(item["fixture"]["inspection_seconds"] for item in runs)
+                       if all("inspection_seconds" in item["fixture"] for item in runs) else None),
+                   "tool_latency_runs": [item.get("tool_latency") for item in runs],
+                   "tool_latency_medians": ({key: statistics.median(item["tool_latency"][key] for item in runs)
+                       for key in ("total_ms", "mean_ms", "p50_ms", "p95_ms", "max_ms")}
+                       if all("tool_latency" in item for item in runs) else None),
                    "passed": all(item["passed"] for item in runs)} for label, runs in reports.items()}}
     (root / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     print(json.dumps(summary, indent=2))
