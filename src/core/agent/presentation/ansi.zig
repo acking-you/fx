@@ -10,24 +10,11 @@ pub const dim_open = "\x1b[2m";
 pub const dim_close = "\x1b[22m";
 pub const underline_open = "\x1b[4m";
 pub const underline_close = "\x1b[24m";
-pub var task_completed_open: []const u8 = shared_theme.fx_dark.task_completed_open;
-pub var task_completed_close: []const u8 = "\x1b[39m";
 pub const strike_open = "\x1b[9m";
 pub const strike_close = "\x1b[29m";
-pub var inline_code_open: []const u8 = shared_theme.fx_dark.inline_code_open;
-pub var inline_code_close: []const u8 = "\x1b[39m";
 
 pub fn setInlineCodeTheme(light: bool) void {
-    applyTheme(shared_theme.builtin(light));
-}
-
-pub fn applyTheme(theme: shared_theme.Theme) void {
-    inline_code_open = theme.inline_code_open;
-    task_completed_open = theme.task_completed_open;
-    // Themed slots may carry bold/italic/background; the close must reset
-    // everything the open sets or attributes bleed into following text.
-    inline_code_close = shared_theme.closingFor(theme.inline_code_open);
-    task_completed_close = shared_theme.closingFor(theme.task_completed_open);
+    shared_theme.activate(shared_theme.builtin(light));
 }
 
 // Keeps table intersections aligned with row separators.

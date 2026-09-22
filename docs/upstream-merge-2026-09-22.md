@@ -16,6 +16,13 @@ This is a real merge with both parents. Land it using a merge commit or a
 fast-forward that retains the upstream ancestry. Squashing or rebasing this
 integration would make Git present the same upstream changes again next time.
 
+The merge commit is `8f77ccf076b84a20febc6989bf814cd7f6c42bf3`, with parents
+`a835ea1255f78ccdf0d272f469833e8ba9ad002b` and
+`1b5a516a2c795f05801332f6ce372ea68299481b`. Later repair commits have one parent
+because they follow that merge. `git merge-base --is-ancestor` confirms the
+upstream revision is an ancestor of the review branch; a single-parent repair
+commit does not invalidate that ancestry.
+
 The incoming range contains 119 first-parent commits and changes 325 files.
 The initial merge had 201 conflicted paths, including 62 files already deleted
 by the fork. Resolving the ancestry does **not** mean importing every upstream
@@ -86,6 +93,26 @@ training owner; no root E2E owner or shard entry is orphaned.
 Full CI on the exact PR head remains the release/readiness gate. Its final
 result belongs in the PR, rather than treating any older BYOK run as evidence
 for this merge.
+
+## Theme review follow-up
+
+Four theme findings have supported runtime triggers and are addressed together:
+
+| Finding | Correction and regression owner |
+| --- | --- |
+| Custom colors survive a terminal dark/light flip | Resolve the destination palette first, flush pending UI presentation, and retint retained assistant text, table cells, and fx-owned raw entries using the actual old/new slots and their complete closing sequences. Preserve enclosing emphasis when the destination adds resets. External command output stays untouched. Transcript tests and the builtin/custom live TUI reset cases cover replay. |
+| Worker reads race with UI theme publication | Publish and read the complete theme descriptor under one mutex. Render inline content and task markers from a local snapshot and remove the separate mutable ANSI style globals. Immutable theme strings retain their documented process lifetime. A concurrent publication/read test covers coherent snapshots. |
+| Link styling clears enclosing bold/italic | Restore the enclosing Markdown or heading attributes after themed link and inline-code closers. Cover bracket links, bare and angle URLs, images, underscores, headings, and inline code. |
+| Custom task markers mismeasure the separator | Derive the complete close from the matched opener, including background and emphasis resets, before counting the separator. Cover custom and builtin markers plus wrapped continuation indentation. |
+
+Local follow-up validation: the ReleaseSafe build and all 545 focused Zig
+tests pass, including allocation-failure rollback and concurrent theme reads.
+Nine native TUI cases pass, including streamed output followed by builtin and
+custom dark/light flips, historical replay, and a successful next turn; stderr
+is empty. Formatting, public-surface, whitespace, and corpus checks pass.
+
+The remaining finding, that the branch lacks upstream ancestry, is rejected
+using the concrete merge-parent evidence above. No history rewrite is needed.
 
 ## Upstream memory issue evidence
 

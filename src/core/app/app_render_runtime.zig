@@ -494,27 +494,23 @@ pub fn Runtime(comptime App: type) type {
         pub fn applyThemeUpdate(app: *App, light: bool, rgb: ?ui_render.TerminalRgb) !void {
             if (!ui_render.themeNeedsUpdate(light, rgb)) return;
 
-            const prior_light = ui_render.is_light;
-            app.shell.retintEntriesForTheme(app.alloc, prior_light, light) catch |err| {
+            const previous = shared_theme.current();
+            const next = if (shared_theme.sourceName() orelse ui_render.explicitThemeName()) |name| blk: {
+                const custom = shared_theme.resolveNamed(app.alloc, name, light, .{ .truecolor = ui_render.truecolorIsEnabled() }) catch |err| {
+                    debug_trace.logf("theme", "live_theme_resolve_failed name={s} err={s}", .{ name, @errorName(err) });
+                    break :blk shared_theme.builtin(light);
+                };
+                break :blk custom orelse shared_theme.builtin(light);
+            } else shared_theme.builtin(light);
+            // Drain already rendered bytes while the producing palette is still
+            // active, then retint retained text with the actual resolved pair.
+            try app.pacer.flushPresentationAtBoundary(app.alloc, io_mod.nanoTimestamp(), app.pacerCallbacks());
+            app.shell.retintEntriesForTheme(app.alloc, previous, next) catch |err| {
                 debug_trace.logf("theme", "theme_transcript_retint_failed err={s}", .{@errorName(err)});
                 return;
             };
             app.pacer.rethemeInlineCode(light);
-            if (shared_theme.sourceName() orelse ui_render.explicitThemeName()) |name| {
-                // Custom themes re-resolve on live flips: sibling swap or
-                // builtin fallback, same rule as startup.
-                const custom = shared_theme.resolveNamed(app.alloc, name, light, .{ .truecolor = ui_render.truecolorIsEnabled() }) catch |err| blk: {
-                    debug_trace.logf("theme", "live_theme_resolve_failed name={s} err={s}", .{ name, @errorName(err) });
-                    break :blk null;
-                };
-                if (custom) |resolved| {
-                    ui_render.applyTheme(resolved, rgb);
-                } else {
-                    ui_render.initTheme(light, rgb);
-                }
-            } else {
-                ui_render.initTheme(light, rgb);
-            }
+            ui_render.applyTheme(next, rgb);
             app.shell.setCommandOutputRenderPolicy(shellStyles());
             try app.shell.requestTerminalReset(&app.metrics);
             app.shell.render_requests.request(.transcript);

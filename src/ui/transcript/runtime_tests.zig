@@ -1,4 +1,5 @@
 const std = @import("std");
+const shared_theme = @import("../../core/shared/theme.zig");
 const io_mod = @import("../../core/shared/io.zig");
 const types = @import("../../core/shared/types.zig");
 const command_output_content = @import("../../core/tooling/command_output_content.zig");
@@ -11382,7 +11383,7 @@ test "theme retint preserves a capped canonical anchor and visual geometry" {
     );
     const committed_diagnostic = runtime.transcriptCommitDiagnostic();
 
-    try runtime.retintEntriesForTheme(alloc, false, true);
+    try runtime.retintEntriesForTheme(alloc, shared_theme.builtin(false), shared_theme.builtin(true));
 
     try std.testing.expectEqualDeep(
         committed_diagnostic,
@@ -11440,7 +11441,7 @@ test "theme retint preserves a capped canonical anchor and visual geometry" {
     const retinted_diagnostic = runtime.transcriptCommitDiagnostic();
     const retinted_bytes = try alloc.dupe(u8, retinted_source.bytes);
     defer alloc.free(retinted_bytes);
-    try runtime.retintEntriesForTheme(alloc, true, true);
+    try runtime.retintEntriesForTheme(alloc, shared_theme.builtin(true), shared_theme.builtin(true));
     var unchanged_source = try runtime.prepareTranscriptSource(alloc, null);
     defer unchanged_source.deinit(alloc);
     try std.testing.expectEqualStrings(retinted_bytes, unchanged_source.bytes);
@@ -11483,7 +11484,7 @@ test "light to dark theme retint preserves retention with equal-width tokens" {
         1,
     );
 
-    try runtime.retintEntriesForTheme(alloc, true, false);
+    try runtime.retintEntriesForTheme(alloc, shared_theme.builtin(true), shared_theme.builtin(false));
 
     try std.testing.expectEqual(
         transcript_runtime.TranscriptCommitDiagnosticState.stable,
@@ -11545,7 +11546,7 @@ fn checkThemeRetintAllocationFailures(alloc: Allocator) !void {
     const pending_repaints_before = runtime.render_requests.pendingReasonCount();
     const cache_origin_before = runtime.transcript_cache_origin_untrimmed;
 
-    runtime.retintEntriesForTheme(alloc, false, true) catch |err| {
+    runtime.retintEntriesForTheme(alloc, shared_theme.builtin(false), shared_theme.builtin(true)) catch |err| {
         var source_after = try runtime.prepareTranscriptSource(std.testing.allocator, null);
         defer source_after.deinit(std.testing.allocator);
         try std.testing.expectEqualStrings(source_before.bytes, source_after.bytes);

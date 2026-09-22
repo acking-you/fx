@@ -13,7 +13,6 @@ const block_render = @import("presentation/block_render.zig");
 var link_id_counter: u32 = 1;
 
 pub const setInlineCodeTheme = ansi.setInlineCodeTheme;
-pub const applyTheme = ansi.applyTheme;
 pub const writeHorizontalRule = ansi.writeHorizontalRule;
 
 pub const TableColumnAlign = payload.TableColumnAlign;
@@ -499,11 +498,11 @@ pub const MarkdownProcessor = struct {
             try out.appendSlice(alloc, parsed.indent);
             if (bp.parseTaskListItem(parsed.content)) |task| {
                 try block_render.writeTaskListMarker(alloc, out, task);
-                try inline_render.writeInline(alloc, tu.withoutTerminalHardBreakMarker(task.content, line_has_lf), out, false, &fs, &link_id_counter);
+                try inline_render.writeInline(alloc, tu.withoutTerminalHardBreakMarker(task.content, line_has_lf), out, .{}, &fs, &link_id_counter);
                 return;
             }
             try ansi.writeDim(alloc, out, ansi.bullet_marker);
-            try inline_render.writeInline(alloc, tu.withoutTerminalHardBreakMarker(parsed.content, line_has_lf), out, false, &fs, &link_id_counter);
+            try inline_render.writeInline(alloc, tu.withoutTerminalHardBreakMarker(parsed.content, line_has_lf), out, .{}, &fs, &link_id_counter);
             return;
         }
 
@@ -513,14 +512,14 @@ pub const MarkdownProcessor = struct {
             try out.append(alloc, ' ');
             if (bp.parseTaskListItem(parsed.content)) |task| {
                 try block_render.writeTaskListMarker(alloc, out, task);
-                try inline_render.writeInline(alloc, tu.withoutTerminalHardBreakMarker(task.content, line_has_lf), out, false, &fs, &link_id_counter);
+                try inline_render.writeInline(alloc, tu.withoutTerminalHardBreakMarker(task.content, line_has_lf), out, .{}, &fs, &link_id_counter);
                 return;
             }
-            try inline_render.writeInline(alloc, tu.withoutTerminalHardBreakMarker(parsed.content, line_has_lf), out, false, &fs, &link_id_counter);
+            try inline_render.writeInline(alloc, tu.withoutTerminalHardBreakMarker(parsed.content, line_has_lf), out, .{}, &fs, &link_id_counter);
             return;
         }
 
-        try inline_render.writeInline(alloc, tu.withoutTerminalHardBreakMarker(line, line_has_lf), out, false, &fs, &link_id_counter);
+        try inline_render.writeInline(alloc, tu.withoutTerminalHardBreakMarker(line, line_has_lf), out, .{}, &fs, &link_id_counter);
     }
 
     fn finalizePipeBlock(

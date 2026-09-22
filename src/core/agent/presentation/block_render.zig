@@ -1,6 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const display_width = @import("../../shared/display_width.zig");
+const shared_theme = @import("../../shared/theme.zig");
 const ansi = @import("ansi.zig");
 const tu = @import("text_util.zig");
 const bp = @import("block_parse.zig");
@@ -37,7 +38,11 @@ pub fn writeHeading(
         alloc,
         content,
         out,
-        level == 1 or level == 3 or level == 5,
+        .{
+            .underline = level == 1 or level == 3 or level == 5,
+            .bold = level == 1 or level == 2 or level == 4,
+            .dim = level >= 4,
+        },
         footnotes,
         link_id,
     );
@@ -67,7 +72,7 @@ pub fn writeBlockquoteLine(
 ) !void {
     try out.appendNTimes(alloc, ' ', blockquote.indent);
     for (0..blockquote.depth) |_| try ansi.writeDim(alloc, out, ansi.vertical_rule_prefix);
-    try inline_render.writeInline(alloc, tu.withoutTerminalHardBreakMarker(content, line_has_lf), out, false, footnotes, link_id);
+    try inline_render.writeInline(alloc, tu.withoutTerminalHardBreakMarker(content, line_has_lf), out, .{}, footnotes, link_id);
 }
 
 pub fn writeDefinitionLine(
@@ -79,15 +84,16 @@ pub fn writeDefinitionLine(
     link_id: *u32,
 ) !void {
     try ansi.writeDim(alloc, out, "  ");
-    try inline_render.writeInline(alloc, tu.withoutTerminalHardBreakMarker(body, line_has_lf), out, false, footnotes, link_id);
+    try inline_render.writeInline(alloc, tu.withoutTerminalHardBreakMarker(body, line_has_lf), out, .{}, footnotes, link_id);
     try out.append(alloc, '\n');
 }
 
 pub fn writeTaskListMarker(alloc: Allocator, out: *std.ArrayList(u8), task: bp.ParsedTaskListItem) !void {
     if (task.completed) {
-        try out.appendSlice(alloc, ansi.task_completed_open);
+        const theme = shared_theme.current();
+        try out.appendSlice(alloc, theme.task_completed_open);
         try out.appendSlice(alloc, ansi.task_completed_marker);
-        try out.appendSlice(alloc, ansi.task_completed_close);
+        try out.appendSlice(alloc, shared_theme.closingFor(theme.task_completed_open));
         if (task.has_separator) try out.append(alloc, ' ');
         return;
     }
@@ -176,7 +182,7 @@ fn renderRowCells(
     for (raw_cells) |raw_cell| {
         var bytes: std.ArrayList(u8) = .empty;
         errdefer bytes.deinit(alloc);
-        try inline_render.writeInline(alloc, raw_cell, &bytes, false, footnotes, link_id);
+        try inline_render.writeInline(alloc, raw_cell, &bytes, .{}, footnotes, link_id);
         const width = display_width.visibleWidthIgnoringAnsi(bytes.items);
         try row.append(alloc, .{ .bytes = bytes, .width = width });
     }
@@ -401,7 +407,7 @@ pub fn parseTablePayloadWithFootnotes(
         for (raw.items) |raw_cell| {
             var rendered: std.ArrayList(u8) = .empty;
             errdefer rendered.deinit(alloc);
-            try inline_render.writeInline(alloc, raw_cell, &rendered, false, footnotes, link_id);
+            try inline_render.writeInline(alloc, raw_cell, &rendered, .{}, footnotes, link_id);
             rendered_cells.appendAssumeCapacity(try rendered.toOwnedSlice(alloc));
         }
 
@@ -462,7 +468,7 @@ pub fn writeFootnoteBody(
             @memset(marker[0..marker_bytes.len], ' ');
             try ansi.writeDim(alloc, out, marker[0..marker_bytes.len]);
         }
-        try inline_render.writeInline(alloc, body[start..end], out, false, sink, link_id);
+        try inline_render.writeInline(alloc, body[start..end], out, .{}, sink, link_id);
         if (end == body.len) break;
         is_first = false;
         start = end + 1;

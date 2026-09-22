@@ -4044,9 +4044,9 @@ describe.skipIf(SKIP)("tui: resize", () => {
     TIMEOUT,
   );
 
-  test(
-    "idle theme monitoring stays silent and notifications retint the transcript once",
-    async () => {
+  test.each([false, true])(
+    "idle theme monitoring stays silent and notifications retint the transcript once (custom=%s)",
+    async (custom) => {
       const root = mkdtempSync(join(tmpdir(), "fx-theme-reset-replay-"));
       const home = join(root, "home");
       const workspace = join(root, "workspace");
@@ -4059,6 +4059,17 @@ describe.skipIf(SKIP)("tui: resize", () => {
       writeFileSync(join(home, ".fx", "settings.json"), "{}");
       writeFileSync(stderrPath, "");
 
+      if (custom) {
+        mkdirSync(join(home, ".fx", "themes"), { recursive: true });
+        for (const [variant, code, link] of [
+          ["dark", "#00FFFF", "#FF00FF"],
+          ["light", "#008000", "#800000"],
+        ]) {
+          writeFileSync(join(home, ".fx", "themes", `retint-${variant}.json`), JSON.stringify({
+            name: `Retint ${variant}`, type: variant, colors: { inline_code: code, link },
+          }));
+        }
+      }
       const inlineMarker = "THEME_RESET_INLINE_CODE";
       const inlineTailMarker = "THEME_RESET_INLINE_TAIL";
       const responseFence = textHex("\x1b[?1;2c");
@@ -4066,7 +4077,7 @@ describe.skipIf(SKIP)("tui: resize", () => {
       const lightBackground = textHex("\x1b]11;rgb:ffff/ffff/ffff\x1b\\");
       const gateway = startFakeGateway([
         fakeGatewayFinalText(
-          `THEME_RESET_FIRST_RESPONSE \`${inlineMarker} ${"x".repeat(10_000)}\` ${inlineTailMarker}\n`,
+          `[THEME_RESET_LINK](https://example.com) THEME_RESET_FIRST_RESPONSE \`${inlineMarker} ${"x".repeat(10_000)}\` ${inlineTailMarker}\n`,
         ),
         fakeGatewayFinalText("THEME_RESET_SECOND_RESPONSE"),
       ]);
@@ -4076,6 +4087,9 @@ describe.skipIf(SKIP)("tui: resize", () => {
         cwd: workspace,
         env: {
           HOME: home,
+          FX_THEME: custom ? "retint-dark" : undefined,
+          COLORTERM: undefined,
+          TERM_PROGRAM: "Apple_Terminal",
           OPENAI_API_KEY: "fake-theme-reset-key",
           FX_RESPONSES_BASE_URL: gateway.baseUrl,
           FX_MODEL: FAKE_GATEWAY_MODEL,
@@ -4160,8 +4174,10 @@ describe.skipIf(SKIP)("tui: resize", () => {
       const lightReplayStart = stdoutAfterLightTheme.lastIndexOf("\x1b[3J");
       expect(lightReplayStart).toBeGreaterThanOrEqual(0);
       const lightReplayAndTail = stdoutAfterLightTheme.slice(lightReplayStart);
-      expect(lightReplayAndTail).toContain("\x1b[38;5;247m");
-      expect(lightReplayAndTail).not.toContain("\x1b[38;5;245m");
+      expect(lightReplayAndTail).toContain(custom ? "\x1b[38;5;28m" : "\x1b[38;5;247m");
+      expect(lightReplayAndTail).not.toContain(custom ? "\x1b[38;5;51m" : "\x1b[38;5;245m");
+      expect(lightReplayAndTail).toContain(custom ? "\x1b[38;5;88m" : "\x1b[38;5;25m");
+      expect(lightReplayAndTail).not.toContain(custom ? "\x1b[38;5;201m" : "\x1b[38;5;75m");
       const resetCountAfter = countOccurrences(
         Buffer.concat(stdoutFrames(tapePath).map((frame) => frame.payload)).toString(),
         "\x1b[3J",

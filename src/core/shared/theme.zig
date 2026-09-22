@@ -165,13 +165,38 @@ pub fn builtin(light: bool) Theme {
 /// import ui state read their colors through `current()`; `activate` is called
 /// by the ui layer whenever a theme is applied.
 var active_theme: Theme = fx_dark;
+var active_theme_mutex: std.Io.Mutex = .init;
 
 pub fn current() Theme {
+    active_theme_mutex.lockUncancelable(io_mod.getIo());
+    defer active_theme_mutex.unlock(io_mod.getIo());
     return active_theme;
 }
 
 pub fn activate(theme: Theme) void {
+    // Theme strings are immutable and live for the process lifetime. Copy the
+    // complete descriptor under the lock so worker readers cannot see a torn
+    // slice or an opener and closer from different theme generations.
+    active_theme_mutex.lockUncancelable(io_mod.getIo());
+    defer active_theme_mutex.unlock(io_mod.getIo());
     active_theme = theme;
+}
+
+test "theme publication gives concurrent readers a complete immutable snapshot" {
+    const previous = current();
+    defer activate(previous);
+    activate(fx_dark);
+    const Reader = struct {
+        fn run() void {
+            for (0..10_000) |_| {
+                const snapshot = current();
+                std.debug.assert(std.meta.eql(snapshot, fx_dark) or std.meta.eql(snapshot, fx_light));
+            }
+        }
+    };
+    const reader = try io_mod.spawn(.{}, Reader.run, .{});
+    defer reader.join();
+    for (0..10_000) |index| activate(builtin(index % 2 == 0));
 }
 
 pub const ThemeChoice = union(enum) {

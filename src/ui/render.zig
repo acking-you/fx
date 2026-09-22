@@ -71,7 +71,6 @@ pub fn applyTheme(theme: shared_theme.Theme, terminal_bg: ?TerminalRgb) void {
     shared_theme.activate(theme);
     is_light = theme.light;
     active_terminal_background = terminal_bg;
-    assistant_presentation.applyTheme(theme);
     divider_style = theme.divider_style;
     hint_style = theme.hint_style;
     statusline_style = theme.statusline_style;

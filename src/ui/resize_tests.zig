@@ -2,6 +2,7 @@
 //! `vt_emulator.Grid` without a TTY or signals.
 
 const std = @import("std");
+const shared_theme = @import("../core/shared/theme.zig");
 
 const question_prompt = @import("../core/agent/question_prompt.zig");
 const debug_trace = @import("../core/shared/debug_trace.zig");
@@ -7259,7 +7260,7 @@ test "theme reset retints fx entries and replays the retained transcript once" {
     const min_visible_rows = h.shell.min_visible_viewport_rows;
     const before = try h.file.length(io_mod.getIo());
 
-    try h.shell.retintEntriesForTheme(alloc, false, true);
+    try h.shell.retintEntriesForTheme(alloc, shared_theme.builtin(false), shared_theme.builtin(true));
     try h.shell.requestTerminalReset(&h.metrics);
     try std.testing.expect(h.shell.terminal_reset_pending);
     try std.testing.expectEqual(min_visible_rows, h.shell.min_visible_viewport_rows);

@@ -990,7 +990,6 @@ fn taskMarkerWidth(text: []const u8, start: usize) ?usize {
     // Recognize both builtin variants plus whatever the active theme set, so
     // completed markers keep measuring correctly under custom themes.
     const completed_opens = [_][]const u8{ "\x1b[38;5;252m", "\x1b[38;5;238m", shared_theme.current().task_completed_open };
-    const completed_close = "\x1b[39m";
     const completed = "\xe2\x9c\x93";
 
     if (std.mem.startsWith(u8, text[start..], dim_open)) {
@@ -998,10 +997,11 @@ fn taskMarkerWidth(text: []const u8, start: usize) ?usize {
     }
 
     var i = start;
-    const open_len = for (completed_opens) |open| {
-        if (std.mem.startsWith(u8, text[i..], open)) break open.len;
+    const matched_open = for (completed_opens) |open| {
+        if (std.mem.startsWith(u8, text[i..], open)) break open;
     } else return null;
-    i += open_len;
+    const completed_close = shared_theme.closingFor(matched_open);
+    i += matched_open.len;
     if (!std.mem.startsWith(u8, text[i..], completed)) return null;
     i += completed.len;
     if (!std.mem.startsWith(u8, text[i..], completed_close)) return null;
@@ -1013,6 +1013,21 @@ fn taskMarkerWidth(text: []const u8, start: usize) ?usize {
         width += 1;
     }
     return width;
+}
+
+test "custom theme task marker consumes background and emphasis resets before its separator" {
+    const previous = shared_theme.current();
+    defer shared_theme.activate(previous);
+    var theme = shared_theme.fx_dark;
+    theme.task_completed_open = "\x1b[1;3;38;5;123;48;5;234m";
+    shared_theme.activate(theme);
+    const text = "\x1b[1;3;38;5;123;48;5;234m✓\x1b[39m\x1b[49m\x1b[22m\x1b[23m next";
+    try std.testing.expectEqual(@as(?usize, 2), taskMarkerWidth(text, 0));
+    const wrapped = try wrapAssistantText(std.testing.allocator, "\x1b[1;3;38;5;123;48;5;234m✓\x1b[39m\x1b[49m\x1b[22m\x1b[23m alpha beta gamma delta", 18);
+    defer std.testing.allocator.free(wrapped);
+    try std.testing.expect(std.mem.find(u8, wrapped, "\n  gamma delta") != null);
+    try std.testing.expectEqual(@as(?usize, 2), taskMarkerWidth("\x1b[38;5;252m✓\x1b[39m next", 0));
+    try std.testing.expectEqual(@as(?usize, 2), taskMarkerWidth("\x1b[38;5;238m✓\x1b[39m next", 0));
 }
 
 fn skipPacerDimReassertions(text: []const u8, start: usize) usize {
