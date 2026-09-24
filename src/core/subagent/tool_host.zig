@@ -981,11 +981,12 @@ pub const Runtime = struct {
         defer scratch.deinit();
         var model: []u8 = undefined;
         var effort: types.ReasoningEffort = undefined;
-        if (self.sessions.loadReadOnly(scratch.allocator(), child_id)) |loaded| {
-            var state = loaded;
-            defer state.deinit(scratch.allocator());
-            model = try alloc.dupe(u8, state.preferences.model);
-            effort = state.preferences.effort;
+        // Progress only needs preferences, not the child's replayed history.
+        if (self.sessions.loadReadOnlyPreferences(scratch.allocator(), child_id)) |loaded| {
+            var preferences = loaded;
+            defer preferences.deinit(scratch.allocator());
+            model = try alloc.dupe(u8, preferences.model);
+            effort = preferences.effort;
         } else |err| {
             debug_trace.eventf("subagent", "status_publisher_fallback", .{}, "child_id={s} reason=session_load_failed error={s}", .{ child_id, @errorName(err) });
             model = try alloc.dupe(u8, fallback.model);
@@ -1164,11 +1165,33 @@ test "subagent session reads do not retain scratch in the caller arena" {
     }
     // Only the tiny result and model strings belong in the caller arena.
     try std.testing.expect(turn.queryCapacity() < 64 * 1024);
+    // Preferences must fit even when there is no room to decode the history.
+    var preference_buffer: [64 * 1024]u8 = undefined;
+    var preference_allocator = std.heap.FixedBufferAllocator.init(&preference_buffer);
+    var preferences = try sessions.loadReadOnlyPreferences(preference_allocator.allocator(), loaded.active_id);
+    defer preferences.deinit(preference_allocator.allocator());
+    try std.testing.expectEqualStrings("updated-child-model", preferences.model);
     try std.testing.expect((try runtime.managedResultText(turn.allocator(), loaded.active_id, "missing-work")) == null);
     try std.testing.expect((try runtime.managedResultText(turn.allocator(), "missing-child", "target-work")) == null);
+    const Resolver = struct {
+        fn resolve(_: *anyopaque, scratch: Allocator, _: []const u8) model_capabilities.ResolveError!model_capabilities.Capabilities {
+            const bytes = scratch.alloc(u8, 1024 * 1024) catch return error.Cancelled;
+            @memset(bytes, 'x');
+            return .{ .context_window = 128_000 };
+        }
+    };
+    var context: u8 = 0;
+    var resolved_status = try runtime.startStatusPublisher(turn.allocator(), loaded.active_id, fallback, null, .{ .ctx = &context, .resolve_fn = Resolver.resolve });
+    defer resolved_status.deinit(turn.allocator());
+    try std.testing.expectEqual(@as(?u32, 128_000), resolved_status.context_window);
+    try std.testing.expect(turn.queryCapacity() < 64 * 1024);
     var fallback_status = try runtime.startStatusPublisher(turn.allocator(), "missing-child", fallback, null, null);
     defer fallback_status.deinit(turn.allocator());
     try std.testing.expectEqualStrings(fallback.model, fallback_status.model);
+    var no_space: [0]u8 = .{};
+    var failing = std.heap.FixedBufferAllocator.init(&no_space);
+    try std.testing.expectError(error.OutOfMemory, runtime.managedResultText(failing.allocator(), loaded.active_id, "target-work"));
+    try std.testing.expectError(error.OutOfMemory, runtime.startStatusPublisher(failing.allocator(), loaded.active_id, fallback, null, null));
 }
 
 test "subagent admission preserves an undelivered result before advancing its child" {
