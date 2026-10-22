@@ -2447,7 +2447,7 @@ fn executeHostTool(raw_ctx: ?*anyopaque, dispatch: tool_dispatch.DispatchContext
         .arguments = parsed_args.value,
     }, .{});
     defer alloc.free(params);
-    ctx.state.writer.writeRequest(alloc, .{ .integer = @intCast(request_id) }, "_harnel/tool/call", params) catch
+    ctx.state.writer.writeRequest(alloc, .{ .integer = @intCast(request_id) }, "_infx/tool/call", params) catch
         return .{ .failure = try alloc.dupe(u8, "Host tool transport closed") };
     var response = server.awaitOutboundResponse(ctx.state, request_id, .request) orelse
         return .{ .failure = try alloc.dupe(u8, "Host tool cancelled") };

@@ -25,7 +25,7 @@ The process-wide native I/O driver remains allocated until process exit.
 Tools contain `name`, `description`, `parameters` (an object JSON schema), and
 `read_only` (false by default). Native and historical executable tool names are
 reserved. Host tools pass through ordinary fx admission before a private
-`_harnel/tool/call` request is sent to the host. The host replies with
+`_infx/tool/call` request is sent to the host. The host replies with
 `{ "output": "text", "is_error": false }`. The host owns argument validation
 and callback cancellation. Schemas describe the model contract; they are not
 a substitute for validation inside a tool implementation.
