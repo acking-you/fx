@@ -1,12 +1,39 @@
 # fx
 
-## 0.0.10
+## 0.0.11
 
 <!-- release:start -->
+### Breaking Changes
+
+- **Embedded host tool callback:** Native host tool requests use the `_infx/tool/call` method. Request and response shapes are unchanged.
+
+### New Features
+
+- **Terminal themes:** fx follows the terminal's light or dark mode. `FX_THEME=light` or `FX_THEME=dark` pins a variant, and native fx or VS Code JSON themes saved in `~/.fx/themes/` can be selected with the profile `theme` setting or `FX_THEME`.
+
+### Improvements
+
+- **Syntax highlighting:** Code blocks highlight more languages and shell syntax with the active theme's colors.
+- **File picker startup:** The file picker shows the last saved workspace index immediately, then replaces it with a fresh scan.
+- **Command context:** The model sees the active workspace directory and the shell commands actually use, even when fx starts in another directory. An invalid command directory reports the requested and default directories without running the command.
+- **Permission diagnostics:** An unavailable automatic review records which stage failed, such as credential validation, a timeout, provider rejection, or malformed reviewer output, without logging credentials, endpoints, or provider responses.
+- **Subagent inspection memory:** Repeated subagent inspections in one turn no longer keep each child's loaded history in memory until the turn ends.
+
+### Bug Fixes
+
+- **Provider connection setup:** A model request whose connection fails with an unclassified system error before anything is sent is retried, instead of ending the turn with `Unexpected`.
+- **Request deadlines:** OAuth sign-in, Grok requests, model catalog fetches, and `web_fetch` connections no longer fail with `Timeout` long before their deadline.
+- **macOS static libraries:** The native macOS static libraries link with the Xcode 27 linker.
+- **Question prompts:** Long questions and answers wrap onto continuation lines instead of being truncated.
+- **Markdown links:** Link destinations with balanced parentheses or titles render correctly, and link colors are restored while text streams and wraps.
+- **Full transcript:** Typing while the Ctrl+O transcript is open no longer resets it.
+<!-- release:end -->
+
+## 0.0.10
+
 ### Bug Fixes
 
 - **Windows stream cancellation:** Cancelling a model turn now interrupts an outstanding network read even when the provider stops sending data. The same session remains available for the next prompt.
-<!-- release:end -->
 
 ## 0.0.9
 
