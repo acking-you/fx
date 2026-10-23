@@ -437,7 +437,7 @@ fn executeProviderJsonBounded(
         input.fedramp,
         input.openai_identity,
     );
-    var req = try client.request(switch (input.method) {
+    var req = try openHttpRequest(&client, switch (input.method) {
         .get => .GET,
         .post_json => .POST,
     }, uri, .{
@@ -579,7 +579,7 @@ fn fetchProviderJsonAtUrlCore(
         null,
     );
 
-    var req = client.request(.GET, uri, .{
+    var req = openHttpRequest(&client, .GET, uri, .{
         .headers = headers,
         .extra_headers = extra_headers,
         .redirect_behavior = .unhandled,
@@ -918,6 +918,7 @@ const ConnectedRequestWatch = struct {
 
 const RequestOpenOperation = struct {
     client: *std.http.Client,
+    method: std.http.Method = .POST,
     uri: std.Uri,
     options: std.http.Client.RequestOptions,
     request_open_override: ?RequestOpenOverride,
@@ -927,12 +928,12 @@ const RequestOpenOperation = struct {
             request_open.run(
                 request_open.ctx,
                 self.client,
-                .POST,
+                self.method,
                 self.uri,
                 self.options,
             )
         else
-            self.client.request(.POST, self.uri, self.options);
+            self.client.request(self.method, self.uri, self.options);
         // Opening sends no request bytes. std.Io reports an unclassified
         // errno as Unexpected; on POSIX this includes connect(2) failing with
         // EISCONN when a stray cancellation signal interrupted a connection
@@ -940,6 +941,61 @@ const RequestOpenOperation = struct {
         return request catch |err| if (err == error.Unexpected) error.ConnectionSetupFailed else err;
     }
 };
+
+/// Opens an ordinary HTTP request with bounded recovery for std's stray-signal
+/// connect failure. No request bytes have been sent here, so even OAuth token
+/// exchanges can recover without replaying a submitted body. The caller owns
+/// the returned request and retains its enclosing cancellation/deadline watch.
+/// Streamed model requests keep their existing setup epoch and retry budget.
+pub fn openHttpRequest(
+    client: *std.http.Client,
+    method: std.http.Method,
+    uri: std.Uri,
+    options: std.http.Client.RequestOptions,
+) !std.http.Client.Request {
+    var operation = RequestOpenOperation{
+        .client = client,
+        .method = method,
+        .uri = uri,
+        .options = options,
+        .request_open_override = null,
+    };
+    return recoverHttpSetup(&operation);
+}
+
+fn recoverHttpSetup(operation: anytype) @TypeOf(operation.run()) {
+    var retries: usize = 0;
+    while (true) {
+        return operation.run() catch |err| {
+            if (err != error.ConnectionSetupFailed or retries == 2) return err;
+            retries += 1;
+            continue;
+        };
+    }
+}
+
+test "ordinary HTTP setup recovery is bounded and never retries a delivery failure" {
+    const Operation = struct {
+        calls: usize = 0,
+        failures: usize,
+        failure: anyerror = error.ConnectionSetupFailed,
+
+        fn run(self: *@This()) anyerror!u32 {
+            self.calls += 1;
+            if (self.calls <= self.failures) return self.failure;
+            return 7;
+        }
+    };
+    var transient = Operation{ .failures = 1 };
+    try std.testing.expectEqual(@as(u32, 7), try recoverHttpSetup(&transient));
+    try std.testing.expectEqual(@as(usize, 2), transient.calls);
+    var persistent = Operation{ .failures = 4 };
+    try std.testing.expectError(error.ConnectionSetupFailed, recoverHttpSetup(&persistent));
+    try std.testing.expectEqual(@as(usize, 3), persistent.calls);
+    var delivered = Operation{ .failures = 1, .failure = error.WriteFailed };
+    try std.testing.expectError(error.WriteFailed, recoverHttpSetup(&delivered));
+    try std.testing.expectEqual(@as(usize, 1), delivered.calls);
+}
 
 fn openGatewayRequestBounded(
     client: *std.http.Client,

@@ -52,13 +52,11 @@ const HttpOperation = struct {
         defer secret.zeroAndFree(self.alloc, response_buffer);
         var response_writer = std.Io.Writer.fixed(response_buffer);
 
-        const result = client.fetch(.{
-            .location = .{ .url = self.request.url },
-            .method = switch (self.request.method) {
-                .get => .GET,
-                .post_form, .post_json => .POST,
-            },
-            .payload = self.request.payload,
+        const uri = try std.Uri.parse(self.request.url);
+        var req = try http_client.openHttpRequest(&client, switch (self.request.method) {
+            .get => .GET,
+            .post_form, .post_json => .POST,
+        }, uri, .{
             .headers = .{
                 .content_type = switch (self.request.method) {
                     .get => .default,
@@ -73,17 +71,34 @@ const HttpOperation = struct {
                     .default,
             },
             .redirect_behavior = .unhandled,
-            .response_writer = &response_writer,
-        }) catch |err| switch (err) {
+        });
+        defer req.deinit();
+        if (self.request.payload) |payload|
+            try req.sendBodyComplete(@constCast(payload))
+        else
+            try req.sendBodiless();
+
+        var response = try req.receiveHead(&.{});
+        const decompress_buffer: []u8 = switch (response.head.content_encoding) {
+            .identity => &.{},
+            .zstd => try self.alloc.alloc(u8, std.compress.zstd.default_window_len),
+            .deflate, .gzip => try self.alloc.alloc(u8, std.compress.flate.max_window_len),
+            .compress => return error.UnsupportedCompressionMethod,
+        };
+        defer self.alloc.free(decompress_buffer);
+        var transfer_buffer: [64]u8 = undefined;
+        var decompress: std.http.Decompress = undefined;
+        const reader = response.readerDecompressing(&transfer_buffer, &decompress, decompress_buffer);
+        _ = reader.streamRemaining(&response_writer) catch |err| switch (err) {
             error.WriteFailed => return error.OAuthResponseTooLarge,
-            else => return err,
+            error.ReadFailed => return response.bodyErr().?,
         };
         const body = response_writer.buffered();
         if (body.len > response_max_bytes) return error.OAuthResponseTooLarge;
 
         return .{
-            .disposition = if (result.status == .ok) .accepted else .rejected,
-            .status = result.status,
+            .disposition = if (response.head.status == .ok) .accepted else .rejected,
+            .status = response.head.status,
             .body = try self.alloc.dupe(u8, body),
         };
     }

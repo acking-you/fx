@@ -153,8 +153,18 @@ runtime repair set passes 378 tests, and real TUI authorization cancellation and
 reasoning-stream interactions pass with clean stderr. The separate occupied
 terminal selection regression passes as well.
 
-The first authentication contention run completed with one Grok forced-refresh
-failure in 480 runs. It did not reproduce the early-deadline symptom. A narrow
-browser-only repetition passed 800 times, so a further mixed authentication run
-retains error-name-only diagnostics to isolate the remaining failure; its result
-is recorded in the PR. No successful stress claim is made for the initial run.
+Authentication contention then exposed a remaining `Unexpected` failure in both
+forced Grok refresh and initial Codex device login. OAuth's one-shot fetch and
+ordinary provider JSON requests bypassed the model request's setup recovery.
+They now share request opening with the same setup-only error classification
+and a maximum of three attempts. No HTTP request bytes have been sent at that
+boundary; submitted token exchanges and response reads are never retried there.
+The existing enclosing deadline and cancellation watch remain authoritative,
+and OAuth retains decompression and its 64 KiB response limit. Nineteen focused
+tests and four real CLI/TUI provider login flows pass. Diagnostic and final
+contention results are recorded in the PR.
+
+Binary-size comparison uses the cache environment variable accepted by both
+compiler generations. It selects the base revision's declared Zig version, so
+this compiler migration still compares a valid old binary with the new one.
+The updated workflow passes actionlint.
