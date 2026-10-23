@@ -168,6 +168,10 @@ pub const HostToolExecutor = struct {
 pub const DispatchContext = struct {
     host_tool_executor: ?HostToolExecutor = null,
     allocator: Allocator,
+    /// Thread-safe allocator whose frees return memory, for per-call workspace
+    /// scans. When omitted, `allocator` must satisfy the same contract. Runtime
+    /// dispatch supplies the session allocator separately from the turn arena.
+    scratch_allocator: ?Allocator = null,
     permission_mode: permission_gate.PermissionMode = .ask,
     permission_decider: ?PermissionDecider = null,
     execution_authority: ?command_admission.ToolExecutionAuthority = null,

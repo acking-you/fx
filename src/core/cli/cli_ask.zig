@@ -6243,7 +6243,7 @@ fn exerciseSavedAskSessionStoreAllocation(alloc: Allocator) !void {
 }
 
 test "saved ask allocation failures keep managed borrows owned" {
-    const backing = std.testing.allocator;
+    const backing = testing_allocator.no_resize;
     var counting = std.testing.FailingAllocator.init(backing, .{});
     try exerciseSavedAskSessionStoreAllocation(counting.allocator());
 

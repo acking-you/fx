@@ -1032,7 +1032,7 @@ const TerminalOpenTestSubagents = struct {
     selected_id: []const u8 = "terminal-a",
     manager_active: bool = true,
 
-    fn selectedTerminalId(self: *const TerminalOpenTestSubagents) ?[]const u8 {
+    pub fn selectedTerminalId(self: *const TerminalOpenTestSubagents) ?[]const u8 {
         return self.selected_id;
     }
 };
@@ -1044,7 +1044,7 @@ const TerminalOpenTestApp = struct {
     inline_draft: []const u8 = "preserved inline draft",
     inline_cursor: usize = 9,
 
-    fn requestTerminalOpen(
+    pub fn requestTerminalOpen(
         self: *TerminalOpenTestApp,
         session_id: []const u8,
     ) app_terminal_takeover_runtime.OpenRequestResult {

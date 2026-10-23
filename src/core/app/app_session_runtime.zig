@@ -5948,13 +5948,13 @@ const FakeWorker = struct {
         return 0;
     }
 
-    fn tryHoldTurnStart(self: *FakeWorker) bool {
+    pub fn tryHoldTurnStart(self: *FakeWorker) bool {
         if (self.turn_start_held) return false;
         self.turn_start_held = true;
         return true;
     }
 
-    fn releaseTurnStartHold(self: *FakeWorker) void {
+    pub fn releaseTurnStartHold(self: *FakeWorker) void {
         self.turn_start_held = false;
     }
 
@@ -6117,7 +6117,7 @@ const TestApp = struct {
         return builtin_tools.advertisement_set;
     }
 
-    fn terminalTitle(self: *TestApp) host_capability.TerminalTitle {
+    pub fn terminalTitle(self: *TestApp) host_capability.TerminalTitle {
         return .{
             .context = self,
             .set_fn = setTerminalTitleLabelForTest,
@@ -6324,7 +6324,7 @@ const TestApp = struct {
         try self.replay_events.append(self.alloc, .command_output_summary_flush);
     }
 
-    fn describeToolActionCompletedForRuntime(self: *TestApp, arena: Allocator, call: types.ToolCall, _: ?[]const u8) ![]const u8 {
+    pub fn describeToolActionCompletedForRuntime(self: *TestApp, arena: Allocator, call: types.ToolCall, _: ?[]const u8) ![]const u8 {
         if (self.action_description_allocates_scratch) {
             _ = try arena.dupe(u8, "temporary parsed arguments");
         }
@@ -6334,7 +6334,7 @@ const TestApp = struct {
         return arena.print("● Completed {s}", .{call.name});
     }
 
-    fn describeToolActionDeniedForRuntime(self: *TestApp, arena: Allocator, call: types.ToolCall, _: ?[]const u8, label: []const u8) ![]const u8 {
+    pub fn describeToolActionDeniedForRuntime(self: *TestApp, arena: Allocator, call: types.ToolCall, _: ?[]const u8, label: []const u8) ![]const u8 {
         if (self.action_description_allocates_scratch) {
             _ = try arena.dupe(u8, "temporary parsed arguments");
         }
@@ -6347,7 +6347,7 @@ const TestApp = struct {
         try self.assistant_presentation_events.append(self.alloc, .text);
     }
 
-    fn appendAssistantTable(
+    pub fn appendAssistantTable(
         self: *TestApp,
         table: assistant_presentation.TablePayload,
     ) !void {
@@ -6358,7 +6358,7 @@ const TestApp = struct {
         try self.assistant_tables.append(self.alloc, table);
     }
 
-    fn appendAssistantCodeBlock(
+    pub fn appendAssistantCodeBlock(
         self: *TestApp,
         block: assistant_presentation.CodeBlockPayload,
     ) !void {
@@ -6369,7 +6369,7 @@ const TestApp = struct {
         try self.assistant_code_blocks.append(self.alloc, block);
     }
 
-    fn appendAssistantThematicRule(self: *TestApp) !void {
+    pub fn appendAssistantThematicRule(self: *TestApp) !void {
         self.assistant_thematic_rule_count += 1;
         try self.assistant_presentation_events.append(self.alloc, .thematic_rule);
     }

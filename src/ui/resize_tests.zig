@@ -1980,8 +1980,8 @@ test "streamed H1 keeps bold underline through shrink and grow" {
 
 test "streamed inline code color survives shrink and grow" {
     const cases = [_]struct { light: bool, fg: u8 }{
-        .{ .light = false, .fg = 245 },
-        .{ .light = true, .fg = 247 },
+        .{ .light = false, .fg = 255 },
+        .{ .light = true, .fg = 235 },
     };
     defer assistant_presentation.setInlineCodeTheme(false);
 
@@ -7254,7 +7254,7 @@ test "theme reset retints fx entries and replays the retained transcript once" {
     );
     const assistant_id = try h.shell.appendAssistantTurnEntry(alloc);
     const assistant = h.shell.lookupAssistantSegments(assistant_id) orelse unreachable;
-    try assistant.text.appendSlice(alloc, "\x1b[38;5;245mFX THEME INLINE CODE\x1b[39m\n");
+    try assistant.text.appendSlice(alloc, "\x1b[38;5;255mFX THEME INLINE CODE\x1b[39m\n");
 
     try h.renderTranscriptFrame();
     try h.flush();
@@ -7284,7 +7284,7 @@ test "theme reset retints fx entries and replays the retained transcript once" {
         h.shell.entries.items[2].raw_bytes.bytes,
     );
     try std.testing.expectEqualStrings(
-        "\x1b[38;5;247mFX THEME INLINE CODE\x1b[39m\n",
+        "\x1b[38;5;235mFX THEME INLINE CODE\x1b[39m\n",
         h.shell.lookupAssistantSegments(assistant_id).?.text.items,
     );
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, h.shell.transcript.items, "FX THEME HEADER"));

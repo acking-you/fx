@@ -222,7 +222,7 @@ fn callWithOps(ctx: tool_dispatch.DispatchContext, erased: tool_dispatch.ToolInp
     // The scan and the per-call work use the scratch allocator, so each search
     // returns its memory when it ends; only the result body comes from
     // `ctx.allocator`.
-    var arena_state = std.heap.ArenaAllocator.init(ctx.allocator);
+    var arena_state = std.heap.ArenaAllocator.init(ctx.scratch_allocator orelse ctx.allocator);
     defer mem_utils.deinit_arena(arena_state);
     const arena = arena_state.allocator();
 
@@ -271,10 +271,10 @@ fn searchGrepRoot(
 ) tool_dispatch.DispatchError!SearchOutcome {
     return switch (root_stat.kind) {
         .directory => switch (input.mode) {
-            .count => .{ .count = ops.count_directory(ctx.allocator, arena, ctx.workspace_root, absolute_root, input.pattern, input.case_insensitive, ctx.ignored_list_entries, include_pattern) catch |err| {
+            .count => .{ .count = ops.count_directory(ctx.scratch_allocator orelse ctx.allocator, arena, ctx.workspace_root, absolute_root, input.pattern, input.case_insensitive, ctx.ignored_list_entries, include_pattern) catch |err| {
                 return searchFailure(ctx.allocator, absolute_root, "walk grep search root", err);
             } },
-            .matches, .files_with_matches => .{ .matches = ops.collect_directory(ctx.allocator, arena, ctx.workspace_root, absolute_root, input.pattern, input.case_insensitive, ctx.ignored_list_entries, include_pattern) catch |err| {
+            .matches, .files_with_matches => .{ .matches = ops.collect_directory(ctx.scratch_allocator orelse ctx.allocator, arena, ctx.workspace_root, absolute_root, input.pattern, input.case_insensitive, ctx.ignored_list_entries, include_pattern) catch |err| {
                 return searchFailure(ctx.allocator, absolute_root, "walk grep search root", err);
             } },
         },
@@ -699,6 +699,7 @@ test "grep_files keeps only its result in the turn's allocator" {
         const before = turn_state.queryCapacity();
         const result = try tool_dispatch.dispatchToolCall(.{
             .allocator = turn_state.allocator(),
+            .scratch_allocator = alloc,
             .permission_mode = .auto,
             .workspace_root = workspace,
         }, registry, .{ .id = "call_1", .name = "grep_files", .arguments_json = args });

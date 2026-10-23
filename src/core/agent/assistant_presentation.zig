@@ -841,7 +841,7 @@ test "markdown images preserve code isolation, chunk buffering, and heading unde
 
     try processor.push(alloc, "`![literal](https://example.com/literal.png)`\n", &out);
     try std.testing.expectEqualStrings(
-        "\x1b[38;5;245m![literal](https://example.com/literal.png)\x1b[39m\n",
+        "\x1b[38;5;255m![literal](https://example.com/literal.png)\x1b[39m\n",
         out.items,
     );
     try std.testing.expect(std.mem.find(u8, out.items, "\x1b]8;") == null);
@@ -1003,7 +1003,7 @@ test "rejected angle candidates suppress nested link emission" {
         "<https://escaped.example>\n" ++
         "<a:x> <dev@bad-.example> <https://has space>\n" ++
         "<not-an-autolink https://unterminated.example\n" ++
-        "\x1b[38;5;245m<https://code.example>\x1b[39m\n";
+        "\x1b[38;5;255m<https://code.example>\x1b[39m\n";
 
     try processor.push(alloc, input, &out);
     try std.testing.expectEqualStrings(expected, out.items);
@@ -1042,7 +1042,7 @@ test "bare URL remains literal in code and excluded boundaries" {
         &out,
     );
     try std.testing.expectEqualStrings(
-        "\x1b[38;5;245mhttps://code.example\x1b[39m wordhttps://word.example <<https://angle.example>>\n",
+        "\x1b[38;5;255mhttps://code.example\x1b[39m wordhttps://word.example <<https://angle.example>>\n",
         out.items,
     );
     try std.testing.expect(std.mem.find(u8, out.items, "\x1b]8;") == null);
@@ -1219,7 +1219,7 @@ test "backslash escapes survive heading preprocessing and code spans" {
 
     try processor.push(alloc, "## \\*\\*literal bold\\*\\* and `\\*code\\*`\n", &out);
     try std.testing.expectEqualStrings(
-        "\x1b[1m**literal bold** and \x1b[38;5;245m\\*code\\*\x1b[39m\x1b[22m\n",
+        "\x1b[1m**literal bold** and \x1b[38;5;255m\\*code\\*\x1b[39m\x1b[22m\n",
         out.items,
     );
 }
@@ -1522,7 +1522,7 @@ test "underscore emphasis preserves code literals and closes unpaired spans" {
     try std.testing.expectEqualStrings(
         "\x1b[3munclosed\x1b[23m\n" ++
             "\x1b[1munclosed\x1b[22m\n" ++
-            "\x1b[38;5;245m_literal_ __literal__\x1b[39m\n",
+            "\x1b[38;5;255m_literal_ __literal__\x1b[39m\n",
         out.items,
     );
 }
@@ -1596,7 +1596,7 @@ test "inline code backticks wrap with ANSI" {
     defer out.deinit(alloc);
 
     try processor.push(alloc, "run `zig build` now\n", &out);
-    try std.testing.expectEqualStrings("run \x1b[38;5;245mzig build\x1b[39m now\n", out.items);
+    try std.testing.expectEqualStrings("run \x1b[38;5;255mzig build\x1b[39m now\n", out.items);
 }
 
 test "inline code uses the selected light background" {
@@ -1610,7 +1610,7 @@ test "inline code uses the selected light background" {
     defer out.deinit(alloc);
 
     try processor.push(alloc, "run `zig build` now\n", &out);
-    try std.testing.expectEqualStrings("run \x1b[38;5;247mzig build\x1b[39m now\n", out.items);
+    try std.testing.expectEqualStrings("run \x1b[38;5;235mzig build\x1b[39m now\n", out.items);
 }
 
 test "stray asterisk between spaces stays literal" {
@@ -3003,7 +3003,7 @@ test "line intake buffers partial lines and preserves standalone carriage return
     try processor.push(alloc, "run `zig", &out);
     try std.testing.expectEqual(@as(usize, 0), out.items.len);
     try processor.push(alloc, " build` now\n", &out);
-    try std.testing.expectEqualStrings("run \x1b[38;5;245mzig build\x1b[39m now\n", out.items);
+    try std.testing.expectEqualStrings("run \x1b[38;5;255mzig build\x1b[39m now\n", out.items);
 
     out.clearRetainingCapacity();
     try processor.push(alloc, "left\rright\n", &out);
@@ -3043,7 +3043,7 @@ test "flush closes an unpaired inline code span" {
 
     try processor.push(alloc, "run `zig build", &out);
     try processor.flush(alloc, &out);
-    try std.testing.expectEqualStrings("run \x1b[38;5;245mzig build\x1b[39m", out.items);
+    try std.testing.expectEqualStrings("run \x1b[38;5;255mzig build\x1b[39m", out.items);
 }
 
 test "header with inline markdown" {
@@ -3054,7 +3054,7 @@ test "header with inline markdown" {
     defer out.deinit(alloc);
 
     try processor.push(alloc, "## Using `fx` in CI\n", &out);
-    try std.testing.expectEqualStrings("\x1b[1mUsing \x1b[38;5;245mfx\x1b[39m in CI\x1b[22m\n", out.items);
+    try std.testing.expectEqualStrings("\x1b[1mUsing \x1b[38;5;255mfx\x1b[39m in CI\x1b[22m\n", out.items);
 }
 
 test "inline code ignores bold markers inside" {
@@ -3065,7 +3065,7 @@ test "inline code ignores bold markers inside" {
     defer out.deinit(alloc);
 
     try processor.push(alloc, "use `**literal**` here\n", &out);
-    try std.testing.expectEqualStrings("use \x1b[38;5;245m**literal**\x1b[39m here\n", out.items);
+    try std.testing.expectEqualStrings("use \x1b[38;5;255m**literal**\x1b[39m here\n", out.items);
 }
 
 test "pipe table header separator has junction aligned with column pipes" {
@@ -3275,7 +3275,7 @@ test "header keeps italic and code inline" {
 
     try processor.push(alloc, "# *note* about `fx`\n", &out);
     try std.testing.expectEqualStrings(
-        "\x1b[1m\x1b[4m\x1b[3mnote\x1b[23m about \x1b[38;5;245mfx\x1b[39m\x1b[24m\x1b[22m\n",
+        "\x1b[1m\x1b[4m\x1b[3mnote\x1b[23m about \x1b[38;5;255mfx\x1b[39m\x1b[24m\x1b[22m\n",
         out.items,
     );
 }

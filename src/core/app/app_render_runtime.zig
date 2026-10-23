@@ -4077,7 +4077,7 @@ const CoordinatorFaultTestApp = struct {
     notification_flushes: usize = 0,
     last_snapshot: ?render_request.AttemptSnapshot = null,
 
-    fn flushNotifications(self: *CoordinatorFaultTestApp) void {
+    pub fn flushNotifications(self: *CoordinatorFaultTestApp) void {
         self.notification_flushes += 1;
     }
 
@@ -4596,7 +4596,7 @@ const CoordinatorTestPacer = struct {
         return self.completed_token_progress != null;
     }
 
-    fn hasPending(self: *const CoordinatorTestPacer) bool {
+    pub fn hasPending(self: *const CoordinatorTestPacer) bool {
         return self.pending;
     }
 
@@ -4621,7 +4621,7 @@ const CoordinatorTestTerminalClient = struct {
     snapshot_count: usize = 0,
     source_running: bool = false,
 
-    fn terminalProjection(
+    pub fn terminalProjection(
         self: *CoordinatorTestTerminalClient,
         _: std.mem.Allocator,
     ) std.mem.Allocator.Error!terminal_ui_projection.Snapshot {
@@ -4739,7 +4739,7 @@ const CoordinatorTestApp = struct {
         return fallback;
     }
 
-    fn isFileIndexLoading(_: *CoordinatorTestApp) bool {
+    pub fn isFileIndexLoading(_: *CoordinatorTestApp) bool {
         return false;
     }
 

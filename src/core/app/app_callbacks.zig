@@ -1500,12 +1500,12 @@ const FakeApp = struct {
         return arena.print("run {s}", .{call.name});
     }
 
-    fn describeToolActionCompletedForRuntime(self: *FakeApp, arena: Allocator, call: ToolCall, _: ?[]const u8) ![]const u8 {
+    pub fn describeToolActionCompletedForRuntime(self: *FakeApp, arena: Allocator, call: ToolCall, _: ?[]const u8) ![]const u8 {
         _ = self;
         return arena.print("done {s}", .{call.name});
     }
 
-    fn describeToolActionDeniedForRuntime(self: *FakeApp, arena: Allocator, call: ToolCall, _: ?[]const u8, label: []const u8) ![]const u8 {
+    pub fn describeToolActionDeniedForRuntime(self: *FakeApp, arena: Allocator, call: ToolCall, _: ?[]const u8, label: []const u8) ![]const u8 {
         _ = self;
         return arena.print("denied {s} {s}", .{ call.name, label });
     }
@@ -1524,7 +1524,7 @@ const FakeApp = struct {
         return .{ .model_output = "tool output" };
     }
 
-    fn registerAndEmitDiffBlock(self: *FakeApp, payload: agent_runtime.DiffEntryPayload) !void {
+    pub fn registerAndEmitDiffBlock(self: *FakeApp, payload: agent_runtime.DiffEntryPayload) !void {
         defer diff_mod.freeDiffEntryPayload(std.heap.c_allocator, payload);
         self.diff_register_count += 1;
         try self.transcript.appendSlice(self.alloc, payload.preview);
@@ -1675,7 +1675,7 @@ const NoOverridePersistentApp = struct {
         _ = prompt;
     }
 
-    fn writeDomainNotice(self: *NoOverridePersistentApp, notice: types.SemanticNotice, record: bool) !void {
+    pub fn writeDomainNotice(self: *NoOverridePersistentApp, notice: types.SemanticNotice, record: bool) !void {
         _ = self;
         _ = notice;
         _ = record;
@@ -1713,7 +1713,7 @@ const NoOverridePersistentApp = struct {
         try self.writeTranscript(text, record);
     }
 
-    fn registerAndEmitDiffBlock(self: *NoOverridePersistentApp, payload: agent_runtime.DiffEntryPayload) !void {
+    pub fn registerAndEmitDiffBlock(self: *NoOverridePersistentApp, payload: agent_runtime.DiffEntryPayload) !void {
         _ = self;
         diff_mod.freeDiffEntryPayload(std.heap.c_allocator, payload);
     }

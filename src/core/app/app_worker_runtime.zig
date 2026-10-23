@@ -1315,11 +1315,11 @@ const FakeWorker = struct {
         };
     }
 
-    fn setCompactingContext(self: *FakeWorker, active: bool) void {
+    pub fn setCompactingContext(self: *FakeWorker, active: bool) void {
         self.compacting_context = active;
     }
 
-    fn compactingContext(self: *const FakeWorker) bool {
+    pub fn compactingContext(self: *const FakeWorker) bool {
         return self.compacting_context;
     }
 
@@ -1376,7 +1376,7 @@ const FakeWorker = struct {
         _ = snapshot;
     }
 
-    fn activeTurnId(self: *FakeWorker) u64 {
+    pub fn activeTurnId(self: *FakeWorker) u64 {
         return self.active_turn_id;
     }
 
@@ -1654,17 +1654,17 @@ const FakeSubagents = struct {
         return self.view_active;
     }
 
-    fn childPresentationView(self: *FakeSubagents) ?ChildPresentationView {
+    pub fn childPresentationView(self: *FakeSubagents) ?ChildPresentationView {
         if (!self.view_active) return null;
         return .{ .chat = .{ .busy_value = self.child_busy } };
     }
 
-    fn childConversationRuntime(self: *FakeSubagents) ?*FakeShell {
+    pub fn childConversationRuntime(self: *FakeSubagents) ?*FakeShell {
         if (!self.view_active) return null;
         return &self.child_shell;
     }
 
-    fn activeRenderRequests(self: *FakeSubagents) *render_request.RenderRequestState {
+    pub fn activeRenderRequests(self: *FakeSubagents) *render_request.RenderRequestState {
         return &self.child_render_requests;
     }
 
@@ -1721,7 +1721,7 @@ const FakeApp = struct {
         try self.transcript.appendSlice(self.alloc, text);
     }
 
-    fn writeDomainNotice(self: *FakeApp, notice: types.SemanticNotice, _: bool) !void {
+    pub fn writeDomainNotice(self: *FakeApp, notice: types.SemanticNotice, _: bool) !void {
         try self.transcript.appendSlice(self.alloc, notice.topic);
         try self.transcript.appendSlice(self.alloc, ":");
         try self.transcript.appendSlice(self.alloc, notice.body);
@@ -1766,11 +1766,11 @@ const FakeApp = struct {
         return false;
     }
 
-    fn refreshSubagentManagerProjection(self: *FakeApp) !void {
+    pub fn refreshSubagentManagerProjection(self: *FakeApp) !void {
         self.subagent_manager_refreshes += 1;
     }
 
-    fn dispatchAttentionRequired(
+    pub fn dispatchAttentionRequired(
         self: *FakeApp,
         turn_id: u64,
         kind: @import("../hooks/hooks.zig").AttentionKind,

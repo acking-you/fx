@@ -402,7 +402,7 @@ const TestShell = struct {
         return self.sink;
     }
 
-    fn recordFrameInvalidation(self: *TestShell, range: paint_plan.FrameInvalidationRange) !void {
+    pub fn recordFrameInvalidation(self: *TestShell, range: paint_plan.FrameInvalidationRange) !void {
         try self.recorded_invalidations.append(range);
     }
 

@@ -651,15 +651,15 @@ const TestApp = struct {
         appendTestEvent("terminal-release");
     }
 
-    fn startFileIndex(_: *TestApp) void {
+    pub fn startFileIndex(_: *TestApp) void {
         appendTestEvent("file-index");
     }
 
-    fn rebindAfterInit(_: *TestApp) void {
+    pub fn rebindAfterInit(_: *TestApp) void {
         appendTestEvent("rebind-after-init");
     }
 
-    fn startModelCacheWarmup(_: *TestApp) void {
+    pub fn startModelCacheWarmup(_: *TestApp) void {
         appendTestEvent("model-cache");
     }
 

@@ -569,7 +569,7 @@ const TestApp = struct {
         try self.writeTranscript(text, record);
     }
 
-    fn writeDomainNotice(self: *TestApp, semantic_notice: types.SemanticNotice, record: bool) !void {
+    pub fn writeDomainNotice(self: *TestApp, semantic_notice: types.SemanticNotice, record: bool) !void {
         const styles = self.shell.retainedTranscriptStyles();
         active_capture.?.early_notice_palette_initialized =
             styles.notice_information_style.len > 0 and

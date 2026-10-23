@@ -2329,7 +2329,10 @@ fn runProviderJob(job: *ProviderJob) !ProviderJobOutcome {
     }
     if (job.kind == .refresh) {
         const provider: provider_oauth.Provider = if (job.target == .codex) .codex else .grok;
-        var access = (provider_oauth.loadAccess(provider, state.alloc, state.cfg.gateway_provider.oauth_transport, .force) catch null) orelse {
+        var access = (provider_oauth.loadAccess(provider, state.alloc, state.cfg.gateway_provider.oauth_transport, .force) catch |err| blk: {
+            debug_trace.logDurable("auth", "provider credential refresh failed provider={s} err={s}", .{ @tagName(provider), @errorName(err) });
+            break :blk null;
+        }) orelse {
             return .{ .rpc_error = .{ .code = ErrorCode.invalid_request, .message = "Provider credential refresh failed" } };
         };
         defer access.deinit(state.alloc);

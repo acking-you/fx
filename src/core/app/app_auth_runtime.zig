@@ -1263,7 +1263,7 @@ const BusySignInApp = struct {
         self.selected_model.deinit(self.alloc);
     }
 
-    fn writeDomainNotice(self: *BusySignInApp, _: types.SemanticNotice, _: bool) !void {
+    pub fn writeDomainNotice(self: *BusySignInApp, _: types.SemanticNotice, _: bool) !void {
         self.notice_count += 1;
     }
 
@@ -1359,7 +1359,7 @@ const TestAuth = struct {
         return self.sign_in_entry_active;
     }
 
-    fn signInCodeEntryActive(self: *const TestAuth) bool {
+    pub fn signInCodeEntryActive(self: *const TestAuth) bool {
         return self.sign_in_code_entry_active;
     }
 
@@ -1441,7 +1441,7 @@ const TestAuth = struct {
             credentials.catalogAccessAfterRefreshFailure(.chatgpt_subscription);
     }
 
-    fn refreshSourceInventory(self: *TestAuth, _: std.mem.Allocator) !void {
+    pub fn refreshSourceInventory(self: *TestAuth, _: std.mem.Allocator) !void {
         self.source_inventory_refresh_count += 1;
     }
 
@@ -1558,7 +1558,7 @@ const TestApp = struct {
         try self.transcript.appendSlice(self.alloc, text);
     }
 
-    fn writeDomainNotice(self: *TestApp, notice: types.SemanticNotice, _: bool) !void {
+    pub fn writeDomainNotice(self: *TestApp, notice: types.SemanticNotice, _: bool) !void {
         self.notice_write_count += 1;
         try self.transcript.appendSlice(self.alloc, notice.body);
         try self.transcript.append(self.alloc, '\n');
@@ -1570,12 +1570,12 @@ const TestApp = struct {
         return self.test_url_opener.opener();
     }
 
-    fn persistCredentialSourcePreference(self: *TestApp, source: credentials.Source) void {
+    pub fn persistCredentialSourcePreference(self: *TestApp, source: credentials.Source) void {
         self.preference_write_count += 1;
         if (self.preference_write_succeeds) self.last_preference_source = source;
     }
 
-    fn reconcileModelForCredentialSource(self: *TestApp, announce: bool) void {
+    pub fn reconcileModelForCredentialSource(self: *TestApp, announce: bool) void {
         std.debug.assert(announce);
         self.model_reconcile_count += 1;
     }

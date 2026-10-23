@@ -1162,7 +1162,7 @@ const DirectReturnTestSubagents = struct {
         return false;
     }
 
-    fn activeRenderRequests(_: *DirectReturnTestSubagents) *render_request.RenderRequestState {
+    pub fn activeRenderRequests(_: *DirectReturnTestSubagents) *render_request.RenderRequestState {
         unreachable;
     }
 };

@@ -229,11 +229,11 @@ const FakeApp = struct {
         return self.transcript.items;
     }
 
-    fn nextImageId(self: *FakeApp) usize {
+    pub fn nextImageId(self: *FakeApp) usize {
         return image_attachments.allocateImageId(&self.next_image_id_counter);
     }
 
-    fn peekNextImageId(self: *const FakeApp) usize {
+    pub fn peekNextImageId(self: *const FakeApp) usize {
         return self.next_image_id_counter;
     }
 

@@ -96,7 +96,7 @@ fn callWithWorkspaceOptions(ctx: tool_dispatch.DispatchContext, erased: tool_dis
     // The scan and the per-call work use the scratch allocator, so each search
     // returns its memory when it ends; only the result body comes from
     // `ctx.allocator`.
-    var arena_state = std.heap.ArenaAllocator.init(ctx.allocator);
+    var arena_state = std.heap.ArenaAllocator.init(ctx.scratch_allocator orelse ctx.allocator);
     defer mem_utils.deinit_arena(arena_state);
     const arena = arena_state.allocator();
 
@@ -144,7 +144,7 @@ fn callWithWorkspaceOptions(ctx: tool_dispatch.DispatchContext, erased: tool_dis
     options.include_hidden = options.include_hidden or shouldIncludeHidden(root_relative, input.pattern);
 
     if (root.is_directory) {
-        const listing = tool_files.list(ctx.allocator, arena, ctx.workspace_root, root.absolute, options) catch |err| switch (err) {
+        const listing = tool_files.list(ctx.scratch_allocator orelse ctx.allocator, arena, ctx.workspace_root, root.absolute, options) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.FileNotFound => return .{ .failure = try ctx.allocator.print("Unable to discover glob candidates: {s} ({s})", .{ root.absolute, @errorName(err) }) },
         };
@@ -853,6 +853,7 @@ test "glob_files keeps only its result in the turn's allocator" {
         const before = turn_state.queryCapacity();
         const result = try tool_dispatch.dispatchToolCall(.{
             .allocator = turn_state.allocator(),
+            .scratch_allocator = alloc,
             .permission_mode = .auto,
             .workspace_root = workspace,
         }, registry, .{ .id = "call_1", .name = "glob_files", .arguments_json = args });

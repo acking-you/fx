@@ -593,6 +593,7 @@ fn typedDispatchContext(ctx: Context, arena: Allocator) tool_dispatch.DispatchCo
     return .{
         .host_tool_executor = ctx.host_tool_executor,
         .allocator = arena,
+        .scratch_allocator = ctx.session_allocator,
         .permission_mode = ctx.permission_mode,
         .workspace_root = ctx.workspace_root,
         .access_scope = ctx.access_scope,
@@ -3993,7 +3994,7 @@ test "executeToolCall rejects overlong glob pattern with failure status" {
     try std.testing.expectEqualStrings(expected, result.model_output);
 }
 
-test "executeToolCall glob_files finds match beyond former traversal cap" {
+test "executeToolCall glob_files scans large workspaces without retaining scan memory" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -4022,6 +4023,7 @@ test "executeToolCall glob_files finds match beyond former traversal cap" {
     try std.testing.expectEqual(tool_contracts.ToolExecutionStatus.success, result.status);
     try expectContains(result.model_output, "zzzz/target.zig");
     try std.testing.expect(std.mem.find(u8, result.model_output, "traversal cap") == null);
+    try std.testing.expect(arena_state.queryCapacity() < 64 * 1024);
 }
 
 test "executeToolCall carries authoritative read coverage metadata" {
@@ -4092,20 +4094,13 @@ test "executeToolCall traces non-text grep skips in normal runtime" {
     try expectContains(trace, "binaryish/blob.bin");
 }
 
-test "executeToolCall traces oversized grep skips in normal runtime" {
+test "executeToolCall searches files beyond the former grep size limit" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try writeLargeTestFile(tmp.dir, "workspace/oversized/huge.txt", "needle hidden\n", 260 * 1024);
     const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "workspace");
     defer alloc.free(root);
-    const trace_path = try std.Io.Dir.path.join(alloc, &.{ root, "trace.log" });
-    defer alloc.free(trace_path);
-
-    debug_trace.resetForTest();
-    try debug_trace.configureForTest(alloc, trace_path);
-    defer debug_trace.resetForTest();
-
     var rt = TestRuntime{ .workspace_root = root };
     defer rt.deinit(alloc);
     var arena_state = std.heap.ArenaAllocator.init(alloc);
@@ -4118,12 +4113,7 @@ test "executeToolCall traces oversized grep skips in normal runtime" {
     });
 
     try std.testing.expectEqual(tool_contracts.ToolExecutionStatus.success, result.status);
-    try std.testing.expectEqualStrings("[grep] no matches for needle\n", result.model_output);
-
-    const trace = try readTraceFileForTest(alloc, trace_path);
-    defer alloc.free(trace);
-    try expectContains(trace, "grep_files skipped oversized file path=");
-    try expectContains(trace, "oversized/huge.txt");
+    try expectContains(result.model_output, "oversized/huge.txt:1: needle hidden");
 }
 
 test "executeToolCall returns failure status for missing grep path" {

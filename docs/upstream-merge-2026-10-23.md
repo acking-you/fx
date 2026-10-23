@@ -136,3 +136,25 @@ rapid large-index refreshes, scope changes, and two resume cycles; the credentia
 live-provider scenario remains skipped. The 18 embedded ownership tests pass.
 The tools contention run reports zero failures across all 1,800 runs. PGSO's
 Python checks pass after running their build tests with the pinned Zig 0.17.0.
+
+The parallel file-tool bridge also passes the session allocator as upstream's
+per-call scratch allocator. The turn arena retains only decoded arguments and
+results, while worker scans use a thread-safe allocator whose frees reclaim
+memory. Existing 2,050-file glob and grep regressions protect this boundary;
+the runtime dispatch regression additionally checks retained turn memory.
+
+The next CI pass identified Linux's Zig 0.17 terminal ABI mismatch: libc's
+`tcgetattr` writes a larger structure than `std.posix.termios`. Upstream's direct
+kernel ioctl wrapper is now used by interactive terminal setup and native PTY
+configuration. The existing PTY tests remain intact. Generic callback fixtures
+now expose their reflected methods, and color, hyperlink, native discovery and
+large-file grep fixtures follow the imported upstream behavior. The focused
+runtime repair set passes 378 tests, and real TUI authorization cancellation and
+reasoning-stream interactions pass with clean stderr. The separate occupied
+terminal selection regression passes as well.
+
+The first authentication contention run completed with one Grok forced-refresh
+failure in 480 runs. It did not reproduce the early-deadline symptom. A narrow
+browser-only repetition passed 800 times, so a further mixed authentication run
+retains error-name-only diagnostics to isolate the remaining failure; its result
+is recorded in the PR. No successful stress claim is made for the initial run.

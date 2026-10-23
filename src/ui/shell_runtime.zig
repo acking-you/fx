@@ -119,7 +119,7 @@ pub const TerminalState = struct {
         if (comptime builtin.target.os.tag == .windows) {
             try self.windows_state.capture();
         } else {
-            self.original_termios = try std.posix.tcgetattr(self.stdin_fd);
+            self.original_termios = try io_mod.tcgetattr(self.stdin_fd);
         }
     }
 
@@ -185,7 +185,7 @@ pub const TerminalState = struct {
                 raw.cc[vtime_idx] = 0;
             }
 
-            try std.posix.tcsetattr(self.stdin_fd, .NOW, raw);
+            try io_mod.tcsetattr(self.stdin_fd, .NOW, raw);
             self.raw_enabled = true;
         }
     }
@@ -195,7 +195,7 @@ pub const TerminalState = struct {
         if (comptime builtin.target.os.tag == .windows) {
             self.windows_state.restore();
         } else if (comptime builtin.target.os.tag != .wasi) {
-            std.posix.tcsetattr(self.stdin_fd, .FLUSH, self.original_termios) catch {};
+            io_mod.tcsetattr(self.stdin_fd, .FLUSH, self.original_termios) catch {};
         }
         self.raw_enabled = false;
     }
@@ -674,7 +674,7 @@ test "enableRawMode preserves already queued input" {
     const pty = try TestPty.open();
     defer pty.close();
 
-    var original = try std.posix.tcgetattr(pty.slave);
+    var original = try io_mod.tcgetattr(pty.slave);
     original.lflag.ECHO = false;
     original.lflag.ICANON = false;
     original.lflag.ISIG = false;
@@ -684,7 +684,7 @@ test "enableRawMode preserves already queued input" {
         original.cc[vmin_idx] = 1;
         original.cc[vtime_idx] = 0;
     }
-    try std.posix.tcsetattr(pty.slave, .NOW, original);
+    try io_mod.tcsetattr(pty.slave, .NOW, original);
 
     var terminal = TerminalState{ .stdin_fd = pty.slave };
     try terminal.captureOriginalTermios();
@@ -717,18 +717,18 @@ test "enableRawMode preserves carriage return input" {
     const pty = try TestPty.open();
     defer pty.close();
 
-    var original = try std.posix.tcgetattr(pty.slave);
+    var original = try io_mod.tcgetattr(pty.slave);
     original.iflag.IGNCR = true;
     original.iflag.ICRNL = true;
     original.iflag.INLCR = true;
-    try std.posix.tcsetattr(pty.slave, .NOW, original);
+    try io_mod.tcsetattr(pty.slave, .NOW, original);
 
     var terminal = TerminalState{ .stdin_fd = pty.slave };
     try terminal.captureOriginalTermios();
     try terminal.enableRawMode();
     defer terminal.disableRawMode();
 
-    const raw = try std.posix.tcgetattr(pty.slave);
+    const raw = try io_mod.tcgetattr(pty.slave);
     try std.testing.expect(!raw.iflag.IGNCR);
     try std.testing.expect(!raw.iflag.ICRNL);
     try std.testing.expect(!raw.iflag.INLCR);

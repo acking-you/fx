@@ -1143,7 +1143,7 @@ const RefreshContextApp = struct {
     context_notice_visibility: ?types.NoticeVisibility = null,
     session: session_runtime.SessionRuntime = .{ .max_history_turns = 8 },
 
-    fn contextRegistry(self: *const RefreshContextApp) context_contract.Registry {
+    pub fn contextRegistry(self: *const RefreshContextApp) context_contract.Registry {
         return self.context_registry;
     }
 
@@ -1262,7 +1262,7 @@ const FakeApp = struct {
         return self.tool_registry;
     }
 
-    fn contextRegistry(self: *const FakeApp) context_contract.Registry {
+    pub fn contextRegistry(self: *const FakeApp) context_contract.Registry {
         return self.context_registry;
     }
 

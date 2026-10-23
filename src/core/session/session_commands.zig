@@ -1622,7 +1622,7 @@ const FakeHistoryCommandApp = struct {
         self.* = undefined;
     }
 
-    fn writeDomainNotice(self: *FakeHistoryCommandApp, notice: types.SemanticNotice, _: bool) !void {
+    pub fn writeDomainNotice(self: *FakeHistoryCommandApp, notice: types.SemanticNotice, _: bool) !void {
         self.last_tone = notice.tone;
         try self.transcript.appendSlice(self.alloc, notice.body);
         try self.transcript.append(self.alloc, '\n');
@@ -1692,7 +1692,7 @@ const FakeApp = struct {
         self.* = undefined;
     }
 
-    fn writeDomainNotice(self: *FakeApp, notice: types.SemanticNotice, _: bool) !void {
+    pub fn writeDomainNotice(self: *FakeApp, notice: types.SemanticNotice, _: bool) !void {
         self.semantic_write_count += 1;
         self.last_tone = notice.tone;
         const rendered = if (notice.topic.len > 0)
@@ -1715,7 +1715,7 @@ const FakeApp = struct {
         self.transcript.clearRetainingCapacity();
     }
 
-    fn toolRegistry(self: *const FakeApp) tool_dispatch.Registry {
+    pub fn toolRegistry(self: *const FakeApp) tool_dispatch.Registry {
         return self.tool_registry;
     }
 

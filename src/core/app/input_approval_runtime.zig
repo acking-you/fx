@@ -765,7 +765,7 @@ const ApprovalBridgeApp = struct {
         self.input_runtime.deinit(self.alloc);
     }
 
-    fn refreshSubagentManagerProjection(self: *ApprovalBridgeApp) !void {
+    pub fn refreshSubagentManagerProjection(self: *ApprovalBridgeApp) !void {
         const host = self.session_persistence.subagent_host.?;
         var loaded = try subagent_projection.load(self.alloc, .{
             .root_id = host.root_id,
