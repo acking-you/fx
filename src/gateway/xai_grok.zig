@@ -187,7 +187,7 @@ const OpenRequestOperation = struct {
     extra_headers: []const std.http.Header,
 
     pub fn run(self: *@This()) !OpenedRequest {
-        return .{ .request = try self.client.request(.POST, self.uri, .{
+        return .{ .request = try gateway_client.openHttpRequest(self.client, .POST, self.uri, .{
             .headers = .{
                 .content_type = .{ .override = "application/json" },
                 .authorization = .{ .override = self.auth_header },

@@ -156,13 +156,18 @@ terminal selection regression passes as well.
 Authentication contention then exposed a remaining `Unexpected` failure in both
 forced Grok refresh and initial Codex device login. OAuth's one-shot fetch and
 ordinary provider JSON requests bypassed the model request's setup recovery.
-They now share request opening with the same setup-only error classification
-and a maximum of three attempts. No HTTP request bytes have been sent at that
+OAuth, provider catalogs and usage, ordinary provider JSON, and Grok request
+opening now share the same setup-only error classification and a maximum of
+three attempts. One shared fetch implementation preserves the standard client
+framing, redirects, decompression and response ownership. No HTTP request bytes have been sent at that
 boundary; submitted token exchanges and response reads are never retried there.
 The existing enclosing deadline and cancellation watch remain authoritative,
 and OAuth retains decompression and its 64 KiB response limit. Nineteen focused
-tests and four real CLI/TUI provider login flows pass. Diagnostic and final
-contention results are recorded in the PR.
+tests and four real CLI/TUI provider login flows pass. The shared fetch follow-up
+passes 43 focused tests. A diagnostic authentication run passes all 960
+iterations and records two recovered setup failures with successful completion
+of all four authentication scenarios. Final contention results using the
+unmodified INFX tests and production library are recorded in the PR.
 
 Binary-size comparison uses the cache environment variable accepted by both
 compiler generations. It selects the base revision's declared Zig version, so

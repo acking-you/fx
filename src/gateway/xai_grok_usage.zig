@@ -57,7 +57,7 @@ const FetchOperation = struct {
             .{ .name = "X-XAI-Token-Auth", .value = "xai-grok-cli" },
             .{ .name = "x-userid", .value = self.account_id },
         };
-        const result = client.fetch(.{
+        const result = gateway_client.fetchHttp(&client, .{
             .location = .{ .url = self.url },
             .method = .GET,
             .headers = .{

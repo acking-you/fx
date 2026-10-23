@@ -210,7 +210,7 @@ const FetchOperation = struct {
             extra_headers_buffer[extra_headers_len] = .{ .name = "x-userid", .value = account_id };
             extra_headers_len += 1;
         }
-        const result = client.fetch(.{
+        const result = gateway_client.fetchHttp(&client, .{
             .location = .{ .url = self.url },
             .method = .GET,
             .headers = .{

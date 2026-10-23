@@ -143,7 +143,7 @@ const FetchOperation = struct {
         const body_buffer = try self.alloc.alloc(u8, max_catalog_bytes + 1);
         defer secret.zeroAndFree(self.alloc, body_buffer);
         var response_writer = std.Io.Writer.fixed(body_buffer);
-        const result = client.fetch(.{
+        const result = gateway_client.fetchHttp(&client, .{
             .location = .{ .url = self.url },
             .method = .GET,
             .headers = .{
