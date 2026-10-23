@@ -1369,10 +1369,7 @@ fn waitForConnectDeadlineOrDone(deadline: Deadline, control_done: *std.Io.Event)
         .clock = .awake,
         .raw = std.Io.Timestamp.fromNanoseconds(@as(i96, deadline.deadline_ms) * std.time.ns_per_ms),
     };
-    control_done.waitTimeout(io_mod.getIo(), .{ .deadline = timestamp }) catch |err| switch (err) {
-        error.Timeout => return,
-        else => return err,
-    };
+    _ = try io_mod.waitEventUntil(control_done, timestamp);
 }
 
 fn classifyConnectErrno(err: posix.E) anyerror {
