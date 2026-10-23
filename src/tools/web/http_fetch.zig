@@ -1456,7 +1456,8 @@ fn checkSocketError(fd: posix.fd_t) !void {
 fn closeFd(fd: posix.fd_t) void {
     if (comptime builtin.target.os.tag == .windows) {
         const zio = io_mod.getIo();
-        zio.vtable.netClose(zio.userdata, (&fd)[0..1]);
+        const socket: std.Io.net.Socket = .{ .handle = fd, .address = undefined };
+        socket.close(zio);
     } else {
         while (true) switch (posix.errno(posix.system.close(fd))) {
             .SUCCESS => return,
@@ -1637,7 +1638,8 @@ fn readDefault(_: ?*anyopaque, fd: posix.fd_t, buf: []u8) RawSyscallResult {
     if (comptime builtin.target.os.tag == .windows) {
         const zio = io_mod.getIo();
         var buffers = [_][]u8{buf};
-        const count = zio.vtable.netRead(zio.userdata, fd, &buffers) catch |err| return .{
+        const result = zio.operate(.{ .net_read = .{ .socket_handle = fd, .data = &buffers } }) catch return .{ .failure = .IO };
+        const read = result.net_read catch |err| return .{
             .failure = switch (err) {
                 error.ConnectionResetByPeer => .CONNRESET,
                 error.SocketUnconnected => .NOTCONN,
@@ -1646,7 +1648,7 @@ fn readDefault(_: ?*anyopaque, fd: posix.fd_t, buf: []u8) RawSyscallResult {
                 else => .IO,
             },
         };
-        return .{ .count = count };
+        return .{ .count = read.data_len };
     }
     const rc = posix.system.read(fd, buf.ptr, buf.len);
     return switch (posix.errno(rc)) {
@@ -1728,7 +1730,8 @@ fn rawWriteAllWith(fd: posix.fd_t, bytes: []const u8, options: FetchOptions, pol
         try pollFdWith(fd, poll_events.out, options, poller);
         if (comptime builtin.target.os.tag == .windows) {
             const zio = io_mod.getIo();
-            const n = zio.vtable.netWrite(zio.userdata, fd, &.{}, &.{bytes[written..]}, 1) catch |err| switch (err) {
+            const result = zio.operate(.{ .net_write = .{ .socket_handle = fd, .data = &.{bytes[written..]} } }) catch return error.WriteFailed;
+            const n = result.net_write catch |err| switch (err) {
                 error.ConnectionResetByPeer => return error.ConnectionResetByPeer,
                 error.SocketUnconnected => return error.SocketUnconnected,
                 error.NetworkDown => return error.NetworkDown,

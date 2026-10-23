@@ -1,3 +1,4 @@
+const testing_allocator = @import("../shared/testing_allocator.zig");
 const std = @import("std");
 const builtin_mod = @import("builtin");
 const file_mutation_contract = @import("../tooling/file_mutation_contract.zig");
@@ -1430,7 +1431,7 @@ test "bounded resolver reports intermediate symlink loops" {
 }
 
 test "bounded resolver does not allocate while resolving from fixed scratch" {
-    const alloc = std.testing.allocator;
+    const alloc = testing_allocator.no_resize;
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

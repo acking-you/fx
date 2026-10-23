@@ -666,7 +666,6 @@ fn dispatchGrepFilesRaw(alloc: Allocator, workspace_root: []const u8, args_json:
     const registry = tool_dispatch.Registry{ .tools = &.{grep_files_dispatch_tool} };
     return tool_dispatch.dispatchToolCall(.{
         .allocator = alloc,
-        .scratch_allocator = alloc,
         .permission_mode = .auto,
         .workspace_root = workspace_root,
     }, registry, .{
@@ -700,7 +699,6 @@ test "grep_files keeps only its result in the turn's allocator" {
         const before = turn_state.queryCapacity();
         const result = try tool_dispatch.dispatchToolCall(.{
             .allocator = turn_state.allocator(),
-            .scratch_allocator = alloc,
             .permission_mode = .auto,
             .workspace_root = workspace,
         }, registry, .{ .id = "call_1", .name = "grep_files", .arguments_json = args });
@@ -763,7 +761,7 @@ fn grepFilesFailureWithOps(
     };
     defer input.deinit(alloc);
 
-    const result = try callWithOps(.{ .allocator = alloc, .scratch_allocator = alloc, .workspace_root = workspace_root }, .{ .ptr = &input, .deinit_fn = noopInputDeinit }, ops);
+    const result = try callWithOps(.{ .allocator = alloc, .workspace_root = workspace_root }, .{ .ptr = &input, .deinit_fn = noopInputDeinit }, ops);
     switch (result) {
         .failure => |body| return body,
         .success => |body| {

@@ -1,3 +1,4 @@
+const testing_allocator = @import("../shared/testing_allocator.zig");
 const std = @import("std");
 const builtin = @import("builtin");
 const agent_runtime = @import("../agent/agent_runtime.zig");
@@ -3167,7 +3168,7 @@ fn checkLivePresentationCloneAllocationFailures(alloc: Allocator) !void {
 
 test "live child presentation clone frees every partial allocation" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkLivePresentationCloneAllocationFailures,
         .{},
     );
@@ -5229,7 +5230,7 @@ fn checkNotificationScheduleRegistrationAllocationFailures(alloc: Allocator) !vo
 
 test "notification schedule registration frees every partial allocation" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkNotificationScheduleRegistrationAllocationFailures,
         .{},
     );
@@ -5274,7 +5275,7 @@ fn checkNotificationCleanupAllocationFailures(alloc: Allocator) !void {
 
 test "notification cleanup frees every partial allocation" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkNotificationCleanupAllocationFailures,
         .{},
     );
@@ -5485,7 +5486,7 @@ fn checkNotificationOwnerPollAllocationFailures(alloc: Allocator) !void {
 
 test "notification owner poll frees every partial allocation" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkNotificationOwnerPollAllocationFailures,
         .{},
     );
@@ -8836,7 +8837,7 @@ fn checkAdmissionAllocationFailures(alloc: Allocator) !void {
 
 test "admission snapshot cleans every failing-allocation path" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkAdmissionAllocationFailures,
         .{},
     );
@@ -8857,12 +8858,12 @@ fn checkCancellationAllocationFailures(alloc: Allocator) !void {
 
 test "recovery and cancellation reducers clean failing-allocation paths" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkRecoveryAllocationFailures,
         .{},
     );
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkCancellationAllocationFailures,
         .{},
     );

@@ -1,3 +1,4 @@
+const testing_allocator = @import("../shared/testing_allocator.zig");
 const std = @import("std");
 const permission_request = @import("../permissions/permission_request.zig");
 const permissions = @import("../permissions/permissions.zig");
@@ -4175,7 +4176,7 @@ fn checkRetentionGapAllocationFailures(alloc: Allocator) !void {
 
 test "retention gap projection and recovery free every partial allocation" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkRetentionGapAllocationFailures,
         .{},
     );
@@ -4996,7 +4997,7 @@ fn checkFileApprovalRegistrationAllocationFailures(alloc: Allocator) !void {
 
 test "file approval registration cleans every failing allocation" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkFileApprovalRegistrationAllocationFailures,
         .{},
     );
@@ -6041,7 +6042,7 @@ fn checkCommunicationAllocationFailures(alloc: Allocator) !void {
 
 test "new communication values clean every failing allocation path" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkCommunicationAllocationFailures,
         .{},
     );

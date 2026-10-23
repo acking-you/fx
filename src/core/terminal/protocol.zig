@@ -1,3 +1,4 @@
+const testing_allocator = @import("../shared/testing_allocator.zig");
 const std = @import("std");
 const contracts = @import("contracts.zig");
 
@@ -327,7 +328,7 @@ fn testRequestFrame(alloc: Allocator) !void {
 
 test "host protocol round trips owned correlated frames" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         testRequestFrame,
         .{},
     );

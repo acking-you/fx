@@ -1,4 +1,5 @@
 const text_utils = @import("../shared/text_utils.zig");
+const testing_allocator = @import("../shared/testing_allocator.zig");
 const std = @import("std");
 const approval_persistence = @import("approval_persistence.zig");
 const approval_registry = @import("approval_registry.zig");
@@ -1862,7 +1863,7 @@ fn checkFileApprovalProjectionAllocationFailures(
 }
 
 test "file approval projection cleans every failing allocation" {
-    const alloc = std.testing.allocator;
+    const alloc = testing_allocator.no_resize;
     var ledger = try communication.Ledger.init(alloc, "child");
     defer ledger.deinit(alloc);
     _ = try communication.registerApproval(alloc, &ledger, .{
@@ -1951,7 +1952,7 @@ fn checkExtendedProjectionAllocationFailures(alloc: Allocator) !void {
 
 test "extended projection cleans every failing owned allocation path" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkExtendedProjectionAllocationFailures,
         .{},
     );
@@ -2133,7 +2134,7 @@ test "visible manager hides terminal one offs without removing canonical descend
 }
 
 test "pending approval pages reach beyond eight independently of the bounded tree page" {
-    const alloc = std.testing.allocator;
+    const alloc = testing_allocator.no_resize;
     const tree_limit: usize = 8;
     const later_child_id = "child-008";
     var env = try ProjectionTestEnvironment.init(alloc);
@@ -2585,7 +2586,7 @@ fn checkChildChatPageCacheAllocationFailures(alloc: Allocator) !void {
 
 test "child chat page cache frees partial pages on every allocation failure" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkChildChatPageCacheAllocationFailures,
         .{},
     );
@@ -2607,7 +2608,7 @@ fn checkTurnSourceProjectionAllocationFailures(alloc: Allocator) !void {
 
 test "child chat source projection frees partial owned joins" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkTurnSourceProjectionAllocationFailures,
         .{},
     );

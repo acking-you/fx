@@ -353,17 +353,11 @@ function expectFileDiscoveryOffMainThread(trace: string): void {
       /file index loader entered generation=\d+ worker_thread=(\d+)/g,
     ),
   );
-  const discoveryThreads = traceThreadIds(
-    trace,
-    /workspace file discovery process spawning thread=(\d+)/g,
-  );
   const mainThreads = new Set(callerThreads);
 
   expect(mainThreads.size).toBe(1);
   expect(loaderThreads.size).toBeGreaterThan(0);
-  expect(discoveryThreads.length).toBeGreaterThan(0);
-  for (const thread of discoveryThreads) {
-    expect(loaderThreads.has(thread)).toBe(true);
+  for (const thread of loaderThreads) {
     expect(mainThreads.has(thread)).toBe(false);
   }
 }

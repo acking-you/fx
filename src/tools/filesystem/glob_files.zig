@@ -400,7 +400,6 @@ fn dispatchGlobFilesRaw(alloc: Allocator, workspace_root: []const u8, args_json:
     const registry = tool_dispatch.Registry{ .tools = &.{glob_files_dispatch_tool} };
     return tool_dispatch.dispatchToolCall(.{
         .allocator = alloc,
-        .scratch_allocator = alloc,
         .permission_mode = .auto,
         .workspace_root = workspace_root,
     }, registry, .{
@@ -515,7 +514,7 @@ test "glob_files reports overlong patterns during matching" {
     };
     defer input.deinit(alloc);
 
-    const result = try call(.{ .allocator = alloc, .scratch_allocator = alloc, .workspace_root = workspace }, .{ .ptr = &input, .deinit_fn = noopInputDeinit });
+    const result = try call(.{ .allocator = alloc, .workspace_root = workspace }, .{ .ptr = &input, .deinit_fn = noopInputDeinit });
     defer result.deinit(alloc);
     const expected = try alloc.print("glob_files field \"pattern\" must be at most {d} bytes", .{glob_pattern.max_pattern_bytes});
     defer alloc.free(expected);
@@ -732,7 +731,6 @@ test "glob_files path narrowing applies before candidate cap" {
     const erased = tool_dispatch.ToolInput{ .ptr = &input, .deinit_fn = noopInputDeinit };
     var result = try callWithWorkspaceOptions(.{
         .allocator = alloc,
-        .scratch_allocator = alloc,
         .permission_mode = .auto,
         .workspace_root = workspace,
         .max_list_entries = 10,
@@ -768,7 +766,6 @@ test "glob_files extracts static base before candidate cap" {
     const erased = tool_dispatch.ToolInput{ .ptr = &input, .deinit_fn = noopInputDeinit };
     var result = try callWithWorkspaceOptions(.{
         .allocator = alloc,
-        .scratch_allocator = alloc,
         .permission_mode = .auto,
         .workspace_root = workspace,
         .max_list_entries = 10,
@@ -856,7 +853,6 @@ test "glob_files keeps only its result in the turn's allocator" {
         const before = turn_state.queryCapacity();
         const result = try tool_dispatch.dispatchToolCall(.{
             .allocator = turn_state.allocator(),
-            .scratch_allocator = alloc,
             .permission_mode = .auto,
             .workspace_root = workspace,
         }, registry, .{ .id = "call_1", .name = "glob_files", .arguments_json = args });

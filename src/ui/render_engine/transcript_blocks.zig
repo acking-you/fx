@@ -1,3 +1,4 @@
+const testing_allocator = @import("../../core/shared/testing_allocator.zig");
 const std = @import("std");
 const build_checkpoint = @import("build_checkpoint.zig");
 const debug_trace = @import("../../core/shared/debug_trace.zig");
@@ -4360,7 +4361,7 @@ fn checkCodeBlockRenderAllocationFailures(alloc: Allocator) !void {
 
 test "renderEntryToBlock frees all highlighted code allocation failures" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkCodeBlockRenderAllocationFailures,
         .{},
     );

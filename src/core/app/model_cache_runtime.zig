@@ -1133,7 +1133,7 @@ test "model cache auth change prevents a stale load from replacing the newer cat
 
 test "model cache access copies clean up every induced allocation failure" {
     const access = authenticatedCatalogAccess("copied-secret");
-    var probe = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var probe = std.testing.FailingAllocator.init(testing_allocator.no_resize, .{});
     var owned = try OwnedCatalogAccess.init(probe.allocator(), access);
     owned.deinit(probe.allocator());
     try std.testing.expectEqual(probe.allocated_bytes, probe.freed_bytes);

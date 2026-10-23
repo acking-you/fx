@@ -1,3 +1,4 @@
+const testing_allocator = @import("../shared/testing_allocator.zig");
 const std = @import("std");
 const worker_runtime = @import("../agent/worker_runtime.zig");
 const debug_trace = @import("../shared/debug_trace.zig");
@@ -670,7 +671,7 @@ test "child approval registry owns live preview without widening durable input" 
         try checkLivePreviewRegistryAllocation(std.testing.allocator);
     }
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkLivePreviewRegistryAllocation,
         .{},
     );
@@ -783,7 +784,7 @@ test "simultaneous approval surfaces resolve one durable request exactly once" {
         1,
     );
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkPendingRouteSnapshotAllocation,
         .{&registry},
     );
@@ -1242,7 +1243,7 @@ test "bounded pending route pages reach every request beyond eight and clamp aft
         ) PersistenceError!void {}
     };
 
-    const alloc = std.testing.allocator;
+    const alloc = testing_allocator.no_resize;
     var registry = Registry{
         .alloc = alloc,
         .persistence = .{

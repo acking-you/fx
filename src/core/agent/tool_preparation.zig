@@ -828,7 +828,7 @@ fn checkPreparationAllocationFailures(alloc: Allocator, workspace: []const u8) !
 
 test "preparation cancellation and allocation failures clean owned state" {
     const builtin_tools = @import("../../builtins/tools.zig");
-    const alloc = std.testing.allocator;
+    const alloc = testing_allocator.no_resize;
     const tools = [_]tool_dispatch.Tool{builtin_tools.read_file};
     var cancelled = std.atomic.Value(bool).init(true);
     try std.testing.expectError(error.Cancelled, prepareReadyCall(alloc, .{

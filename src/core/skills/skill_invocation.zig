@@ -1116,7 +1116,7 @@ test "skill invocation preserves hard allocation failures" {
         .{},
     );
 
-    const alloc = std.testing.allocator;
+    const alloc = testing_allocator.no_resize;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.createDirPath(io_mod.getIo(), "home/workspace");

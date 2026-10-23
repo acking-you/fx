@@ -371,10 +371,7 @@ test "deferred replay scope preserves token identity and stale projection safety
         testDeferredCacheToken("second-dirty-session"),
     };
     const empty = DeferredReplayScope{ .tokens = .empty };
-    const populated = DeferredReplayScope{ .tokens = .{
-        .items = token_values[0..],
-        .capacity = token_values.len,
-    } };
+    const populated = DeferredReplayScope{ .tokens = .fromOwnedSlice(&token_values) };
     const untrusted = DeferredReplayScope.all;
     const cases = [_]struct {
         scope: DeferredReplayScope,
@@ -6277,7 +6274,7 @@ test "workspace latest pointer is materialized on session creation" {
 }
 
 test "workspace latest pointer preserves allocator failure" {
-    const alloc = std.testing.allocator;
+    const alloc = testing_allocator.no_resize;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var ctx = try initTempStore(alloc, &tmp);

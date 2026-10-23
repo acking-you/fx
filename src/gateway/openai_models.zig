@@ -1,3 +1,4 @@
+const testing_allocator = @import("../core/shared/testing_allocator.zig");
 const std = @import("std");
 const model_catalog = @import("../core/gateway/model_catalog.zig");
 const sort_utils = @import("../core/shared/sort_utils.zig");
@@ -301,7 +302,7 @@ fn checkAllocationFailures(alloc: Allocator) !void {
 
 test "OpenAI catalog cleans all partial allocations" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkAllocationFailures,
         .{},
     );

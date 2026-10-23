@@ -3997,10 +3997,10 @@ test "resume-history-to-request conversion preserves user assistant ordering" {
 }
 test "appendHistoryMessages frees owned projection text when append fails" {
     const compact = [_]HistoryTurn{.{ .compacted_summary = .{ .summary = @constCast("summary"), .removed_turn_count = 1, .compaction_count = 1 } }};
-    var compact_failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
+    var compact_failing = std.testing.FailingAllocator.init(testing_allocator.no_resize, .{ .fail_index = 1 });
     var compact_messages: std.ArrayList(message.Message) = .empty;
     try std.testing.expectError(error.OutOfMemory, appendHistoryMessages(compact_failing.allocator(), &compact_messages, &compact));
-    var bg_failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var bg_failing = std.testing.FailingAllocator.init(testing_allocator.no_resize, .{});
     const bg_alloc = bg_failing.allocator();
     var bg_messages: std.ArrayList(message.Message) = .empty;
     defer bg_messages.deinit(bg_alloc);
@@ -5635,7 +5635,7 @@ fn checkPromptHistoryMessageProjectionAllocationFailures(
 }
 
 test "prompt history cleanup is independent after snapshot creation" {
-    const alloc = std.testing.allocator;
+    const alloc = testing_allocator.no_resize;
     var calls = [_]ToolCall{.{
         .id = "call_latest",
         .name = "read_file",
@@ -5997,7 +5997,7 @@ test "image catalog replacement cleans up every allocation failure" {
         .{ .id = 9, .path = @constCast("/tmp/new-current.jpg"), .media_type = @constCast("image/jpeg") },
     };
 
-    var probe = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var probe = std.testing.FailingAllocator.init(testing_allocator.no_resize, .{});
     const replaced = try replace_image_catalog_current_images(
         probe.allocator(),
         &catalog,

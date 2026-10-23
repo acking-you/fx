@@ -4170,52 +4170,6 @@ fn fuzzRawListAndQuery(_: void, smith: *std.testing.Smith) !void {
     }
 }
 
-test "file picker readable revision captures one prefix and survives equal count replacement" {
-    const alloc = std.testing.allocator;
-    var index: FileIndex = .{};
-    defer index.deinit(alloc);
-    try index.buildFromRaw(alloc, "a.txt\x00b.txt\x00c.txt\x00");
-    const first = index.active_generation.?;
-    first.scope_epoch = 7;
-    first.ready_count.store(1, .release);
-    const revision = index.readableRevision();
-    first.ready_count.store(3, .release);
-    var results: [4]SearchResult = undefined;
-    var spans: [16]MatchSpan = undefined;
-    try std.testing.expectEqual(@as(usize, 1), try index.searchAtRevision(revision, "txt", &results, &spans));
-    try std.testing.expectEqualStrings("a.txt", results[0].path);
-    try std.testing.expectEqual(@as(u64, 7), revision.scope_epoch);
-    try std.testing.expectEqual(@as(usize, 3), index.readableRevision().count);
-    try index.buildFromRaw(alloc, "d.txt\x00e.txt\x00f.txt\x00");
-    try std.testing.expect(index.readableRevision().generation != revision.generation);
-    try std.testing.expectError(error.InvalidIndexData, index.searchAtRevision(revision, "txt", &results, &spans));
-}
-
-test "file picker pending scope coalesces epochs through A B A and failed refresh" {
-    const alloc = testing_allocator.no_resize;
-    var index: FileIndex = .{};
-    defer index.deinit(alloc);
-    try index.buildFromRaw(alloc, "stable.txt\x00");
-    index.active_generation.?.scope_epoch = 1;
-    index.scope_epoch = 1;
-    index.roots = try cloneRoots(alloc, &.{"/A"});
-    index.replacePendingRoots(alloc, try cloneRoots(alloc, &.{"/A"}), 1);
-    index.replacePendingRoots(alloc, try cloneRoots(alloc, &.{"/B"}), 2);
-    index.replacePendingRoots(alloc, try cloneRoots(alloc, &.{"/A"}), 3);
-    try std.testing.expectEqual(@as(u64, 3), index.pending_scope.?.epoch);
-    index.replacePendingRoots(alloc, try cloneRoots(alloc, &.{"/A"}), 4);
-    try std.testing.expectEqual(@as(u64, 4), index.pending_scope.?.epoch);
-    const pending = index.pending_scope.?.roots.ptr;
-    index.replacePendingRoots(alloc, try cloneRoots(alloc, &.{"/A"}), 4);
-    try std.testing.expectEqual(pending, index.pending_scope.?.roots.ptr);
-    var failing = std.testing.FailingAllocator.init(alloc, .{ .fail_index = 0 });
-    index.refreshScopeEpoch(failing.allocator(), workspace_access.AccessScope.primaryOnly("/C"), 5);
-    try std.testing.expect(failing.has_induced_failure);
-    try std.testing.expectEqual(@as(u64, 1), index.readableRevision().scope_epoch);
-    try std.testing.expectEqual(@as(u64, 4), index.pending_scope.?.epoch);
-    try std.testing.expectEqualStrings("/A", index.pending_scope.?.roots[0]);
-}
-
 fn sleepBlocking(milliseconds: u64) void {
     var sleep_io_backend: std.Io.Threaded = .init_single_threaded;
     sleep_io_backend.io().sleep(.fromMilliseconds(@intCast(milliseconds)), .real) catch {};

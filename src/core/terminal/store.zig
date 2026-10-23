@@ -8053,14 +8053,14 @@ test "recovery execution scope rejects record authority inconsistency" {
 
 test "recovery execution scope covers allocation failures" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkRecoveryExecutionScopeAllocationFailures,
         .{},
     );
 }
 
 test "tmux recovery propagates execution scope allocation failure without durable loss" {
-    const alloc = std.testing.allocator;
+    const alloc = testing_allocator.no_resize;
     var failing = OneShotFailingAllocator.init(alloc);
     var fixture = try TestStoreFixture.init(failing.allocator(), test_options());
     defer fixture.deinit();

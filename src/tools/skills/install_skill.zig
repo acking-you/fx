@@ -237,7 +237,7 @@ test "install_skill owner encodes installed names without returning bodies" {
 }
 
 test "install_skill owner reports no matching skills" {
-    const alloc = std.testing.allocator;
+    const alloc = testing_allocator.no_resize;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 

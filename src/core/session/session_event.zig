@@ -2119,7 +2119,7 @@ test "single event application updates caller-owned state without replaying its 
 }
 
 test "single event application preserves caller-owned state on allocation failure" {
-    const alloc = std.testing.allocator;
+    const alloc = testing_allocator.no_resize;
     const generation = identifier(0xa1);
     const event = Envelope{
         .log_generation = generation,

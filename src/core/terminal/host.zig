@@ -1,4 +1,5 @@
 const text_utils = @import("../shared/text_utils.zig");
+const testing_allocator = @import("../shared/testing_allocator.zig");
 const std = @import("std");
 const builtin = @import("builtin");
 const contracts = @import("contracts.zig");
@@ -1639,7 +1640,7 @@ test "endpoint selection preserves short homes and deterministically separates l
 }
 
 test "endpoint selection allocation and unsupported targets fail closed" {
-    const alloc = std.testing.allocator;
+    const alloc = testing_allocator.no_resize;
     try std.testing.expectError(
         error.TerminalHostUnsupported,
         resolveEndpointSelection(alloc, .windows, "C:\\profile", 501),

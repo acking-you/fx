@@ -339,5 +339,5 @@ test "skill search projection releases every allocation failure" {
             alloc.free(output);
         }
     };
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, Case.run, .{});
+    try std.testing.checkAllAllocationFailures(testing_allocator.no_resize, Case.run, .{});
 }

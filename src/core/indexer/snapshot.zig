@@ -7,6 +7,7 @@
 //! and are overwritten by the next save.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const io_mod = @import("../shared/io.zig");
 const debug_trace = @import("../shared/debug_trace.zig");
 const tree_mod = @import("tree.zig");
@@ -63,8 +64,9 @@ fn readAdmitted(arena: Allocator, path: []const u8) ![]const u8 {
     const io = io_mod.getIo();
     var file = try std.Io.Dir.openFileAbsolute(io, path, .{ .follow_symlinks = false, .allow_directory = false });
     defer file.close(io);
+    io_mod.alignOpenedFileFlags(&file, false);
     const stat = try file.stat(io);
-    if (stat.kind != .file or stat.nlink != 1 or (stat.permissions.toMode() & 0o077) != 0 or stat.size > max_bytes) return error.InvalidSnapshot;
+    if (stat.kind != .file or stat.nlink != 1 or !io_mod.permissionsPrivateFile(stat.permissions) or stat.size > max_bytes) return error.InvalidSnapshot;
     const bytes = try arena.alloc(u8, @intCast(stat.size));
     var offset: usize = 0;
     while (offset < bytes.len) {
@@ -116,7 +118,7 @@ pub fn save(alloc: Allocator, path: []const u8, trees: []const Tree) !void {
     defer dir.close(io);
     var verified: io_mod.VerifiedDir = .{ .dir = dir };
     try io_mod.durableReplaceVerified(alloc, &verified, std.Io.Dir.path.basename(path), out.written());
-    try dir.setPermissions(io, .fromMode(0o700));
+    try io_mod.setDirPermissions(dir, io_mod.private_dir_permissions);
 }
 
 fn writeInt(writer: *std.Io.Writer, comptime T: type, value: T) !void {
@@ -337,6 +339,7 @@ test "snapshot round trips, rejects tampering, other scopes and v1 files, and an
 
     // Every single-byte change breaks the digest.
     var file = try std.Io.Dir.openFileAbsolute(std.testing.io, path, .{ .mode = .read_write });
+    io_mod.alignOpenedFileFlags(&file, false);
     try file.writePositionalAll(std.testing.io, "X", magic.len + Sha256.digest_length + 4);
     file.close(std.testing.io);
     try std.testing.expect((try load(alloc, path, &roots)) == null);
@@ -344,14 +347,16 @@ test "snapshot round trips, rejects tampering, other scopes and v1 files, and an
     // Older formats fail the magic check. A v2 file stamped every source
     // without following symlinks.
     for ([_][]const u8{ "fx-file-index-v1\n{}", "fx-file-index-v2\n" }) |old| {
-        try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = path, .data = old, .flags = .{ .permissions = .fromMode(0o600) } });
+        try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = path, .data = old, .flags = .{ .permissions = io_mod.private_file_permissions } });
         try std.testing.expect((try load(alloc, path, &roots)) == null);
     }
 
     // A file others can read is not trusted.
     try save(alloc, path, &trees);
-    try std.Io.Dir.cwd().setFilePermissions(std.testing.io, path, .fromMode(0o644), .{});
-    try std.testing.expect((try load(alloc, path, &roots)) == null);
+    if (builtin.target.os.tag != .windows) {
+        try std.Io.Dir.cwd().setFilePermissions(std.testing.io, path, io_mod.permissionsFromMode(0o644), .{});
+        try std.testing.expect((try load(alloc, path, &roots)) == null);
+    }
 
     try save(alloc, path, &.{ testTree("/w", &.{}), testTree("/extra", &.{}) });
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().statFile(std.testing.io, path, .{}));

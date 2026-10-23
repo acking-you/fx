@@ -1,3 +1,4 @@
+const testing_allocator = @import("../../core/shared/testing_allocator.zig");
 const std = @import("std");
 const debug_trace = @import("../../core/shared/debug_trace.zig");
 const display_width = @import("../../core/shared/display_width.zig");
@@ -8592,14 +8593,14 @@ fn checkCheckpointTwoRouteAllocationFailures(alloc: Allocator) !void {
 
 test "child route switching frees partial pages drafts and operation identity" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkChildRouteAllocationFailures,
         .{},
     );
 }
 
 test "checkpoint two owned forms routes and results clean up across allocation failures" {
-    var probe = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var probe = std.testing.FailingAllocator.init(testing_allocator.no_resize, .{});
     try checkCheckpointTwoRouteAllocationFailures(probe.allocator());
     const allocation_count = probe.alloc_index;
     try std.testing.expectEqual(probe.allocated_bytes, probe.freed_bytes);

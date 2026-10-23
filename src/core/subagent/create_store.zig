@@ -1,3 +1,4 @@
+const testing_allocator = @import("../shared/testing_allocator.zig");
 const std = @import("std");
 const domain = @import("domain.zig");
 const io_mod = @import("../shared/io.zig");
@@ -1014,7 +1015,7 @@ fn checkIdentityReservationAllocationFailures(alloc: Allocator) !void {
 
 test "identity allocation failures preserve retry ownership" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkIdentityReservationAllocationFailures,
         .{},
     );
@@ -1131,7 +1132,7 @@ fn checkCreateCompactionAllocationFailures(alloc: Allocator) !void {
 
 test "create compaction cleans every failing allocation path" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkCreateCompactionAllocationFailures,
         .{},
     );

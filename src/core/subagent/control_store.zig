@@ -1,3 +1,4 @@
+const testing_allocator = @import("../shared/testing_allocator.zig");
 const std = @import("std");
 const auto_classifier_context = @import("../permissions/auto_classifier_context.zig");
 const domain = @import("domain.zig");
@@ -2767,7 +2768,7 @@ fn checkControlCompactionAllocationFailures(alloc: Allocator) !void {
 
 test "control compaction cleans every failing allocation path" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkControlCompactionAllocationFailures,
         .{},
     );

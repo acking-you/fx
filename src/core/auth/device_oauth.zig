@@ -1,5 +1,6 @@
 //! Device authorization protocols. Session identity and persistence stay with
 //! each provider; this module owns only request, polling, and wire validation.
+const testing_allocator = @import("../shared/testing_allocator.zig");
 const std = @import("std");
 const io_mod = @import("../shared/io.zig");
 const login_flow = @import("login_flow.zig");
@@ -302,8 +303,8 @@ fn allocationTest(alloc: Allocator, protocol: Protocol) !void {
 }
 
 test "device OAuth preserves both provider protocols and frees every partial allocation" {
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, allocationTest, .{Protocol.codex});
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, allocationTest, .{Protocol.grok});
+    try std.testing.checkAllAllocationFailures(testing_allocator.no_resize, allocationTest, .{Protocol.codex});
+    try std.testing.checkAllAllocationFailures(testing_allocator.no_resize, allocationTest, .{Protocol.grok});
 }
 
 test "device OAuth classifies slow down denial and expiry without exposing private codes" {

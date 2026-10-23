@@ -2762,7 +2762,7 @@ fn checkRoutedSkillOrderAllocationFailures(alloc: Allocator) !void {
 
 test "routed skill order releases every partial allocation" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkRoutedSkillOrderAllocationFailures,
         .{},
     );
@@ -4967,7 +4967,7 @@ fn checkContainedLinkedSkillAllocationFailures(
 }
 
 test "loadVisibleSkills cleans contained-link authority allocation failures" {
-    const alloc = std.testing.allocator;
+    const alloc = testing_allocator.no_resize;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -5269,7 +5269,7 @@ fn checkLoadVisibleSkillsAllocationFailures(
 }
 
 test "loadVisibleSkills cleans every partial allocation failure" {
-    const alloc = std.testing.allocator;
+    const alloc = testing_allocator.no_resize;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -5314,7 +5314,7 @@ fn checkLinkedMetadataAllocationFailures(
 }
 
 test "linked metadata cleans every partial allocation failure" {
-    const alloc = std.testing.allocator;
+    const alloc = testing_allocator.no_resize;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 

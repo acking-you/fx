@@ -56,7 +56,7 @@ pub fn build(b: *std.Build) void {
             .stack_check = false,
             .stack_protector = false,
             .omit_frame_pointer = true,
-            .unwind_tables = .none,
+            .unwind_tables = if (target.result.os.tag == .windows) null else .none,
             .error_tracing = false,
             .strip = optimize != .debug,
         }),

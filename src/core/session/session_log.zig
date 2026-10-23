@@ -6638,7 +6638,7 @@ test "event append rejects a truncated committed prefix without extending it" {
 }
 
 test "writable open state replays only the committed tail after a checkpoint" {
-    const alloc = std.testing.allocator;
+    const alloc = testing_allocator.no_resize;
     var temp = try TempRoot.init(alloc);
     defer temp.deinit(alloc);
     var initial = try testState(alloc, "session-checkpoint-tail-open", 10);

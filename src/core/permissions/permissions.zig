@@ -2570,7 +2570,7 @@ fn checkExternalStructuredFileGrantOfferAllocationFailures(
 }
 
 test "structured file grant offer cleans partial allocations" {
-    const alloc = std.testing.allocator;
+    const alloc = testing_allocator.no_resize;
     var items: [1]file_mutation_contract.EvaluatedPermissionTarget = undefined;
     const offer = try structuredFileGrantOffer(
         alloc,
@@ -2782,7 +2782,7 @@ fn checkFileTargetPreparationAllocationFailures(alloc: std.mem.Allocator, worksp
 }
 
 test "file target preparation cleans every partial allocation failure" {
-    const alloc = std.testing.allocator;
+    const alloc = testing_allocator.no_resize;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.createDirPath(io_mod.getIo(), "workspace/existing");

@@ -1,4 +1,5 @@
 const text_utils = @import("../shared/text_utils.zig");
+const testing_allocator = @import("../shared/testing_allocator.zig");
 const std = @import("std");
 const debug_trace = @import("../shared/debug_trace.zig");
 const image_attachments = @import("../images/image_attachments.zig");
@@ -892,7 +893,7 @@ fn openQueueReviewWithSemanticImageTokens(alloc: std.mem.Allocator) !void {
 
 test "queued prompt review releases semantic image tokens once on allocation failure" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         openQueueReviewWithSemanticImageTokens,
         .{},
     );
@@ -1014,8 +1015,8 @@ test "visible queue review aggregate matches composed entity-aware rows" {
                 .images = &images,
                 .skill_display_spans = &display_spans,
             },
-            .pasted_blocks = .{ .items = &pasted, .capacity = pasted.len },
-            .image_tokens = .{ .items = &image_tokens, .capacity = image_tokens.len },
+            .pasted_blocks = .fromOwnedSlice(&pasted),
+            .image_tokens = .fromOwnedSlice(&image_tokens),
         },
         .{ .draft = .{
             .turn_id = 2,
@@ -1093,7 +1094,7 @@ fn measureVisibleReviewRowsWithSkillScratch(alloc: std.mem.Allocator) !void {
 
 test "visible queue review measurement cleans scratch on allocation failure" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         measureVisibleReviewRowsWithSkillScratch,
         .{},
     );

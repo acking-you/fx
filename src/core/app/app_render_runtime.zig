@@ -4081,7 +4081,7 @@ const CoordinatorFaultTestApp = struct {
         self.notification_flushes += 1;
     }
 
-    fn renderFrameAttemptForTest(
+    pub fn renderFrameAttemptForTest(
         self: *CoordinatorFaultTestApp,
         snapshot: render_request.AttemptSnapshot,
     ) !FrameAttemptResult {

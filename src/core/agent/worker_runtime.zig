@@ -2993,7 +2993,7 @@ fn checkFinishOwnershipHandoffAllocation(
 }
 
 test "finish ownership handoff preserves allocator and filesystem ownership" {
-    const alloc = std.testing.allocator;
+    const alloc = testing_allocator.no_resize;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");

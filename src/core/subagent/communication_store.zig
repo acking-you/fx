@@ -1,3 +1,4 @@
+const testing_allocator = @import("../shared/testing_allocator.zig");
 const std = @import("std");
 const io_mod = @import("../shared/io.zig");
 const permission_request = @import("../permissions/permission_request.zig");
@@ -2264,7 +2265,7 @@ fn checkCommunicationCodecAllocationFailures(alloc: Allocator) !void {
 
 test "communication codec cleans every failing allocation path" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkCommunicationCodecAllocationFailures,
         .{},
     );
@@ -2291,7 +2292,7 @@ fn checkCommunicationCompactionAllocationFailures(alloc: Allocator) !void {
 
 test "communication compaction cleans every failing allocation path" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkCommunicationCompactionAllocationFailures,
         .{},
     );
@@ -2344,7 +2345,7 @@ fn checkCapacityMutationAllocationFailures(alloc: Allocator) !void {
 
 test "capacity mutations clean every failing allocation path" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkCapacityMutationAllocationFailures,
         .{},
     );

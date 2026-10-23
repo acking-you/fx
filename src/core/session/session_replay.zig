@@ -421,7 +421,7 @@ test "recovery replay preserves reader failure identity" {
 }
 
 test "session replay parser honors exact copied boundary" {
-    const alloc = std.testing.allocator;
+    const alloc = testing_allocator.no_resize;
     const generation: Identifier = @splat(0x10);
     const first_id: Identifier = @splat(0x20);
     const second_id: Identifier = @splat(0x30);

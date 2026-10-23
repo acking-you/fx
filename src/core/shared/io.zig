@@ -427,6 +427,14 @@ pub fn setRawEnviron(raw: RawEnviron) void {
     global_raw_environ = raw;
 }
 
+/// Test fixtures restore the empty installed environment after their scoped map.
+pub fn resetEnvironForTest() void {
+    if (comptime !builtin.is_test) @compileError("resetEnvironForTest is test-only");
+    global_environ = null;
+    global_environ_block = null;
+    global_raw_environ = null;
+}
+
 /// Returns the absolute profile home from the current environment scope.
 pub fn homeDir() ?[]const u8 {
     const home = getenv("HOME") orelse return null;

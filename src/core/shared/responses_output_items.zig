@@ -1,3 +1,4 @@
+const testing_allocator = @import("testing_allocator.zig");
 const std = @import("std");
 
 const Allocator = std.mem.Allocator;
@@ -288,7 +289,7 @@ fn checkAllocationFailures(alloc: Allocator) !void {
 
 test "provider output item ownership is allocation failure safe" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkAllocationFailures,
         .{},
     );

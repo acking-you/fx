@@ -28,7 +28,7 @@ upstream product feature is now available in BYOK.
 | --- | --- |
 | Request watches | Adopt upstream `select_watch` and extend its stop-and-join pattern to the fork's generic bounded requests, catalog fetches, direct HTTP fetch, OAuth callback reads, terminal monitor networking, and image-normalizer process waits. |
 | Zig toolchain | Adopt Zig 0.17.0 across source, build configuration, CI, native packaging, and development documentation. Keep the fork's binary, embedded C ABI, NAPI and WASM build owners. Test filters now use repeated `-Dtest-filter=...` options. |
-| Workspace discovery | Adopt upstream's native indexer and its single public facade for picker, glob, and grep discovery. Git metadata is read as data without spawning git. Preserve BYOK's immutable access scopes, scope epochs, generation ownership, and cancellation. |
+| Workspace discovery | Adopt upstream's native indexer and its single public facade for picker, glob, and grep discovery. Git metadata is read as data without spawning git. Preserve BYOK's immutable access scopes, captured index prefixes, generation ownership, and cancellation. |
 | Terminal and input | Accept compatible shared terminal engine, Unicode width, OSC hyperlink, parser, keypad, navigation, and rendering fixes. Keep transcript mutation and paint ownership on the UI thread. |
 | Shared utilities | Accept compatible text, shell parsing/classification, GitHub, path, search, and process changes. Retain saved fuzz regression inputs for the six imported parser/index/terminal test owners. |
 | PGSO | Accept compatible compiler/profile tooling updates; retain BYOK's corpus classification, native matrices, release routing, and established E2E owners. |
@@ -113,3 +113,26 @@ Remaining focused regression checks, the requested contention stress runs, and
 exact-head Full CI are recorded in the draft PR as they finish. The
 PR must stay draft until the maintainer authorizes readiness, and must not be
 merged, released, or filed upstream without separate authorization.
+
+### CI compatibility follow-up
+
+The first CI pass exposed test-only assumptions from the old toolchain and
+Windows-specific APIs. The repair resolves generated executable paths before
+child launches, uses Zig 0.17's explicit array-list construction and public test
+hooks, and applies upstream's non-resizing allocator to fault-injection sweeps.
+The resulting focused process and allocation regression set passes 13 tests.
+
+Windows HTTP I/O now uses the operation API and complete socket handles. Native
+index snapshots use the fork's existing permission and synchronous-file helpers;
+POSIX mode-bit rejection stays POSIX-specific, with Windows profile ACLs retaining
+their existing ownership contract. Windows executable builds keep the target's
+unwind-table default because its CRT registers structured exception handlers.
+The obsolete v1 file-index cache owner is removed in favor of the shared v3
+snapshot implementation.
+
+The file-picker E2E assertion now checks the native loader thread instead of a
+removed git subprocess. All 15 deterministic picker scenarios pass, including
+rapid large-index refreshes, scope changes, and two resume cycles; the credentialed
+live-provider scenario remains skipped. The 18 embedded ownership tests pass.
+The tools contention run reports zero failures across all 1,800 runs. PGSO's
+Python checks pass after running their build tests with the pinned Zig 0.17.0.

@@ -1433,8 +1433,8 @@ test "streamed presentation preserves ANSI OSC 8 code fence and table spans" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const test_paths_source = try alloc.print(
-        "pub const product_exe: []const u8 = \"{f}\";\npub const source_root: []const u8 = \"{f}\";\n",
-        .{ std.zig.fmtString(test_paths.product_exe), std.zig.fmtString(test_paths.source_root) },
+        "pub const product_exe: []const u8 = \"{f}\";\n",
+        .{std.zig.fmtString(test_paths.product_exe)},
     );
     defer alloc.free(test_paths_source);
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "test_paths.zig", .data = test_paths_source });
