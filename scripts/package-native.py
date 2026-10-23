@@ -21,6 +21,22 @@ TARGETS = {
 }
 
 
+def check_darwin_member_alignment(archive):
+    """Apple's linker ignores 64-bit Mach-O archive members that are not 8-byte aligned."""
+    data = archive.read_bytes()
+    if data[:8] != b"!<arch>\n":
+        raise SystemExit(f"{archive} is not an ar archive")
+    position = 8
+    while position < len(data):
+        header = data[position:position + 60]
+        name, size = header[:16].decode().rstrip(), int(header[48:58])
+        start = position + 60
+        member_data = start + (int(name[3:]) if name.startswith("#1/") else 0)
+        if member_data % 8:
+            raise SystemExit(f"{archive}: member at offset {position} starts its data at {member_data}, not 8-byte aligned")
+        position = start + size + (start + size) % 2
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target", required=True, choices=TARGETS)
@@ -39,6 +55,8 @@ def main():
                     "-Dembedded-strip=true", f"-Dgit-revision={revision}", "--prefix", str(prefix)], check=True)
     archive = "fx_core.lib" if "windows" in args.target else "libfx_core.a"
     native = prefix / "lib" / archive
+    if "apple-darwin" in args.target:
+        check_darwin_member_alignment(native)
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="fx-native-") as temporary:

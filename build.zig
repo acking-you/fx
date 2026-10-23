@@ -340,9 +340,19 @@ fn addEmbeddedArtifact(
         .root_module = root,
     });
     library.bundle_compiler_rt = true;
-    const install = b.addInstallArtifact(library, .{});
     const step = b.step("libfx", "Build the native embedded fx C library");
-    step.dependOn(&install.step);
+    if (target.result.os.tag.isDarwin()) {
+        // Zig's Mach-O archiver aligns members to two bytes, and Apple's
+        // linker ignores 64-bit objects that do not start on an eight-byte
+        // boundary. llvm-ar's Darwin writer aligns members and rebuilds the
+        // symbol table deterministically.
+        const realign = b.addSystemCommand(&.{ b.graph.zig_exe, "ar", "--format=darwin", "qcsL" });
+        const aligned = realign.addOutputFileArg(library.out_filename);
+        realign.addArtifactArg(library);
+        step.dependOn(&b.addInstallLibFile(aligned, library.out_filename).step);
+    } else {
+        step.dependOn(&b.addInstallArtifact(library, .{}).step);
+    }
     const tests = b.addTest(.{ .root_module = root, .filters = &.{"embedded"} });
     const run_tests = b.addRunArtifact(tests);
     const test_step = b.step("test-embedded", "Test the embedded runtime ownership boundaries");
