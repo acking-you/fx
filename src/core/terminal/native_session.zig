@@ -1,4 +1,7 @@
+const testing_allocator = @import("../shared/testing_allocator.zig");
 const std = @import("std");
+const select_watch = @import("../shared/select_watch.zig");
+const NetworkWatch = select_watch.Watch(select_watch.CancellationDeadline);
 const builtin = @import("builtin");
 const contracts = @import("contracts.zig");
 const monitor_core = @import("monitor.zig");
@@ -46,12 +49,12 @@ const default_dimensions: contracts.Dimensions = .{
     .rows = 24,
     .columns = 80,
 };
-const ioctl_set_controlling_terminal: c_int = switch (builtin.os.tag) {
+const ioctl_set_controlling_terminal: c_int = switch (builtin.target.os.tag) {
     .macos => 0x20007461,
     .linux => @intCast(std.os.linux.T.IOCSCTTY),
     else => 0,
 };
-const ioctl_set_window_size: c_int = switch (builtin.os.tag) {
+const ioctl_set_window_size: c_int = switch (builtin.target.os.tag) {
     .macos => @bitCast(@as(u32, 0x80087467)),
     .linux => @intCast(std.os.linux.T.IOCSWINSZ),
     else => 0,
@@ -260,7 +263,7 @@ pub const WorkTracker = struct {
 };
 
 fn isSupported() bool {
-    return isSupportedForOs(builtin.os.tag);
+    return isSupportedForOs(builtin.target.os.tag);
 }
 
 fn isSupportedForOs(os_tag: std.Target.Os.Tag) bool {
@@ -282,9 +285,9 @@ test "native terminal backend selection follows canonical platform support" {
             isSupportedForOs(os_tag),
         );
     }
-    try std.testing.expectEqual(isSupportedForOs(builtin.os.tag), isSupported());
+    try std.testing.expectEqual(isSupportedForOs(builtin.target.os.tag), isSupported());
     const ExpectedRegistry = if (comptime host_capabilities
-        .terminalSupportForOs(builtin.os.tag)
+        .terminalSupportForOs(builtin.target.os.tag)
         .isSupported())
         SupportedRegistry
     else
@@ -339,7 +342,7 @@ pub fn runControlMarker(raw_args: []const [*:0]const u8) !void {
 
     var bytes: [marker_frame_len]u8 = @splat(0);
     @memcpy(bytes[0..control_nonce_len], nonce);
-    bytes[control_nonce_len] = @intFromEnum(kind);
+    bytes[control_nonce_len] = @backingInt(kind);
     const address = try std.Io.net.UnixAddress.init(control_path);
     var stream = try address.connect(io_mod.getIo());
     defer stream.close(io_mod.getIo());
@@ -401,16 +404,16 @@ pub fn runLauncher(alloc: Allocator) !void {
     );
     defer parsed.deinit();
     if (parsed.value.argv.len == 0) return error.InvalidLauncherConfig;
-    if (!std.fs.path.isAbsolute(parsed.value.cwd) or
-        !std.fs.path.isAbsolute(parsed.value.control_path) or
-        !std.fs.path.isAbsolute(parsed.value.bootstrap_path) or
+    if (!std.Io.Dir.path.isAbsolute(parsed.value.cwd) or
+        !std.Io.Dir.path.isAbsolute(parsed.value.control_path) or
+        !std.Io.Dir.path.isAbsolute(parsed.value.bootstrap_path) or
         parsed.value.control_nonce.len != control_nonce_len or
         (parsed.value.command == null) != (parsed.value.command_path == null))
     {
         return error.InvalidLauncherConfig;
     }
     if (parsed.value.command_path) |path| {
-        if (!std.fs.path.isAbsolute(path)) return error.InvalidLauncherConfig;
+        if (!std.Io.Dir.path.isAbsolute(path)) return error.InvalidLauncherConfig;
     }
     try parsed.value.dimensions.validate();
 
@@ -483,7 +486,7 @@ pub fn runLauncher(alloc: Allocator) !void {
         try writeControlFd(
             std.posix.STDERR_FILENO,
             .startup_failed,
-            @intFromEnum(StartupFailure.shell_unavailable),
+            @backingInt(StartupFailure.shell_unavailable),
         );
         return;
     };
@@ -538,7 +541,7 @@ pub fn runLauncher(alloc: Allocator) !void {
         try writeControlFd(
             std.posix.STDERR_FILENO,
             .startup_failed,
-            @intFromEnum(StartupFailure.control_failed),
+            @backingInt(StartupFailure.control_failed),
         );
         return;
     }
@@ -548,7 +551,7 @@ pub fn runLauncher(alloc: Allocator) !void {
         try writeControlFd(
             std.posix.STDERR_FILENO,
             .startup_failed,
-            @intFromEnum(StartupFailure.profile_failed),
+            @backingInt(StartupFailure.profile_failed),
         );
         return;
     }
@@ -561,7 +564,7 @@ pub fn runLauncher(alloc: Allocator) !void {
         .signal => |signal| try writeControlFd(
             std.posix.STDERR_FILENO,
             .command_signal,
-            @intFromEnum(signal),
+            @backingInt(signal),
         ),
         .stopped, .unknown => try writeControlFd(
             std.posix.STDERR_FILENO,
@@ -597,15 +600,15 @@ test "launcher wait status classifies terminal results before stops" {
     );
     try std.testing.expectEqual(
         std.process.Child.Term{ .signal = .TERM },
-        launcherStatusToTerm(@intFromEnum(std.c.SIG.TERM)),
+        launcherStatusToTerm(@backingInt(std.c.SIG.TERM)),
     );
     try std.testing.expectEqual(
         std.process.Child.Term{ .signal = .SEGV },
-        launcherStatusToTerm(@intFromEnum(std.c.SIG.SEGV) | 0x80),
+        launcherStatusToTerm(@backingInt(std.c.SIG.SEGV) | 0x80),
     );
     try std.testing.expectEqual(
         std.process.Child.Term{ .stopped = .TTIN },
-        launcherStatusToTerm((@as(u32, @intFromEnum(std.c.SIG.TTIN)) << 8) | 0x7f),
+        launcherStatusToTerm((@as(u32, @backingInt(std.c.SIG.TTIN)) << 8) | 0x7f),
     );
 }
 
@@ -1760,7 +1763,7 @@ fn recoveredExitMatches(
             .signal => false,
         },
         .signal => |expected| switch (term) {
-            .signal => |actual| @intFromEnum(signalValue(expected)) == actual,
+            .signal => |actual| @backingInt(signalValue(expected)) == actual,
             .exited => false,
         },
         else => false,
@@ -2477,7 +2480,7 @@ fn monitorOperationFailure(operation_name: []const u8, boundary: []const u8) boo
     const requested = io_mod.getenv("FX_TERMINAL_TEST_FAIL_MONITOR_OPERATION") orelse
         return false;
     var buffer: [64]u8 = undefined;
-    const expected = std.fmt.bufPrint(
+    const expected = std.mem.print(
         &buffer,
         "{s}:{s}",
         .{ operation_name, boundary },
@@ -2841,9 +2844,9 @@ fn resolveMonitorPath(
     var arena_state = std.heap.ArenaAllocator.init(alloc);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const lexical = try std.fs.path.resolve(
+    const lexical = try std.Io.Dir.path.resolve(
         arena,
-        if (std.fs.path.isAbsolute(path)) &.{path} else &.{ session.cwd, path },
+        if (std.Io.Dir.path.isAbsolute(path)) &.{path} else &.{ session.cwd, path },
     );
     const canonical_root = try io_mod.realpathAlloc(arena, session.workspace_root);
     const resolved = try workspace_pathing.resolveWorkspacePath(
@@ -2928,7 +2931,7 @@ fn runCustomProbe(
         .command = probe.command,
         .resolved_cwd = canonical_cwd,
         .background = false,
-        .target_os = builtin.os.tag,
+        .target_os = builtin.target.os.tag,
     };
     const authority = command_admission.CommandExecutionAuthority{ .shell_allowed = .{
         .fingerprint = .init(command_ctx),
@@ -3043,12 +3046,12 @@ fn findMonitorSequenceIndex(
 
 const LookupSelection = union(enum) {
     lookup: anyerror![]std.Io.net.IpAddress,
-    timeout: anyerror!void,
+    watch: std.Io.Cancelable!select_watch.Outcome,
 };
 
 const ConnectSelection = union(enum) {
     connect: anyerror!std.Io.net.Stream,
-    timeout: anyerror!void,
+    watch: std.Io.Cancelable!select_watch.Outcome,
 };
 
 fn tcpReady(alloc: Allocator, host_name: []const u8, port: u16) bool {
@@ -3073,25 +3076,38 @@ fn resolveMonitorHost(
         return result;
     } else |_| {}
     const host = try std.Io.net.HostName.init(host_name);
-    const zio = io_mod.getIo();
+    const io = io_mod.getIo();
+    var watch: NetworkWatch = .{};
     var buffer: [2]LookupSelection = undefined;
-    var select: std.Io.Select(LookupSelection) = .init(zio, &buffer);
-    try select.concurrent(.lookup, collectMonitorLookup, .{ alloc, host, port });
-    try select.concurrent(.timeout, waitMonitorNetworkDeadline, .{});
-    const result = try select.await();
-    return switch (result) {
-        .lookup => |lookup| blk: {
-            select.cancelDiscard();
-            break :blk try lookup;
+    var select: std.Io.Select(LookupSelection) = .init(io, &buffer);
+    const condition = monitorNetworkCondition(io);
+    try select.concurrent(.watch, NetworkWatch.run, .{ &watch, io, condition });
+    select.concurrent(.lookup, collectMonitorLookup, .{ alloc, host, port }) catch |err| {
+        watch.finish(&select);
+        return err;
+    };
+    const result = select.await() catch |err| {
+        watch.stop(io);
+        cancelMonitorLookup(alloc, &select);
+        return err;
+    };
+    switch (result) {
+        .lookup => |lookup| {
+            watch.finish(&select);
+            return lookup;
         },
-        .timeout => |timeout| blk: {
-            while (select.cancel()) |item| switch (item) {
-                .lookup => |lookup| if (lookup) |addresses| alloc.free(addresses) else |_| {},
-                .timeout => {},
-            };
-            try timeout;
-            break :blk error.Timeout;
+        .watch => |outcome| {
+            cancelMonitorLookup(alloc, &select);
+            _ = try outcome;
+            return error.Timeout;
         },
+    }
+}
+
+fn cancelMonitorLookup(alloc: Allocator, select: *std.Io.Select(LookupSelection)) void {
+    while (select.cancel()) |item| switch (item) {
+        .lookup => |lookup| if (lookup) |addresses| alloc.free(addresses) else |_| {},
+        .watch => {},
     };
 }
 
@@ -3118,25 +3134,37 @@ fn collectMonitorLookup(
 }
 
 fn connectMonitorAddress(address: std.Io.net.IpAddress) !std.Io.net.Stream {
-    const zio = io_mod.getIo();
+    const io = io_mod.getIo();
+    var watch: NetworkWatch = .{};
     var buffer: [2]ConnectSelection = undefined;
-    var select: std.Io.Select(ConnectSelection) = .init(zio, &buffer);
-    try select.concurrent(.connect, connectMonitorAddressTask, .{address});
-    try select.concurrent(.timeout, waitMonitorNetworkDeadline, .{});
-    const result = try select.await();
-    return switch (result) {
-        .connect => |connected| blk: {
-            select.cancelDiscard();
-            break :blk try connected;
+    var select: std.Io.Select(ConnectSelection) = .init(io, &buffer);
+    try select.concurrent(.watch, NetworkWatch.run, .{ &watch, io, monitorNetworkCondition(io) });
+    select.concurrent(.connect, connectMonitorAddressTask, .{address}) catch |err| {
+        watch.finish(&select);
+        return err;
+    };
+    const result = select.await() catch |err| {
+        watch.stop(io);
+        cancelMonitorConnect(&select);
+        return err;
+    };
+    switch (result) {
+        .connect => |connected| {
+            watch.finish(&select);
+            return connected;
         },
-        .timeout => |timeout| blk: {
-            while (select.cancel()) |item| switch (item) {
-                .connect => |connected| if (connected) |stream| stream.close(zio) else |_| {},
-                .timeout => {},
-            };
-            try timeout;
-            break :blk error.Timeout;
+        .watch => |outcome| {
+            cancelMonitorConnect(&select);
+            _ = try outcome;
+            return error.Timeout;
         },
+    }
+}
+
+fn cancelMonitorConnect(select: *std.Io.Select(ConnectSelection)) void {
+    while (select.cancel()) |item| switch (item) {
+        .connect => |connected| if (connected) |stream| stream.close(select.io) else |_| {},
+        .watch => {},
     };
 }
 
@@ -3144,15 +3172,8 @@ fn connectMonitorAddressTask(address: std.Io.net.IpAddress) !std.Io.net.Stream {
     return std.Io.net.IpAddress.connect(&address, io_mod.getIo(), .{ .mode = .stream });
 }
 
-fn waitMonitorNetworkDeadline() !void {
-    const zio = io_mod.getIo();
-    const now = std.Io.Clock.Timestamp.now(zio, .awake);
-    const due = std.Io.Clock.Timestamp{
-        .clock = .awake,
-        .raw = now.raw.addDuration(.fromMilliseconds(250)),
-    };
-    try due.wait(zio);
-    return error.Timeout;
+fn monitorNetworkCondition(io: std.Io) select_watch.CancellationDeadline {
+    return .{ .deadline = std.Io.Clock.Timestamp.fromNow(io, .{ .clock = .awake, .raw = .fromMilliseconds(250) }) };
 }
 
 fn httpReady(alloc: Allocator, url: []const u8) bool {
@@ -3624,7 +3645,7 @@ const Session = struct {
                 }
                 if (!terminal_present) {
                     var pid_buffer: [32]u8 = undefined;
-                    const pid_text = try std.fmt.bufPrint(
+                    const pid_text = try std.mem.print(
                         &pid_buffer,
                         "{d}",
                         .{identity.pid},
@@ -3808,21 +3829,18 @@ const Session = struct {
         var path_bytes: [16]u8 = undefined;
         io_mod.getIo().random(&path_bytes);
         const path_suffix = std.fmt.bytesToHex(path_bytes, .lower);
-        const control_path = try std.fmt.allocPrint(
-            self.alloc,
+        const control_path = try self.alloc.print(
             "/tmp/fx-terminal-{s}.sock",
             .{path_suffix},
         );
         defer self.alloc.free(control_path);
-        const bootstrap_path = try std.fmt.allocPrint(
-            self.alloc,
+        const bootstrap_path = try self.alloc.print(
             "/tmp/fx-terminal-{s}.bootstrap",
             .{path_suffix},
         );
         defer self.alloc.free(bootstrap_path);
         const command_path = if (request.command != null)
-            try std.fmt.allocPrint(
-                self.alloc,
+            try self.alloc.print(
                 "/tmp/fx-terminal-{s}.command",
                 .{path_suffix},
             )
@@ -4211,7 +4229,7 @@ const Session = struct {
 
     fn matchesSignalTarget(self: *Session, target: SignalTarget) bool {
         var pid_buffer: [32]u8 = undefined;
-        const pid_text = std.fmt.bufPrint(
+        const pid_text = std.mem.print(
             &pid_buffer,
             "{d}",
             .{target.pid},
@@ -4291,7 +4309,7 @@ const Session = struct {
         self.mutex.unlock(zio);
         if (!running or pid == null or token == null) return false;
         var pid_buffer: [32]u8 = undefined;
-        const pid_text = std.fmt.bufPrint(&pid_buffer, "{d}", .{pid.?}) catch
+        const pid_text = std.mem.print(&pid_buffer, "{d}", .{pid.?}) catch
             return false;
         if (self.durable.profile.process_provider.matchToken(
             self.alloc,
@@ -4582,7 +4600,7 @@ const Session = struct {
             return;
         };
         var pid_buffer: [32]u8 = undefined;
-        const pid_text = std.fmt.bufPrint(&pid_buffer, "{d}", .{pid}) catch {
+        const pid_text = std.mem.print(&pid_buffer, "{d}", .{pid}) catch {
             self.failClosed(.session_lost);
             return;
         };
@@ -4691,7 +4709,7 @@ const Session = struct {
         }
         const persisted: terminal_store.PersistedTermination = switch (term) {
             .exited => |code| .{ .exited = code },
-            .signal => |signal| .{ .signal = @intFromEnum(signal) },
+            .signal => |signal| .{ .signal = @backingInt(signal) },
             .stopped, .unknown => {
                 self.persistLostLocked(io_mod.milliTimestamp());
                 self.mutex.unlock(zio);
@@ -5658,7 +5676,7 @@ fn terminalSignalCompleted(
 fn processGroupMissing(pid: std.posix.pid_t) bool {
     while (true) switch (std.c.errno(std.c.kill(
         -pid,
-        @enumFromInt(0),
+        @fromBackingInt(@intCast(0)),
     ))) {
         .SUCCESS, .PERM => return false,
         .INTR => continue,
@@ -5994,7 +6012,7 @@ fn tmuxStartupFrameCount(frames: []const tmux_session.LifecycleFrame) usize {
 
 fn writeControlFd(fd: std.posix.fd_t, kind: ControlKind, value: u32) !void {
     var bytes: [control_frame_len]u8 = undefined;
-    bytes[0] = @intFromEnum(kind);
+    bytes[0] = @backingInt(kind);
     std.mem.writeInt(u32, bytes[1..5], value, .little);
     try writeAllFd(fd, &bytes, false);
 }
@@ -6267,7 +6285,7 @@ fn signalTestBarrier(name: []const u8) void {
 fn outcomeFromTerm(term: std.process.Child.Term) ?contracts.ReturnOutcome {
     return switch (term) {
         .exited => |code| .{ .exited = code },
-        .signal => |signal| .{ .signal = @intFromEnum(signal) },
+        .signal => |signal| .{ .signal = @backingInt(signal) },
         .stopped, .unknown => null,
     };
 }
@@ -6313,7 +6331,7 @@ fn signalValue(signal: contracts.Signal) std.c.SIG {
 
 fn signalFromInt(value: u32) ?std.posix.SIG {
     if (value == 0 or value > 255) return null;
-    return @enumFromInt(value);
+    return @fromBackingInt(@intCast(value));
 }
 
 fn projectedFacts(
@@ -6424,14 +6442,14 @@ test "terminal outcomes preserve exact exit and signal status" {
         outcomeFromTerm(.{ .exited = 23 }).?,
     );
     try std.testing.expectEqual(
-        contracts.ReturnOutcome{ .signal = @intFromEnum(std.posix.SIG.TERM) },
+        contracts.ReturnOutcome{ .signal = @backingInt(std.posix.SIG.TERM) },
         outcomeFromTerm(.{ .signal = .TERM }).?,
     );
     try std.testing.expect(outcomeFromTerm(.{ .unknown = 1 }) == null);
     try std.testing.expect(outcomeFromTerm(.{ .stopped = .STOP }) == null);
     try std.testing.expectEqual(
         std.posix.SIG.SEGV,
-        signalFromInt(@intFromEnum(std.posix.SIG.SEGV)).?,
+        signalFromInt(@backingInt(std.posix.SIG.SEGV)).?,
     );
     try std.testing.expect(signalFromInt(0) == null);
     try std.testing.expect(signalFromInt(256) == null);
@@ -6609,8 +6627,7 @@ test "monitor owner relevant output is allocation and persistence atomic" {
     var fixture = try TestDurableFixture.init(alloc);
     defer fixture.deinit();
     for (cases, 0..) |case, index| {
-        const session_id = try std.fmt.allocPrint(
-            alloc,
+        const session_id = try alloc.print(
             "terminal-output-owner-{d}",
             .{index},
         );
@@ -6705,7 +6722,7 @@ fn checkSessionInitAllocationFailures(alloc: Allocator) !void {
 
 test "session initialization owns durable resources" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkSessionInitAllocationFailures,
         .{},
     );
@@ -7211,7 +7228,7 @@ test "recovery classifiers preserve allocation and transient failures" {
 }
 
 test "checkpoint load allocation failure preserves durable recovery facts" {
-    const alloc = std.testing.allocator;
+    const alloc = testing_allocator.no_resize;
     var fixture = try TestDurableFixture.init(alloc);
     defer fixture.deinit();
     const id = try alloc.dupe(u8, "terminal-checkpoint-load-oom");
@@ -7265,7 +7282,7 @@ test "checkpoint load allocation failure preserves durable recovery facts" {
 }
 
 test "journal engine feed allocation failure preserves durable recovery facts" {
-    const alloc = std.testing.allocator;
+    const alloc = testing_allocator.no_resize;
     var fixture = try TestDurableFixture.init(alloc);
     defer fixture.deinit();
     const id = try alloc.dupe(u8, "terminal-replay-feed-oom");

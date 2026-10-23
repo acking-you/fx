@@ -3143,9 +3143,9 @@ test "model child permissions inherit and reject elevation before persistence" {
     }
 
     for ([_]types.PermissionMode{ .ask, .auto, .yolo }, 0..) |parent_mode, index| {
-        const invocation_id = try std.fmt.allocPrint(alloc, "inherit-{d}", .{index});
+        const invocation_id = try alloc.print("inherit-{d}", .{index});
         defer alloc.free(invocation_id);
-        const name = try std.fmt.allocPrint(alloc, "inherited-{d}", .{index});
+        const name = try alloc.print("inherited-{d}", .{index});
         defer alloc.free(name);
         var command = try domain.validateCommand(alloc, .{ .create = .{
             .name = name,
@@ -4570,7 +4570,7 @@ test "human inspections and stable failures leave no mutation reservations" {
     defer inspect.deinit(alloc);
     for (0..3) |index| {
         var invocation_buffer: [64]u8 = undefined;
-        const invocation_id = try std.fmt.bufPrint(
+        const invocation_id = try std.mem.print(
             &invocation_buffer,
             "human-inspect-{d}",
             .{index},
@@ -4591,7 +4591,7 @@ test "human inspections and stable failures leave no mutation reservations" {
     defer missing.deinit(alloc);
     for (0..3) |index| {
         var invocation_buffer: [64]u8 = undefined;
-        const invocation_id = try std.fmt.bufPrint(
+        const invocation_id = try std.mem.print(
             &invocation_buffer,
             "stable-human-failure-{d}",
             .{index},
@@ -7356,9 +7356,9 @@ test "tool host persistent child executes a message after returning idle" {
     try runner.waitFor(2);
 
     for (3..18) |turn_index| {
-        const content = try std.fmt.allocPrint(alloc, "turn {d}", .{turn_index});
+        const content = try alloc.print("turn {d}", .{turn_index});
         defer alloc.free(content);
-        const invocation_id = try std.fmt.allocPrint(alloc, "send-{d}", .{turn_index});
+        const invocation_id = try alloc.print("send-{d}", .{turn_index});
         defer alloc.free(invocation_id);
         var repeated = try domain.validateCommand(alloc, .{ .message = .{ .send = .{
             .id = child_id,
@@ -7405,14 +7405,14 @@ test "child beyond the first tree page can message its direct parent only" {
     }
     for (0..101) |index| {
         var child_buffer: [32]u8 = undefined;
-        const child_id = try std.fmt.bufPrint(
+        const child_id = try std.mem.print(
             &child_buffer,
             "sibling-{d:0>3}",
             .{index},
         );
         try env.createSession(alloc, child_id);
         var operation_buffer: [32]u8 = undefined;
-        const operation_id = try std.fmt.bufPrint(
+        const operation_id = try std.mem.print(
             &operation_buffer,
             "create-sibling-{d:0>3}",
             .{index},

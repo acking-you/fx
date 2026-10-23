@@ -640,7 +640,7 @@ pub const TurnContext = struct {
                 domain.max_cancellation_reason_bytes,
             ))
         else
-            try std.fmt.allocPrint(self.alloc, "{s}: {s}", .{ code, safe_detail });
+            try self.alloc.print("{s}: {s}", .{ code, safe_detail });
     }
 
     pub fn failureDiagnostic(self: *const TurnContext) ?[]const u8 {
@@ -1417,14 +1417,8 @@ pub const ChildWaiter = struct {
         self: *ChildWaiter,
         duration: std.Io.Clock.Duration,
     ) error{Canceled}!ChildWaitResult {
-        self.event.waitTimeout(
-            io_mod.getIo(),
-            .{ .duration = duration },
-        ) catch |err| return switch (err) {
-            error.Timeout => .timed_out,
-            error.Canceled => error.Canceled,
-        };
-        return .signaled;
+        const deadline = std.Io.Clock.Timestamp.fromNow(io_mod.getIo(), duration);
+        return if (try io_mod.waitEventUntil(&self.event, deadline)) .signaled else .timed_out;
     }
 };
 
@@ -1461,7 +1455,7 @@ pub const Owner = struct {
     child_waiters: std.ArrayList(*ChildWaiter) = .empty,
     notification_schedules: std.ArrayList(NotificationSchedule) = .empty,
     recovery_external_busy: std.ArrayList([]u8) = .empty,
-    completions: [completion_capacity]?Completion = [_]?Completion{null} ** completion_capacity,
+    completions: [completion_capacity]?Completion = @as([completion_capacity]?Completion, @splat(null)),
     completion_cursor: usize = 0,
     started_any: bool = false,
     closed: bool = false,
@@ -3645,8 +3639,7 @@ fn boundedFinalResultAlloc(
     if (content.len <= communication.max_delivery_content_bytes) {
         return alloc.dupe(u8, content);
     }
-    const suffix = try std.fmt.allocPrint(
-        alloc,
+    const suffix = try alloc.print(
         "\n\n[truncated; original_bytes={d}]",
         .{content.len},
     );
@@ -3656,7 +3649,7 @@ fn boundedFinalResultAlloc(
         content,
         communication.max_delivery_content_bytes - suffix.len,
     );
-    return std.fmt.allocPrint(alloc, "{s}{s}", .{ prefix, suffix });
+    return alloc.print("{s}{s}", .{ prefix, suffix });
 }
 
 fn oneOffFinalResultAlloc(
@@ -3678,16 +3671,14 @@ fn oneOffFinalResultAlloc(
                 fallback_completed;
         },
         .failed => blk: {
-            formatted = try std.fmt.allocPrint(
-                alloc,
+            formatted = try alloc.print(
                 "One-off subagent failed: {s}",
                 .{transition.reason orelse "unknown failure"},
             );
             break :blk formatted.?;
         },
         .cancelled => blk: {
-            formatted = try std.fmt.allocPrint(
-                alloc,
+            formatted = try alloc.print(
                 "One-off subagent cancelled: {s}",
                 .{work.cancellation_reason orelse transition.reason orelse "cancelled"},
             );
@@ -4459,8 +4450,7 @@ const FakeExecution = struct {
         if (cancel.load(.seq_cst)) return error.Cancelled;
         if (self.run_fails) return error.ProviderFailed;
 
-        const response = try std.fmt.allocPrint(
-            self.alloc,
+        const response = try self.alloc.print(
             "model={s} effort={s} tool=read_file content={s}",
             .{ admission.model, admission.effort.label(), message.content },
         );
@@ -5412,9 +5402,9 @@ test "notification owner bounds hundreds of active schedules and excludes idle s
 
     for (0..600) |index| {
         var child_buffer: [32]u8 = undefined;
-        const child_id = try std.fmt.bufPrint(&child_buffer, "active-{d}", .{index});
+        const child_id = try std.mem.print(&child_buffer, "active-{d}", .{index});
         var work_buffer: [32]u8 = undefined;
-        const work_id = try std.fmt.bufPrint(&work_buffer, "work-{d}", .{index});
+        const work_id = try std.mem.print(&work_buffer, "work-{d}", .{index});
         try owner.registerNotificationSchedule(
             child_id,
             work_id,
@@ -5562,7 +5552,7 @@ test "owner reaps many distinct completed child threads before shutdown" {
     defer owner.deinit();
 
     for (0..child_count) |index| {
-        const child_id = try std.fmt.allocPrint(alloc, "reaped-child-{d}", .{index});
+        const child_id = try alloc.print("reaped-child-{d}", .{index});
         defer alloc.free(child_id);
         try env.createSession(alloc, child_id);
         try env.installControl(
@@ -5614,9 +5604,9 @@ test "persistent wakes racing finished-slot reaping execute every queued turn" {
     try std.testing.expectEqual(StartResult.started, try owner.start(child_id, false));
     try waitForEntries(&fake, 1);
     for (1..turn_count) |index| {
-        const content = try std.fmt.allocPrint(alloc, "turn-{d}", .{index});
+        const content = try alloc.print("turn-{d}", .{index});
         defer alloc.free(content);
-        const operation_id = try std.fmt.allocPrint(alloc, "wake-reap-{d}", .{index});
+        const operation_id = try alloc.print("wake-reap-{d}", .{index});
         defer alloc.free(operation_id);
         var send = try domain.validateCommand(alloc, .{ .message = .{ .send = .{
             .id = child_id,
@@ -6479,7 +6469,7 @@ test "restart recovery reconciles interrupted and cancelled approvals by work id
                 .child_id = "approval-restart-child",
                 .root_id = "parent",
                 .work_id = "approval-work",
-                .prepared_fingerprint = [_]u8{4} ** 32,
+                .prepared_fingerprint = @as([32]u8, @splat(4)),
                 .label = "prepared child action",
                 .explanation = null,
                 .grants = &.{},
@@ -6494,7 +6484,7 @@ test "restart recovery reconciles interrupted and cancelled approvals by work id
                 .child_id = "approval-restart-child",
                 .root_id = "parent",
                 .work_id = "cancelled-work",
-                .prepared_fingerprint = [_]u8{5} ** 32,
+                .prepared_fingerprint = @as([32]u8, @splat(5)),
                 .label = "cancelled child action",
                 .explanation = null,
                 .grants = &.{},
@@ -6585,7 +6575,7 @@ test "restart recovery finishes cancelled approval cleanup without model replay"
                 .child_id = child_id,
                 .root_id = "parent",
                 .work_id = "approval-work",
-                .prepared_fingerprint = [_]u8{5} ** 32,
+                .prepared_fingerprint = @as([32]u8, @splat(5)),
                 .label = "prepared child action",
                 .explanation = null,
                 .grants = &.{},
@@ -7266,7 +7256,7 @@ test "terminal one off recovery repairs parent result while child writer is busy
     try std.testing.expectEqual(domain.State.completed, terminal.state);
     try std.testing.expectEqual(domain.QueueStatus.completed, terminal.queue[0].status);
 
-    const lock_path = try std.fs.path.join(
+    const lock_path = try std.Io.Dir.path.join(
         alloc,
         &.{ env.store.sessions_dir, child_id, "session.lock" },
     );
@@ -7584,7 +7574,7 @@ test "process-held session lock preserves queue until explicit exactly-once retr
     defer env.deinit(alloc);
     try env.createSession(alloc, "locked-child");
     try env.installControl(alloc, "locked-child", .persistent, "model/locked", types.ReasoningEffort.literal("high"), &.{});
-    const lock_path = try std.fs.path.join(
+    const lock_path = try std.Io.Dir.path.join(
         alloc,
         &.{ env.store.sessions_dir, "locked-child", "session.lock" },
     );
@@ -7924,7 +7914,7 @@ test "shutdown joins while control locking and control writes are unavailable" {
     var owner = Owner{ .alloc = alloc, .sessions = &env.store, .manager = &manager, .services = fake.services() };
     try std.testing.expectEqual(StartResult.started, try owner.start("shutdown-unavailable", false));
     try waitForEntries(&fake, 1);
-    const lock_path = try std.fs.path.join(alloc, &.{
+    const lock_path = try std.Io.Dir.path.join(alloc, &.{
         env.store.sessions_dir,
         "shutdown-unavailable",
         "subagent",

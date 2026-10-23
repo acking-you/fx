@@ -430,7 +430,7 @@ fn parseLatestWorkspaceSessionIdFast(alloc: Allocator, bytes: []const u8, target
     const array = array_tail[0..array_end];
 
     var needle_buf: [std.fs.max_path_bytes + 32]u8 = undefined;
-    const needle = std.fmt.bufPrint(&needle_buf, "\"workspace_root\":\"{s}\"", .{target_workspace}) catch return null;
+    const needle = std.mem.print(&needle_buf, "\"workspace_root\":\"{s}\"", .{target_workspace}) catch return null;
     const match_start = std.mem.find(u8, array, needle) orelse return null;
     const entry_tail = array[match_start + needle.len ..];
     const entry_end = std.mem.findScalar(u8, entry_tail, '}') orelse return null;
@@ -1502,8 +1502,7 @@ pub fn refreshRelationshipMigrationSnapshot(
     var random_bytes: [16]u8 = undefined;
     io_mod.getIo().random(&random_bytes);
     const random_hex = std.fmt.bytesToHex(random_bytes, .lower);
-    const temp_name = try std.fmt.allocPrint(
-        alloc,
+    const temp_name = try alloc.print(
         ".{s}.tmp.{s}",
         .{ relationship_migration_snapshot_file, random_hex },
     );
@@ -1870,7 +1869,7 @@ test "session list sort is stable and O(n log n)" {
     var summaries: [500]SessionSummary = undefined;
     for (&summaries, 0..) |*summary, i| {
         summary.* = .{
-            .id = try std.fmt.allocPrint(alloc, "session-{d:0>3}", .{i}),
+            .id = try alloc.print("session-{d:0>3}", .{i}),
             .created_at_ms = @intCast(i),
             .updated_at_ms = if (i % 2 == 0) 200 else 100,
             .conversation_language = session.ConversationLanguage.default(),
@@ -2190,7 +2189,7 @@ test "workspace summary cache returns first matching latest entry" {
     defer tmp.cleanup();
     const cache_dir = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
     defer alloc.free(cache_dir);
-    const summary_path = try std.fs.path.join(alloc, &.{ cache_dir, "summary.json" });
+    const summary_path = try std.Io.Dir.path.join(alloc, &.{ cache_dir, "summary.json" });
     defer alloc.free(summary_path);
     try writeTestFile(
         summary_path,
@@ -2220,9 +2219,9 @@ test "state summary fast parser reads generated cache shape" {
 test "deferred cache token round trips an exact commit position" {
     const alloc = std.testing.allocator;
     const position = session_replay.CommitPosition{
-        .log_generation = [_]u8{0x12} ** 16,
+        .log_generation = @as([16]u8, @splat(0x12)),
         .through_seq = 42,
-        .through_event_id = [_]u8{0xab} ** 16,
+        .through_event_id = @as([16]u8, @splat(0xab)),
         .through_event_log_bytes = 4096,
     };
     const encoded = try encodeDeferredCacheToken(
@@ -2290,9 +2289,9 @@ test "deferred cache token reader rejects non-private files" {
         "non-private-token",
         "/tmp/workspace",
         .{
-            .log_generation = [_]u8{0x12} ** 16,
+            .log_generation = @as([16]u8, @splat(0x12)),
             .through_seq = 1,
-            .through_event_id = [_]u8{0xab} ** 16,
+            .through_event_id = @as([16]u8, @splat(0xab)),
             .through_event_log_bytes = 100,
         },
     );

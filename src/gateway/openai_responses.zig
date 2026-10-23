@@ -135,7 +135,7 @@ fn fetchCompaction(
         debug_trace.logf(
             "compaction",
             "event=remote_response route={s} status={d} output_items={d}",
-            .{ @tagName(route), @intFromEnum(response.status), response.completion.responses_provider_output_items.len },
+            .{ @tagName(route), @backingInt(response.status), response.completion.responses_provider_output_items.len },
         );
         if (response.status.class() != .success) return .{ .rejected = response.status };
 
@@ -166,7 +166,7 @@ fn fetchCompaction(
     debug_trace.logf(
         "compaction",
         "event=remote_response route={s} status={d} body_bytes={d}",
-        .{ @tagName(route), @intFromEnum(response.status), response.body.len },
+        .{ @tagName(route), @backingInt(response.status), response.body.len },
     );
     if (response.status.class() != .success) return .{ .rejected = response.status };
 

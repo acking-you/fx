@@ -1,3 +1,4 @@
+const testing_allocator = @import("../core/shared/testing_allocator.zig");
 const std = @import("std");
 const acp_runner = @import("../core/cli/acp_runner.zig");
 const config_runtime = @import("../core/config/config_runtime.zig");
@@ -243,7 +244,7 @@ pub const ActiveSessionState = struct {
         const next = try alloc.alloc(types.PermissionGrant, self.session_grants.len + 1);
         errdefer alloc.free(next);
         if (self.session_grants.len > 0) {
-            std.mem.copyForwards(types.PermissionGrant, next[0..self.session_grants.len], self.session_grants);
+            @memmove(next[0..self.session_grants.len], self.session_grants);
             alloc.free(self.session_grants);
         }
         next[next.len - 1] = .{ .tool_name = name_copy, .target_path = target_copy };
@@ -288,7 +289,7 @@ pub const ActivePrompt = struct {
     steer_mutex: std.Io.Mutex = .init,
     turn_id: u64 = 0,
     accepting_steers: bool = true,
-    pending_steers: std.ArrayListUnmanaged(PendingSteer) = .empty,
+    pending_steers: std.ArrayList(PendingSteer) = .empty,
 
     pub fn setTurnId(self: *ActivePrompt, turn_id: u64) void {
         self.steer_mutex.lockUncancelable(io_mod.getIo());
@@ -631,7 +632,7 @@ fn adoptServerCredential(state: *ServerState, credential: *credentials.Credentia
 }
 
 fn adoptServerCredentialLocked(state: *ServerState, credential: *credentials.Credential) void {
-    state.logged_out[@intFromEnum(state.provider)] = false;
+    state.logged_out[@backingInt(state.provider)] = false;
     if (state.active_session) |*active| active.api_key = &.{};
     if (state.api_key.len > 0) secret.zeroAndFree(state.alloc, state.api_key);
     if (state.account_id) |account_id| state.alloc.free(account_id);
@@ -655,7 +656,7 @@ pub fn selectCredentialForProvider(
     state: *ServerState,
     provider: model_provider.ProviderId,
 ) !bool {
-    if (state.logged_out[@intFromEnum(provider)]) return false;
+    if (state.logged_out[@backingInt(provider)]) return false;
     if (provider == .gateway and state.gateway_binding != null) {
         var connection_credential = try cloneServerCredential(
             state.alloc,
@@ -2305,7 +2306,7 @@ fn runProviderJob(job: *ProviderJob) !ProviderJobOutcome {
         }
         state.credential_mutex.lockUncancelable(io_mod.getIo());
         defer state.credential_mutex.unlock(io_mod.getIo());
-        state.logged_out[@intFromEnum(job.target)] = true;
+        state.logged_out[@backingInt(job.target)] = true;
         if (job.target == .gateway) {
             state.gateway_binding_mutex.lockUncancelable(io_mod.getIo());
             if (state.gateway_binding) |*binding| binding.deinit(state.alloc);
@@ -3852,7 +3853,7 @@ test "ACP rejects refreshed Codex tokens for another account" {
 }
 
 test "ACP usage flush preserves snapshot ownership on allocation failure" {
-    const alloc = std.testing.allocator;
+    const alloc = testing_allocator.no_resize;
     var runtime: session_runtime.SessionRuntime = .{ .max_history_turns = 8 };
     var runtime_owned = true;
     defer if (runtime_owned) runtime.deinit(alloc);

@@ -1,4 +1,5 @@
 const std = @import("std");
+const testing_allocator = @import("../shared/testing_allocator.zig");
 const builtin = @import("builtin");
 const contracts = @import("contracts.zig");
 const command_environment = @import("../execution/command_environment.zig");
@@ -18,7 +19,7 @@ pub const Environment = command_environment.Environment;
 pub const CommandSyntax = enum { bash, zsh, cmd, powershell };
 
 fn shellKind(path: []const u8) ?CommandSyntax {
-    const basename = std.fs.path.basename(path);
+    const basename = std.Io.Dir.path.basename(path);
     if (std.ascii.eqlIgnoreCase(basename, "bash") or std.ascii.eqlIgnoreCase(basename, "bash.exe")) return .bash;
     if (std.ascii.eqlIgnoreCase(basename, "zsh") or std.ascii.eqlIgnoreCase(basename, "zsh.exe")) return .zsh;
     if (std.ascii.eqlIgnoreCase(basename, "cmd") or std.ascii.eqlIgnoreCase(basename, "cmd.exe")) return .cmd;
@@ -34,8 +35,8 @@ pub fn commandSyntax(path: []const u8) ?CommandSyntax {
 }
 
 fn fallbackLoginShell() []const u8 {
-    if (builtin.os.tag == .windows) return "C:\\Windows\\System32\\cmd.exe";
-    return if (builtin.os.tag == .macos) "/bin/zsh" else "/bin/bash";
+    if (builtin.target.os.tag == .windows) return "C:\\Windows\\System32\\cmd.exe";
+    return if (builtin.target.os.tag == .macos) "/bin/zsh" else "/bin/bash";
 }
 
 const WindowsGitBashEnvironment = struct {
@@ -66,7 +67,7 @@ const PathProbe = struct {
 };
 
 fn nativePathExists(_: ?*anyopaque, path: []const u8) bool {
-    if (!std.fs.path.isAbsolute(path)) return false;
+    if (!std.Io.Dir.path.isAbsolute(path)) return false;
     var file = std.Io.Dir.openFileAbsolute(io_mod.getIo(), path, .{}) catch return false;
     file.close(io_mod.getIo());
     return true;
@@ -80,7 +81,7 @@ fn candidateInto(
 ) ?[]const u8 {
     const trimmed_root = std.mem.trimEnd(u8, root, "\\/");
     if (trimmed_root.len == 0) return null;
-    const candidate = std.fmt.bufPrint(buffer, "{s}\\{s}", .{
+    const candidate = std.mem.print(buffer, "{s}\\{s}", .{
         trimmed_root,
         suffix,
     }) catch return null;
@@ -110,9 +111,9 @@ fn windowsGitBashIntoWith(
     while (entries.next()) |raw_entry| {
         const unquoted = std.mem.trim(u8, raw_entry, " \t\"");
         const entry = std.mem.trimEnd(u8, unquoted, "\\/");
-        if (entry.len == 0 or !std.fs.path.isAbsolute(entry)) continue;
-        const basename = std.fs.path.basename(entry);
-        const parent = std.fs.path.dirname(entry) orelse continue;
+        if (entry.len == 0 or !std.Io.Dir.path.isAbsolute(entry)) continue;
+        const basename = std.Io.Dir.path.basename(entry);
+        const parent = std.Io.Dir.path.dirname(entry) orelse continue;
         if (std.ascii.eqlIgnoreCase(basename, "cmd")) {
             if (candidateInto(&scratch, entry, "git.exe", probe) == null) continue;
             if (candidateInto(buffer, parent, "bin\\bash.exe", probe)) |path| return path;
@@ -125,7 +126,7 @@ fn windowsGitBashIntoWith(
 }
 
 fn windowsGitBashInto(buffer: []u8) ?[]const u8 {
-    if (comptime builtin.os.tag != .windows) return null;
+    if (comptime builtin.target.os.tag != .windows) return null;
     return windowsGitBashIntoWith(buffer, .fromProcess(), .{
         .exists_fn = nativePathExists,
     });
@@ -135,7 +136,7 @@ fn windowsGitBashInto(buffer: []u8) ?[]const u8 {
 /// invocation semantics.  The captured-command and Unified Exec permission
 /// fingerprints must agree with the shell that will actually be started.
 pub fn isSupportedShell(path: []const u8) bool {
-    return std.fs.path.isAbsolute(path) and shellKind(path) != null;
+    return std.Io.Dir.path.isAbsolute(path) and shellKind(path) != null;
 }
 
 /// Resolves the configured login shell to one of the shells whose startup
@@ -149,7 +150,7 @@ pub fn configuredOrDefaultLoginShellInto(buffer: []u8) []const u8 {
 
 fn supportedLoginShell(configured_login_shell: ?[]const u8) ResolveError![]const u8 {
     const path = configured_login_shell orelse return error.MissingLoginShell;
-    if (!std.fs.path.isAbsolute(path)) return error.RelativeShellPath;
+    if (!std.Io.Dir.path.isAbsolute(path)) return error.RelativeShellPath;
     if (shellKind(path) != null) return path;
     return fallbackLoginShell();
 }
@@ -199,7 +200,7 @@ pub fn resolve(
             .clean_start = value.clean_start,
         },
     };
-    if (!std.fs.path.isAbsolute(selection.path)) {
+    if (!std.Io.Dir.path.isAbsolute(selection.path)) {
         return error.RelativeShellPath;
     }
 
@@ -238,14 +239,14 @@ pub fn resolve(
 }
 
 pub fn configuredLoginShellInto(buffer: []u8) ?[]const u8 {
-    if (comptime builtin.os.tag == .windows) {
+    if (comptime builtin.target.os.tag == .windows) {
         if (windowsGitBashInto(buffer)) |git_bash| return git_bash;
         const configured = io_mod.getenv("COMSPEC") orelse return null;
         if (configured.len == 0 or configured.len > buffer.len) return null;
         @memcpy(buffer[0..configured.len], configured);
         return buffer[0..configured.len];
     }
-    if (comptime !builtin.link_libc or builtin.os.tag == .wasi) {
+    if (comptime !builtin.link_libc or builtin.target.os.tag == .wasi) {
         return null;
     }
     var entry: std.c.passwd = undefined;
@@ -352,7 +353,7 @@ pub fn commandInvocation(
     login: bool,
     command: []const u8,
 ) ResolveError!Invocation {
-    if (!std.fs.path.isAbsolute(path)) return error.RelativeShellPath;
+    if (!std.Io.Dir.path.isAbsolute(path)) return error.RelativeShellPath;
     var invocation = Invocation{ .path = path };
     invocation.append(path);
     const kind = shellKind(path) orelse {
@@ -360,7 +361,7 @@ pub fn commandInvocation(
         // invoked it with the conventional sh-compatible flags. Preserve
         // that contract while requiring an explicitly supported invocation
         // shape on Windows, where cmd and PowerShell use different syntax.
-        if (comptime builtin.os.tag == .windows) return error.UnsupportedShell;
+        if (comptime builtin.target.os.tag == .windows) return error.UnsupportedShell;
         invocation.append(if (login) "-lc" else "-c");
         invocation.append(command);
         invocation.append("fx-exec");
@@ -547,7 +548,7 @@ test "resolver rejects missing relative and unsupported shells" {
 }
 
 test "Windows shell discovery prefers Git Bash installations and PATH roots" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag != .windows) return error.SkipZigTest;
 
     const FakeProbe = struct {
         existing: []const []const u8,
@@ -589,7 +590,7 @@ test "Windows shell discovery prefers Git Bash installations and PATH roots" {
 }
 
 test "resolver builds Windows command invocations" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag != .windows) return error.SkipZigTest;
 
     const cmd = try commandInvocation(
         "C:\\Windows\\System32\\cmd.exe",
@@ -651,7 +652,7 @@ test "resolver builds Windows command invocations" {
 }
 
 test "resolver preserves generic Unix command invocations" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
 
     const command = try commandInvocation("/bin/sh", false, "printf ready");
     try std.testing.expectEqualSlices(
@@ -671,7 +672,7 @@ test "resolver preserves generic Unix command invocations" {
 test "login shell resolution falls back without accepting explicit unsupported shells" {
     const fallback = try resolve("/opt/homebrew/bin/fish", .user_login);
     try std.testing.expectEqualStrings(fallbackLoginShell(), fallback.path);
-    if (builtin.os.tag == .macos) {
+    if (builtin.target.os.tag == .macos) {
         try std.testing.expectEqualSlices(
             []const u8,
             &.{ "/bin/zsh", "-l", "-i" },
@@ -838,7 +839,7 @@ fn checkBootstrapAllocationFailures(alloc: Allocator) !void {
 
 test "bootstrap construction cleans every allocation failure" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkBootstrapAllocationFailures,
         .{},
     );

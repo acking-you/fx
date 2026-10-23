@@ -13,7 +13,6 @@ pub fn wrapIo(io: std.Io) std.Io {
     original_vtable = io.vtable;
     scoped_vtable = io.vtable.*;
     scoped_vtable.processSpawn = spawnProcess;
-    scoped_vtable.processSpawnPath = spawnProcessPath;
     return .{ .userdata = io.userdata, .vtable = &scoped_vtable };
 }
 
@@ -25,10 +24,6 @@ fn scopedOptions(options: std.process.SpawnOptions) std.process.SpawnOptions {
 
 fn spawnProcess(userdata: ?*anyopaque, options: std.process.SpawnOptions) std.process.SpawnError!std.process.Child {
     return original_vtable.processSpawn(userdata, scopedOptions(options));
-}
-
-fn spawnProcessPath(userdata: ?*anyopaque, dir: std.Io.Dir, options: std.process.SpawnOptions) std.process.SpawnError!std.process.Child {
-    return original_vtable.processSpawnPath(userdata, dir, scopedOptions(options));
 }
 
 pub const Environment = struct {

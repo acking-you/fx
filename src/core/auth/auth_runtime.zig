@@ -74,7 +74,7 @@ pub const FailureSnapshot = struct {
             },
         });
         if (self.http_status) |status| {
-            try out.writer.print(" · HTTP {d}", .{@intFromEnum(status)});
+            try out.writer.print(" · HTTP {d}", .{@backingInt(status)});
         }
         return try out.toOwnedSlice();
     }
@@ -94,7 +94,7 @@ pub const FailureSnapshot = struct {
         try writer.writeAll(",\"reason\":");
         try std.json.Stringify.value(@tagName(self.reason), .{}, writer);
         if (self.http_status) |status| {
-            try writer.print(",\"http_status\":{d}", .{@intFromEnum(status)});
+            try writer.print(",\"http_status\":{d}", .{@backingInt(status)});
         }
         try writer.writeByte('}');
     }

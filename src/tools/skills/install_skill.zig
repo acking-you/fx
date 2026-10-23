@@ -1,4 +1,5 @@
 const std = @import("std");
+const testing_allocator = @import("../../core/shared/testing_allocator.zig");
 const builtin_skills = @import("../../builtins/skills.zig");
 const io_mod = @import("../../core/shared/io.zig");
 const model_context_encoding = @import("../../core/shared/model_context_encoding.zig");
@@ -68,13 +69,13 @@ pub fn call(ctx: tool_dispatch.DispatchContext, erased: tool_dispatch.ToolInput)
     const input = erased.as(Input);
     const output = executeFromSource(ctx.allocator, ctx.skills_dir, input.source, input.skill) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        else => return .{ .failure = try std.fmt.allocPrint(ctx.allocator, "install_skill failed: {s}", .{@errorName(err)}) },
+        else => return .{ .failure = try ctx.allocator.print("install_skill failed: {s}", .{@errorName(err)}) },
     };
     return .{ .success = output };
 }
 
 pub fn execute(arena: Allocator, skills_dir: []const u8, args_json: []const u8) ![]u8 {
-    if (skills_dir.len == 0) return std.fmt.allocPrint(arena, "Skill installation is unavailable in this runtime.", .{});
+    if (skills_dir.len == 0) return arena.print("Skill installation is unavailable in this runtime.", .{});
 
     const args = try tool_args.parseToolArgsObject(arena, args_json);
     const source = try tool_args.requiredStringArg(args, "source");
@@ -83,7 +84,7 @@ pub fn execute(arena: Allocator, skills_dir: []const u8, args_json: []const u8) 
 }
 
 pub fn executeFromSource(alloc: Allocator, skills_dir: []const u8, source: []const u8, filter: ?[]const u8) ![]u8 {
-    if (skills_dir.len == 0) return std.fmt.allocPrint(alloc, "Skill installation is unavailable in this runtime.", .{});
+    if (skills_dir.len == 0) return alloc.print("Skill installation is unavailable in this runtime.", .{});
 
     var result = try builtin_skills.installFromSource(alloc, skills_dir, source, filter);
     defer result.deinit(alloc);
@@ -142,7 +143,7 @@ fn checkNoMatchAllocationFailures(alloc: Allocator, source: []const u8) !void {
 }
 
 fn writeTempFile(tmp: *std.testing.TmpDir, sub_path: []const u8, content: []const u8) !void {
-    if (std.fs.path.dirname(sub_path)) |parent| {
+    if (std.Io.Dir.path.dirname(sub_path)) |parent| {
         try tmp.dir.createDirPath(io_mod.getIo(), parent);
     }
     var file = try tmp.dir.createFile(io_mod.getIo(), sub_path, .{});
@@ -191,7 +192,7 @@ test "install_skill owner installs local skill source" {
     try std.testing.expect(std.mem.find(u8, output, "<skill") == null);
     try std.testing.expect(std.mem.find(u8, output, "use the workflow skill") == null);
 
-    const installed = try std.fs.path.join(alloc, &.{ skills_dir, "workflow", "SKILL.md" });
+    const installed = try std.Io.Dir.path.join(alloc, &.{ skills_dir, "workflow", "SKILL.md" });
     defer alloc.free(installed);
     const content = try readAbsoluteFile(alloc, installed, 1024 * 1024);
     defer alloc.free(content);
@@ -225,7 +226,7 @@ test "install_skill owner encodes installed names without returning bodies" {
     try std.testing.expect(std.mem.find(u8, output, "BODY SENTINEL") == null);
     try std.testing.expect(std.mem.find(u8, output, "workflow\"<injected>") == null);
 
-    const installed = try std.fs.path.join(alloc, &.{ skills_dir, "workflow", "SKILL.md" });
+    const installed = try std.Io.Dir.path.join(alloc, &.{ skills_dir, "workflow", "SKILL.md" });
     defer alloc.free(installed);
     const content = try readAbsoluteFile(alloc, installed, 1024 * 1024);
     defer alloc.free(content);
@@ -253,12 +254,12 @@ test "install_skill owner reports no matching skills" {
     defer arena_state.deinit();
     const output = try executeFromSource(arena_state.allocator(), skills_dir, repo_root, "missing");
 
-    const expected = try std.fmt.allocPrint(alloc, "No matching skills were installed into fx from {s}.", .{repo_root});
+    const expected = try alloc.print("No matching skills were installed into fx from {s}.", .{repo_root});
     defer alloc.free(expected);
     try std.testing.expectEqualStrings(expected, output);
 
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkNoMatchAllocationFailures,
         .{repo_root},
     );

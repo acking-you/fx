@@ -1,3 +1,4 @@
+const text_utils = @import("../../core/shared/text_utils.zig");
 const std = @import("std");
 const question_prompt = @import("../../core/agent/question_prompt.zig");
 const auth_runtime = @import("../../core/auth/auth_runtime.zig");
@@ -70,11 +71,11 @@ pub fn composeQueuedSummaryRow(
     var row_buf: [max_top_row_len]u8 = undefined;
     const label = if (steering_count > 0 and steering_count == queued_count)
         if (steering_count == 1)
-            std.fmt.bufPrint(&row_buf, "1 message steering current turn{s}", .{affordance}) catch "message steering current turn"
+            std.mem.print(&row_buf, "1 message steering current turn{s}", .{affordance}) catch "message steering current turn"
         else
-            std.fmt.bufPrint(&row_buf, "{d} messages steering current turn{s}", .{ steering_count, affordance }) catch "messages steering current turn"
+            std.mem.print(&row_buf, "{d} messages steering current turn{s}", .{ steering_count, affordance }) catch "messages steering current turn"
     else if (steering_count > 0)
-        std.fmt.bufPrint(
+        std.mem.print(
             &row_buf,
             "{d} steering · {d} queued{s}",
             .{ steering_count, queued_count - steering_count, affordance },
@@ -82,9 +83,9 @@ pub fn composeQueuedSummaryRow(
     else if (queued_count == 0)
         "queued"
     else if (queued_count == 1)
-        std.fmt.bufPrint(&row_buf, "1 queued message{s}", .{affordance}) catch "1 queued message"
+        std.mem.print(&row_buf, "1 queued message{s}", .{affordance}) catch "1 queued message"
     else
-        std.fmt.bufPrint(&row_buf, "{d} queued messages{s}", .{ queued_count, affordance }) catch "queued messages";
+        std.mem.print(&row_buf, "{d} queued messages{s}", .{ queued_count, affordance }) catch "queued messages";
 
     try row_text.appendClipped(alloc, &row, label, width);
     try row.appendSlice(alloc, ui_render.reset_style);
@@ -229,7 +230,7 @@ fn questionInteractionHint(
     // footer chrome; a lone question needs no counter.
     if (projection.entry_count > 1) {
         var counter_buf: [32]u8 = undefined;
-        const counter = std.fmt.bufPrint(
+        const counter = std.mem.print(
             &counter_buf,
             "Question {d} of {d}",
             .{ projection.current_index + 1, projection.entry_count },
@@ -464,7 +465,7 @@ pub fn composeHintRow(
         hint
     else if (ctx.selected_subagent_label) |label|
         if (ctx.selected_subagent_status) |status|
-            std.fmt.bufPrint(
+            std.mem.print(
                 &hint_with_subagents_buf,
                 "{s} · {s} · {s}",
                 .{
@@ -479,7 +480,7 @@ pub fn composeHintRow(
         else
             base_hint_line
     else if (ctx.subagent_view_active)
-        std.fmt.bufPrint(&hint_with_subagents_buf, "Subagent manager · tracked {d} · ctrl+x exit", .{ctx.subagent_count}) catch base_hint_line
+        std.mem.print(&hint_with_subagents_buf, "Subagent manager · tracked {d} · ctrl+x exit", .{ctx.subagent_count}) catch base_hint_line
     else
         base_hint_line;
 
@@ -1071,7 +1072,7 @@ test "composeVisibleInputRows avoids clear-to-eol after full-width input" {
     var full = try composeVisibleInputRows(alloc, full_source, full_window);
     defer full.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 1), full.rows.items.len);
-    try std.testing.expect(std.mem.indexOf(u8, full.rows.items[0].items, "\x1b[K") == null);
+    try std.testing.expect(std.mem.find(u8, full.rows.items[0].items, "\x1b[K") == null);
 
     const short_source = visual_layout.Source{
         .input = "1234",
@@ -1083,7 +1084,7 @@ test "composeVisibleInputRows avoids clear-to-eol after full-width input" {
     var short = try composeVisibleInputRows(alloc, short_source, short_window);
     defer short.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 1), short.rows.items.len);
-    try std.testing.expect(std.mem.indexOf(u8, short.rows.items[0].items, "\x1b[K") != null);
+    try std.testing.expect(std.mem.find(u8, short.rows.items[0].items, "\x1b[K") != null);
 }
 
 test "composeVisibleInputRows paints selected input without changing visible width" {
@@ -1237,7 +1238,7 @@ test "footer raw geometry windows capped input around the cursor" {
     const alloc = std.testing.allocator;
     var input = InputRuntime{};
     defer input.deinit(alloc);
-    try input.edit_state.input.appendSlice(alloc, "x" ** 5000);
+    try input.edit_state.input.appendSlice(alloc, text_utils.repeat("x", 5000));
     input.edit_state.cursor = input.edit_state.input.items.len;
     const geometry = measureRawInputGeometry(testRenderContext(&input), 80, 8, true, false, false, false);
     try std.testing.expect(geometry.summary.total_rows > geometry.window.row_count);

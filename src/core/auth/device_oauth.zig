@@ -45,7 +45,7 @@ pub fn deinitContext(raw: ?*anyopaque, alloc: Allocator) void {
 /// Returns owned flow and context. Transfer both to SignInRuntime together.
 pub fn prepare(alloc: Allocator, transport: oauth_transport.Provider, config: Config, cancel_flag: *std.atomic.Value(bool)) !Prepared {
     const issuer = std.mem.trimEnd(u8, config.issuer, "/");
-    const request_url = try std.fmt.allocPrint(alloc, "{s}{s}", .{ issuer, switch (config.protocol) {
+    const request_url = try alloc.print("{s}{s}", .{ issuer, switch (config.protocol) {
         .codex => "/api/accounts/deviceauth/usercode",
         .grok => "/oauth2/device/code",
     } });
@@ -77,7 +77,7 @@ pub fn prepare(alloc: Allocator, transport: oauth_transport.Provider, config: Co
     if (user_code.len > 128) return error.InvalidDeviceCodeResponse;
     for (user_code) |byte| if (!std.ascii.isAlphanumeric(byte) and byte != '-') return error.InvalidDeviceCodeResponse;
     const verification_uri = if (config.protocol == .codex)
-        try std.fmt.allocPrint(alloc, "{s}/codex/device", .{issuer})
+        try alloc.print("{s}/codex/device", .{issuer})
     else
         try alloc.dupe(u8, try requiredString(root, "verification_uri"));
     errdefer alloc.free(verification_uri);
@@ -102,11 +102,11 @@ pub fn prepare(alloc: Allocator, transport: oauth_transport.Provider, config: Co
     const owned_user_code = try alloc.dupe(u8, user_code);
     errdefer secret.zeroAndFree(alloc, owned_user_code);
     const poll_endpoint = if (config.protocol == .codex)
-        try std.fmt.allocPrint(alloc, "{s}/api/accounts/deviceauth/token", .{issuer})
+        try alloc.print("{s}/api/accounts/deviceauth/token", .{issuer})
     else
         try alloc.dupe(u8, config.token_endpoint);
     errdefer alloc.free(poll_endpoint);
-    const redirect_uri = try std.fmt.allocPrint(alloc, "{s}/deviceauth/callback", .{issuer});
+    const redirect_uri = try alloc.print("{s}/deviceauth/callback", .{issuer});
     errdefer alloc.free(redirect_uri);
     const context = try alloc.create(Context);
     context.* = .{ .protocol = config.protocol, .transport = transport, .client_id = client_id, .device_code = device_code, .user_code = owned_user_code, .poll_endpoint = poll_endpoint, .redirect_uri = redirect_uri };

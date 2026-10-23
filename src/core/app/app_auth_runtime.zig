@@ -1,4 +1,5 @@
 const std = @import("std");
+const testing_allocator = @import("../shared/testing_allocator.zig");
 const config_runtime = @import("../config/config_runtime.zig");
 const debug_trace = @import("../shared/debug_trace.zig");
 const host = @import("../hosts/host.zig");
@@ -529,8 +530,7 @@ pub fn Runtime(comptime App: type) type {
         }
 
         fn applySourceChoice(app: *App, source: credentials.Source) !void {
-            const body = try std.fmt.allocPrint(
-                app.alloc,
+            const body = try app.alloc.print(
                 "Switched credential to {s}.",
                 .{credentials.sourceLabel(source)},
             );
@@ -714,8 +714,7 @@ pub fn Runtime(comptime App: type) type {
             })) {
                 .prepare => {},
                 .no_change => {
-                    const body = try std.fmt.allocPrint(
-                        app.alloc,
+                    const body = try app.alloc.print(
                         "Already using {s}.",
                         .{provider_catalog.label(target)},
                     );
@@ -789,8 +788,7 @@ pub fn Runtime(comptime App: type) type {
                 }, true);
                 return;
             }
-            const body = try std.fmt.allocPrint(
-                app.alloc,
+            const body = try app.alloc.print(
                 "{s} {s}...",
                 .{
                     if (configure != null) "Configuring" else "Switching to",
@@ -941,8 +939,7 @@ pub fn Runtime(comptime App: type) type {
             app.provider_selection.adoptOwned(target, &owned_model);
             _ = app.auth.adoptCredential(app.alloc, &prepared.credential);
 
-            const body = try std.fmt.allocPrint(
-                app.alloc,
+            const body = try app.alloc.print(
                 "Switched to {s} with {s}.",
                 .{ provider_catalog.label(target), provider_runtime.model(app) },
             );
@@ -1071,8 +1068,7 @@ pub fn Runtime(comptime App: type) type {
             };
             const failure_text = try failure.renderText(app.alloc);
             defer app.alloc.free(failure_text);
-            const recovery = try std.fmt.allocPrint(
-                app.alloc,
+            const recovery = try app.alloc.print(
                 "{s}.\nChoose another source below.",
                 .{failure_text},
             );
@@ -1411,7 +1407,7 @@ const TestAuth = struct {
         return false;
     }
 
-    fn pickerView(_: *const TestAuth) auth_runtime.PickerView {
+    pub fn pickerView(_: *const TestAuth) auth_runtime.PickerView {
         return .{
             .active = false,
             .available_sources = .empty,
@@ -1554,7 +1550,7 @@ const TestApp = struct {
         self.transcript.deinit(self.alloc);
     }
 
-    fn startModelCacheWarmup(self: *TestApp) void {
+    pub fn startModelCacheWarmup(self: *TestApp) void {
         self.model_cache_warmup_count += 1;
     }
 
@@ -1777,8 +1773,7 @@ test "completed credential switch emits exactly one transcript line" {
     try std.testing.expectEqual(@as(usize, 1), app.preference_write_count);
     try std.testing.expectEqual(credentials.Source.openai_api_key, app.last_preference_source.?);
     try std.testing.expectEqual(@as(usize, 1), app.notice_write_count);
-    const expected = try std.fmt.allocPrint(
-        app.alloc,
+    const expected = try app.alloc.print(
         "Switched credential to {s}.\n",
         .{credentials.sourceLabel(.openai_api_key)},
     );

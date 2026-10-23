@@ -1,3 +1,4 @@
+const testing_allocator = @import("../../shared/testing_allocator.zig");
 const std = @import("std");
 const command_admission = @import("../../permissions/command_admission.zig");
 const permission_auto_classifier = @import("../../permissions/auto_classifier.zig");
@@ -183,7 +184,7 @@ pub const ProvisionalToolStatuses = struct {
             diff.max_encoded_label_bytes,
         );
         const summary = if (encoded.bytes.len > 0)
-            try std.fmt.allocPrint(arena, "{s} {s}", .{ action, encoded.bytes })
+            try arena.print("{s} {s}", .{ action, encoded.bytes })
         else
             action;
         try hooks.push_tool_lifecycle(hooks.ctx, .{ .terminal = .{
@@ -204,8 +205,7 @@ pub const ProvisionalToolStatuses = struct {
         call: ToolCall,
     ) !void {
         const call_id = self.visibleId(call) orelse return;
-        const summary = try std.fmt.allocPrint(
-            arena,
+        const summary = try arena.print(
             "{s} failed: invalid JSON arguments",
             .{fallbackToolDisplay(hooks.tool_registry, call.name)},
         );
@@ -452,7 +452,7 @@ pub const ProvisionalToolStatuses = struct {
                 detail,
                 diff.max_encoded_label_bytes,
             );
-            const summary = try std.fmt.allocPrint(arena, "Cancelled {s}", .{encoded.bytes});
+            const summary = try arena.print("Cancelled {s}", .{encoded.bytes});
             try hooks.push_tool_lifecycle(hooks.ctx, .{ .terminal = .{
                 .id = .{ .turn_id = turn_id, .call_id = status.id },
                 .outcome = .{ .kind = .cancelled, .summary = summary },
@@ -497,8 +497,7 @@ pub const ProvisionalToolStatuses = struct {
                 detail,
                 diff.max_encoded_label_bytes,
             );
-            const summary = try std.fmt.allocPrint(
-                arena,
+            const summary = try arena.print(
                 "Connection interrupted before {s} ran",
                 .{encoded.bytes},
             );
@@ -724,9 +723,9 @@ fn formatProvisionalProgressLabel(
     label_value: ?[]const u8,
 ) ![]const u8 {
     if (label_value) |value| {
-        return std.fmt.bufPrint(buf, "● {s}\x1b[0m \x1b[38;5;245m{s}\x1b[0m", .{ action_label, value });
+        return std.mem.print(buf, "● {s}\x1b[0m \x1b[38;5;245m{s}\x1b[0m", .{ action_label, value });
     }
-    return std.fmt.bufPrint(buf, "● {s}\x1b[0m", .{action_label});
+    return std.mem.print(buf, "● {s}\x1b[0m", .{action_label});
 }
 
 pub fn fileMutationDisplayPath(
@@ -958,7 +957,7 @@ pub fn finishExecutedToolStatus(
             decision.label,
         );
         break :blk if (decision.detail) |detail|
-            try std.fmt.allocPrint(arena, "{s}: {s}", .{ base, detail })
+            try arena.print("{s}: {s}", .{ base, detail })
         else
             base;
     } else switch (result.status) {
@@ -985,7 +984,7 @@ pub fn finishExecutedToolStatus(
                 safe_result,
             )) orelse break :blk base;
             if (detail.len == 0) break :blk base;
-            break :blk try std.fmt.allocPrint(arena, "{s}: {s}", .{ base, detail });
+            break :blk try arena.print("{s}: {s}", .{ base, detail });
         },
     };
     const summary_line = if (result.web_fetch_completion) |completion|
@@ -1049,11 +1048,11 @@ pub fn commandOutcomeDecision(
         else
             .{
                 .outcome = .failed,
-                .label = try std.fmt.allocPrint(arena, "Exited {d}", .{code}),
+                .label = try arena.print("Exited {d}", .{code}),
             },
         .signal => |signal| .{
             .outcome = .failed,
-            .label = try std.fmt.allocPrint(arena, "Signaled {d}", .{signal}),
+            .label = try arena.print("Signaled {d}", .{signal}),
         },
         .timed_out => .{ .outcome = .failed, .label = "Timed out" },
         .output_capture_failed => .{
@@ -1112,7 +1111,7 @@ fn commandArtifactHandle(
         .string => |value| value,
         else => return null,
     };
-    const handle = std.fs.path.basename(output_file);
+    const handle = std.Io.Dir.path.basename(output_file);
     if (!std.mem.startsWith(u8, handle, "fx-command-") or
         !std.mem.endsWith(u8, handle, ".log") or
         std.mem.endsWith(u8, handle, ".stdout.log") or
@@ -1167,8 +1166,7 @@ pub fn finishCommittedFileStatus(
 }
 
 fn formatWebSearchCompletion(arena: Allocator, base: []const u8, completion: types.WebSearchCompletion) ![]const u8 {
-    return std.fmt.allocPrint(
-        arena,
+    return arena.print(
         "{s} \x1b[38;5;245m| {d} search{s} | {d}ms\x1b[0m",
         .{ base, completion.searches, if (completion.searches == 1) "" else "es", completion.duration_ms },
     );
@@ -1181,8 +1179,7 @@ fn formatWebFetchCompletion(arena: Allocator, base: []const u8, completion: type
         .stored => " | artifact stored",
         .unavailable => " | artifact unavailable",
     };
-    return std.fmt.allocPrint(
-        arena,
+    return arena.print(
         "{s} \x1b[38;5;245m| {s} | {d} bytes | HTTP {d} | {d}ms | {s}{s}\x1b[0m",
         .{ base, completion.url(), completion.bytes, completion.status, completion.duration_ms, cache, artifact },
     );
@@ -1202,11 +1199,11 @@ pub fn formatToolStatusWithStats(
     const add_style = if (markers.added.len != 0) markers.added else accent;
     const rem_style = if (markers.removed.len != 0) markers.removed else accent;
     if (additions > 0 and deletions > 0) {
-        return std.fmt.allocPrint(arena, "{s} {s}+{d}{s} {s}/{s} {s}-{d}{s}", .{ base, add_style, additions, reset, dim, reset, rem_style, deletions, reset });
+        return arena.print("{s} {s}+{d}{s} {s}/{s} {s}-{d}{s}", .{ base, add_style, additions, reset, dim, reset, rem_style, deletions, reset });
     } else if (additions > 0) {
-        return std.fmt.allocPrint(arena, "{s} {s}+{d}{s}", .{ base, add_style, additions, reset });
+        return arena.print("{s} {s}+{d}{s}", .{ base, add_style, additions, reset });
     } else if (deletions > 0) {
-        return std.fmt.allocPrint(arena, "{s} {s}-{d}{s}", .{ base, rem_style, deletions, reset });
+        return arena.print("{s} {s}-{d}{s}", .{ base, rem_style, deletions, reset });
     }
     return base;
 }
@@ -1274,10 +1271,10 @@ const ProvisionalStatusTestCapture = struct {
         return .{ .decision = .once, .execution_authority = .ordinary };
     }
     fn describeToolAction(_: *anyopaque, arena: Allocator, call: ToolCall, _: ?[]const u8) ![]const u8 {
-        return std.fmt.allocPrint(arena, "started {s}", .{call.name});
+        return arena.print("started {s}", .{call.name});
     }
     fn describeDeniedToolAction(_: *anyopaque, arena: Allocator, call: ToolCall, _: ?[]const u8, label: []const u8) ![]const u8 {
-        return std.fmt.allocPrint(arena, "{s} {s}", .{ label, call.name });
+        return arena.print("{s} {s}", .{ label, call.name });
     }
     fn noopPermissionTarget(_: *anyopaque, arena: Allocator, _: ToolCall) ![]const u8 {
         return arena.dupe(u8, "");
@@ -1297,7 +1294,7 @@ const ProvisionalStatusTestCapture = struct {
     fn noopPushCommandOutputComplete(_: *anyopaque, _: ?types.ToolLifecycleId) !void {}
     fn noopPushHttpError(_: *anyopaque, _: std.http.Status, _: []const u8, _: ?types.CredentialSource) !void {}
     fn noopFormatToolExecutionError(_: *anyopaque, arena: Allocator, _: []const u8, err: anyerror) ![]const u8 {
-        return std.fmt.allocPrint(arena, "{s}", .{@errorName(err)});
+        return arena.print("{s}", .{@errorName(err)});
     }
 
     fn captureToolLifecycle(raw: *anyopaque, event: types.ToolLifecycleEvent) !void {
@@ -1864,7 +1861,7 @@ fn checkProvisionalLifecycleAllocationFailures(alloc: Allocator) !void {
 
 test "provisional lifecycle cleans up every copied-id allocation failure" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkProvisionalLifecycleAllocationFailures,
         .{},
     );

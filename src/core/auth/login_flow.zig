@@ -985,7 +985,7 @@ test "cooperative sign-in store failure is traced and becomes a recoverable tran
     defer tmp.cleanup();
     const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
     defer alloc.free(root);
-    const trace_path = try std.fs.path.join(alloc, &.{ root, "sign-in-store-failure.log" });
+    const trace_path = try std.Io.Dir.path.join(alloc, &.{ root, "sign-in-store-failure.log" });
     defer alloc.free(trace_path);
     debug_trace.resetForTest();
     defer debug_trace.resetForTest();

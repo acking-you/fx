@@ -1,4 +1,5 @@
 const std = @import("std");
+const testing_allocator = @import("../shared/testing_allocator.zig");
 const context_contract = @import("../workspace/context_contract.zig");
 const io_mod = @import("../shared/io.zig");
 const permissions = @import("../permissions/permissions.zig");
@@ -584,7 +585,7 @@ test "registered candidates expose only authoritative canonical targets" {
         "workspace/segment::scope",
     );
     defer alloc.free(delimiter_cwd_path);
-    const new_path = try std.fs.path.join(alloc, &.{ workspace, "build/pkg/new.txt" });
+    const new_path = try std.Io.Dir.path.join(alloc, &.{ workspace, "build/pkg/new.txt" });
     defer alloc.free(new_path);
     const tools = [_]tool_dispatch.Tool{
         builtin_tools.read_file,
@@ -847,7 +848,7 @@ test "preparation cancellation and allocation failures clean owned state" {
     const workspace = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "workspace");
     defer alloc.free(workspace);
     try std.testing.checkAllAllocationFailures(
-        alloc,
+        testing_allocator.no_resize,
         checkPreparationAllocationFailures,
         .{workspace},
     );

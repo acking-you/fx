@@ -43,7 +43,7 @@ pub const Store = struct {
 
     pub fn initWithLimits(alloc: Allocator, session_dir: []const u8, limits: Limits) !Store {
         try ensureArtifactDir(alloc, session_dir);
-        const dir = try std.fs.path.join(alloc, &.{ session_dir, relative_dir });
+        const dir = try std.Io.Dir.path.join(alloc, &.{ session_dir, relative_dir });
         errdefer alloc.free(dir);
         const store_id = try alloc.dupe(u8, dir);
         errdefer alloc.free(store_id);
@@ -149,7 +149,7 @@ pub const Store = struct {
         defer alloc.free(path);
         const display_path = try alloc.dupe(u8, path);
         errdefer alloc.free(display_path);
-        const temp_path = try std.fmt.allocPrint(alloc, "{s}.tmp.{d}", .{ path, io_mod.nanoTimestamp() });
+        const temp_path = try alloc.print("{s}.tmp.{d}", .{ path, io_mod.nanoTimestamp() });
         defer alloc.free(temp_path);
 
         try self.reserve(bytes.len);
@@ -197,7 +197,7 @@ pub const Store = struct {
 
     fn pathForHandle(self: *const Store, alloc: Allocator, handle: []const u8) ![]u8 {
         try validateHandle(handle);
-        return std.fs.path.join(alloc, &.{ self.dir, handle });
+        return std.Io.Dir.path.join(alloc, &.{ self.dir, handle });
     }
 
     fn usedBytesForTest(self: *Store) usize {
@@ -223,7 +223,7 @@ pub const Store = struct {
 
 fn ensureArtifactDir(alloc: Allocator, session_dir: []const u8) !void {
     try ensureManagedDir(session_dir, "artifacts");
-    const artifacts_dir = try std.fs.path.join(alloc, &.{ session_dir, "artifacts" });
+    const artifacts_dir = try std.Io.Dir.path.join(alloc, &.{ session_dir, "artifacts" });
     defer alloc.free(artifacts_dir);
     try ensureManagedDir(artifacts_dir, "web-fetch");
 }
@@ -295,7 +295,7 @@ fn makeHandle(alloc: Allocator, extension: []const u8) ![]u8 {
     var random_bytes: [8]u8 = undefined;
     io_mod.getIo().random(&random_bytes);
     const random_hex = std.fmt.bytesToHex(random_bytes, .lower);
-    return std.fmt.allocPrint(alloc, "artifact-{d}-{s}.{s}", .{ io_mod.nanoTimestamp(), &random_hex, extension });
+    return alloc.print("artifact-{d}-{s}.{s}", .{ io_mod.nanoTimestamp(), &random_hex, extension });
 }
 
 fn isTempName(name: []const u8) bool {
@@ -353,10 +353,10 @@ test "web_fetch artifact quota reconciles existing files on resume" {
 
     const session_dir = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
     defer alloc.free(session_dir);
-    const artifact_dir = try std.fs.path.join(alloc, &.{ session_dir, relative_dir });
+    const artifact_dir = try std.Io.Dir.path.join(alloc, &.{ session_dir, relative_dir });
     defer alloc.free(artifact_dir);
     try config_runtime.makeAbsolutePath(artifact_dir);
-    const existing_path = try std.fs.path.join(alloc, &.{ artifact_dir, "artifact-existing.bin" });
+    const existing_path = try std.Io.Dir.path.join(alloc, &.{ artifact_dir, "artifact-existing.bin" });
     defer alloc.free(existing_path);
     try createFileAbsolute(existing_path, "abc");
 
@@ -395,7 +395,7 @@ test "web_fetch failed artifact write rolls back quota reservation" {
     var store = try Store.initWithLimits(alloc, session_dir, .{ .max_bytes = 3, .max_files = 1 });
     defer store.deinit();
 
-    const final_dir = try std.fs.path.join(alloc, &.{ store.dir, "artifact-conflict.bin" });
+    const final_dir = try std.Io.Dir.path.join(alloc, &.{ store.dir, "artifact-conflict.bin" });
     defer alloc.free(final_dir);
     try config_runtime.makeAbsolutePath(final_dir);
 
@@ -417,10 +417,10 @@ test "web_fetch artifact store refuses symlinks and partial temp files determini
         defer tmp.cleanup();
         const session_dir = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
         defer alloc.free(session_dir);
-        const artifact_dir = try std.fs.path.join(alloc, &.{ session_dir, relative_dir });
+        const artifact_dir = try std.Io.Dir.path.join(alloc, &.{ session_dir, relative_dir });
         defer alloc.free(artifact_dir);
         try config_runtime.makeAbsolutePath(artifact_dir);
-        const temp_path = try std.fs.path.join(alloc, &.{ artifact_dir, ".artifact-leftover.tmp" });
+        const temp_path = try std.Io.Dir.path.join(alloc, &.{ artifact_dir, ".artifact-leftover.tmp" });
         defer alloc.free(temp_path);
         try createFileAbsolute(temp_path, "partial");
 
@@ -483,10 +483,10 @@ test "web_fetch corrupt durable artifact store fails instead of degrading to sto
 
     const session_dir = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
     defer alloc.free(session_dir);
-    const artifact_dir = try std.fs.path.join(alloc, &.{ session_dir, relative_dir });
+    const artifact_dir = try std.Io.Dir.path.join(alloc, &.{ session_dir, relative_dir });
     defer alloc.free(artifact_dir);
     try config_runtime.makeAbsolutePath(artifact_dir);
-    const corrupt_path = try std.fs.path.join(alloc, &.{ artifact_dir, "not-managed.bin" });
+    const corrupt_path = try std.Io.Dir.path.join(alloc, &.{ artifact_dir, "not-managed.bin" });
     defer alloc.free(corrupt_path);
     try createFileAbsolute(corrupt_path, "corrupt");
 

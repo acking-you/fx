@@ -1,4 +1,5 @@
 const std = @import("std");
+const testing_allocator = @import("../../core/shared/testing_allocator.zig");
 const builtin_skills = @import("../../builtins/skills.zig");
 const skill_invocation = @import("../../core/skills/skill_invocation.zig");
 const skill_runtime = @import("../../core/skills/skill_runtime.zig");
@@ -121,7 +122,7 @@ pub fn call(ctx: tool_dispatch.DispatchContext, erased: tool_dispatch.ToolInput)
         ctx.max_tool_result_bytes,
     ) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        else => return .{ .failure = try std.fmt.allocPrint(ctx.allocator, "skill failed: {s}", .{@errorName(err)}) },
+        else => return .{ .failure = try ctx.allocator.print("skill failed: {s}", .{@errorName(err)}) },
     };
     errdefer skill_invocation.freeExecuteResult(ctx.allocator, result);
     if (result.contextNotice()) |notice| try tool_dispatch.reportContextNotice(ctx, notice);
@@ -258,7 +259,7 @@ fn checkDecodeAllocationFailures(alloc: Allocator) !void {
 
 test "skill tool decode cleans allocation failures" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkDecodeAllocationFailures,
         .{},
     );

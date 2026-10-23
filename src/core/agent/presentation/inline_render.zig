@@ -1,4 +1,5 @@
 const std = @import("std");
+const display_width = @import("../../shared/display_width.zig");
 const Allocator = std.mem.Allocator;
 const ansi = @import("ansi.zig");
 const tu = @import("text_util.zig");
@@ -25,7 +26,7 @@ test "custom theme link and code closers preserve enclosing emphasis" {
         defer out.deinit(alloc);
         var link_id: u32 = 0;
         try writeInline(alloc, case.input, &out, .{}, null, &link_id);
-        const suffix = try std.fmt.allocPrint(alloc, "\x1b[23m\x1b]8;;\x1b\\{s} tail", .{case.restore});
+        const suffix = try alloc.print("\x1b[23m\x1b]8;;\x1b\\{s} tail", .{case.restore});
         defer alloc.free(suffix);
         try std.testing.expect(std.mem.find(u8, out.items, suffix) != null);
     }
@@ -366,7 +367,7 @@ fn parseFootnoteReference(text: []const u8, start: usize) ?ParsedFootnoteReferen
 
 fn writeFootnoteMarker(alloc: Allocator, out: *std.ArrayList(u8), number: usize) !void {
     var marker: [32]u8 = undefined;
-    const bytes = try std.fmt.bufPrint(&marker, "[{d}]", .{number});
+    const bytes = try std.mem.print(&marker, "[{d}]", .{number});
     try ansi.writeDim(alloc, out, bytes);
 }
 
@@ -390,7 +391,7 @@ fn emitInlineLink(
     const id = link_id.*;
     link_id.* +%= 1;
     var id_buf: [32]u8 = undefined;
-    const open = std.fmt.bufPrint(&id_buf, "\x1b]8;id=fx-{d};", .{id}) catch unreachable;
+    const open = std.mem.print(&id_buf, "\x1b]8;id=fx-{d};", .{id}) catch unreachable;
     try out.appendSlice(alloc, open);
     try out.appendSlice(alloc, link.destination_prefix);
     try out.appendSlice(alloc, link.url);

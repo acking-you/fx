@@ -80,7 +80,7 @@ fn fetch(
     var headers: std.ArrayList(Header) = .empty;
     defer headers.deinit(alloc);
     const authorization = if (input.access.authorizationCredential()) |credential|
-        try std.fmt.allocPrint(alloc, "Bearer {s}", .{credential})
+        try alloc.print("Bearer {s}", .{credential})
     else
         null;
     defer if (authorization) |value| secret.zeroAndFree(alloc, value);
@@ -122,7 +122,7 @@ fn fetch(
         if (status_result < 0) return .{ .failure = .{ .category = .transport, .retryable = true } };
     }
 
-    const status: std.http.Status = @enumFromInt(status_code);
+    const status: std.http.Status = @fromBackingInt(@intCast(status_code));
     if (status != .ok) return .{ .failure = model_catalog.failureForHttpStatus(status) };
 
     var body: std.ArrayList(u8) = .empty;

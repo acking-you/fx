@@ -171,13 +171,12 @@ fn readOutput(ctx: tool_dispatch.DispatchContext, input: *Input) ![]u8 {
 
 fn formatReadFailure(alloc: Allocator, handle: []const u8, err: anyerror) ![]u8 {
     if (err == error.ResultHandleNotFound) {
-        return std.fmt.allocPrint(
-            alloc,
+        return alloc.print(
             "read_tool_result failed for handle {s}: ResultHandleNotFound. No exact match exists in the active tool-result store; handles are session-scoped and must be copied exactly from the tool result preview.",
             .{handle},
         );
     }
-    return std.fmt.allocPrint(alloc, "read_tool_result failed for handle {s}: {s}", .{ handle, @errorName(err) });
+    return alloc.print("read_tool_result failed for handle {s}: {s}", .{ handle, @errorName(err) });
 }
 
 pub fn readsOnly(_: tool_dispatch.ToolInput) bool {
@@ -385,7 +384,7 @@ test "large web_search result is previewed and available through read_tool_resul
     try std.testing.expect(std.mem.find(u8, prepared.model_output, "<tool_result_preview") != null);
     try std.testing.expect(std.mem.find(u8, prepared.model_output, "Use read_tool_result") != null);
 
-    const args_json = try std.fmt.allocPrint(alloc, "{{\"handle\":\"{s}\",\"query\":\"needle\"}}", .{prepared.memory.output_handle.?});
+    const args_json = try alloc.print("{{\"handle\":\"{s}\",\"query\":\"needle\"}}", .{prepared.memory.output_handle.?});
     defer alloc.free(args_json);
     const decoded = try decode(.{ .allocator = alloc }, args_json);
     const input = switch (decoded) {
@@ -412,7 +411,7 @@ test "persisted provider search results remain readable" {
     const handle = try result_store.storeLargeResult(alloc, dir, "provider_call", "provider_search", "historical provider search result");
     defer alloc.free(handle);
 
-    const args_json = try std.fmt.allocPrint(alloc, "{{\"handle\":\"{s}\"}}", .{handle});
+    const args_json = try alloc.print("{{\"handle\":\"{s}\"}}", .{handle});
     defer alloc.free(args_json);
     const decoded = try decode(.{ .allocator = alloc }, args_json);
     const input = switch (decoded) {

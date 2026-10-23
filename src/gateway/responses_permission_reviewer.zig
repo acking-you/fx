@@ -1,3 +1,4 @@
+const text_utils = @import("../core/shared/text_utils.zig");
 const std = @import("std");
 const permission_auto_classifier = @import("../core/permissions/auto_classifier.zig");
 const stream_provider = @import("../core/agent/stream_provider.zig");
@@ -315,7 +316,7 @@ test "direct review unavailable diagnostics retain bounded reasons without crede
     defer tmp.cleanup();
     const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
     defer alloc.free(root);
-    const trace_path = try std.fs.path.join(alloc, &.{ root, "review.log" });
+    const trace_path = try std.Io.Dir.path.join(alloc, &.{ root, "review.log" });
     defer alloc.free(trace_path);
     debug_trace.resetForTest();
     defer debug_trace.resetForTest();
@@ -335,14 +336,14 @@ test "direct review unavailable diagnostics retain bounded reasons without crede
             if (std.meta.stringToEnum(stream_provider.FailureKind, payload)) |kind| {
                 return .{ .failed = .{
                     .kind = kind,
-                    .detail = @constCast("private-provider-payload Bearer sk-private-credential\n" ** 256),
+                    .detail = @constCast(text_utils.repeat("private-provider-payload Bearer sk-private-credential\n", 256)),
                 } };
             }
             if (std.mem.eql(u8, payload, "timeout")) return error.Timeout;
             if (std.mem.eql(u8, payload, "cancelled")) return error.Cancelled;
             if (std.mem.eql(u8, payload, "unknown")) return error.@"private-provider-payload";
             return .{ .completed = .{ .completion = .{
-                .content = "private-provider-payload" ** 256,
+                .content = text_utils.repeat("private-provider-payload", 256),
                 .finish_reason = if (std.mem.eql(u8, payload, "filtered")) .content_filter else .provider_error,
             } } };
         }

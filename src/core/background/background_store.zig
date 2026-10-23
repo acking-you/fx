@@ -118,7 +118,7 @@ fn validateLogStorage(value: std.json.Value) !void {
         return;
     }
     if (std.mem.eql(u8, kind, "external")) {
-        if (!std.fs.path.isAbsolute(try requireString(object, "path"))) {
+        if (!std.Io.Dir.path.isAbsolute(try requireString(object, "path"))) {
             return error.InvalidBackgroundRecord;
         }
         return;

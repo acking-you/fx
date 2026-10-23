@@ -377,7 +377,7 @@ pub fn prefixStructuralRows(alloc: Allocator, bytes: []const u8, gutter: u16) ![
     errdefer out.deinit(alloc);
     var line_start: usize = 0;
     while (line_start < bytes.len) {
-        const newline = std.mem.indexOfScalarPos(u8, bytes, line_start, '\n');
+        const newline = std.mem.findScalarPos(u8, bytes, line_start, '\n');
         const line_end = newline orelse bytes.len;
         if (firstVisibleWidth(bytes[line_start..line_end]) != null) {
             try out.appendNTimes(alloc, ' ', gutter);
@@ -435,6 +435,71 @@ pub fn wrapTranscriptAssistantTextWithFinalityInterruptible(
         .bytes = bytes,
         .finalized_prefix_bytes = finalized_prefix_bytes,
     };
+}
+
+pub const RetentionSourceMap = struct {
+    pub const Point = struct { source: usize, rendered: usize };
+    rows: std.ArrayList(usize) = .empty,
+    points: std.ArrayList(Point) = .empty,
+
+    pub fn deinit(self: *RetentionSourceMap, alloc: Allocator) void {
+        self.rows.deinit(alloc);
+        self.points.deinit(alloc);
+    }
+
+    fn record(self: *RetentionSourceMap, alloc: Allocator, source: usize, rendered: usize) !void {
+        try self.points.append(alloc, .{ .source = source, .rendered = rendered });
+    }
+
+    fn boundary(self: RetentionSourceMap, comptime field: enum { source, rendered }, offset: usize) Point {
+        var lo: usize = 0;
+        var hi = self.points.items.len;
+        while (lo < hi) {
+            const mid = lo + (hi - lo) / 2;
+            if (@field(self.points.items[mid], @tagName(field)) <= offset) lo = mid + 1 else hi = mid;
+        }
+        return if (lo == 0) .{ .source = 0, .rendered = 0 } else self.points.items[lo - 1];
+    }
+
+    pub fn sourceAt(self: RetentionSourceMap, rendered: usize) usize {
+        return self.boundary(.rendered, rendered).source;
+    }
+
+    pub fn renderedAt(self: RetentionSourceMap, source: usize) usize {
+        return self.boundary(.source, source).rendered;
+    }
+};
+
+/// Caller-owned source coordinates emitted by the actual wrapping decisions.
+/// Generated gutters and presentation controls never split an input display unit.
+pub fn retentionSourceMap(alloc: Allocator, text: []const u8, cols: u16) !RetentionSourceMap {
+    var map: RetentionSourceMap = .{};
+    errdefer map.deinit(alloc);
+    const wrapped = try wrapAssistantTextWithBaseGutter(
+        alloc,
+        text,
+        cols,
+        gutterWidth(cols),
+        true,
+        false,
+        null,
+        null,
+        &map,
+    );
+    defer alloc.free(wrapped);
+    var leading: usize = 0;
+    while (leading < wrapped.len and wrapped[leading] == '\n') : (leading += 1) {}
+    const skip = @min(leading, map.rows.items.len);
+    @memmove(map.rows.items[0 .. map.rows.items.len - skip], map.rows.items[skip..]);
+    map.rows.items.len -= skip;
+    for (map.points.items) |*point| point.rendered -|= leading;
+    return map;
+}
+
+pub fn retentionSourceRows(alloc: Allocator, text: []const u8, cols: u16) ![]usize {
+    var map = try retentionSourceMap(alloc, text, cols);
+    defer map.deinit(alloc);
+    return map.rows.toOwnedSlice(alloc);
 }
 
 /// Reflow canonical command output as literal terminal text. Every physical
@@ -683,7 +748,7 @@ fn osc8Update(seq: []const u8) ?Osc8Update {
     else
         return null;
     const payload = seq[4 .. seq.len - terminator_len];
-    const separator = std.mem.indexOfScalar(u8, payload, ';') orelse return null;
+    const separator = std.mem.findScalar(u8, payload, ';') orelse return null;
     return if (separator + 1 == payload.len) .close else .{ .open = seq };
 }
 
@@ -1305,7 +1370,7 @@ test "wrapAssistantText recognizes a leading paced footnote reassertion" {
         32,
     );
     defer alloc.free(out);
-    try std.testing.expect(std.mem.indexOf(u8, out, "\n    before its reference.") != null);
+    try std.testing.expect(std.mem.find(u8, out, "\n    before its reference.") != null);
 }
 
 test "wrapTranscriptAssistantText retains reset-closed footnote indentation after prose" {
@@ -1318,7 +1383,7 @@ test "wrapTranscriptAssistantText retains reset-closed footnote indentation afte
         null,
     );
     defer alloc.free(out);
-    try std.testing.expect(std.mem.indexOf(u8, out, "\n      before its reference") != null);
+    try std.testing.expect(std.mem.find(u8, out, "\n      before its reference") != null);
 }
 
 test "wrapTranscriptAssistantText retains footnote indentation through character-paced markers" {
@@ -1336,7 +1401,7 @@ test "wrapTranscriptAssistantText retains footnote indentation through character
         null,
     );
     defer alloc.free(out);
-    try std.testing.expect(std.mem.indexOf(u8, out, "\n      through a narrow terminal.") != null);
+    try std.testing.expect(std.mem.find(u8, out, "\n      through a narrow terminal.") != null);
 }
 
 test "wrapAssistantText elides infeasible dim footnote markers at narrow widths" {
@@ -1354,7 +1419,7 @@ test "wrapAssistantText elides infeasible dim footnote markers at narrow widths"
             try std.testing.expect(display_width.visibleWidthIgnoringAnsi(line) > 0);
         }
         if (cols <= 4) {
-            try std.testing.expect(std.mem.indexOf(u8, out, "[1]") == null);
+            try std.testing.expect(std.mem.find(u8, out, "[1]") == null);
         } else {
             try std.testing.expect(std.mem.startsWith(u8, out, "\x1b[2m[1] \x1b[22m"));
         }
@@ -1386,7 +1451,7 @@ test "wrapAssistantText reopens a definition link after a wrap" {
     defer alloc.free(out);
 
     try std.testing.expect(std.mem.startsWith(u8, out, "\x1b[2m  \x1b[22m" ++ link_open ++ "\x1b[4malpha"));
-    try std.testing.expect(std.mem.indexOf(
+    try std.testing.expect(std.mem.find(
         u8,
         out,
         "\x1b[0m" ++ link_close ++ "\n  \x1b[4m" ++ link_open ++ "beta\x1b[24m" ++ link_close,
@@ -1491,12 +1556,12 @@ test "wrapAssistantText keeps Unicode display units intact at row boundaries" {
     };
 
     for (cases) |unit| {
-        const input = try std.fmt.allocPrint(alloc, "a{s}b", .{unit});
+        const input = try alloc.print("a{s}b", .{unit});
         defer alloc.free(input);
         const out = try wrapAssistantText(alloc, input, 3);
         defer alloc.free(out);
 
-        try std.testing.expect(std.mem.indexOf(u8, out, unit) != null);
+        try std.testing.expect(std.mem.find(u8, out, unit) != null);
         var lines = std.mem.splitScalar(u8, out, '\n');
         while (lines.next()) |line| {
             try std.testing.expect(display_width.visibleWidthIgnoringAnsi(line) <= 3);
@@ -1596,13 +1661,13 @@ test "wrapLiteralCommandOutput preserves and rows a pathological zero width run"
 test "a link opening a guttered row keeps its theme color" {
     const alloc = std.testing.allocator;
     const link_style = shared_theme.current().link_style;
-    const input = try std.fmt.allocPrint(alloc, "\x1b]8;id=fx-1;https://example.com\x1b\\{s}\x1b[4mdocs\x1b[24m\x1b[39m\x1b]8;;\x1b\\", .{link_style});
+    const input = try alloc.print("\x1b]8;id=fx-1;https://example.com\x1b\\{s}\x1b[4mdocs\x1b[24m\x1b[39m\x1b]8;;\x1b\\", .{link_style});
     defer alloc.free(input);
     const out = try wrapAssistantTextWithBaseGutter(alloc, input, 40, 2, false, false, null, null);
     defer alloc.free(out);
     // Pre-content escapes are not copied verbatim into a guttered row; the
     // row-start restore must re-emit the link color with the underline.
-    try std.testing.expect(std.mem.indexOf(u8, out, link_style) != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[4m") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "docs") != null);
+    try std.testing.expect(std.mem.find(u8, out, link_style) != null);
+    try std.testing.expect(std.mem.find(u8, out, "\x1b[4m") != null);
+    try std.testing.expect(std.mem.find(u8, out, "docs") != null);
 }

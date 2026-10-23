@@ -1,4 +1,5 @@
 const std = @import("std");
+const testing_allocator = @import("../shared/testing_allocator.zig");
 const credentials = @import("../auth/credentials.zig");
 const secret = @import("../auth/secret.zig");
 const collections = @import("../shared/collections.zig");
@@ -103,7 +104,7 @@ pub const ModelProviderFilter = enum {
     others,
 };
 
-pub const model_provider_filter_count = std.meta.fields(ModelProviderFilter).len;
+pub const model_provider_filter_count = @typeInfo(ModelProviderFilter).@"enum".field_names.len;
 
 pub const ModelMenuItem = struct {
     id: []u8,
@@ -137,14 +138,14 @@ pub const ModelMenu = struct {
 
     pub fn setQuery(self: *ModelMenu, query_text: []const u8) void {
         const len = @min(query_text.len, self.query_buf.len);
-        if (len > 0) std.mem.copyForwards(u8, self.query_buf[0..len], query_text[0..len]);
+        if (len > 0) @memmove(self.query_buf[0..len], query_text[0..len]);
         self.query_len = len;
         self.selected_index = 0;
         self.window_start = 0;
     }
 
     pub fn providerFilter(self: *const ModelMenu) ModelProviderFilter {
-        return @enumFromInt(@min(self.provider_index, model_provider_filter_count - 1));
+        return @fromBackingInt(@intCast(@min(self.provider_index, model_provider_filter_count - 1)));
     }
 
     pub fn filteredItemCount(self: *const ModelMenu) usize {
@@ -185,7 +186,7 @@ pub const ModelMenu = struct {
             next += direction;
             if (next < 0) next = @as(i32, @intCast(filter_count)) - 1;
             if (next >= @as(i32, @intCast(filter_count))) next = 0;
-            const filter: ModelProviderFilter = @enumFromInt(@as(usize, @intCast(next)));
+            const filter: ModelProviderFilter = @fromBackingInt(@intCast(next));
             if (!modelProviderFilterAvailable(self.items.items, filter)) continue;
             if (next == current) return false;
             self.provider_index = @intCast(next);
@@ -266,12 +267,12 @@ fn providerFilter(provider: []const u8) ModelProviderFilter {
 
 pub fn modelProviderFilterAvailable(items: []const ModelMenuItem, filter: ModelProviderFilter) bool {
     if (filter == .all) return true;
-    var seen = [_]bool{false} ** model_provider_filter_count;
-    for (items) |item| seen[@intFromEnum(providerFilter(item.provider))] = true;
+    var seen: [model_provider_filter_count]bool = @splat(false);
+    for (items) |item| seen[@backingInt(providerFilter(item.provider))] = true;
 
     var specific_count: usize = 0;
     for (seen[1..]) |available| specific_count += @intFromBool(available);
-    return specific_count > 1 and seen[@intFromEnum(filter)];
+    return specific_count > 1 and seen[@backingInt(filter)];
 }
 
 fn providerMatchesFilter(provider: []const u8, filter: ModelProviderFilter) bool {
@@ -1160,7 +1161,7 @@ test "model cache access owns Grok account identity with its credential" {
     );
     for (0..2) |fail_index| {
         var failing = std.testing.FailingAllocator.init(
-            std.testing.allocator,
+            testing_allocator.no_resize,
             .{ .fail_index = fail_index },
         );
         try std.testing.expectError(
@@ -1214,8 +1215,7 @@ test "model cache warmup publishes a snapshot and filtered completion" {
     try fixture.start();
     try std.testing.expect(fixture.waitForAcceptStart(5000));
 
-    const models_url = try std.fmt.allocPrint(
-        std.testing.allocator,
+    const models_url = try std.testing.allocator.print(
         "http://127.0.0.1:{d}/v1/models",
         .{fixture.port()},
     );
@@ -1326,11 +1326,11 @@ test "model menu owns resolved catalog state and filters without changing catalo
     try std.testing.expect(runtime.menu.moveProvider(-1));
     try std.testing.expectEqual(ModelProviderFilter.all, runtime.menu.providerFilter());
 
-    runtime.menu.provider_index = @intFromEnum(ModelProviderFilter.others);
+    runtime.menu.provider_index = @backingInt(ModelProviderFilter.others);
     try std.testing.expectEqual(@as(usize, 2), runtime.menu.filteredItemCount());
     try std.testing.expectEqualStrings("private/blue-hornbill", runtime.menu.itemAt(0).?.id);
     try std.testing.expectEqualStrings("standalone", runtime.menu.itemAt(1).?.id);
-    runtime.menu.provider_index = @intFromEnum(ModelProviderFilter.all);
+    runtime.menu.provider_index = @backingInt(ModelProviderFilter.all);
 
     try std.testing.expect(runtime.menu.moveVisibleItems(-1, 2));
     try std.testing.expectEqual(@as(usize, 3), runtime.menu.selected_index);
@@ -1420,7 +1420,7 @@ test "model menu provider navigation skips absent and redundant filters" {
 }
 
 test "model menu snapshot construction cleans every allocation failure" {
-    const backing = std.testing.allocator;
+    const backing = testing_allocator.no_resize;
     const entries = [_]model_catalog.ModelCatalogEntry{
         .{ .id = @constCast("openai/gpt-5"), .model_type = @constCast("language") },
         .{ .id = @constCast("anthropic/claude-opus-4.8"), .model_type = @constCast("language") },
@@ -1449,8 +1449,7 @@ test "model cache completion hydrates an open menu and reports once" {
     try fixture.start();
     try std.testing.expect(fixture.waitForAcceptStart(5000));
 
-    const models_url = try std.fmt.allocPrint(
-        std.testing.allocator,
+    const models_url = try std.testing.allocator.print(
         "http://127.0.0.1:{d}/v1/models",
         .{fixture.port()},
     );

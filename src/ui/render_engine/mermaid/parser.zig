@@ -354,7 +354,7 @@ fn parseStateTransition(graph: *Graph, statement: []const u8, marker_id: *usize)
 
 fn stateEndpoint(graph: *Graph, raw: []const u8, source: bool, marker_id: *usize) MermaidError!usize {
     if (std.mem.eql(u8, raw, "[*]")) {
-        const id = try std.fmt.allocPrint(graph.alloc, "__mermaid_{s}_{d}", .{ if (source) "start" else "end", marker_id.* });
+        const id = try graph.alloc.print("__mermaid_{s}_{d}", .{ if (source) "start" else "end", marker_id.* });
         defer graph.alloc.free(id);
         marker_id.* += 1;
         return graph.addNode(id, if (source) "●" else "◉", if (source) .start else .finish);
@@ -395,7 +395,7 @@ pub fn parse_class(alloc: Allocator, source: []const u8) MermaidError!?Graph {
             const id = firstWord(std.mem.trim(u8, statement[close + 2 ..], " \t"));
             if (id.len > 0) {
                 const node = try graph.addNode(id, null, .rect);
-                const text = try std.fmt.allocPrint(graph.alloc, "«{s}»", .{annotation});
+                const text = try graph.alloc.print("«{s}»", .{annotation});
                 defer graph.alloc.free(text);
                 try graph.addMember(node, text);
             }
@@ -601,9 +601,9 @@ fn erRelationLabel(
     const middle_text = middle orelse "";
     if (left_text.len == 0 and middle_text.len == 0 and right_text.len == 0) return null;
     const rendered = if (middle_text.len == 0)
-        try std.fmt.allocPrint(alloc, "{s} ↔ {s}", .{ left_text, right_text })
+        try alloc.print("{s} ↔ {s}", .{ left_text, right_text })
     else
-        try std.fmt.allocPrint(alloc, "{s} {s} {s}", .{ left_text, middle_text, right_text });
+        try alloc.print("{s} {s} {s}", .{ left_text, middle_text, right_text });
     return rendered;
 }
 
@@ -749,8 +749,8 @@ fn parseSequenceMessage(
         owned_label = if (label) |value| blk: {
             const clean = try label_text.clean(sequence.alloc, value);
             defer sequence.alloc.free(clean);
-            break :blk try std.fmt.allocPrint(sequence.alloc, "{d}. {s}", .{ message_number.*, clean });
-        } else try std.fmt.allocPrint(sequence.alloc, "{d}.", .{message_number.*});
+            break :blk try sequence.alloc.print("{d}. {s}", .{ message_number.*, clean });
+        } else try sequence.alloc.print("{d}.", .{message_number.*});
     } else if (label) |value| {
         owned_label = try label_text.clean(sequence.alloc, value);
     }

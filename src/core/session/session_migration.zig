@@ -1,4 +1,5 @@
 const std = @import("std");
+const testing_allocator = @import("../shared/testing_allocator.zig");
 const config_runtime = @import("../config/config_runtime.zig");
 const io_mod = @import("../shared/io.zig");
 const session = @import("session.zig");
@@ -235,7 +236,7 @@ noinline fn migrateLegacyLockedInto(
         .checkpoint_seq = canonical.position.through_seq,
         .checkpoint_sha256 = session_projection.sha256(canonical.checkpoint),
         .projection_status = .current,
-        .migration_source_schema_version = @intFromEnum(schema),
+        .migration_source_schema_version = @backingInt(schema),
         .migration_source_bytes = primary_stat.size,
         .commit_lifecycle = lifecycle.*,
     };
@@ -583,7 +584,7 @@ fn migrationWatermarkName(
     generation: session_event.Identifier,
 ) ![]u8 {
     const hex = std.fmt.bytesToHex(generation, .lower);
-    return std.fmt.allocPrint(alloc, "commit.{s}.json", .{hex});
+    return alloc.print("commit.{s}.json", .{hex});
 }
 
 fn encodeMigrationAuthority(
@@ -625,7 +626,7 @@ fn encodeMigrationIntent(
         .{
             operation,
             authority,
-            @intFromEnum(schema),
+            @backingInt(schema),
             primary_bytes.len,
             digest,
             generation,
@@ -769,7 +770,7 @@ pub fn loadedMigrationTarget(
     const active_id = try alloc.dupe(u8, writable.session_id);
     errdefer alloc.free(active_id);
     const source_schema_version: ?u8 = if (transition.prior) |prior|
-        @intFromEnum(prior.schema)
+        @backingInt(prior.schema)
     else
         null;
     const source_bytes: ?u64 = if (transition.prior) |prior|
@@ -1088,7 +1089,7 @@ pub fn migratedSourceSchemaVersion(
         max_bytes,
     )) orelse return error.SessionNotFound;
     defer alloc.free(bytes);
-    return @intFromEnum(try session_json.parseLegacySchemaVersion(alloc, bytes));
+    return @backingInt(try session_json.parseLegacySchemaVersion(alloc, bytes));
 }
 
 /// Returns the byte size of the retained `session.legacy.json` source.

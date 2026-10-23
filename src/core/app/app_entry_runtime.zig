@@ -29,7 +29,7 @@ else
 
 const Allocator = std.mem.Allocator;
 
-const supports_graceful_exit_sigint_guard = !host_target.is_wasm and builtin.os.tag != .windows;
+const supports_graceful_exit_sigint_guard = !host_target.is_wasm and builtin.target.os.tag != .windows;
 
 const GracefulExitSigintGuard = if (!supports_graceful_exit_sigint_guard) struct {
     fn install(_: bool) @This() {
@@ -389,7 +389,7 @@ fn writeRealStdout(_: ?*anyopaque, text: []const u8) !void {
 }
 
 fn formatResumeHandoff(buffer: []u8, session_id: []const u8) ![]const u8 {
-    return std.fmt.bufPrint(
+    return std.mem.print(
         buffer,
         "Continue session with: fx --resume {s}\n",
         .{session_id},
@@ -397,7 +397,7 @@ fn formatResumeHandoff(buffer: []u8, session_id: []const u8) ![]const u8 {
 }
 
 fn formatUnexpectedError(buffer: []u8, err: anyerror) ![]const u8 {
-    return std.fmt.bufPrint(buffer, "fx: {s}\n", .{@errorName(err)});
+    return std.mem.print(buffer, "fx: {s}\n", .{@errorName(err)});
 }
 
 fn reportUnexpectedInteractiveError(deps: RunDeps, err: anyerror) void {
@@ -496,7 +496,7 @@ fn appendInitEvent(launch: *const cli_surface.InteractiveLaunch) void {
         switch (target) {
             .pick => appendTestEvent("init:pick"),
             .last => appendTestEvent("init:last"),
-            .id => |id| appendTestEvent(std.fmt.bufPrint(&test_init_event_buf, "init:{s}", .{id}) catch "init:<invalid>"),
+            .id => |id| appendTestEvent(std.mem.print(&test_init_event_buf, "init:{s}", .{id}) catch "init:<invalid>"),
         }
     } else {
         appendTestEvent("init:none");
@@ -893,7 +893,7 @@ test "app entry releases terminal before reporting initial context failures exac
             runWithDeps(TestApp, alloc, &.{}, testConfig(), capture.deps()),
         );
         var expected_stderr_buf: [64]u8 = undefined;
-        const expected_stderr = try std.fmt.bufPrint(
+        const expected_stderr = try std.mem.print(
             &expected_stderr_buf,
             "fx: {s}\n",
             .{@errorName(expected_error)},

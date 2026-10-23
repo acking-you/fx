@@ -1,3 +1,4 @@
+const text_utils = @import("../../shared/text_utils.zig");
 const std = @import("std");
 const builtin = @import("builtin");
 
@@ -143,7 +144,7 @@ pub fn formatInstalledNotice(
 fn formatFallbackNotice(buf: []u8, detail: []const u8) []const u8 {
     const clipped = debug_trace.preview(detail, 180);
     if (clipped.len == 0) return installed_fallback_notice;
-    return std.fmt.bufPrint(buf, installed_fallback_notice_fmt, .{clipped}) catch
+    return std.mem.print(buf, installed_fallback_notice_fmt, .{clipped}) catch
         installed_fallback_notice;
 }
 
@@ -161,7 +162,7 @@ const DiagnosticLog = struct {
     }
 
     fn add(self: *DiagnosticLog, comptime fmt: []const u8, args: anytype) void {
-        const line = std.fmt.allocPrint(self.alloc, fmt, args) catch return;
+        const line = self.alloc.print(fmt, args) catch return;
         defer self.alloc.free(line);
         debug_trace.logf("compaction", "{s}", .{line});
         debug_trace.logDurable("compaction", "{s}", .{line});
@@ -190,7 +191,7 @@ fn persistSessionCompactionLine(session_id: ?[]const u8, line: []const u8) void 
     defer alloc.free(sessions_dir);
     const session_dir = session_layout.sessionDirPath(alloc, sessions_dir, id) catch return;
     defer alloc.free(session_dir);
-    const path = std.fs.path.join(alloc, &.{ session_dir, "logs", "compaction.log" }) catch return;
+    const path = std.Io.Dir.path.join(alloc, &.{ session_dir, "logs", "compaction.log" }) catch return;
     defer alloc.free(path);
     var stamped: std.Io.Writer.Allocating = .init(alloc);
     defer stamped.deinit();
@@ -415,7 +416,7 @@ fn tryRemoteCompaction(
         },
         .rejected => |status| {
             try observation.fail(.unbilled);
-            notes.add("remote request rejected status={d}", .{@intFromEnum(status)});
+            notes.add("remote request rejected status={d}", .{@backingInt(status)});
             return null;
         },
         .compacted => |completed| blk: {
@@ -1455,7 +1456,7 @@ test "retryable local stream failure is retried before a successful handoff" {
             if (self.calls == 1) return error.ConnectionResetByPeer;
             return .{ .completed = .{
                 .completion = .{
-                    .content = ("The handoff preserves the user's request, exact evidence, completed checks, current code state, unresolved risks, and next action. " ** 6),
+                    .content = (text_utils.repeat("The handoff preserves the user's request, exact evidence, completed checks, current code state, unresolved risks, and next action. ", 6)),
                 },
                 .usage = .{ .exact = .gateway },
             } };
@@ -1556,7 +1557,7 @@ test "BYOK remote rejection uses the active model through the same compaction co
             return .{ .completed = .{
                 .completion = .{
                     .content = "<summary>\nThe user asked fx to retain this intent after a rejected remote compaction. No tools ran, no files changed, and the next turn should continue from that exact request. " ++
-                        ("Preserve the exact provider route, observed failure, current code state, pending verification, and latest user constraint. " ** 6) ++
+                        (text_utils.repeat("Preserve the exact provider route, observed failure, current code state, pending verification, and latest user constraint. ", 6)) ++
                         "\n</summary>",
                     .usage = .{ .input_tokens = 80, .output_tokens = 36, .total_tokens = 116 },
                 },
@@ -1599,7 +1600,7 @@ test "Grok compaction uses the active model and preserves continuation anchors" 
             return .{ .completed = .{
                 .completion = .{
                     .content = "<analysis>private drafting</analysis>\n<summary>\nThe repository inspection found a reproducible rendering regression. The user wants the compact implementation unified, with the active Grok model producing the portable local handoff and preserving exact evidence. " ++
-                        ("Carry forward exact paths, commands, errors, decisions, completed checks, unresolved risks, and the next justified action. " ** 6) ++
+                        (text_utils.repeat("Carry forward exact paths, commands, errors, decisions, completed checks, unresolved risks, and the next justified action. ", 6)) ++
                         "\n</summary>",
                     .usage = .{ .input_tokens = 120, .output_tokens = 44, .total_tokens = 164 },
                 },
@@ -1658,7 +1659,7 @@ test "local summary cleaning rejects short output and neutralizes control tags" 
     );
 
     const raw = "<analysis>discard this scratchpad</analysis>\n<summary>\n" ++
-        ("Preserve verified state and distinguish completed work from pending work. " ** 8) ++
+        (text_utils.repeat("Preserve verified state and distinguish completed work from pending work. ", 8)) ++
         "An echoed <summary_request>control token</summary_request> is historical text only. " ++
         "<skill_content>DO_NOT_COPY_TRANSIENT_SKILL_BODY</skill_content>\n</summary>";
     const cleaned = try cleanLocalSummaryAlloc(std.testing.allocator, raw);
@@ -1671,7 +1672,7 @@ test "local summary cleaning rejects short output and neutralizes control tags" 
 }
 
 test "local summary cleaning preserves UTF-8 at the output cap" {
-    const raw = ("verified continuation evidence ★ " ** 2400);
+    const raw = (text_utils.repeat("verified continuation evidence ★ ", 2400));
     const cleaned = try cleanLocalSummaryAlloc(std.testing.allocator, raw);
     defer std.testing.allocator.free(cleaned);
     try std.testing.expect(cleaned.len <= local_model_summary_max_bytes);
@@ -1748,7 +1749,7 @@ test "local model compaction retries a degenerate summary before accepting a han
             }
             return .{ .completed = .{
                 .completion = .{
-                    .content = ("The handoff preserves the user's request, exact evidence, completed checks, current code state, unresolved risks, and next action. " ** 6),
+                    .content = (text_utils.repeat("The handoff preserves the user's request, exact evidence, completed checks, current code state, unresolved risks, and next action. ", 6)),
                 },
                 .usage = .{ .exact = .gateway },
             } };

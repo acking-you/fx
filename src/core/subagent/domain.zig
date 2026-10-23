@@ -770,7 +770,7 @@ fn validateCreate(alloc: Allocator, input: CreateInput) ValidationError!CreateCo
 fn validateInspect(alloc: Allocator, input: InspectInput) ValidationError!InspectCommand {
     const id_raw = input.id orelse return error.MissingInspectId;
     try validateId(id_raw);
-    if (input.sections.len == 0 or input.sections.len > @typeInfo(InspectSection).@"enum".fields.len) {
+    if (input.sections.len == 0 or input.sections.len > @typeInfo(InspectSection).@"enum".field_names.len) {
         return error.InvalidInspectSections;
     }
     for (input.sections, 0..) |section, index| {
@@ -1124,7 +1124,7 @@ pub fn parseCursor(text: []const u8) ValidationError!Cursor {
 
 /// Returns an owned opaque cursor; caller frees it with `alloc.free`.
 pub fn encodeCursor(alloc: Allocator, cursor: Cursor) ![]u8 {
-    return std.fmt.allocPrint(alloc, "v1:{d}:{d}", .{
+    return alloc.print("v1:{d}:{d}", .{
         cursor.generation,
         cursor.offset,
     });

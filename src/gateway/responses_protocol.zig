@@ -1,4 +1,5 @@
 const std = @import("std");
+const testing_allocator = @import("../core/shared/testing_allocator.zig");
 const stream_provider = @import("../core/agent/stream_provider.zig");
 const model_provider = @import("../core/config/model_provider.zig");
 const model_tool_schema = @import("../core/tooling/model_tool_schema.zig");
@@ -802,8 +803,7 @@ pub fn buildSubscriptionBilling(
     if (provider == .gateway or created_at_ms < 0) return null;
     const input_tokens = usage.input_tokens orelse return null;
     const output_tokens = usage.output_tokens orelse return null;
-    const qualified_model = try std.fmt.allocPrint(
-        alloc,
+    const qualified_model = try alloc.print(
         "{s}/{s}",
         .{ @tagName(provider), model },
     );

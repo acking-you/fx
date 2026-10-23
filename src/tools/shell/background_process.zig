@@ -85,7 +85,7 @@ fn spawnPrepared(
     };
 
     const child_id = child.id orelse return error.SpawnFailed;
-    const pid = try std.fmt.allocPrint(alloc, "{d}", .{io_mod.childProcessId(child_id)});
+    const pid = try alloc.print("{d}", .{io_mod.childProcessId(child_id)});
     var pid_owned = true;
     errdefer if (pid_owned) alloc.free(pid);
 
@@ -245,7 +245,7 @@ fn captureToken(
     alloc: Allocator,
     pid_text: []const u8,
 ) background_process_provider.ProviderError!process_supervisor.ProcessInstanceToken {
-    return switch (builtin.os.tag) {
+    return switch (builtin.target.os.tag) {
         .linux => blk: {
             const pid = std.fmt.parseInt(std.posix.pid_t, pid_text, 10) catch
                 return error.InvalidPid;
@@ -280,7 +280,7 @@ fn matchToken(
 }
 
 fn readLinuxProcStat(file: std.Io.File, buffer: []u8) !usize {
-    if (builtin.os.tag != .linux) return error.ProcessIdentityUnsupported;
+    if (builtin.target.os.tag != .linux) return error.ProcessIdentityUnsupported;
     while (true) {
         // A process can disappear after open, and procfs reports that read as
         // ESRCH. Read directly so the expected race does not reach Zig's
@@ -333,7 +333,7 @@ fn captureLinuxToken(
     }
     if (boot_len != boot_id.len) return error.ProcessIdentityUnavailable;
 
-    const stat_path = try std.fmt.allocPrint(alloc, "/proc/{d}/stat", .{pid});
+    const stat_path = try alloc.print("/proc/{d}/stat", .{pid});
     defer alloc.free(stat_path);
     var stat_file = std.Io.Dir.openFileAbsolute(
         zio,
@@ -368,7 +368,7 @@ fn captureLinuxToken(
         return error.ProcessIdentityUnavailable;
 
     var token_buf: [128]u8 = undefined;
-    const text = try std.fmt.bufPrint(
+    const text = try std.mem.print(
         &token_buf,
         "linux:{s}:{s}",
         .{ boot_id[0..], ticks },
@@ -379,7 +379,7 @@ fn captureLinuxToken(
 fn captureMacOSToken(
     pid: std.posix.pid_t,
 ) !process_supervisor.ProcessInstanceToken {
-    if (builtin.os.tag != .macos) return error.ProcessIdentityUnsupported;
+    if (builtin.target.os.tag != .macos) return error.ProcessIdentityUnsupported;
     const ProcBsdInfo = extern struct {
         pbi_flags: u32,
         pbi_status: u32,
@@ -459,7 +459,7 @@ fn captureMacOSToken(
     if (normalized_len != uuid.len) return error.ProcessIdentityUnavailable;
 
     var token_buf: [128]u8 = undefined;
-    const text = try std.fmt.bufPrint(
+    const text = try std.mem.print(
         &token_buf,
         "macos:{s}:{d}:{d}",
         .{ uuid[0..], info.pbi_start_tvsec, info.pbi_start_tvusec },
@@ -488,7 +488,7 @@ fn signalProcess(
         },
     }
     if (!host.current().background_processes) return error.Unsupported;
-    if (comptime builtin.os.tag == .windows) {
+    if (comptime builtin.target.os.tag == .windows) {
         return error.Unsupported;
     } else {
         const pid = std.fmt.parseInt(std.posix.pid_t, pid_text, 10) catch
@@ -498,7 +498,7 @@ fn signalProcess(
 }
 
 fn signalPidTree(root_pid: std.posix.pid_t) std.posix.KillError!void {
-    if (comptime builtin.os.tag == .windows) {
+    if (comptime builtin.target.os.tag == .windows) {
         return error.ProcessNotFound;
     } else {
         const descendants = collectDescendantPids(
@@ -588,7 +588,7 @@ fn anyProcessTreeMemberRunning(
 }
 
 fn isPidRunningRaw(pid: std.posix.pid_t) bool {
-    std.posix.kill(pid, @enumFromInt(0)) catch |err| switch (err) {
+    std.posix.kill(pid, @fromBackingInt(@intCast(0))) catch |err| switch (err) {
         error.ProcessNotFound => return false,
         else => return true,
     };
@@ -742,7 +742,7 @@ const SpawnedBackgroundHandshake = struct {
         process_token: ?process_supervisor.ProcessInstanceToken,
         timeout_ms: i64,
     ) bool {
-        if (builtin.os.tag == .windows or builtin.os.tag == .wasi) {
+        if (builtin.target.os.tag == .windows or builtin.target.os.tag == .wasi) {
             return waitForProcessExit(
                 alloc,
                 self.pid,
@@ -764,7 +764,7 @@ const SpawnedBackgroundHandshake = struct {
         self: *SpawnedBackgroundHandshake,
         alloc: std.mem.Allocator,
     ) bool {
-        switch (builtin.os.tag) {
+        switch (builtin.target.os.tag) {
             .windows, .wasi => return false,
             else => {},
         }
@@ -812,7 +812,7 @@ fn waitForProcessExit(
 }
 
 fn processExists(pid_text: []const u8) bool {
-    switch (builtin.os.tag) {
+    switch (builtin.target.os.tag) {
         .windows, .wasi => return true,
         else => {},
     }
@@ -821,7 +821,7 @@ fn processExists(pid_text: []const u8) bool {
         pid_text,
         10,
     ) catch return false;
-    std.posix.kill(pid, @enumFromInt(0)) catch |err| switch (err) {
+    std.posix.kill(pid, @fromBackingInt(@intCast(0))) catch |err| switch (err) {
         error.ProcessNotFound => return false,
         else => return true,
     };
@@ -842,8 +842,7 @@ fn expectBlockedWrapperDoesNotExecute(
         .{ .read = true, .truncate = true },
     );
     defer log_file.close(io_mod.getIo());
-    const command = try std.fmt.allocPrint(
-        alloc,
+    const command = try alloc.print(
         "printf executed > '{s}'",
         .{marker_path},
     );
@@ -904,9 +903,9 @@ test "blocked background wrapper rejects eof and invalid release without executi
     defer tmp.cleanup();
     const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
     defer alloc.free(root);
-    const marker = try std.fs.path.join(alloc, &.{ root, "executed" });
+    const marker = try std.Io.Dir.path.join(alloc, &.{ root, "executed" });
     defer alloc.free(marker);
-    const log_path = try std.fs.path.join(alloc, &.{ root, "background.log" });
+    const log_path = try std.Io.Dir.path.join(alloc, &.{ root, "background.log" });
     defer alloc.free(log_path);
 
     try expectBlockedWrapperDoesNotExecute(
@@ -931,12 +930,12 @@ test "blocked background wrapper executes only after valid release" {
     defer tmp.cleanup();
     const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
     defer alloc.free(root);
-    const marker = try std.fs.path.join(
+    const marker = try std.Io.Dir.path.join(
         alloc,
         &.{ root, "executed-after-release" },
     );
     defer alloc.free(marker);
-    const log_path = try std.fs.path.join(
+    const log_path = try std.Io.Dir.path.join(
         alloc,
         &.{ root, "released.log" },
     );
@@ -947,8 +946,7 @@ test "blocked background wrapper executes only after valid release" {
         .{ .read = true, .truncate = true },
     );
     defer log_file.close(io_mod.getIo());
-    const command = try std.fmt.allocPrint(
-        alloc,
+    const command = try alloc.print(
         "printf executed > '{s}'",
         .{marker},
     );
@@ -1001,7 +999,7 @@ test "native provider transfers a prepared process to its owned handle" {
     defer tmp.cleanup();
     const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
     defer alloc.free(root);
-    const log_path = try std.fs.path.join(alloc, &.{ root, "provider.log" });
+    const log_path = try std.Io.Dir.path.join(alloc, &.{ root, "provider.log" });
     defer alloc.free(log_path);
     var output_target = background_launch_output.Output{
         .external = .{
@@ -1042,16 +1040,16 @@ test "native provider transfers a prepared process to its owned handle" {
 }
 
 test "native provider captures the current process identity" {
-    if (builtin.os.tag != .linux and builtin.os.tag != .macos) {
+    if (builtin.target.os.tag != .linux and builtin.target.os.tag != .macos) {
         return error.SkipZigTest;
     }
 
     const alloc = std.testing.allocator;
-    const pid = try std.fmt.allocPrint(alloc, "{d}", .{io_mod.processId()});
+    const pid = try alloc.print("{d}", .{io_mod.processId()});
     defer alloc.free(pid);
 
     const token = try provider.captureToken(alloc, pid);
-    const platform = if (builtin.os.tag == .linux) "linux:" else "macos:";
+    const platform = if (builtin.target.os.tag == .linux) "linux:" else "macos:";
     try std.testing.expect(std.mem.startsWith(u8, token.view(), platform));
 }
 
@@ -1061,7 +1059,7 @@ test "native provider writes through the verified borrowed output handle" {
     defer tmp.cleanup();
     const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
     defer alloc.free(root);
-    const log_path = try std.fs.path.join(
+    const log_path = try std.Io.Dir.path.join(
         alloc,
         &.{ root, "verified-output.log" },
     );
@@ -1116,7 +1114,7 @@ test "released background command does not inherit release pipe as stdin" {
     defer tmp.cleanup();
     const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
     defer alloc.free(root);
-    const log_path = try std.fs.path.join(
+    const log_path = try std.Io.Dir.path.join(
         alloc,
         &.{ root, "released-stdin.log" },
     );
@@ -1182,7 +1180,7 @@ test "released background command does not inherit release pipe as stdin" {
 }
 
 test "unreleased background cleanup reaps an exited child before token liveness" {
-    if (builtin.os.tag == .windows or builtin.os.tag == .wasi) return;
+    if (builtin.target.os.tag == .windows or builtin.target.os.tag == .wasi) return;
 
     const alloc = std.testing.allocator;
     const argv = [_][]const u8{
@@ -1216,7 +1214,7 @@ test "unreleased background cleanup reaps an exited child before token liveness"
     };
     process_supervisor.process_token_match_for_test = Stub.match;
     defer process_supervisor.process_token_match_for_test = null;
-    const pid = try std.fmt.allocPrint(alloc, "{d}", .{child.id.?});
+    const pid = try alloc.print("{d}", .{child.id.?});
     const token = try process_supervisor.ProcessInstanceToken.parse(
         "linux:00112233445566778899aabbccddeeff:12345",
     );
@@ -1275,7 +1273,7 @@ test "unreleased background wrapper cleanup is bounded" {
     };
     process_supervisor.process_token_match_for_test = Stub.match;
     defer process_supervisor.process_token_match_for_test = null;
-    const pid = try std.fmt.allocPrint(alloc, "{d}", .{child.id.?});
+    const pid = try alloc.print("{d}", .{child.id.?});
     const token = try process_supervisor.ProcessInstanceToken.parse(
         "linux:00112233445566778899aabbccddeeff:12345",
     );

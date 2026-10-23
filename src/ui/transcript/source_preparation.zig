@@ -8,6 +8,7 @@ const render_engine = @import("../render_engine.zig");
 const user_message_card = @import("../assistant/user_message_card.zig");
 const ui_render = @import("../render.zig");
 const types = @import("../../core/shared/types.zig");
+const text_utils = @import("../../core/shared/text_utils.zig");
 
 const Allocator = std.mem.Allocator;
 const transcript_blocks = render_engine.transcript_blocks;

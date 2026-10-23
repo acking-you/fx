@@ -12,7 +12,7 @@ const types = @import("../shared/types.zig");
 
 const Allocator = std.mem.Allocator;
 
-const WindowsJob = if (builtin.os.tag == .windows) struct {
+const WindowsJob = if (builtin.target.os.tag == .windows) struct {
     const windows = std.os.windows;
     const job_object_extended_limit_information: c_int = 9;
     const job_object_limit_kill_on_job_close: windows.DWORD = 0x00002000;
@@ -102,7 +102,7 @@ const WindowsJob = if (builtin.os.tag == .windows) struct {
     extern "kernel32" fn ResumeThread(thread: windows.HANDLE) callconv(.winapi) windows.DWORD;
 } else struct {};
 
-const WindowsProcessProbe = if (builtin.os.tag == .windows) struct {
+const WindowsProcessProbe = if (builtin.target.os.tag == .windows) struct {
     const windows = std.os.windows;
     const synchronize: windows.DWORD = 0x00100000;
     const wait_object_0: windows.DWORD = 0;
@@ -167,13 +167,13 @@ pub const Manager = struct {
     }
 
     pub fn supported() bool {
-        return std.process.can_spawn and builtin.os.tag != .wasi;
+        return std.process.can_spawn and builtin.target.os.tag != .wasi;
     }
 
     pub const ExecRequest = struct {
         command: []const u8,
         cwd: []const u8,
-        shell: []const u8 = if (builtin.os.tag == .windows)
+        shell: []const u8 = if (builtin.target.os.tag == .windows)
             "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
         else
             "/bin/sh",
@@ -527,20 +527,20 @@ pub const Manager = struct {
                 .stdin = .pipe,
                 .stdout = .pipe,
                 .stderr = .pipe,
-                .pgid = if (comptime builtin.os.tag == .windows) null else 0,
-                .start_suspended = builtin.os.tag == .windows,
+                .pgid = if (comptime builtin.target.os.tag == .windows) null else 0,
+                .start_suspended = builtin.target.os.tag == .windows,
             });
         var child_owned = true;
         errdefer if (child_owned) {
             child.kill(zio);
             _ = child.wait(zio) catch {};
         };
-        var windows_job: WindowsJob = if (comptime builtin.os.tag == .windows)
+        var windows_job: WindowsJob = if (comptime builtin.target.os.tag == .windows)
             try WindowsJob.create(child.id orelse return error.SpawnFailed)
         else
             .{};
         var windows_job_owned = true;
-        errdefer if (windows_job_owned and comptime builtin.os.tag == .windows)
+        errdefer if (windows_job_owned and comptime builtin.target.os.tag == .windows)
             windows_job.deinit();
         const stdin = if (pty) |pair|
             pseudo_terminal.file(try pseudo_terminal.duplicate(pair.master), true)
@@ -586,7 +586,7 @@ pub const Manager = struct {
             process.destroy();
         }
         try process.start();
-        if (comptime builtin.os.tag == .windows) {
+        if (comptime builtin.target.os.tag == .windows) {
             try process.windows_job.resumeChild(process.child.thread_handle);
         }
 
@@ -764,7 +764,7 @@ fn elapsedSeconds(started_at_ms: i64) f64 {
 
 fn processIdValue(pid: std.process.Child.Id) u64 {
     if (comptime @TypeOf(pid) == void) return 0;
-    return if (comptime builtin.os.tag == .windows)
+    return if (comptime builtin.target.os.tag == .windows)
         @intCast(@intFromPtr(pid))
     else
         @intCast(pid);
@@ -772,7 +772,7 @@ fn processIdValue(pid: std.process.Child.Id) u64 {
 
 fn processSignalValue(signal: anytype) ?u8 {
     if (comptime @TypeOf(signal) == void) return null;
-    return @intCast(@intFromEnum(signal));
+    return @intCast(@backingInt(signal));
 }
 
 const OutputProjectionChunk = struct {
@@ -1037,7 +1037,7 @@ const Process = struct {
         if (chars.len == 0) return;
         if (!self.tty) {
             if (std.mem.eql(u8, chars, "\x03")) {
-                if (comptime builtin.os.tag == .windows) {
+                if (comptime builtin.target.os.tag == .windows) {
                     self.windows_job.terminate();
                 } else {
                     std.posix.kill(-self.pid, std.posix.SIG.INT) catch return error.WriteFailed;
@@ -1051,7 +1051,7 @@ const Process = struct {
         if (self.stop_requested.load(.seq_cst)) return error.ProcessExited;
         if (self.done) return error.ProcessExited;
         const stdin = self.stdin orelse return error.ProcessStdinClosed;
-        if (comptime builtin.os.tag == .windows) return error.PtyUnavailable;
+        if (comptime builtin.target.os.tag == .windows) return error.PtyUnavailable;
         var offset: usize = 0;
         while (offset < chars.len) {
             const rc = std.posix.system.write(stdin.handle, chars[offset..].ptr, chars.len - offset);
@@ -1282,7 +1282,7 @@ const Process = struct {
     }
 
     fn stopAndJoin(self: *Process) void {
-        if (comptime builtin.os.tag == .wasi) return;
+        if (comptime builtin.target.os.tag == .wasi) return;
         self.stop_mutex.lockUncancelable(io_mod.getIo());
         defer self.stop_mutex.unlock(io_mod.getIo());
         if (!self.stop_requested.swap(true, .seq_cst)) {
@@ -1291,7 +1291,7 @@ const Process = struct {
             var readers_done = self.readers_done == self.reader_count;
             self.mutex.unlock(io_mod.getIo());
             if (!done or !readers_done) {
-                if (comptime builtin.os.tag == .windows) {
+                if (comptime builtin.target.os.tag == .windows) {
                     self.windows_job.terminate();
                 } else {
                     const process_group: std.posix.pid_t = -self.pid;
@@ -1339,7 +1339,7 @@ const Process = struct {
             thread.join();
             self.stderr_thread = null;
         }
-        if (comptime builtin.os.tag == .windows) self.windows_job.deinit();
+        if (comptime builtin.target.os.tag == .windows) self.windows_job.deinit();
     }
 
     fn destroy(self: *Process) void {
@@ -1533,7 +1533,7 @@ fn maxOutputBytes(max_output_tokens: ?u64) usize {
 }
 
 fn setNonblocking(fd: std.Io.File.Handle) !void {
-    if (comptime builtin.os.tag == .windows) {
+    if (comptime builtin.target.os.tag == .windows) {
         return;
     } else {
         const current = std.posix.system.fcntl(fd, std.posix.F.GETFL, @as(usize, 0));
@@ -1678,12 +1678,12 @@ test "unified exec keeps long process addressable and polls output" {
     var manager = Manager.init(std.testing.allocator);
     defer manager.deinit();
     var first = try manager.exec(std.testing.allocator, .{
-        .command = if (builtin.os.tag == .windows)
+        .command = if (builtin.target.os.tag == .windows)
             "[Console]::Out.Write('ready'); Start-Sleep -Milliseconds 1000; [Console]::Out.Write('done')"
         else
             "printf ready; sleep 1; printf done",
-        .cwd = if (builtin.os.tag == .windows) "." else "/tmp",
-        .yield_time_ms = if (builtin.os.tag == .windows) 750 else 250,
+        .cwd = if (builtin.target.os.tag == .windows) "." else "/tmp",
+        .yield_time_ms = if (builtin.target.os.tag == .windows) 750 else 250,
     });
     defer first.deinit(std.testing.allocator);
     try std.testing.expect(first.process_id != null);
@@ -1715,7 +1715,7 @@ test "unified exec keeps long process addressable and polls output" {
 }
 
 test "unified exec queues one Claude continuation event from an independent cursor" {
-    if (!Manager.supported() or builtin.os.tag == .windows) return error.SkipZigTest;
+    if (!Manager.supported() or builtin.target.os.tag == .windows) return error.SkipZigTest;
     var manager = Manager.init(std.testing.allocator);
     defer manager.deinit();
     var first = try manager.exec(std.testing.allocator, .{
@@ -1752,7 +1752,7 @@ test "unified exec queues one Claude continuation event from an independent curs
 }
 
 test "Claude watchdog event keeps the running process addressable" {
-    if (!Manager.supported() or builtin.os.tag == .windows) return error.SkipZigTest;
+    if (!Manager.supported() or builtin.target.os.tag == .windows) return error.SkipZigTest;
     var manager = Manager.init(std.testing.allocator);
     defer manager.deinit();
     var first = try manager.exec(std.testing.allocator, .{
@@ -1835,7 +1835,7 @@ test "terminate all discards lifecycle events from the prior session" {
 }
 
 test "non-tty write_stdin accepts polling and control-c only" {
-    if (!Manager.supported() or builtin.os.tag == .windows) return error.SkipZigTest;
+    if (!Manager.supported() or builtin.target.os.tag == .windows) return error.SkipZigTest;
     var manager = Manager.init(std.testing.allocator);
     defer manager.deinit();
     var first = try manager.exec(std.testing.allocator, .{
@@ -2021,12 +2021,12 @@ test "unified exec returns short commands synchronously" {
     var manager = Manager.init(std.testing.allocator);
     defer manager.deinit();
     var result = try manager.exec(std.testing.allocator, .{
-        .command = if (builtin.os.tag == .windows)
+        .command = if (builtin.target.os.tag == .windows)
             "[Console]::Out.Write('synchronous')"
         else
             "printf synchronous",
-        .cwd = if (builtin.os.tag == .windows) "." else "/tmp",
-        .yield_time_ms = if (builtin.os.tag == .windows) 2_000 else 250,
+        .cwd = if (builtin.target.os.tag == .windows) "." else "/tmp",
+        .yield_time_ms = if (builtin.target.os.tag == .windows) 2_000 else 250,
     });
     defer result.deinit(std.testing.allocator);
     try std.testing.expectEqual(Manager.Status.exited, result.status);
@@ -2036,10 +2036,10 @@ test "unified exec returns short commands synchronously" {
 }
 
 test "unified exec Windows resolver runs commands through installed Git Bash" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag != .windows) return error.SkipZigTest;
     var shell_buffer: [4096]u8 = undefined;
     const shell = shell_resolver.configuredOrDefaultLoginShellInto(&shell_buffer);
-    if (!std.ascii.eqlIgnoreCase(std.fs.path.basename(shell), "bash.exe"))
+    if (!std.ascii.eqlIgnoreCase(std.Io.Dir.path.basename(shell), "bash.exe"))
         return error.SkipZigTest;
 
     var manager = Manager.init(std.testing.allocator);
@@ -2087,12 +2087,12 @@ test "unified exec writes interactive input without blocking the caller" {
     var manager = Manager.init(std.testing.allocator);
     defer manager.deinit();
     var first = try manager.exec(std.testing.allocator, .{
-        .command = if (builtin.os.tag == .windows)
+        .command = if (builtin.target.os.tag == .windows)
             "$line = [Console]::In.ReadLine(); [Console]::Out.Write(('got:{0}' -f $line))"
         else
             "IFS= read -r line; printf 'got:%s' \"$line\"",
-        .cwd = if (builtin.os.tag == .windows) "." else "/tmp",
-        .yield_time_ms = if (builtin.os.tag == .windows) 1_000 else 250,
+        .cwd = if (builtin.target.os.tag == .windows) "." else "/tmp",
+        .yield_time_ms = if (builtin.target.os.tag == .windows) 1_000 else 250,
         .tty = true,
     });
     defer first.deinit(std.testing.allocator);
@@ -2100,7 +2100,7 @@ test "unified exec writes interactive input without blocking the caller" {
     var second = try manager.writeStdin(std.testing.allocator, .{
         .process_id = first.process_id.?,
         .chars = "hello\n",
-        .yield_time_ms = if (builtin.os.tag == .windows) 5_000 else 2_000,
+        .yield_time_ms = if (builtin.target.os.tag == .windows) 5_000 else 2_000,
     });
     defer second.deinit(std.testing.allocator);
     try std.testing.expectEqual(Manager.Status.exited, second.status);
@@ -2160,9 +2160,9 @@ test "unified exec activates the observer before a direct write can fail" {
     var manager = Manager.init(std.testing.allocator);
     defer manager.deinit();
     var first = try manager.exec(std.testing.allocator, .{
-        .command = if (builtin.os.tag == .windows) "Start-Sleep -Seconds 30" else "sleep 30",
-        .cwd = if (builtin.os.tag == .windows) "." else "/tmp",
-        .yield_time_ms = if (builtin.os.tag == .windows) 1_000 else 250,
+        .command = if (builtin.target.os.tag == .windows) "Start-Sleep -Seconds 30" else "sleep 30",
+        .cwd = if (builtin.target.os.tag == .windows) "." else "/tmp",
+        .yield_time_ms = if (builtin.target.os.tag == .windows) 1_000 else 250,
     });
     const process_id = first.process_id.?;
     first.deinit(std.testing.allocator);
@@ -2188,11 +2188,11 @@ test "unified exec direct control stays responsive during a model poll" {
     var manager = Manager.init(std.testing.allocator);
     defer manager.deinit();
     var first = try manager.exec(std.testing.allocator, .{
-        .command = if (builtin.os.tag == .windows)
+        .command = if (builtin.target.os.tag == .windows)
             "$first = [Console]::In.ReadLine(); [Console]::Out.Write(\"model:$first\"); [void][Console]::In.ReadLine()"
         else
             "IFS= read -r first; printf 'model:%s' \"$first\"; IFS= read -r second",
-        .cwd = if (builtin.os.tag == .windows) "." else "/tmp",
+        .cwd = if (builtin.target.os.tag == .windows) "." else "/tmp",
         .yield_time_ms = 250,
         .tty = true,
     });
@@ -2272,7 +2272,7 @@ test "unified exec clamps empty polls and retains head tail bounds" {
     try std.testing.expectEqual(@as(u64, 300_000), clampPollYield(500_000));
     var buffer: HeadTailBuffer = .{};
     defer buffer.deinit(std.testing.allocator);
-    const bytes = [_]u8{'x'} ** (output_limit + 100);
+    const bytes = @as([(output_limit + 100)]u8, @splat('x'));
     try buffer.append(std.testing.allocator, &bytes);
     const snap = try buffer.snapshot(std.testing.allocator, output_limit);
     defer std.testing.allocator.free(snap.bytes);
@@ -2293,12 +2293,12 @@ test "unified exec manager cleanup terminates a still-running process group" {
     var manager_live = true;
     defer if (manager_live) manager.deinit();
     var running = try manager.exec(std.testing.allocator, .{
-        .command = if (builtin.os.tag == .windows)
+        .command = if (builtin.target.os.tag == .windows)
             "$child = Start-Process -FilePath ($PSHOME + '\\powershell.exe') -ArgumentList '-NoLogo','-NoProfile','-Command','Start-Sleep -Seconds 30' -NoNewWindow -PassThru; [Console]::Out.WriteLine($child.Id); Wait-Process -Id $child.Id"
         else
             "sleep 30 & child=$!; printf '%d\\n' \"$child\"; wait",
-        .cwd = if (builtin.os.tag == .windows) "." else "/tmp",
-        .yield_time_ms = if (builtin.os.tag == .windows) 1_000 else 250,
+        .cwd = if (builtin.target.os.tag == .windows) "." else "/tmp",
+        .yield_time_ms = if (builtin.target.os.tag == .windows) 1_000 else 250,
     });
     defer running.deinit(std.testing.allocator);
     // Shell and child startup are not part of the manager's cleanup budget.
@@ -2323,13 +2323,13 @@ test "unified exec manager cleanup terminates a still-running process group" {
     const elapsed = io_mod.milliTimestamp() - started;
     try std.testing.expect(elapsed < 2_000);
     const deadline = io_mod.milliTimestamp() + 2_000;
-    if (builtin.os.tag == .windows) {
+    if (builtin.target.os.tag == .windows) {
         while (!WindowsProcessProbe.exited(child_pid) and io_mod.milliTimestamp() < deadline)
             io_mod.sleep(10 * std.time.ns_per_ms);
         try std.testing.expect(WindowsProcessProbe.exited(child_pid));
     } else {
         while (io_mod.milliTimestamp() < deadline) {
-            std.posix.kill(@intCast(child_pid), @enumFromInt(0)) catch |err| switch (err) {
+            std.posix.kill(@intCast(child_pid), @fromBackingInt(@intCast(0))) catch |err| switch (err) {
                 error.ProcessNotFound => break,
                 else => return err,
             };
@@ -2337,7 +2337,7 @@ test "unified exec manager cleanup terminates a still-running process group" {
         }
         try std.testing.expectError(
             error.ProcessNotFound,
-            std.posix.kill(@intCast(child_pid), @enumFromInt(0)),
+            std.posix.kill(@intCast(child_pid), @fromBackingInt(@intCast(0))),
         );
     }
 }

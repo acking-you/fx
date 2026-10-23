@@ -7,7 +7,7 @@ const session_id_encoded_bytes = std.base64.url_safe_no_pad.Encoder.calcSize(ses
 
 pub fn sessionDirPath(alloc: Allocator, sessions_dir: []const u8, session_id: []const u8) ![]u8 {
     try validateSessionId(session_id);
-    return std.fs.path.join(alloc, &.{ sessions_dir, session_id });
+    return std.Io.Dir.path.join(alloc, &.{ sessions_dir, session_id });
 }
 
 pub fn validateSessionId(session_id: []const u8) !void {

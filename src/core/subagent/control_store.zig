@@ -2181,8 +2181,8 @@ test "control compaction ignores non-monotonic process epochs" {
         errdefer alloc.free(target_id);
         operation.* = .{
             .id = owned_id,
-            .request_fingerprint = [_]u8{0x5a} ** 32,
-            .fingerprint = [_]u8{0xa5} ** 32,
+            .request_fingerprint = @as([32]u8, @splat(0x5a)),
+            .fingerprint = @as([32]u8, @splat(0xa5)),
             .code = .configured,
             .target_id = target_id,
             .generation = epoch,
@@ -2226,7 +2226,7 @@ test "canonical bytes evict receipt epochs with their event prefix" {
     @memset(&current_parent, 'b');
     for (0..count) |index| {
         const epoch: u64 = @intCast(index + 1);
-        const id = try std.fmt.allocPrint(alloc, "fxop:2:m:{d}:{s}", .{ epoch, digest });
+        const id = try alloc.print("fxop:2:m:{d}:{s}", .{ epoch, digest });
         errdefer alloc.free(id);
         const previous_parent_id = try alloc.dupe(u8, &previous_parent);
         errdefer alloc.free(previous_parent_id);
@@ -2245,8 +2245,8 @@ test "canonical bytes evict receipt epochs with their event prefix" {
         errdefer event.deinit(alloc);
         var operation = domain.OperationReceipt{
             .id = id,
-            .request_fingerprint = [_]u8{@intCast(index % 251)} ** 32,
-            .fingerprint = [_]u8{@intCast((index + 1) % 251)} ** 32,
+            .request_fingerprint = @as([32]u8, @splat(@intCast(index % 251))),
+            .fingerprint = @as([32]u8, @splat(@intCast((index + 1) % 251))),
             .code = .relationship_changed,
             .target_id = try alloc.dupe(u8, record.child_id),
             .generation = epoch,
@@ -2311,8 +2311,8 @@ test "control semantics reject noncanonical event and receipt sequences" {
     const canonical_operations = [_]domain.OperationReceipt{
         .{
             .id = @constCast("operation-1"),
-            .request_fingerprint = [_]u8{3} ** 32,
-            .fingerprint = [_]u8{1} ** 32,
+            .request_fingerprint = @as([32]u8, @splat(3)),
+            .fingerprint = @as([32]u8, @splat(1)),
             .code = .created,
             .target_id = @constCast("child-id"),
             .generation = 1,
@@ -2320,8 +2320,8 @@ test "control semantics reject noncanonical event and receipt sequences" {
         },
         .{
             .id = @constCast("operation-2"),
-            .request_fingerprint = [_]u8{4} ** 32,
-            .fingerprint = [_]u8{2} ** 32,
+            .request_fingerprint = @as([32]u8, @splat(4)),
+            .fingerprint = @as([32]u8, @splat(2)),
             .code = .configured,
             .target_id = @constCast("child-id"),
             .generation = 2,

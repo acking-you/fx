@@ -1,3 +1,4 @@
+const testing_allocator = @import("testing_allocator.zig");
 const std = @import("std");
 const responses_output_items = @import("responses_output_items.zig");
 const text_utils = @import("text_utils.zig");
@@ -410,7 +411,7 @@ pub const ModelRecoveryRequiredAction = enum {
 pub const ModelFailureDiagnostic = struct {
     pub const max_bytes: usize = 256;
 
-    bytes: [max_bytes]u8 = [_]u8{0} ** max_bytes,
+    bytes: [max_bytes]u8 = @splat(0),
     len: u16 = 0,
 
     pub fn defaultTextForCause(cause: ModelRecoveryCause) []const u8 {
@@ -510,7 +511,7 @@ pub const RouteRecoveryStatus = struct {
     pub fn label(self: RouteRecoveryStatus, buf: []u8) []const u8 {
         return switch (self.kind) {
             .auto_retry => self.recoveryLabel(buf),
-            .auto_recovered => std.fmt.bufPrint(
+            .auto_recovered => std.mem.print(
                 buf,
                 "✓ recovered · succeeded on attempt {d}/{d}",
                 .{ self.succeeded_attempt, self.attempt_limit },
@@ -534,7 +535,7 @@ pub const RouteRecoveryStatus = struct {
 
     fn manualRetryLabel(self: RouteRecoveryStatus, buf: []u8) []const u8 {
         if (self.diagnostic) |diagnostic| {
-            return std.fmt.bufPrint(
+            return std.mem.print(
                 buf,
                 "⚠ Provider route unavailable · {s} · continuing without Fast",
                 .{diagnostic.view()},
@@ -550,13 +551,13 @@ pub const RouteRecoveryStatus = struct {
         action: []const u8,
     ) []const u8 {
         if (self.diagnostic) |diagnostic| {
-            return std.fmt.bufPrint(
+            return std.mem.print(
                 buf,
                 "⚠ {s} · {s} · {s}",
                 .{ cause, diagnostic.view(), action },
             ) catch "⚠ Model response failed";
         }
-        return std.fmt.bufPrint(buf, "⚠ {s} · {s}", .{ cause, action }) catch "⚠ Model response failed";
+        return std.mem.print(buf, "⚠ {s} · {s}", .{ cause, action }) catch "⚠ Model response failed";
     }
 
     fn recoveryLabel(self: RouteRecoveryStatus, buf: []u8) []const u8 {
@@ -580,26 +581,26 @@ pub const RouteRecoveryStatus = struct {
         };
         if (self.delay_seconds > 0) {
             if (self.diagnostic) |diagnostic| {
-                return std.fmt.bufPrint(
+                return std.mem.print(
                     buf,
                     "⚠ {s} · {s} · {s} in {d}s · attempt {d}/{d}",
                     .{ cause, diagnostic.view(), action, self.delay_seconds, self.failed_attempt, self.attempt_limit },
                 ) catch "⚠ Recovering model response";
             }
-            return std.fmt.bufPrint(
+            return std.mem.print(
                 buf,
                 "⚠ {s} · {s} in {d}s · attempt {d}/{d}",
                 .{ cause, action, self.delay_seconds, self.failed_attempt, self.attempt_limit },
             ) catch "⚠ Recovering model response";
         }
         if (self.diagnostic) |diagnostic| {
-            return std.fmt.bufPrint(
+            return std.mem.print(
                 buf,
                 "⚠ {s} · {s} · {s} · attempt {d}/{d}",
                 .{ cause, diagnostic.view(), action, self.failed_attempt, self.attempt_limit },
             ) catch "⚠ Recovering model response";
         }
-        return std.fmt.bufPrint(
+        return std.mem.print(
             buf,
             "⚠ {s} · {s} · attempt {d}/{d}",
             .{ cause, action, self.failed_attempt, self.attempt_limit },
@@ -610,13 +611,13 @@ pub const RouteRecoveryStatus = struct {
         const cause = self.cause orelse return self.pausedCauseLabel(buf, "Provider unavailable");
         if (cause == .rate_limited and self.failed_attempt < self.attempt_limit) {
             if (self.diagnostic) |diagnostic| {
-                return std.fmt.bufPrint(
+                return std.mem.print(
                     buf,
                     "⚠ Rate limited · {s} · server requested a longer wait · recovery paused · attempt {d}/{d}",
                     .{ diagnostic.view(), self.failed_attempt, self.attempt_limit },
                 ) catch "⚠ Rate limited · recovery paused";
             }
-            return std.fmt.bufPrint(
+            return std.mem.print(
                 buf,
                 "⚠ Rate limited · server requested a longer wait · recovery paused · attempt {d}/{d}",
                 .{ self.failed_attempt, self.attempt_limit },
@@ -624,13 +625,13 @@ pub const RouteRecoveryStatus = struct {
         }
         if (cause == .system_resumed and self.failed_attempt < self.attempt_limit) {
             if (self.diagnostic) |diagnostic| {
-                return std.fmt.bufPrint(
+                return std.mem.print(
                     buf,
                     "⚠ Mac woke from sleep · {s} · connection still unavailable · recovery paused · attempt {d}/{d}",
                     .{ diagnostic.view(), self.failed_attempt, self.attempt_limit },
                 ) catch "⚠ Connection unavailable · recovery paused";
             }
-            return std.fmt.bufPrint(
+            return std.mem.print(
                 buf,
                 "⚠ Mac woke from sleep · connection still unavailable · recovery paused · attempt {d}/{d}",
                 .{ self.failed_attempt, self.attempt_limit },
@@ -638,13 +639,13 @@ pub const RouteRecoveryStatus = struct {
         }
         if (cause == .request_limit_reached) {
             if (self.diagnostic) |diagnostic| {
-                return std.fmt.bufPrint(
+                return std.mem.print(
                     buf,
                     "⚠ Response paused · {s} · {d}/{d} provider-request safety limit reached",
                     .{ diagnostic.view(), self.failed_attempt, self.attempt_limit },
                 ) catch "⚠ Response paused · provider-request safety limit reached";
             }
-            return std.fmt.bufPrint(
+            return std.mem.print(
                 buf,
                 "⚠ Response paused · {d}/{d} provider-request safety limit reached",
                 .{ self.failed_attempt, self.attempt_limit },
@@ -668,13 +669,13 @@ pub const RouteRecoveryStatus = struct {
         name: []const u8,
     ) []const u8 {
         if (self.diagnostic) |diagnostic| {
-            return std.fmt.bufPrint(
+            return std.mem.print(
                 buf,
                 "⚠ {s} · {s} · recovery paused after {d}/{d} attempts",
                 .{ name, diagnostic.view(), self.failed_attempt, self.attempt_limit },
             ) catch "⚠ Model response recovery paused";
         }
-        return std.fmt.bufPrint(
+        return std.mem.print(
             buf,
             "⚠ {s} · recovery paused after {d}/{d} attempts",
             .{ name, self.failed_attempt, self.attempt_limit },
@@ -719,7 +720,7 @@ test "route recovery label includes a value-owned diagnostic" {
 }
 
 test "model failure diagnostic truncation is bounded and utf8 safe" {
-    const long = "provider_error: " ++ ("é" ** 200);
+    const long = "provider_error: " ++ text_utils.repeat("é", 200);
     const diagnostic = ModelFailureDiagnostic.init(long);
 
     try std.testing.expect(diagnostic.view().len <= ModelFailureDiagnostic.max_bytes);
@@ -822,7 +823,7 @@ pub const WebFetchArtifactState = enum {
 pub const WebFetchCompletion = struct {
     pub const max_url_len: usize = 192;
 
-    url_buf: [max_url_len]u8 = [_]u8{0} ** max_url_len,
+    url_buf: [max_url_len]u8 = @splat(0),
     url_len: u8 = 0,
     bytes: u64 = 0,
     status: u16 = 0,
@@ -1692,7 +1693,7 @@ test "authoritative tool admission rejects malformed provider arguments but admi
 pub const ConversationLanguage = struct {
     pub const max_len: usize = 24;
 
-    bytes: [max_len]u8 = [_]u8{0} ** max_len,
+    bytes: [max_len]u8 = @splat(0),
     len: u8 = 0,
 
     pub fn default() ConversationLanguage {
@@ -1953,7 +1954,7 @@ pub const ReasoningEffort = union(enum) {
             }
 
             var name = Name{
-                .bytes = [_]u8{0} ** max_name_bytes,
+                .bytes = @as([max_name_bytes]u8, @splat(0)),
                 .len = @intCast(raw.len),
             };
             @memcpy(name.bytes[0..raw.len], raw);
@@ -2951,7 +2952,7 @@ test "ToolArgumentIntegrity rejects malformed trailing and duplicate-key JSON" {
 }
 
 test "ToolArgumentIntegrity preserves parser allocation failure" {
-    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var failing = std.testing.FailingAllocator.init(testing_allocator.no_resize, .{ .fail_index = 0 });
     try std.testing.expectError(
         error.OutOfMemory,
         ToolArgumentIntegrity.classifySerialized(failing.allocator(), "{\"path\":\"src/main.zig\"}"),

@@ -1,3 +1,4 @@
+const text_utils = @import("../shared/text_utils.zig");
 const std = @import("std");
 const builtin = @import("builtin");
 const contracts = @import("contracts.zig");
@@ -28,17 +29,17 @@ const max_connection_requests: usize = 32;
 const listener_poll_ms = 50;
 const transport_hash_bytes: usize = 16;
 const transport_hash_context = "fx.terminal.transport.v1\x00";
-const socket_permissions: std.Io.File.Permissions = switch (builtin.os.tag) {
+const socket_permissions: std.Io.File.Permissions = switch (builtin.target.os.tag) {
     .macos, .linux => .fromMode(0o600),
     else => .default_file,
 };
 
 pub fn isSupported() bool {
-    return isSupportedForOs(builtin.os.tag);
+    return isSupportedForOs(builtin.target.os.tag);
 }
 
 fn currentUserId() std.c.uid_t {
-    if (comptime builtin.os.tag == .windows) return 0;
+    if (comptime builtin.target.os.tag == .windows) return 0;
     return std.c.getuid();
 }
 
@@ -52,7 +53,7 @@ pub fn isInternalModeRaw(raw_args: []const [*:0]const u8) bool {
 }
 
 pub fn validateEndpointPath(path: []const u8) !void {
-    return validateEndpointPathForTarget(builtin.os.tag, path);
+    return validateEndpointPathForTarget(builtin.target.os.tag, path);
 }
 
 fn nativeEndpointPathLimit(target: std.Target.Os.Tag) ?usize {
@@ -102,12 +103,12 @@ fn resolveEndpointSelection(
 ) !EndpointSelection {
     const runtime_base = runtimeBase(target) orelse
         return error.TerminalHostUnsupported;
-    const authority_root = try std.fs.path.join(
+    const authority_root = try std.Io.Dir.path.join(
         alloc,
         &.{ home, profile_paths.root_dir_name, host_dir_name },
     );
     errdefer alloc.free(authority_root);
-    const profile_endpoint = try std.fs.path.join(
+    const profile_endpoint = try std.Io.Dir.path.join(
         alloc,
         &.{ authority_root, endpoint_name },
     );
@@ -137,18 +138,17 @@ fn resolveEndpointSelection(
         digest[0..transport_hash_bytes].*,
         .lower,
     );
-    const runtime_name = try std.fmt.allocPrint(
-        alloc,
+    const runtime_name = try alloc.print(
         "fx-terminal-{d}-{s}",
         .{ uid, digest_hex },
     );
     defer alloc.free(runtime_name);
-    const transport_root = try std.fs.path.join(
+    const transport_root = try std.Io.Dir.path.join(
         alloc,
         &.{ runtime_base, runtime_name },
     );
     errdefer alloc.free(transport_root);
-    const endpoint_path = try std.fs.path.join(
+    const endpoint_path = try std.Io.Dir.path.join(
         alloc,
         &.{ transport_root, endpoint_name },
     );
@@ -206,7 +206,7 @@ pub const Paths = struct {
         if (!isSupported()) return error.TerminalHostUnsupported;
         var selection = try resolveEndpointSelection(
             alloc,
-            builtin.os.tag,
+            builtin.target.os.tag,
             home,
             currentUserId(),
         );
@@ -270,9 +270,9 @@ fn openRuntimeTransportDir(
     transport_root: []const u8,
     uid: std.c.uid_t,
 ) !io_mod.VerifiedDir {
-    const parent_path = std.fs.path.dirname(transport_root) orelse
+    const parent_path = std.Io.Dir.path.dirname(transport_root) orelse
         return error.RuntimeDirectoryUnsafe;
-    const name = std.fs.path.basename(transport_root);
+    const name = std.Io.Dir.path.basename(transport_root);
     var parent = try std.Io.Dir.openDirAbsolute(io_mod.getIo(), parent_path, .{
         .iterate = true,
         .follow_symlinks = false,
@@ -323,7 +323,7 @@ fn verifyPrivateRuntimeDir(dir: std.Io.Dir, uid: std.c.uid_t) !void {
 }
 
 fn directoryOwner(dir: std.Io.Dir) !std.c.uid_t {
-    return switch (builtin.os.tag) {
+    return switch (builtin.target.os.tag) {
         .linux => blk: {
             const linux = std.os.linux;
             while (true) {
@@ -655,24 +655,17 @@ fn idleOwner(state: *HostState) void {
             state.changed.waitUncancelable(io_mod.getIo());
             continue;
         }
-        state.changed.waitTimeout(
-            io_mod.getIo(),
-            .{ .duration = .{
-                .clock = .awake,
-                .raw = .{ .nanoseconds = @intCast(@min(
-                    timeout_ns,
-                    std.math.maxInt(i64),
-                )) },
-            } },
-        ) catch |err| switch (err) {
-            error.Timeout => {
-                if (state.generation.load(.acquire) != generation) continue;
-                if (!policy.idleEligible(state.facts())) continue;
-                state.stopping.store(true, .release);
-                return;
-            },
-            error.Canceled => return,
-        };
+        const deadline = std.Io.Clock.Timestamp.fromNow(io_mod.getIo(), .{
+            .clock = .awake,
+            .raw = .{ .nanoseconds = @intCast(@min(timeout_ns, std.math.maxInt(i64))) },
+        });
+        const changed = io_mod.waitEventUntil(&state.changed, deadline) catch return;
+        if (!changed) {
+            if (state.generation.load(.acquire) != generation) continue;
+            if (!policy.idleEligible(state.facts())) continue;
+            state.stopping.store(true, .release);
+            return;
+        }
     }
 }
 
@@ -1167,7 +1160,7 @@ fn testAcceptFailureRequested() bool {
 fn noteTestOrderedAdmission(correlation_id: contracts.CorrelationId) !void {
     const prefix = io_mod.getenv("FX_TERMINAL_TEST_ORDER_BARRIER") orelse return;
     var path_buffer: [4096]u8 = undefined;
-    const path = try std.fmt.bufPrint(
+    const path = try std.mem.print(
         &path_buffer,
         "{s}.{d}.admitted",
         .{ prefix, correlation_id.value },
@@ -1194,7 +1187,7 @@ fn awaitTestOrderedBoundary(
     }
 
     var ready_buffer: [4096]u8 = undefined;
-    const ready_path = try std.fmt.bufPrint(
+    const ready_path = try std.mem.print(
         &ready_buffer,
         "{s}.{d}.ready",
         .{ prefix, correlation_id.value },
@@ -1207,7 +1200,7 @@ fn awaitTestOrderedBoundary(
     ready.close(io_mod.getIo());
 
     var release_buffer: [4096]u8 = undefined;
-    const release_path = try std.fmt.bufPrint(
+    const release_path = try std.mem.print(
         &release_buffer,
         "{s}.{d}.release",
         .{ prefix, correlation_id.value },
@@ -1241,7 +1234,7 @@ fn applySocketTimeout(stream: std.Io.net.Stream) void {
 }
 
 fn peerMatchesCurrentUser(handle: std.Io.net.Socket.Handle) bool {
-    if (comptime builtin.os.tag == .macos) {
+    if (comptime builtin.target.os.tag == .macos) {
         var peer_uid: std.c.uid_t = undefined;
         var peer_gid: std.c.gid_t = undefined;
         const Peer = struct {
@@ -1254,7 +1247,7 @@ fn peerMatchesCurrentUser(handle: std.Io.net.Socket.Handle) bool {
         if (Peer.getpeereid(handle, &peer_uid, &peer_gid) != 0) return false;
         return peer_uid == currentUserId();
     }
-    if (comptime builtin.os.tag == .linux) {
+    if (comptime builtin.target.os.tag == .linux) {
         const UCred = extern struct {
             pid: std.c.pid_t,
             uid: std.c.uid_t,
@@ -1280,7 +1273,7 @@ fn peerProcessOwner(
     process_provider: background_process_provider.Provider,
     handle: std.Io.net.Socket.Handle,
 ) !contracts.ProcessOwner {
-    const pid: std.c.pid_t = if (comptime builtin.os.tag == .macos) blk: {
+    const pid: std.c.pid_t = if (comptime builtin.target.os.tag == .macos) blk: {
         const local_peer_pid = 0x002;
         var peer_pid: std.c.pid_t = undefined;
         var peer_pid_len: std.c.socklen_t = @sizeOf(std.c.pid_t);
@@ -1294,7 +1287,7 @@ fn peerProcessOwner(
             return error.TerminalPeerIdentityUnavailable;
         }
         break :blk peer_pid;
-    } else if (comptime builtin.os.tag == .linux) blk: {
+    } else if (comptime builtin.target.os.tag == .linux) blk: {
         const UCred = extern struct {
             pid: std.c.pid_t,
             uid: std.c.uid_t,
@@ -1315,7 +1308,7 @@ fn peerProcessOwner(
     } else return error.TerminalHostUnsupported;
 
     var pid_buffer: [32]u8 = undefined;
-    const pid_text = try std.fmt.bufPrint(&pid_buffer, "{d}", .{pid});
+    const pid_text = try std.mem.print(&pid_buffer, "{d}", .{pid});
     const token = try process_provider.captureToken(
         alloc,
         pid_text,
@@ -1331,7 +1324,7 @@ fn writeIdentity(
     instance: []const u8,
 ) !void {
     var pid_buffer: [32]u8 = undefined;
-    const pid = try std.fmt.bufPrint(&pid_buffer, "{d}", .{std.c.getpid()});
+    const pid = try std.mem.print(&pid_buffer, "{d}", .{std.c.getpid()});
     const process_token = try process_provider.captureToken(
         alloc,
         pid,
@@ -1464,7 +1457,7 @@ test "terminal host selection follows canonical platform support" {
             isSupportedForOs(os_tag),
         );
     }
-    try std.testing.expectEqual(isSupportedForOs(builtin.os.tag), isSupported());
+    try std.testing.expectEqual(isSupportedForOs(builtin.target.os.tag), isSupported());
 }
 
 test "host identity capture and reconciliation use the injected provider" {
@@ -1577,7 +1570,7 @@ test "host identity capture and reconciliation use the injected provider" {
 
 test "endpoint paths honor the native sockaddr capacity" {
     if (!isSupported()) return error.SkipZigTest;
-    const path_limit = comptime nativeEndpointPathLimit(builtin.os.tag).?;
+    const path_limit = comptime nativeEndpointPathLimit(builtin.target.os.tag).?;
     var maximum: [path_limit - 1]u8 = @splat('x');
     var oversized: [path_limit]u8 = @splat('x');
     try validateEndpointPath(&maximum);
@@ -1590,12 +1583,12 @@ test "endpoint selection preserves short homes and deterministically separates l
     const short_home = "/Users/terminal-short";
     var short = try resolveEndpointSelection(
         alloc,
-        builtin.os.tag,
+        builtin.target.os.tag,
         short_home,
         501,
     );
     defer short.deinit(alloc);
-    const expected_short = try std.fs.path.join(
+    const expected_short = try std.Io.Dir.path.join(
         alloc,
         &.{ short_home, profile_paths.root_dir_name, host_dir_name },
     );
@@ -1604,25 +1597,25 @@ test "endpoint selection preserves short homes and deterministically separates l
     try std.testing.expectEqualStrings(expected_short, short.authority_root);
     try std.testing.expectEqualStrings(short.authority_root, short.transport_root);
 
-    const first_home = "/profiles/" ++ "a" ** 160;
-    const second_home = "/profiles/" ++ "b" ** 160;
+    const first_home = "/profiles/" ++ text_utils.repeat("a", 160);
+    const second_home = "/profiles/" ++ text_utils.repeat("b", 160);
     var first = try resolveEndpointSelection(
         alloc,
-        builtin.os.tag,
+        builtin.target.os.tag,
         first_home,
         501,
     );
     defer first.deinit(alloc);
     var reopened = try resolveEndpointSelection(
         alloc,
-        builtin.os.tag,
+        builtin.target.os.tag,
         first_home,
         501,
     );
     defer reopened.deinit(alloc);
     var second = try resolveEndpointSelection(
         alloc,
-        builtin.os.tag,
+        builtin.target.os.tag,
         second_home,
         501,
     );
@@ -1652,7 +1645,7 @@ test "endpoint selection allocation and unsupported targets fail closed" {
         resolveEndpointSelection(alloc, .windows, "C:\\profile", 501),
     );
 
-    const long_home = "/profiles/" ++ "x" ** 160;
+    const long_home = "/profiles/" ++ text_utils.repeat("x", 160);
     var probe = std.testing.FailingAllocator.init(alloc, .{});
     var selected = try resolveEndpointSelection(
         probe.allocator(),

@@ -138,7 +138,7 @@ pub fn initial_runtime(
 
 pub fn stable_id(buffer: []u8, sequence: u64) ![]const u8 {
     if (sequence == 0) return error.MonitorIdExhausted;
-    return std.fmt.bufPrint(buffer, "monitor-{d}", .{sequence});
+    return std.mem.print(buffer, "monitor-{d}", .{sequence});
 }
 
 pub fn observe(

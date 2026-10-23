@@ -1,3 +1,4 @@
+const testing_allocator = @import("../core/shared/testing_allocator.zig");
 const std = @import("std");
 const std_builtin = @import("builtin");
 const command_admission = @import("../core/permissions/command_admission.zig");
@@ -120,7 +121,7 @@ const AcpCommandOutputPreview = struct {
         var visible: std.ArrayList(u8) = .empty;
         errdefer visible.deinit(alloc);
         var sink = AcpCommandOutputSink{ .alloc = alloc, .bytes = &visible };
-        try self.decoders[@intFromEnum(stream)].append(raw, &sink);
+        try self.decoders[@backingInt(stream)].append(raw, &sink);
         return visible.toOwnedSlice(alloc);
     }
 
@@ -132,7 +133,7 @@ const AcpCommandOutputPreview = struct {
         var visible: std.ArrayList(u8) = .empty;
         errdefer visible.deinit(alloc);
         var sink = AcpCommandOutputSink{ .alloc = alloc, .bytes = &visible };
-        try self.decoders[@intFromEnum(stream)].finish(&sink);
+        try self.decoders[@backingInt(stream)].finish(&sink);
         return visible.toOwnedSlice(alloc);
     }
 
@@ -2070,7 +2071,7 @@ fn localFileTargetPath(alloc: Allocator, uri_text: []const u8) Allocator.Error!?
         write_index += 1;
     }
     const decoded_path = decoded_storage[0..write_index];
-    if (!std.fs.path.isAbsolute(decoded_path)) return null;
+    if (!std.Io.Dir.path.isAbsolute(decoded_path)) return null;
 
     var components = std.mem.splitScalar(u8, decoded_path, '/');
     while (components.next()) |component| {
@@ -3102,9 +3103,9 @@ fn pushHttpError(raw_ctx: *anyopaque, status: std.http.Status, detail: []const u
         null;
     defer if (owned_message) |message| ctx.alloc.free(message);
     const msg = owned_message orelse if (detail.len > 0)
-        std.fmt.bufPrint(&buf, "HTTP {d}: {s}", .{ @intFromEnum(status), detail }) catch "HTTP error"
+        std.mem.print(&buf, "HTTP {d}: {s}", .{ @backingInt(status), detail }) catch "HTTP error"
     else
-        std.fmt.bufPrint(&buf, "HTTP {d}", .{@intFromEnum(status)}) catch "HTTP error";
+        std.mem.print(&buf, "HTTP {d}", .{@backingInt(status)}) catch "HTTP error";
     ctx.sendAgentText(msg) catch {};
 }
 
@@ -3143,9 +3144,9 @@ fn describeToolTitle(registry: tool_dispatch.Registry, arena: Allocator, call: T
         }
     }
     if (tool_dispatch.toolCallPresentation(arena, registry, call)) |presentation| {
-        return std.fmt.allocPrint(arena, "{s}", .{presentation.action_label});
+        return arena.print("{s}", .{presentation.action_label});
     }
-    return std.fmt.allocPrint(arena, "{s}", .{call.name});
+    return arena.print("{s}", .{call.name});
 }
 
 test "mapToolKind maps common tools" {
@@ -3415,11 +3416,10 @@ test "parsePromptInput preserves resource text and accepts only local absolute f
     defer alloc.free(root);
     const expected_path = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "Fx Project/src/main.zig");
     defer alloc.free(expected_path);
-    const local_uri = try std.fmt.allocPrint(alloc, "file://{s}/Fx%20Project/src/main.zig", .{root});
+    const local_uri = try alloc.print("file://{s}/Fx%20Project/src/main.zig", .{root});
     defer alloc.free(local_uri);
     const remote_uri = "https://example.test/reference.txt";
-    const params = try std.fmt.allocPrint(
-        alloc,
+    const params = try alloc.print(
         "{{\"sessionId\":\"s1\",\"prompt\":[" ++
             "{{\"type\":\"resource\",\"resource\":{{\"uri\":\"{s}\",\"text\":\"local body\"}}}}," ++
             "{{\"type\":\"resource\",\"resource\":{{\"uri\":\"{s}\",\"text\":\"remote body\"}}}}]}}",
@@ -3430,8 +3430,7 @@ test "parsePromptInput preserves resource text and accepts only local absolute f
     var parsed = try parsePromptInput(alloc, params);
     defer parsed.deinit(alloc);
 
-    const expected_text = try std.fmt.allocPrint(
-        alloc,
+    const expected_text = try alloc.print(
         "File: {s}\nlocal body\nFile: {s}\nremote body",
         .{ local_uri, remote_uri },
     );
@@ -3460,8 +3459,7 @@ test "parsePromptInput rejects unsafe file URI targeting without losing embedded
     };
 
     for (uris) |uri| {
-        const params = try std.fmt.allocPrint(
-            alloc,
+        const params = try alloc.print(
             "{{\"sessionId\":\"s1\",\"prompt\":[{{\"type\":\"resource\",\"resource\":{{\"uri\":\"{s}\",\"text\":\"embedded text\"}}}}]}}",
             .{uri},
         );
@@ -3499,8 +3497,8 @@ test "parsePromptInput bounds remote resource omissions with a stable summary" {
     try std.testing.expect(std.mem.find(u8, parsed.omissions[parsed.omissions.len - 1].source, "/31") != null);
     const summary = parsed.omission_summary orelse return error.TestExpectedEqual;
     try std.testing.expectEqual(@as(usize, 96), summary.omitted_count);
-    try std.testing.expectEqual(@as(usize, 96), summary.reason_counts[@intFromEnum(context_contract.OmissionReason.unsafe_target)]);
-    const zero_digest = [_]u8{0} ** std.crypto.hash.sha2.Sha256.digest_length;
+    try std.testing.expectEqual(@as(usize, 96), summary.reason_counts[@backingInt(context_contract.OmissionReason.unsafe_target)]);
+    const zero_digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = @splat(0);
     try std.testing.expect(!std.mem.eql(u8, &summary.digest, &zero_digest));
 }
 
@@ -3515,11 +3513,11 @@ test "localFileTargetPath canonicalizes a local symlink target" {
 
     const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
     defer alloc.free(root);
-    const alias_path = try std.fs.path.join(alloc, &.{ root, "alias.txt" });
+    const alias_path = try std.Io.Dir.path.join(alloc, &.{ root, "alias.txt" });
     defer alloc.free(alias_path);
     const expected = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "real.txt");
     defer alloc.free(expected);
-    const uri = try std.fmt.allocPrint(alloc, "file://{s}", .{alias_path});
+    const uri = try alloc.print("file://{s}", .{alias_path});
     defer alloc.free(uri);
 
     const actual = (try localFileTargetPath(alloc, uri)) orelse
@@ -3529,15 +3527,14 @@ test "localFileTargetPath canonicalizes a local symlink target" {
 }
 
 test "parsePromptInput releases partial resource state across allocation failures" {
-    const backing = std.testing.allocator;
+    const backing = testing_allocator.no_resize;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var file = try tmp.dir.createFile(std.testing.io, "local.txt", .{});
     file.close(std.testing.io);
     const local_path = try io_mod.dirRealpathAlloc(backing, tmp.dir, "local.txt");
     defer backing.free(local_path);
-    const params = try std.fmt.allocPrint(
-        backing,
+    const params = try backing.print(
         "{{\"sessionId\":\"s1\",\"prompt\":[" ++
             "{{\"type\":\"resource\",\"resource\":{{\"uri\":\"file://{s}\",\"text\":\"local body\"}}}}," ++
             "{{\"type\":\"resource\",\"resource\":{{\"uri\":\"https://example.test/reference.txt\",\"text\":\"remote body\"}}}}]}}",
@@ -3947,7 +3944,7 @@ const AcpContextRegistryFixture = struct {
     fn gather(alloc: Allocator, _: context_contract.InitialContextInput) context_contract.ProviderError!context_contract.ProviderContext {
         gather_calls += 1;
         if (gather_error) |err| return err;
-        return .{ .content = try std.fmt.allocPrint(alloc, "ACP registry context {d}", .{gather_calls}) };
+        return .{ .content = try alloc.print("ACP registry context {d}", .{gather_calls}) };
     }
 
     fn appendStatic(input: context_contract.StaticContextInput, alloc: Allocator, messages: *std.ArrayList(ChatMessage)) context_contract.ProviderError!void {
@@ -4373,7 +4370,7 @@ fn writeArgsJson(alloc: Allocator, path: []const u8, content: []const u8) ![]u8 
 }
 
 fn createSymlinkOrSkip(dir: std.Io.Dir, target_path: []const u8, link_path: []const u8) !void {
-    if (comptime @import("builtin").os.tag == .windows) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
     dir.symLink(std.testing.io, target_path, link_path, .{ .is_directory = false }) catch |err| {
         if (err == error.AccessDenied or std.mem.eql(u8, @errorName(err), "Permission" ++ "Denied")) {
             return error.SkipZigTest;
@@ -4641,9 +4638,8 @@ test "ACP auto mode automatic review clears or cautions prepared external file m
         ),
     };
 
-    const target_path = try std.fs.path.join(arena, &.{ external, "desktop-test.txt" });
-    const arguments_json = try std.fmt.allocPrint(
-        arena,
+    const target_path = try std.Io.Dir.path.join(arena, &.{ external, "desktop-test.txt" });
+    const arguments_json = try arena.print(
         "{{\"path\":\"{s}\",\"content\":\"hello\\n\"}}",
         .{target_path},
     );

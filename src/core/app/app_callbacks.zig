@@ -1,3 +1,4 @@
+const testing_allocator = @import("../shared/testing_allocator.zig");
 const std = @import("std");
 const agent_runtime = @import("../agent/agent_runtime.zig");
 const agent_stream_provider = @import("../agent/stream_provider.zig");
@@ -133,7 +134,7 @@ test "prepared diff payload keeps compact elision and retains the complete appro
         var line: [32]u8 = undefined;
         try after.appendSlice(
             alloc,
-            try std.fmt.bufPrint(&line, "full-review-{d:0>3}\n", .{line_number}),
+            try std.mem.print(&line, "full-review-{d:0>3}\n", .{line_number}),
         );
     }
 
@@ -166,11 +167,11 @@ test "prepared diff payload keeps compact elision and retains the complete appro
     const payload = try preparedDiffPayload(alloc, enriched_handoff);
     defer diff_mod.freeDiffEntryPayload(alloc, payload);
 
-    try std.testing.expect(std.mem.indexOf(u8, payload.preview, "⋯ +118 omitted") != null);
+    try std.testing.expect(std.mem.find(u8, payload.preview, "⋯ +118 omitted") != null);
     const full = payload.full orelse return error.TestExpectedFullDiff;
-    try std.testing.expect(std.mem.indexOf(u8, full.content, "full-review-001") != null);
-    try std.testing.expect(std.mem.indexOf(u8, full.content, "full-review-120") != null);
-    try std.testing.expect(std.mem.indexOf(u8, full.content, "⋯ +118 omitted") == null);
+    try std.testing.expect(std.mem.find(u8, full.content, "full-review-001") != null);
+    try std.testing.expect(std.mem.find(u8, full.content, "full-review-120") != null);
+    try std.testing.expect(std.mem.find(u8, full.content, "⋯ +118 omitted") == null);
 }
 
 test "prepared diff payload keeps compact output when full formatting is unavailable" {
@@ -181,7 +182,7 @@ test "prepared diff payload keeps compact output when full formatting is unavail
         .lifecycle_id = .{ .turn_id = 40, .call_id = "full-format-fallback" },
     };
     var failing = std.testing.FailingAllocator.init(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         .{ .fail_index = 0 },
     );
 
@@ -193,7 +194,7 @@ test "prepared diff payload keeps compact output when full formatting is unavail
     defer diff_mod.freeDiffEntryPayload(std.testing.allocator, payload);
 
     try std.testing.expect(payload.full == null);
-    try std.testing.expect(std.mem.indexOf(u8, payload.preview, "after") != null);
+    try std.testing.expect(std.mem.find(u8, payload.preview, "after") != null);
 }
 
 test "full diff formatter renders unchanged review elisions" {
@@ -257,9 +258,9 @@ test "full diff formatter renders unchanged review elisions" {
     )) orelse
         return error.TestExpectedFullDiff;
     defer full.deinit(std.testing.allocator);
-    try std.testing.expect(std.mem.indexOf(u8, full.content, "5 unchanged lines ⋯") != null);
-    try std.testing.expect(std.mem.indexOf(u8, full.content, "old") != null);
-    try std.testing.expect(std.mem.indexOf(u8, full.content, "new") != null);
+    try std.testing.expect(std.mem.find(u8, full.content, "5 unchanged lines ⋯") != null);
+    try std.testing.expect(std.mem.find(u8, full.content, "old") != null);
+    try std.testing.expect(std.mem.find(u8, full.content, "new") != null);
 }
 
 pub fn Bindings(comptime App: type) type {
@@ -924,13 +925,12 @@ pub fn Bindings(comptime App: type) type {
                 try gateway_error_format.formatHttpErrorMessage(std.heap.c_allocator, status, detail);
             defer std.heap.c_allocator.free(message);
             const label = if (auth_failure != null)
-                try std.fmt.allocPrint(
-                    std.heap.c_allocator,
+                try std.heap.c_allocator.print(
                     "⚠ {s} · Run /login to choose another source.",
                     .{message},
                 )
             else
-                try std.fmt.allocPrint(std.heap.c_allocator, "⚠ {s}", .{message});
+                try std.heap.c_allocator.print("⚠ {s}", .{message});
             defer std.heap.c_allocator.free(label);
             try app_worker_runtime.Runtime(App).pushEvent(app, .{ .api_status_text = label });
         }
@@ -940,8 +940,7 @@ pub fn Bindings(comptime App: type) type {
             const question = switch (request.finish_reason) {
                 .content_filter => "Response blocked by content filter. What should fx do?",
                 else => if (request.replay_safe)
-                    try std.fmt.allocPrint(
-                        arena,
+                    try arena.print(
                         "Route failed after {d} attempt{s} for {s}. What should fx do?",
                         .{
                             request.semantic_attempts,
@@ -1488,7 +1487,7 @@ const FakeApp = struct {
 
     fn validateToolCall(self: *FakeApp, arena: Allocator, call: ToolCall) !agent_runtime.ToolCallValidationResult {
         _ = self;
-        return .{ .failure = try std.fmt.allocPrint(arena, "invalid {s}", .{call.name}) };
+        return .{ .failure = try arena.print("invalid {s}", .{call.name}) };
     }
 
     fn checkToolAvailability(self: *FakeApp, _: Allocator, _: ToolCall) !?[]const u8 {
@@ -1498,22 +1497,22 @@ const FakeApp = struct {
 
     fn describeToolActionForRuntime(self: *FakeApp, arena: Allocator, call: ToolCall, _: ?[]const u8) ![]const u8 {
         _ = self;
-        return std.fmt.allocPrint(arena, "run {s}", .{call.name});
+        return arena.print("run {s}", .{call.name});
     }
 
     fn describeToolActionCompletedForRuntime(self: *FakeApp, arena: Allocator, call: ToolCall, _: ?[]const u8) ![]const u8 {
         _ = self;
-        return std.fmt.allocPrint(arena, "done {s}", .{call.name});
+        return arena.print("done {s}", .{call.name});
     }
 
     fn describeToolActionDeniedForRuntime(self: *FakeApp, arena: Allocator, call: ToolCall, _: ?[]const u8, label: []const u8) ![]const u8 {
         _ = self;
-        return std.fmt.allocPrint(arena, "denied {s} {s}", .{ call.name, label });
+        return arena.print("denied {s} {s}", .{ call.name, label });
     }
 
     fn permissionTargetForCallForRuntime(self: *FakeApp, arena: Allocator, call: ToolCall) ![]const u8 {
         _ = self;
-        return std.fmt.allocPrint(arena, "target:{s}", .{call.id});
+        return arena.print("target:{s}", .{call.id});
     }
 
     fn executeToolCallForRuntime(
@@ -1533,7 +1532,7 @@ const FakeApp = struct {
 
     fn formatToolExecutionErrorForAgent(self: *FakeApp, arena: Allocator, tool_name: []const u8, err: anyerror) ![]const u8 {
         _ = self;
-        return std.fmt.allocPrint(arena, "{s}:{s}", .{ tool_name, @errorName(err) });
+        return arena.print("{s}:{s}", .{ tool_name, @errorName(err) });
     }
 
     fn writeUserPromptCard(self: *FakeApp, prompt: types.UserTurn) !void {
@@ -1561,7 +1560,7 @@ const FakeApp = struct {
         self.command_output_count += 1;
     }
 
-    fn writeCommandOutputChunkForLifecycle(self: *FakeApp, lifecycle_id: ?types.ToolLifecycleId, stream: command_output_content.Stream, text: []const u8, record: bool) !void {
+    pub fn writeCommandOutputChunkForLifecycle(self: *FakeApp, lifecycle_id: ?types.ToolLifecycleId, stream: command_output_content.Stream, text: []const u8, record: bool) !void {
         storeLifecycleId(
             &self.last_command_output_lifecycle_turn_id,
             &self.last_command_output_lifecycle_call_id,
@@ -1574,7 +1573,7 @@ const FakeApp = struct {
         try self.flushCommandOutputSummaryForLifecycle(null, record);
     }
 
-    fn flushCommandOutputSummaryForLifecycle(self: *FakeApp, lifecycle_id: ?types.ToolLifecycleId, record: bool) !void {
+    pub fn flushCommandOutputSummaryForLifecycle(self: *FakeApp, lifecycle_id: ?types.ToolLifecycleId, record: bool) !void {
         _ = record;
         storeLifecycleId(
             &self.last_command_output_complete_lifecycle_turn_id,

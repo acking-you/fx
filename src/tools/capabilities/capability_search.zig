@@ -1,4 +1,5 @@
 const std = @import("std");
+const testing_allocator = @import("../../core/shared/testing_allocator.zig");
 const lexical_relevance = @import("../../core/shared/lexical_relevance.zig");
 const result_store = @import("../../core/session/result_store.zig");
 const capability_retrieval = @import("../../core/tooling/capability_retrieval.zig");
@@ -91,8 +92,7 @@ pub fn call(
     );
     const output = skill_search.searchRequest(ctx, input.request(), output_cap) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        else => return .{ .failure = try std.fmt.allocPrint(
-            ctx.allocator,
+        else => return .{ .failure = try ctx.allocator.print(
             "capability_search skill search failed: {s}",
             .{@errorName(err)},
         ) },

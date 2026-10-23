@@ -828,7 +828,7 @@ pub fn formatCompactCommandStatus(
         (text[text.len - 1] == '\n' or text[text.len - 1] == '\r');
     if (next == text.len and display_width.visibleWidthIgnoringAnsi(line) <= cols) {
         return if (preserve_trailing_newline)
-            std.fmt.allocPrint(alloc, "{s}\n", .{line})
+            alloc.print("{s}\n", .{line})
         else
             alloc.dupe(u8, line);
     }
@@ -2813,8 +2813,7 @@ test "semantic notice renders every tone and resets before following content" {
         }, styles, 80);
         defer alloc.free(rendered);
 
-        const expected = try std.fmt.allocPrint(
-            alloc,
+        const expected = try alloc.print(
             "{s}● Topic:\x1b[0m\x1b[37m body\x1b[0m",
             .{label_style},
         );
@@ -2873,8 +2872,7 @@ test "plan notice renders a Codex-style checklist" {
 test "semantic notice keeps an OSC 8 target hidden and clickable" {
     const alloc = std.testing.allocator;
     const url = "https://example.com/report";
-    const body = try std.fmt.allocPrint(
-        alloc,
+    const body = try alloc.print(
         "\x1b]8;;{s}\x1b\\Open feedback form\x1b]8;;\x1b\\.",
         .{url},
     );
@@ -4422,7 +4420,7 @@ test "Unicode display units remain atomic in three-column vertical tables" {
     };
 
     for (sequences) |sequence| {
-        const source = try std.fmt.allocPrint(alloc, "| S |\n|---|\n| {s} |\n", .{sequence});
+        const source = try alloc.print("| S |\n|---|\n| {s} |\n", .{sequence});
         defer alloc.free(source);
         var table = try assistant_presentation.parseTablePayload(alloc, source);
         defer table.deinit(alloc);

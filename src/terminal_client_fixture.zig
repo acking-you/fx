@@ -406,7 +406,7 @@ fn openFixtureOwnerCapability(
 ) !session_child_store.SessionChildCapability {
     const sessions_path = try profile_paths.sessionsDir(alloc, home);
     defer alloc.free(sessions_path);
-    const owner_path = try std.fs.path.join(
+    const owner_path = try std.Io.Dir.path.join(
         alloc,
         &.{ sessions_path, fixture_owner_session_id },
     );
@@ -752,7 +752,7 @@ fn orderingMarkerPath(
 ) ![]const u8 {
     const prefix = io_mod.getenv("FX_TERMINAL_TEST_ORDER_BARRIER") orelse
         return error.TerminalOutcomeFixtureBarrierMissing;
-    return std.fmt.bufPrint(
+    return std.mem.print(
         buffer,
         "{s}.{d}.{s}",
         .{ prefix, correlation_id, suffix },

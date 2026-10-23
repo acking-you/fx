@@ -1062,13 +1062,12 @@ fn gatherTestProjectContext(_: Allocator, _: context_contract.InitialContextInpu
 }
 
 fn appendTestStaticContext(input: context_contract.StaticContextInput, alloc: Allocator, messages: *std.ArrayList(ChatMessage)) context_contract.ProviderError!void {
-    const content = try std.fmt.allocPrint(alloc, "provider static:{s}", .{input.project_context});
+    const content = try alloc.print("provider static:{s}", .{input.project_context});
     try messages.append(alloc, .{ .role = .system, .content = content });
 }
 
 fn appendTestTransientContext(input: context_contract.TransientContextInput, alloc: Allocator, messages: *std.ArrayList(ChatMessage)) context_contract.ProviderError!void {
-    const content = try std.fmt.allocPrint(
-        alloc,
+    const content = try alloc.print(
         "provider transient:{s}:{s}",
         .{ input.workspace_root, @tagName(input.permission_mode) },
     );
@@ -1101,7 +1100,7 @@ fn gatherFreshProjectContext(alloc: Allocator, input: context_contract.InitialCo
     refresh_targets_match = input.targets.len == 1 and
         input.targets[0].kind == .file and
         std.mem.eql(u8, input.targets[0].path, "/tmp/workspace/images/example.png");
-    const content = try std.fmt.allocPrint(alloc, "fresh:{s}", .{input.workspace_root});
+    const content = try alloc.print("fresh:{s}", .{input.workspace_root});
     errdefer alloc.free(content);
     const notices = try alloc.alloc([]u8, 1);
     errdefer alloc.free(notices);
@@ -1154,7 +1153,7 @@ const RefreshContextApp = struct {
         self.session.deinit(self.alloc);
     }
 
-    fn writeDomainNotice(self: *RefreshContextApp, notice: types.SemanticNotice, _: bool) !void {
+    pub fn writeDomainNotice(self: *RefreshContextApp, notice: types.SemanticNotice, _: bool) !void {
         self.context_notice_tone = notice.tone;
         self.context_notice_visibility = notice.visibility;
         try self.context_notices.appendSlice(self.alloc, notice.body);
@@ -1259,7 +1258,7 @@ const FakeApp = struct {
         return app;
     }
 
-    fn toolRegistry(self: *const FakeApp) tool_dispatch.Registry {
+    pub fn toolRegistry(self: *const FakeApp) tool_dispatch.Registry {
         return self.tool_registry;
     }
 
@@ -1429,7 +1428,7 @@ const FakeApp = struct {
 
     pub fn formatToolExecutionErrorForAgent(self: *FakeApp, arena: Allocator, tool_name: []const u8, err: anyerror) ![]const u8 {
         _ = self;
-        return std.fmt.allocPrint(arena, "Tool {s} failed: {s}", .{ tool_name, @errorName(err) });
+        return arena.print("Tool {s} failed: {s}", .{ tool_name, @errorName(err) });
     }
 };
 
@@ -1742,7 +1741,7 @@ test "app agent runtime bounds a large multiline run command activity" {
     const label = try app.describeToolAction(arena, .{
         .id = "large_command",
         .name = "exec_command",
-        .arguments_json = "{\"cmd\":\"" ++ ("x\\n" ** 20_000) ++ "\"}",
+        .arguments_json = "{\"cmd\":\"" ++ (text_utils.repeat("x\\n", 20_000)) ++ "\"}",
     });
 
     try std.testing.expect(label.len <= 180);

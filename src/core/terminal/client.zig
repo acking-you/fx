@@ -1,3 +1,4 @@
+const testing_allocator = @import("../shared/testing_allocator.zig");
 const std = @import("std");
 const builtin = @import("builtin");
 const host_target = @import("../hosts/target.zig");
@@ -890,7 +891,7 @@ fn connectOrStart(
 }
 
 fn tryConnect(endpoint_path: []const u8) ?std.Io.net.Stream {
-    if (comptime builtin.os.tag != .macos and builtin.os.tag != .linux) {
+    if (comptime builtin.target.os.tag != .macos and builtin.target.os.tag != .linux) {
         const address = std.Io.net.UnixAddress.init(endpoint_path) catch return null;
         return address.connect(io_mod.getIo()) catch null;
     }
@@ -954,7 +955,7 @@ fn launchHost(alloc: Allocator) !void {
         .stdin = .ignore,
         .stdout = .ignore,
         .stderr = .ignore,
-        .pgid = if (builtin.os.tag == .macos or builtin.os.tag == .linux)
+        .pgid = if (builtin.target.os.tag == .macos or builtin.target.os.tag == .linux)
             0
         else
             null,
@@ -964,7 +965,7 @@ fn launchHost(alloc: Allocator) !void {
 }
 
 fn reapChild(child_value: std.process.Child) void {
-    if (comptime builtin.os.tag == .macos or builtin.os.tag == .linux) {
+    if (comptime builtin.target.os.tag == .macos or builtin.target.os.tag == .linux) {
         const pid = child_value.id orelse return;
         while (true) {
             const waited = std.c.waitpid(pid, null, 0);
@@ -1088,7 +1089,7 @@ fn checkIntentAllocationFailures(alloc: Allocator) !void {
 
 test "owned admission survives allocation failure and rollback has one owner" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkIntentAllocationFailures,
         .{},
     );
@@ -1435,7 +1436,7 @@ test "stalled request cancellation emits only the targeted cancel" {
 test "unsupported client platforms remain structural" {
     const host_capabilities = @import("../hosts/host.zig");
     try std.testing.expectEqual(
-        host_capabilities.terminalSupportForOs(builtin.os.tag).isSupported(),
+        host_capabilities.terminalSupportForOs(builtin.target.os.tag).isSupported(),
         host.isSupported(),
     );
 }

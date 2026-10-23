@@ -47,7 +47,7 @@ const FetchOperation = struct {
     pub fn run(self: *@This()) !FetchResponse {
         var client: std.http.Client = .{ .allocator = self.alloc, .io = io_mod.getIo() };
         defer client.deinit();
-        const auth_header = try std.fmt.allocPrint(self.alloc, "Bearer {s}", .{self.credential});
+        const auth_header = try self.alloc.print("Bearer {s}", .{self.credential});
         defer secret.zeroAndFree(self.alloc, auth_header);
         const body_buffer = try self.alloc.alloc(u8, max_billing_bytes + 1);
         defer secret.zeroAndFree(self.alloc, body_buffer);

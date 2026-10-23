@@ -775,7 +775,7 @@ test "create operation store round trips exact durable reservations" {
     const alloc = std.testing.allocator;
     var record = try Record.init(alloc, "01J00000000000000000000000");
     defer record.deinit(alloc);
-    const fingerprint = [_]u8{0x5a} ** 32;
+    const fingerprint = @as([32]u8, @splat(0x5a));
     try record.append(
         alloc,
         "create-op",
@@ -821,7 +821,7 @@ test "process-epoch create records retain exact receipts and reset authority" {
     try record.append(
         alloc,
         process_id,
-        [_]u8{0x5a} ** 32,
+        @as([32]u8, @splat(0x5a)),
         "legacy-child",
     );
     record.identity_epoch_high = 999;
@@ -874,7 +874,7 @@ test "create identity classification admits only outstanding manager identities"
     try record.append(
         alloc,
         retained,
-        [_]u8{0x5a} ** 32,
+        @as([32]u8, @splat(0x5a)),
         "child-id",
     );
     const older = try tool_result.boundOperationIdAlloc(alloc, "older", .human, 9);
@@ -910,7 +910,7 @@ test "outstanding identity reservations are bounded without losing retries" {
     defer record.deinit(alloc);
     for (0..max_outstanding_operations) |index| {
         var invocation_buffer: [64]u8 = undefined;
-        const invocation = try std.fmt.bufPrint(
+        const invocation = try std.mem.print(
             &invocation_buffer,
             "outstanding-{d}",
             .{index},
@@ -1024,12 +1024,12 @@ test "create replay horizon is canonical-byte bounded" {
     const alloc = std.testing.allocator;
     var record = try Record.init(alloc, "root-id");
     defer record.deinit(alloc);
-    const suffix = [_]u8{'x'} ** 220;
-    const fingerprint = [_]u8{0x5a} ** 32;
+    const suffix = @as([220]u8, @splat('x'));
+    const fingerprint = @as([32]u8, @splat(0x5a));
     const count: usize = 1300;
     for (0..count) |index| {
         var invocation_buffer: [64]u8 = undefined;
-        const invocation = try std.fmt.bufPrint(&invocation_buffer, "create-{d}", .{index});
+        const invocation = try std.mem.print(&invocation_buffer, "create-{d}", .{index});
         const operation_id = try tool_result.boundOperationIdAlloc(
             alloc,
             invocation,
@@ -1037,7 +1037,7 @@ test "create replay horizon is canonical-byte bounded" {
             @intCast(index + 1),
         );
         defer alloc.free(operation_id);
-        const child_id = try std.fmt.allocPrint(alloc, "child-{d}-{s}", .{ index, &suffix });
+        const child_id = try alloc.print("child-{d}-{s}", .{ index, &suffix });
         defer alloc.free(child_id);
         try record.append(alloc, operation_id, fingerprint, child_id);
     }
@@ -1072,7 +1072,7 @@ test "non-monotonic process epochs cannot advance manager compaction horizon" {
     const alloc = std.testing.allocator;
     var record = try Record.init(alloc, "root-id");
     defer record.deinit(alloc);
-    const fingerprint = [_]u8{0x5a} ** 32;
+    const fingerprint = @as([32]u8, @splat(0x5a));
     const manager_five = try tool_result.boundOperationIdAlloc(
         alloc,
         "manager-five",
@@ -1112,11 +1112,11 @@ test "non-monotonic process epochs cannot advance manager compaction horizon" {
 fn checkCreateCompactionAllocationFailures(alloc: Allocator) !void {
     var record = try Record.init(alloc, "root-id");
     defer record.deinit(alloc);
-    const fingerprint = [_]u8{0x5a} ** 32;
+    const fingerprint = @as([32]u8, @splat(0x5a));
     inline for (.{ 1, 2, 3 }) |epoch| {
         const operation_id = try tool_result.boundOperationIdAlloc(alloc, "create", .model, epoch);
         defer alloc.free(operation_id);
-        const child_id = try std.fmt.allocPrint(alloc, "child-{d}", .{epoch});
+        const child_id = try alloc.print("child-{d}", .{epoch});
         defer alloc.free(child_id);
         try record.append(alloc, operation_id, fingerprint, child_id);
     }

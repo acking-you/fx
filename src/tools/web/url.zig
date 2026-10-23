@@ -282,7 +282,7 @@ fn stripFragment(path_query_fragment: []const u8) []const u8 {
 fn normalizePathQuery(alloc: Allocator, path_query: []const u8) Error![]u8 {
     for (path_query) |char| if (std.ascii.isWhitespace(char)) return error.RequestTargetWhitespace;
     if (path_query.len == 0) return alloc.dupe(u8, "/");
-    if (path_query[0] == '?') return std.fmt.allocPrint(alloc, "/{s}", .{path_query});
+    if (path_query[0] == '?') return alloc.print("/{s}", .{path_query});
     return alloc.dupe(u8, path_query);
 }
 
@@ -297,19 +297,19 @@ fn formatUrl(
     const host_text = try hostForUrl(alloc, host);
     defer alloc.free(host_text);
     const authority = if (userinfo) |value|
-        try std.fmt.allocPrint(alloc, "{s}@{s}", .{ value, host_text })
+        try alloc.print("{s}@{s}", .{ value, host_text })
     else
         try alloc.dupe(u8, host_text);
     defer alloc.free(authority);
     if (explicit_port) |port| {
-        return std.fmt.allocPrint(alloc, "{s}://{s}:{d}{s}", .{ scheme.text(), authority, port, path_query });
+        return alloc.print("{s}://{s}:{d}{s}", .{ scheme.text(), authority, port, path_query });
     }
-    return std.fmt.allocPrint(alloc, "{s}://{s}{s}", .{ scheme.text(), authority, path_query });
+    return alloc.print("{s}://{s}{s}", .{ scheme.text(), authority, path_query });
 }
 
 fn hostForUrl(alloc: Allocator, canonical_host: []const u8) ![]u8 {
     if (std.mem.findScalar(u8, canonical_host, ':') == null) return alloc.dupe(u8, canonical_host);
-    return std.fmt.allocPrint(alloc, "[{s}]", .{canonical_host});
+    return alloc.print("[{s}]", .{canonical_host});
 }
 
 fn absoluteRedirectUrl(alloc: Allocator, current: ParsedUrl, location: []const u8) Error![]u8 {
@@ -318,13 +318,13 @@ fn absoluteRedirectUrl(alloc: Allocator, current: ParsedUrl, location: []const u
 
     if (hasHttpScheme(without_fragment)) return alloc.dupe(u8, without_fragment);
     if (std.mem.startsWith(u8, without_fragment, "//")) {
-        return std.fmt.allocPrint(alloc, "{s}:{s}", .{ current.scheme.text(), without_fragment });
+        return alloc.print("{s}:{s}", .{ current.scheme.text(), without_fragment });
     }
     if (hasAbsoluteScheme(without_fragment)) return error.UnsupportedScheme;
 
     if (without_fragment[0] == '?') {
         const path_end = std.mem.findScalar(u8, current.path_query, '?') orelse current.path_query.len;
-        const path_query = try std.fmt.allocPrint(alloc, "{s}{s}", .{ current.path_query[0..path_end], without_fragment });
+        const path_query = try alloc.print("{s}{s}", .{ current.path_query[0..path_end], without_fragment });
         defer alloc.free(path_query);
         return formatUrl(alloc, current.scheme, currentUserinfo(current), current.canonical_host, current.explicit_port, path_query);
     }
@@ -365,11 +365,11 @@ fn mergeRelativePath(alloc: Allocator, current_path_query: []const u8, relative:
     const current_path = current_path_query[0..current_path_end];
     const base_end = if (std.mem.lastIndexOfScalar(u8, current_path, '/')) |slash| slash + 1 else 0;
     const query_start = std.mem.findScalar(u8, relative, '?') orelse relative.len;
-    const joined = try std.fmt.allocPrint(alloc, "{s}{s}", .{ current_path[0..base_end], relative[0..query_start] });
+    const joined = try alloc.print("{s}{s}", .{ current_path[0..base_end], relative[0..query_start] });
     defer alloc.free(joined);
     const normalized_path = try removeDotSegments(alloc, joined);
     defer alloc.free(normalized_path);
-    return std.fmt.allocPrint(alloc, "{s}{s}", .{ normalized_path, relative[query_start..] });
+    return alloc.print("{s}{s}", .{ normalized_path, relative[query_start..] });
 }
 
 fn removeDotSegments(alloc: Allocator, path: []const u8) ![]u8 {

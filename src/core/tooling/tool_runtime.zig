@@ -1,3 +1,4 @@
+const testing_allocator = @import("../shared/testing_allocator.zig");
 const std = @import("std");
 const builtin = @import("builtin");
 const agent_stream_provider = @import("../agent/stream_provider.zig");
@@ -360,7 +361,7 @@ pub fn executeToolCallAuthorized(
             .maybe_cancel_flag = execution_ctx.cancel_flag,
             .lifecycle_id = request.lifecycle_id,
         })
-    else if (comptime builtin.os.tag == .wasi)
+    else if (comptime builtin.target.os.tag == .wasi)
         semanticFailure(try request.result_allocator.dupe(u8, "Unified Exec is unavailable on this host."))
     else
         executeToolCallInner(
@@ -464,7 +465,7 @@ fn resolveToolDispatchPrelude(
     }
     if (registeredToolSpec(ctx, call.name) != null) return .registered_static;
     return .{ .completed = semanticFailure(
-        try std.fmt.allocPrint(arena, "Unsupported tool: {s}", .{call.name}),
+        try arena.print("Unsupported tool: {s}", .{call.name}),
     ) };
 }
 
@@ -1620,15 +1621,14 @@ test "subagent production identity inspections leave no mutation reservations" {
     const child_id = try subagentResultStringAlloc(alloc, created.model_output, "child_id");
     defer alloc.free(child_id);
 
-    const inspect_args = try std.fmt.allocPrint(
-        alloc,
+    const inspect_args = try alloc.print(
         "{{\"command\":{{\"inspect\":{{\"id\":\"{s}\",\"sections\":[\"status\"]}}}}}}",
         .{child_id},
     );
     defer alloc.free(inspect_args);
     for (0..3) |index| {
         var invocation_buffer: [64]u8 = undefined;
-        const invocation_id = try std.fmt.bufPrint(
+        const invocation_id = try std.mem.print(
             &invocation_buffer,
             "inspect-{d}",
             .{index},
@@ -1650,8 +1650,7 @@ test "subagent production identity inspections leave no mutation reservations" {
         );
     }
 
-    const configure_args = try std.fmt.allocPrint(
-        alloc,
+    const configure_args = try alloc.print(
         "{{\"command\":{{\"configure\":{{\"id\":\"{s}\",\"name\":\"renamed\"}}}}}}",
         .{child_id},
     );
@@ -1731,7 +1730,7 @@ test "subagent production stable failures leave no mutation reservations" {
     ;
     for (0..3) |index| {
         var invocation_buffer: [64]u8 = undefined;
-        const invocation_id = try std.fmt.bufPrint(
+        const invocation_id = try std.mem.print(
             &invocation_buffer,
             "stable-model-failure-{d}",
             .{index},
@@ -1757,8 +1756,7 @@ test "subagent production stable failures leave no mutation reservations" {
         );
     }
 
-    const configure_args = try std.fmt.allocPrint(
-        alloc,
+    const configure_args = try alloc.print(
         "{{\"command\":{{\"configure\":{{\"id\":\"{s}\",\"name\":\"still writable\"}}}}}}",
         .{child_id},
     );
@@ -2128,8 +2126,7 @@ test "subagent identity evidence prefers canonical active-turn results and authe
         0,
     );
     defer alloc.free(zero_epoch_id);
-    const process_local_id = try std.fmt.allocPrint(
-        alloc,
+    const process_local_id = try alloc.print(
         "fxop:{s}",
         .{current_operation_id["fxop:2:".len..]},
     );
@@ -2347,7 +2344,7 @@ fn expectToolErrorDetailInt(json: []const u8, field: []const u8, expected: i64) 
 }
 
 fn writeTestFile(dir: std.Io.Dir, path: []const u8, content: []const u8) !void {
-    if (std.fs.path.dirname(path)) |parent| {
+    if (std.Io.Dir.path.dirname(path)) |parent| {
         try dir.createDirPath(io_mod.getIo(), parent);
     }
     var file = try dir.createFile(std.testing.io, path, .{ .truncate = true });
@@ -2356,7 +2353,7 @@ fn writeTestFile(dir: std.Io.Dir, path: []const u8, content: []const u8) !void {
 }
 
 fn writeLargeTestFile(dir: std.Io.Dir, path: []const u8, prefix: []const u8, fill_len: usize) !void {
-    if (std.fs.path.dirname(path)) |parent| {
+    if (std.Io.Dir.path.dirname(path)) |parent| {
         try dir.createDirPath(io_mod.getIo(), parent);
     }
     var file = try dir.createFile(std.testing.io, path, .{ .truncate = true });
@@ -3165,12 +3162,11 @@ test "local file mutations bypass review while external mutations use exact revi
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     const targets = [_][]const u8{
-        try std.fs.path.join(arena, &.{ workspace, "approved-local.txt" }),
-        try std.fs.path.join(arena, &.{ external, "approved-external.txt" }),
+        try std.Io.Dir.path.join(arena, &.{ workspace, "approved-local.txt" }),
+        try std.Io.Dir.path.join(arena, &.{ external, "approved-external.txt" }),
     };
     for (targets, 0..) |target, index| {
-        const args = try std.fmt.allocPrint(
-            arena,
+        const args = try arena.print(
             "{{\"path\":\"{s}\",\"content\":\"alpha\\nbeta\\n\"}}",
             .{target},
         );
@@ -3215,14 +3211,13 @@ test "main file mutation producer rejects wildcard-bearing grant roots before pr
     for ([_]u8{ '*', '?' }) |wildcard| {
         for ([_]Scope{ .workspace, .external }) |scope| {
             const prefix = if (scope == .workspace) "workspace" else "external";
-            const dir_name = try std.fmt.allocPrint(
-                arena,
+            const dir_name = try arena.print(
                 "{s}{c}literal",
                 .{ prefix, wildcard },
             );
             try tmp.dir.createDirPath(io_mod.getIo(), dir_name);
             const literal_root = try io_mod.dirRealpathAlloc(arena, tmp.dir, dir_name);
-            const edit_path = try std.fs.path.join(arena, &.{ dir_name, "edit.txt" });
+            const edit_path = try std.Io.Dir.path.join(arena, &.{ dir_name, "edit.txt" });
             {
                 var file = try tmp.dir.createFile(
                     io_mod.getIo(),
@@ -3235,7 +3230,7 @@ test "main file mutation producer rejects wildcard-bearing grant roots before pr
 
             for ([_]file_mutation_contract.Kind{ .write, .edit }) |kind| {
                 const basename = if (kind == .write) "write.txt" else "edit.txt";
-                const target_path = try std.fs.path.join(
+                const target_path = try std.Io.Dir.path.join(
                     arena,
                     &.{ literal_root, basename },
                 );
@@ -3316,19 +3311,19 @@ test "main file mutation prompts project producer-backed workspace and external 
     var arena_state = std.heap.ArenaAllocator.init(alloc);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const workspace_write = try std.fs.path.join(
+    const workspace_write = try std.Io.Dir.path.join(
         arena,
         &.{ workspace, "write.txt" },
     );
-    const workspace_edit = try std.fs.path.join(
+    const workspace_edit = try std.Io.Dir.path.join(
         arena,
         &.{ workspace, "edit.txt" },
     );
-    const external_write = try std.fs.path.join(
+    const external_write = try std.Io.Dir.path.join(
         arena,
         &.{ external, "write.txt" },
     );
-    const external_edit = try std.fs.path.join(
+    const external_edit = try std.Io.Dir.path.join(
         arena,
         &.{ external, "edit.txt" },
     );
@@ -3348,13 +3343,11 @@ test "main file mutation prompts project producer-backed workspace and external 
         std.Io.Dir.max_path_bytes,
         max_edit_path.len,
     );
-    const workspace_pattern = try std.fmt.allocPrint(
-        arena,
+    const workspace_pattern = try arena.print(
         "{s}/**",
         .{workspace},
     );
-    const external_pattern = try std.fmt.allocPrint(
-        arena,
+    const external_pattern = try arena.print(
         "{s}/**",
         .{external},
     );
@@ -3565,12 +3558,11 @@ test "file mutation lifecycle decodes each call at most once" {
         .pattern = @constCast("**"),
         .action = .deny,
     }};
-    const prompted_target = try std.fs.path.join(
+    const prompted_target = try std.Io.Dir.path.join(
         call_arena,
         &.{ external, "prompted.txt" },
     );
-    const prompted_args = try std.fmt.allocPrint(
-        call_arena,
+    const prompted_args = try call_arena.print(
         "{{\"path\":\"{s}\",\"content\":\"prompted\"}}",
         .{prompted_target},
     );
@@ -3735,12 +3727,11 @@ test "file mutation preflight separates edit approval from equality disclosure" 
     var arena_state = std.heap.ArenaAllocator.init(alloc);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const private_target = try std.fs.path.join(
+    const private_target = try std.Io.Dir.path.join(
         arena,
         &.{ external, "private.txt" },
     );
-    const private_pattern = try std.fmt.allocPrint(
-        arena,
+    const private_pattern = try arena.print(
         "{s}/**",
         .{external},
     );
@@ -3756,13 +3747,11 @@ test "file mutation preflight separates edit approval from equality disclosure" 
             .action = .allow,
         },
     };
-    const private_noop_args = try std.fmt.allocPrint(
-        arena,
+    const private_noop_args = try arena.print(
         "{{\"path\":\"{s}\",\"content\":\"private\\n\"}}",
         .{private_target},
     );
-    const private_changed_args = try std.fmt.allocPrint(
-        arena,
+    const private_changed_args = try arena.print(
         "{{\"path\":\"{s}\",\"content\":\"changed\\n\"}}",
         .{private_target},
     );
@@ -3855,7 +3844,7 @@ test "disabled automatic reviewer returns a recoverable denial without a human p
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const target = try std.fs.path.join(arena, &.{ external, "created.txt" });
+    const target = try std.Io.Dir.path.join(arena, &.{ external, "created.txt" });
     {
         var existing = try tmp.dir.createFile(
             io_mod.getIo(),
@@ -3865,7 +3854,7 @@ test "disabled automatic reviewer returns a recoverable denial without a human p
         defer existing.close(io_mod.getIo());
         try existing.writeStreamingAll(io_mod.getIo(), "before");
     }
-    const args = try std.fmt.allocPrint(arena, "{{\"path\":\"{s}\",\"content\":\"hello\"}}", .{target});
+    const args = try arena.print("{{\"path\":\"{s}\",\"content\":\"hello\"}}", .{target});
 
     const outcome = try tool_admission.requestPermissionOutcome(rt.context().admissionInput(), arena, .{
         .id = "external-write",
@@ -3991,7 +3980,7 @@ test "executeToolCall rejects overlong glob pattern with failure status" {
     var arena_state = std.heap.ArenaAllocator.init(alloc);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const args = try std.fmt.allocPrint(arena, "{{\"pattern\":\"{s}\"}}", .{pattern});
+    const args = try arena.print("{{\"pattern\":\"{s}\"}}", .{pattern});
 
     const result = try executeToolCall(rt.context(), arena, .{
         .id = "glob",
@@ -4000,7 +3989,7 @@ test "executeToolCall rejects overlong glob pattern with failure status" {
     });
 
     try std.testing.expectEqual(tool_contracts.ToolExecutionStatus.failure, result.status);
-    const expected = try std.fmt.allocPrint(arena, "glob_files field \"pattern\" must be at most {d} bytes", .{glob_pattern.max_pattern_bytes});
+    const expected = try arena.print("glob_files field \"pattern\" must be at most {d} bytes", .{glob_pattern.max_pattern_bytes});
     try std.testing.expectEqualStrings(expected, result.model_output);
 }
 
@@ -4012,7 +4001,7 @@ test "executeToolCall glob_files finds match beyond former traversal cap" {
     var i: usize = 0;
     while (i < 2050) : (i += 1) {
         var name_buf: [64]u8 = undefined;
-        const name = try std.fmt.bufPrint(&name_buf, "workspace/many/file-{d:0>4}.txt", .{i});
+        const name = try std.mem.print(&name_buf, "workspace/many/file-{d:0>4}.txt", .{i});
         try writeTestFile(tmp.dir, name, "not here\n");
     }
     try writeTestFile(tmp.dir, "workspace/zzzz/target.zig", "target\n");
@@ -4076,7 +4065,7 @@ test "executeToolCall traces non-text grep skips in normal runtime" {
     try writeTestFile(tmp.dir, "workspace/binaryish/blob.bin", "binary\x00needle\x01\n");
     const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "workspace");
     defer alloc.free(root);
-    const trace_path = try std.fs.path.join(alloc, &.{ root, "trace.log" });
+    const trace_path = try std.Io.Dir.path.join(alloc, &.{ root, "trace.log" });
     defer alloc.free(trace_path);
 
     debug_trace.resetForTest();
@@ -4110,7 +4099,7 @@ test "executeToolCall traces oversized grep skips in normal runtime" {
     try writeLargeTestFile(tmp.dir, "workspace/oversized/huge.txt", "needle hidden\n", 260 * 1024);
     const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "workspace");
     defer alloc.free(root);
-    const trace_path = try std.fs.path.join(alloc, &.{ root, "trace.log" });
+    const trace_path = try std.Io.Dir.path.join(alloc, &.{ root, "trace.log" });
     defer alloc.free(trace_path);
 
     debug_trace.resetForTest();
@@ -4442,7 +4431,7 @@ test "install_skill explicit tool installs local skill source" {
 
     var rt = TestRuntime{ .workspace_root = repo_root, .skills_dir = skills_dir };
     defer rt.deinit(alloc);
-    const args_json = try std.fmt.allocPrint(alloc, "{{\"source\":\"{s}\",\"skill\":\"workflow\"}}", .{repo_root});
+    const args_json = try alloc.print("{{\"source\":\"{s}\",\"skill\":\"workflow\"}}", .{repo_root});
     defer alloc.free(args_json);
 
     var arena_state = std.heap.ArenaAllocator.init(alloc);
@@ -4454,7 +4443,7 @@ test "install_skill explicit tool installs local skill source" {
     try expectNotContains(result.model_output, "BODY SENTINEL");
     try std.testing.expect(std.mem.find(u8, result.model_output, "workflow\"<injected>") == null);
 
-    const installed = try std.fs.path.join(alloc, &.{ skills_dir, "workflow", "SKILL.md" });
+    const installed = try std.Io.Dir.path.join(alloc, &.{ skills_dir, "workflow", "SKILL.md" });
     defer alloc.free(installed);
     var file = try std.Io.Dir.openFileAbsolute(io_mod.getIo(), installed, .{});
     defer file.close(io_mod.getIo());
@@ -4479,7 +4468,7 @@ test "skill tool preserves resource and discovery notices separately" {
         defer file.close(io_mod.getIo());
         try file.writeStreamingAll(
             io_mod.getIo(),
-            "---\nname: workflow\ndescription: workflow helper\n---\n\nuse the workflow skill\n" ++ ("bounded instruction line\n" ** 8),
+            "---\nname: workflow\ndescription: workflow helper\n---\n\nuse the workflow skill\n" ++ text_utils.repeat("bounded instruction line\n", 8),
         );
     }
     {
@@ -4573,7 +4562,7 @@ test "skill tool loads the exact advertised duplicate and rejects ambiguous or u
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const exact_managed_args = try std.fmt.allocPrint(arena, "{{\"name\":\"workflow\",\"location\":\"{s}\"}}", .{managed_skill});
+    const exact_managed_args = try arena.print("{{\"name\":\"workflow\",\"location\":\"{s}\"}}", .{managed_skill});
     const exact = try executeToolCall(rt.context(), arena, .{ .id = "exact", .name = "skill", .arguments_json = exact_managed_args });
     try std.testing.expectEqual(tool_contracts.ToolExecutionStatus.success, exact.status);
     try expectContains(exact.model_output, "MANAGED BODY B");
@@ -4592,13 +4581,13 @@ test "skill tool loads the exact advertised duplicate and rejects ambiguous or u
     try expectContains(ambiguous.model_output, workspace_skill);
     try expectContains(ambiguous.model_output, managed_skill);
 
-    const outside_args = try std.fmt.allocPrint(arena, "{{\"name\":\"workflow\",\"location\":\"{s}\"}}", .{outside_skill});
+    const outside_args = try arena.print("{{\"name\":\"workflow\",\"location\":\"{s}\"}}", .{outside_skill});
     const outside = try executeToolCall(rt.context(), arena, .{ .id = "outside", .name = "skill", .arguments_json = outside_args });
     try std.testing.expectEqual(tool_contracts.ToolExecutionStatus.failure, outside.status);
     try expectNotContains(outside.model_output, "OUTSIDE BODY SENTINEL");
     try expectNotContains(outside.model_output, "outside-only.txt");
 
-    const mismatch_args = try std.fmt.allocPrint(arena, "{{\"name\":\"other\",\"location\":\"{s}\"}}", .{managed_skill});
+    const mismatch_args = try arena.print("{{\"name\":\"other\",\"location\":\"{s}\"}}", .{managed_skill});
     const mismatch = try executeToolCall(rt.context(), arena, .{ .id = "mismatch", .name = "skill", .arguments_json = mismatch_args });
     try std.testing.expectEqual(tool_contracts.ToolExecutionStatus.failure, mismatch.status);
     try expectContains(mismatch.model_output, "does not match");
@@ -4773,10 +4762,10 @@ fn makeVisionCatalog(
     errdefer for (catalog[0..initialized]) |image| types.freeImageAttachment(alloc, image);
     const root = try io_mod.dirRealpathAlloc(alloc, dir, ".");
     defer alloc.free(root);
-    const snapshot_dir = try std.fs.path.join(alloc, &.{ root, "snapshots" });
+    const snapshot_dir = try std.Io.Dir.path.join(alloc, &.{ root, "snapshots" });
     defer alloc.free(snapshot_dir);
     for (catalog, 0..) |*image, index| {
-        const name = try std.fmt.allocPrint(alloc, "vision-{d}.png", .{index + 1});
+        const name = try alloc.print("vision-{d}.png", .{index + 1});
         defer alloc.free(name);
         try dir.writeFile(io_mod.getIo(), .{ .sub_path = name, .data = "\x89PNG\r\n\x1a\nimage bytes" });
         const path = try io_mod.dirRealpathAlloc(alloc, dir, name);
@@ -4943,7 +4932,7 @@ test "Codex vision calls fail before provider access" {
 
 fn visionRequestAllocationCount(args_json: []const u8) !usize {
     var probe = std.testing.FailingAllocator.init(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         .{ .resize_fail_index = 0 },
     );
     const alloc = probe.allocator();
@@ -4955,7 +4944,7 @@ fn visionRequestAllocationCount(args_json: []const u8) !usize {
 
 fn visionProviderParseAllocationCount(provider_json: []const u8) !usize {
     var probe = std.testing.FailingAllocator.init(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         .{ .resize_fail_index = 0 },
     );
     const alloc = probe.allocator();
@@ -4974,7 +4963,7 @@ fn visionAllocationIndexAtGateway(
     args_json: []const u8,
     provider_json: []const u8,
 ) !usize {
-    const base = std.testing.allocator;
+    const base = testing_allocator.no_resize;
     var probe = std.testing.FailingAllocator.init(
         base,
         .{ .resize_fail_index = 0 },
@@ -5092,7 +5081,7 @@ fn expectVisionOutOfMemoryAt(
     args_json: []const u8,
     provider_json: []const u8,
 ) !void {
-    const base = std.testing.allocator;
+    const base = testing_allocator.no_resize;
     var failing = OneShotFailingAllocator.init(base, fail_index);
     const responses = [_]VisionGatewayResponse{.{ .content = provider_json }};
     var fixture = VisionGatewayFixture{ .alloc = base, .responses = &responses };
@@ -5316,7 +5305,7 @@ test "vision runtime resolves historical authorized images and batches twenty as
     }
     var previous_offset: usize = 0;
     for (requested) |image_id| {
-        const needle = try std.fmt.allocPrint(alloc, "\"image_id\":{d}", .{image_id});
+        const needle = try alloc.print("\"image_id\":{d}", .{image_id});
         defer alloc.free(needle);
         const relative = std.mem.findPos(u8, result.model_output, previous_offset, needle) orelse return error.TestExpectedEqual;
         previous_offset = relative + needle.len;
@@ -5601,7 +5590,7 @@ test "vision runtime honors configured provider bounds without a hidden twenty K
     defer tmp.cleanup();
     const catalog = try makeVisionCatalog(alloc, tmp.dir, 1);
     defer types.freeImageAttachmentSlice(alloc, catalog);
-    const evidence = "x" ** 3500;
+    const evidence = text_utils.repeat("x", 3500);
     var large_out: std.Io.Writer.Allocating = .init(alloc);
     defer large_out.deinit();
     try large_out.writer.writeAll("{\"images\":[{\"image_id\":1,\"status\":\"ok\",\"summary\":\"large\",\"visible_text\":[");

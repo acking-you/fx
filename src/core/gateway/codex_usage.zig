@@ -63,11 +63,11 @@ pub fn resolveEndpointsAlloc(
     const usage_path = if (chatgpt_style) "/wham/usage" else "/api/codex/usage";
     const profile_path = if (chatgpt_style) "/wham/profiles/me" else "/api/codex/profiles/me";
 
-    const usage = try std.fmt.allocPrint(alloc, "{s}{s}", .{ account_base, usage_path });
+    const usage = try alloc.print("{s}{s}", .{ account_base, usage_path });
     errdefer alloc.free(usage);
     return .{
         .usage = usage,
-        .profile = try std.fmt.allocPrint(alloc, "{s}{s}", .{ account_base, profile_path }),
+        .profile = try alloc.print("{s}{s}", .{ account_base, profile_path }),
     };
 }
 

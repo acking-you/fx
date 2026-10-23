@@ -284,7 +284,7 @@ test "OpenAI catalog rejects malformed or conflicting BYOK capability metadata" 
         "\"reasoning_efforts\":{}",
         "\"reasoning_efforts\":[{\"value\":\"high\",\"default\":true},{\"value\":\"low\",\"default\":true}]",
     }) |fields| {
-        const json = try std.fmt.allocPrint(std.testing.allocator, "{{\"data\":[{{\"id\":\"custom\",{s}}}]}}", .{fields});
+        const json = try std.testing.allocator.print("{{\"data\":[{{\"id\":\"custom\",{s}}}]}}", .{fields});
         defer std.testing.allocator.free(json);
         try std.testing.expectError(error.MalformedResponse, parse(std.testing.allocator, json, .full));
     }

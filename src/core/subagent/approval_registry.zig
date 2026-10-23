@@ -98,7 +98,7 @@ const Binding = struct {
     child_id: []u8,
     tool_arguments_preview: ?[]u8 = null,
     prepared_fingerprint: [32]u8,
-    identity_fingerprint: [32]u8 = [_]u8{0} ** 32,
+    identity_fingerprint: [32]u8 = @as([32]u8, @splat(0)),
     worker: ?*worker_runtime.WorkerRuntime,
     worker_request_id: ?u64,
     worker_route_detached: bool = false,
@@ -1255,9 +1255,9 @@ test "bounded pending route pages reach every request beyond eight and clamp aft
 
     for (0..10) |index| {
         var request_buf: [32]u8 = undefined;
-        const request_id = try std.fmt.bufPrint(&request_buf, "approval-{d:0>2}", .{index});
+        const request_id = try std.mem.print(&request_buf, "approval-{d:0>2}", .{index});
         var child_buf: [32]u8 = undefined;
-        const child_id = try std.fmt.bufPrint(&child_buf, "child-{d:0>2}", .{index});
+        const child_id = try std.mem.print(&child_buf, "child-{d:0>2}", .{index});
         try registry.registerRelationship(
             request_id,
             child_id,

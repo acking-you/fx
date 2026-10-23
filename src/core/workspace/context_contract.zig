@@ -1,3 +1,4 @@
+const testing_allocator = @import("../shared/testing_allocator.zig");
 const std = @import("std");
 const change_tracker = @import("change_tracker.zig");
 const types = @import("../shared/types.zig");
@@ -80,20 +81,20 @@ pub const ContextOmissionInput = struct {
 
 pub const ContextOmissionSummary = struct {
     omitted_count: usize,
-    reason_counts: [std.meta.fields(OmissionReason).len]usize,
+    reason_counts: [@typeInfo(OmissionReason).@"enum".field_names.len]usize,
     digest: [std.crypto.hash.sha2.Sha256.digest_length]u8,
 };
 
 pub const ContextOmissionSummaryBuilder = struct {
     omitted_count: usize = 0,
-    reason_counts: [std.meta.fields(OmissionReason).len]usize = @splat(0),
+    reason_counts: [@typeInfo(OmissionReason).@"enum".field_names.len]usize = @splat(0),
     hasher: std.crypto.hash.sha2.Sha256 = std.crypto.hash.sha2.Sha256.init(.{}),
 
     pub fn add(self: *ContextOmissionSummaryBuilder, source: []const u8, reason: OmissionReason) void {
         self.omitted_count += 1;
-        self.reason_counts[@intFromEnum(reason)] += 1;
+        self.reason_counts[@backingInt(reason)] += 1;
         self.hasher.update("fx.context.omission-record\x00");
-        self.hasher.update(&.{@intFromEnum(reason)});
+        self.hasher.update(&.{@backingInt(reason)});
         hashUsize(&self.hasher, source.len);
         self.hasher.update(source);
     }
@@ -730,7 +731,7 @@ test "entrypoint model-visible layout snapshot covers major entrypoints" {
 test "context registry routes the default provider" {
     const Fixture = struct {
         fn gather(alloc: Allocator, input: InitialContextInput) ProviderError!ProviderContext {
-            return .{ .content = try std.fmt.allocPrint(alloc, "project:{s}", .{input.workspace_root}) };
+            return .{ .content = try alloc.print("project:{s}", .{input.workspace_root}) };
         }
 
         fn appendStatic(input: StaticContextInput, alloc: Allocator, messages: *std.ArrayList(types.ChatMessage)) ProviderError!void {
@@ -738,7 +739,7 @@ test "context registry routes the default provider" {
         }
 
         fn appendTransient(input: TransientContextInput, alloc: Allocator, messages: *std.ArrayList(types.ChatMessage)) ProviderError!void {
-            const content = try std.fmt.allocPrint(alloc, "runtime:{s}", .{input.workspace_root});
+            const content = try alloc.print("runtime:{s}", .{input.workspace_root});
             try messages.append(alloc, .{ .role = .system, .content = content });
         }
     };
@@ -845,7 +846,7 @@ test "delivery state copies snapshot seeds and atomically takes selection identi
 }
 
 test "delivery state commit leaves selection identities owned on reserve failure" {
-    const alloc = std.testing.allocator;
+    const alloc = testing_allocator.no_resize;
     var selected: ProviderContext = .{
         .delivered_sources = try dupeOwnedStrings(alloc, &.{"/workspace/src/AGENTS.md"}),
         .evaluated_endpoints = try dupeOwnedStrings(alloc, &.{"/workspace/src/nested"}),
@@ -886,7 +887,7 @@ test "gathered context snapshot cleans partial allocation failures" {
         .append_static_fn = Fixture.appendStatic,
         .append_transient_fn = Fixture.appendTransient,
     } };
-    const backing = std.testing.allocator;
+    const backing = testing_allocator.no_resize;
 
     var gather_probe = std.testing.FailingAllocator.init(backing, .{});
     var gathered = try registry.gatherDefaultSnapshot(gather_probe.allocator(), .{ .workspace_root = "/workspace" });

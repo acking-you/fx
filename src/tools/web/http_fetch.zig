@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const debug_trace = @import("../../core/shared/debug_trace.zig");
 const io_mod = @import("../../core/shared/io.zig");
+const select_watch = @import("../../core/shared/select_watch.zig");
 const socket_poll = @import("../../core/shared/socket_poll.zig");
 const web_url = @import("url.zig");
 
@@ -315,13 +316,13 @@ fn cloneUrl(alloc: Allocator, source: web_url.ParsedUrl) !web_url.ParsedUrl {
 fn hostHeader(alloc: Allocator, target: web_url.ParsedUrl) ![]u8 {
     const host = try hostForHeader(alloc, target.canonical_host);
     defer alloc.free(host);
-    if (target.explicit_port) |port| return std.fmt.allocPrint(alloc, "{s}:{d}", .{ host, port });
+    if (target.explicit_port) |port| return alloc.print("{s}:{d}", .{ host, port });
     return alloc.dupe(u8, host);
 }
 
 fn hostForHeader(alloc: Allocator, canonical_host: []const u8) ![]u8 {
     if (std.mem.findScalar(u8, canonical_host, ':') == null) return alloc.dupe(u8, canonical_host);
-    return std.fmt.allocPrint(alloc, "[{s}]", .{canonical_host});
+    return alloc.print("[{s}]", .{canonical_host});
 }
 
 fn isRedirectStatus(status: std.http.Status) bool {
@@ -341,26 +342,52 @@ fn resolveDefault(_: *anyopaque, alloc: Allocator, host: []const u8, port: u16, 
 
 const ResolveSelect = union(enum) {
     lookup: anyerror![]IpAddress,
-    timeout: anyerror!void,
+    watch: std.Io.Cancelable!select_watch.Outcome,
 };
+
+/// Ends a DNS lookup's watch when the hop deadline passes. Cancellation is
+/// checked by the lookup itself. See `select_watch` for why the resolver stops
+/// the watch instead of cancelling it.
+const ResolveCondition = struct {
+    deadline: Deadline,
+
+    pub fn cancelled(_: ResolveCondition) bool {
+        return false;
+    }
+
+    pub fn expired(condition: ResolveCondition, _: std.Io) bool {
+        return monotonicMillis() >= condition.deadline.deadline_ms;
+    }
+};
+
+const ResolveWatch = select_watch.Watch(ResolveCondition);
 
 fn resolveWithDeadline(alloc: Allocator, host_name: std.Io.net.HostName, port: u16, deadline: Deadline, options: FetchOptions) anyerror![]IpAddress {
     const zio = io_mod.getIo();
+    var watch: ResolveWatch = .{};
     var select_buffer: [2]ResolveSelect = undefined;
     var select: std.Io.Select(ResolveSelect) = .init(zio, &select_buffer);
 
-    try select.concurrent(.lookup, collectLookup, .{ alloc, host_name, port, options });
-    try select.concurrent(.timeout, waitForDeadline, .{deadline});
+    try select.concurrent(.watch, ResolveWatch.run, .{ &watch, zio, ResolveCondition{ .deadline = deadline } });
+    select.concurrent(.lookup, collectLookup, .{ alloc, host_name, port, options }) catch |err| {
+        watch.finish(&select);
+        return err;
+    };
 
-    const result = try select.await();
+    const result = select.await() catch |err| {
+        watch.stop(zio);
+        cancelResolveSelect(alloc, &select);
+        return err;
+    };
     switch (result) {
         .lookup => |lookup_result| {
-            select.cancelDiscard();
+            watch.finish(&select);
             return lookup_result;
         },
-        .timeout => |timeout_result| {
+        // getaddrinfo cannot be stopped any other way, so the lookup is cancelled.
+        .watch => |watch_result| {
             cancelResolveSelect(alloc, &select);
-            try timeout_result;
+            _ = try watch_result;
             return error.Timeout;
         },
     }
@@ -389,22 +416,13 @@ fn collectLookup(alloc: Allocator, host_name: std.Io.net.HostName, port: u16, op
     return addresses.toOwnedSlice(alloc);
 }
 
-fn waitForDeadline(deadline: Deadline) anyerror!void {
-    const timestamp: std.Io.Clock.Timestamp = .{
-        .clock = .awake,
-        .raw = std.Io.Timestamp.fromNanoseconds(@as(i96, deadline.deadline_ms) * std.time.ns_per_ms),
-    };
-    try timestamp.wait(io_mod.getIo());
-    return error.Timeout;
-}
-
 fn cancelResolveSelect(alloc: Allocator, select: *std.Io.Select(ResolveSelect)) void {
     while (select.cancel()) |item| switch (item) {
         .lookup => |lookup_result| {
             const addresses = lookup_result catch continue;
             alloc.free(addresses);
         },
-        .timeout => {},
+        .watch => {},
     };
 }
 
@@ -618,7 +636,7 @@ fn readResponse(
 
         const head_end = complete_head_end.?;
         var parsed = try parseHead(alloc, received.items[0 .. head_end - "\r\n\r\n".len]);
-        const status_code = @intFromEnum(parsed.status);
+        const status_code = @backingInt(parsed.status);
         if (status_code >= 100 and status_code < 200) {
             if (status_code == 101) {
                 parsed.deinit(alloc);
@@ -633,7 +651,7 @@ fn readResponse(
             parsed.deinit(alloc);
 
             const pending_len = received.items.len - head_end;
-            std.mem.copyForwards(u8, received.items[0..pending_len], received.items[head_end..]);
+            @memmove(received.items[0..pending_len], received.items[head_end..]);
             received.items.len = pending_len;
             continue;
         }
@@ -871,7 +889,7 @@ fn responseBodyFraming(status: StatusLine, framing: ResponseFramingState) !BodyF
     if (status.version == .http_1_0 and transfer_coding.present)
         return error.InvalidHttpResponse;
 
-    const status_code = @intFromEnum(status.status);
+    const status_code = @backingInt(status.status);
     return if (status_code == 204 or status_code == 304)
         .no_body
     else if (transfer_coding.present and framing.content_length_present)
@@ -908,7 +926,7 @@ fn parseStatusLine(line: []const u8) !StatusLine {
     }
     return .{
         .version = version,
-        .status = @enumFromInt(code),
+        .status = @fromBackingInt(@intCast(code)),
     };
 }
 
@@ -1227,7 +1245,7 @@ fn readChunkedTrailers(reader: *BodyReader, alloc: Allocator) !void {
 
 fn connectPinned(address: IpAddress, options: FetchOptions) !posix.fd_t {
     try checkControl(options);
-    if (comptime builtin.os.tag == .windows) {
+    if (comptime builtin.target.os.tag == .windows) {
         var operation = WindowsConnectOperation{ .address = address };
         return connectWindowsControlled(options, .{
             .ctx = @ptrCast(&operation),
@@ -1279,64 +1297,52 @@ const WindowsConnectOperation = struct {
 
 const ConnectControlEvent = union(enum) {
     connection: anyerror!posix.fd_t,
-    cancelled: anyerror!void,
-    deadline: anyerror!void,
+    watch: std.Io.Cancelable!select_watch.Outcome,
 };
+const ConnectWatch = select_watch.Watch(select_watch.CancellationDeadline);
 
 fn connectWindowsControlled(options: FetchOptions, operation: ControlledConnect) !posix.fd_t {
     if (options.cancel_flag == null and options.deadline == null)
         return operation.run_fn(operation.ctx);
-
+    try checkControl(options);
     const zio = io_mod.getIo();
-    var control_done: std.Io.Event = .unset;
-    var select_buffer: [3]ConnectControlEvent = undefined;
-    var select: std.Io.Select(ConnectControlEvent) = .init(zio, &select_buffer);
-
-    try select.concurrent(.connection, runControlledConnect, .{operation});
-    if (options.cancel_flag) |cancel_flag| {
-        select.concurrent(.cancelled, waitForConnectCancellationOrDone, .{ cancel_flag, &control_done }) catch |err| {
-            control_done.set(zio);
-            cancelConnectControl(&select);
-            return err;
-        };
-    }
-    if (options.deadline) |deadline| {
-        select.concurrent(.deadline, waitForConnectDeadlineOrDone, .{ deadline, &control_done }) catch |err| {
-            control_done.set(zio);
-            cancelConnectControl(&select);
-            return err;
-        };
-    }
-
+    var watch: ConnectWatch = .{};
+    var buffer: [2]ConnectControlEvent = undefined;
+    var select: std.Io.Select(ConnectControlEvent) = .init(zio, &buffer);
+    const condition: select_watch.CancellationDeadline = .{
+        .cancel_flag = options.cancel_flag,
+        .deadline = if (options.deadline) |deadline| .{
+            .clock = .awake,
+            .raw = std.Io.Timestamp.fromNanoseconds(@as(i96, deadline.deadline_ms) * std.time.ns_per_ms),
+        } else null,
+    };
+    try select.concurrent(.watch, ConnectWatch.run, .{ &watch, zio, condition });
+    select.concurrent(.connection, runControlledConnect, .{operation}) catch |err| {
+        watch.finish(&select);
+        return err;
+    };
     const event = select.await() catch |err| {
-        control_done.set(zio);
+        watch.stop(zio);
         cancelConnectControl(&select);
         return err;
     };
-    control_done.set(zio);
-    return switch (event) {
-        .connection => |connection| result: {
-            cancelConnectControl(&select);
+    switch (event) {
+        .connection => |connection| {
+            watch.finish(&select);
             const fd = try connection;
             checkControl(options) catch |err| {
                 closeFd(fd);
                 return err;
             };
-            break :result fd;
+            return fd;
         },
-        .cancelled => |cancelled| result: {
-            try cancelled;
+        .watch => |result| {
             cancelConnectControl(&select);
-            break :result error.Canceled;
+            const outcome = try result;
+            if (outcome == .cancelled or condition.cancelled()) return error.Canceled;
+            return error.Timeout;
         },
-        .deadline => |deadline| result: {
-            try deadline;
-            cancelConnectControl(&select);
-            if (options.cancel_flag) |flag| if (flag.load(.seq_cst))
-                break :result error.Canceled;
-            break :result error.Timeout;
-        },
-    };
+    }
 }
 
 fn cancelConnectControl(select: *std.Io.Select(ConnectControlEvent)) void {
@@ -1345,31 +1351,8 @@ fn cancelConnectControl(select: *std.Io.Select(ConnectControlEvent)) void {
             const fd = connection catch continue;
             closeFd(fd);
         },
-        .cancelled, .deadline => {},
+        .watch => {},
     };
-}
-
-fn waitForConnectCancellationOrDone(
-    cancel_flag: *std.atomic.Value(bool),
-    control_done: *std.Io.Event,
-) anyerror!void {
-    while (!cancel_flag.load(.seq_cst)) {
-        control_done.waitTimeout(io_mod.getIo(), .{
-            .duration = .{ .clock = .awake, .raw = .fromMilliseconds(5) },
-        }) catch |err| switch (err) {
-            error.Timeout => continue,
-            else => return err,
-        };
-        return;
-    }
-}
-
-fn waitForConnectDeadlineOrDone(deadline: Deadline, control_done: *std.Io.Event) anyerror!void {
-    const timestamp: std.Io.Clock.Timestamp = .{
-        .clock = .awake,
-        .raw = std.Io.Timestamp.fromNanoseconds(@as(i96, deadline.deadline_ms) * std.time.ns_per_ms),
-    };
-    _ = try io_mod.waitEventUntil(control_done, timestamp);
 }
 
 fn classifyConnectErrno(err: posix.E) anyerror {
@@ -1466,12 +1449,12 @@ fn checkSocketError(fd: posix.fd_t) !void {
     var len: std.c.socklen_t = @sizeOf(c_int);
     if (std.c.getsockopt(fd, posix.SOL.SOCKET, posix.SO.ERROR, &value, &len) != 0) return error.ConnectionFailed;
     if (value == 0) return;
-    const socket_error: posix.E = @enumFromInt(value);
+    const socket_error: posix.E = @fromBackingInt(@intCast(value));
     return classifyConnectErrno(socket_error);
 }
 
 fn closeFd(fd: posix.fd_t) void {
-    if (comptime builtin.os.tag == .windows) {
+    if (comptime builtin.target.os.tag == .windows) {
         const zio = io_mod.getIo();
         zio.vtable.netClose(zio.userdata, (&fd)[0..1]);
     } else {
@@ -1651,7 +1634,7 @@ const ReadSyscall = struct {
 };
 
 fn readDefault(_: ?*anyopaque, fd: posix.fd_t, buf: []u8) RawSyscallResult {
-    if (comptime builtin.os.tag == .windows) {
+    if (comptime builtin.target.os.tag == .windows) {
         const zio = io_mod.getIo();
         var buffers = [_][]u8{buf};
         const count = zio.vtable.netRead(zio.userdata, fd, &buffers) catch |err| return .{
@@ -1743,7 +1726,7 @@ fn rawWriteAllWith(fd: posix.fd_t, bytes: []const u8, options: FetchOptions, pol
     var written: usize = 0;
     while (written < bytes.len) {
         try pollFdWith(fd, poll_events.out, options, poller);
-        if (comptime builtin.os.tag == .windows) {
+        if (comptime builtin.target.os.tag == .windows) {
             const zio = io_mod.getIo();
             const n = zio.vtable.netWrite(zio.userdata, fd, &.{}, &.{bytes[written..]}, 1) catch |err| switch (err) {
                 error.ConnectionResetByPeer => return error.ConnectionResetByPeer,
@@ -1813,7 +1796,7 @@ fn pollSocketError(fd: posix.fd_t) !void {
     if (std.c.getsockopt(fd, posix.SOL.SOCKET, posix.SO.ERROR, &value, &len) != 0)
         return error.UnexpectedClose;
     if (value == 0) return error.UnexpectedClose;
-    const socket_error: posix.E = @enumFromInt(value);
+    const socket_error: posix.E = @fromBackingInt(@intCast(value));
     return switch (socket_error) {
         .CONNREFUSED => error.ConnectionRefused,
         .CONNRESET => error.ConnectionResetByPeer,
@@ -1908,7 +1891,7 @@ fn expectResponseBody(payload: []const u8, expected_status: u16, expected_body: 
     var response = try readResponse(alloc, &reader, max_body_bytes, .{}, &failure_stage);
     defer response.deinit(alloc);
 
-    try std.testing.expectEqual(expected_status, @intFromEnum(response.status));
+    try std.testing.expectEqual(expected_status, @backingInt(response.status));
     try std.testing.expectEqualStrings(expected_body, response.body);
 }
 
@@ -2056,8 +2039,7 @@ test "web_fetch response parser consumes informational heads before final respon
         "103 Early Hints",
     };
     for (informational) |status_line| {
-        const payload = try std.fmt.allocPrint(
-            std.testing.allocator,
+        const payload = try std.testing.allocator.print(
             "HTTP/1.1 {s}\r\nX-Interim: yes\r\n\r\n" ++
                 "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok",
             .{status_line},
@@ -2827,7 +2809,7 @@ const FakeResolver = struct {
     calls: usize = 0,
     last_host: ?[]u8 = null,
     last_port: ?u16 = null,
-    deadlines: [fake_recorded_calls]?i64 = [_]?i64{null} ** fake_recorded_calls,
+    deadlines: [fake_recorded_calls]?i64 = @splat(null),
 
     fn resolver(self: *@This()) Resolver {
         return .{ .ctx = @ptrCast(self), .resolve = resolve };
@@ -2864,7 +2846,7 @@ const FakeConnector = struct {
     last_first_resolved_address: ?IpAddress = null,
     last_max_body_bytes: ?usize = null,
     last_deadline_ms: ?i64 = null,
-    deadlines: [fake_recorded_calls]?i64 = [_]?i64{null} ** fake_recorded_calls,
+    deadlines: [fake_recorded_calls]?i64 = @as([fake_recorded_calls]?i64, @splat(null)),
     sleep_after_first_call_ms: u64 = 0,
 
     fn connector(self: *@This()) Connector {
@@ -3407,7 +3389,7 @@ test "web_fetch deadline helpers fail before io when expired or canceled" {
 }
 
 test "web_fetch Windows connect control does not truncate a later deadline to one second" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag != .windows) return error.SkipZigTest;
 
     const DelayedConnect = struct {
         fn run(_: *anyopaque) anyerror!posix.fd_t {
@@ -3564,7 +3546,7 @@ test "web_fetch transport traces stable stages and redact sensitive values" {
     defer tmp.cleanup();
     const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
     defer alloc.free(root);
-    const trace_path = try std.fs.path.join(alloc, &.{ root, "web-fetch-transport.log" });
+    const trace_path = try std.Io.Dir.path.join(alloc, &.{ root, "web-fetch-transport.log" });
     defer alloc.free(trace_path);
 
     debug_trace.resetForTest();
@@ -3643,7 +3625,7 @@ const ScriptedDialer = struct {
     errors: []const ?anyerror,
     returned_fds: []const posix.fd_t,
     attempts: [4]IpAddress = undefined,
-    deadlines: [4]?i64 = [_]?i64{null} ** 4,
+    deadlines: [4]?i64 = @splat(null),
     calls: usize = 0,
     cancel_after_call: ?usize = null,
     cancel_flag: ?*std.atomic.Value(bool) = null,

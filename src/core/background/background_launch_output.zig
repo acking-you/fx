@@ -123,7 +123,7 @@ pub fn prepareExternal(alloc: Allocator) !Output {
     while (attempt < 16) : (attempt += 1) {
         const name = try randomLogName(alloc);
         defer alloc.free(name);
-        const path = try std.fs.path.join(alloc, &.{ root, name });
+        const path = try std.Io.Dir.path.join(alloc, &.{ root, name });
         const file = std.Io.Dir.createFileAbsolute(
             io_mod.getIo(),
             path,
@@ -157,8 +157,7 @@ fn randomLogName(alloc: Allocator) ![]u8 {
         encoded[index * 2] = alphabet[byte >> 4];
         encoded[index * 2 + 1] = alphabet[byte & 0x0f];
     }
-    return std.fmt.allocPrint(
-        alloc,
+    return alloc.print(
         "fx-cmd-{s}.log",
         .{encoded[0..]},
     );

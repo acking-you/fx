@@ -1,7 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const types = @import("../../core/shared/types.zig");
-const windows_console = if (builtin.os.tag == .windows) @import("windows_console.zig") else struct {};
+const windows_console = if (builtin.target.os.tag == .windows) @import("windows_console.zig") else struct {};
 
 pub const interactive_mode_enable_sequence = "\x1b[>4;2m\x1b[>1u\x1b[?2004h\x1b[?7l";
 const tmux_interactive_mode_enable_sequence = "\x1b[>4;2m\x1b[?2004h\x1b[?7l";
@@ -35,15 +35,15 @@ pub fn interactiveModeEnableSequence(tmux: ?[]const u8) []const u8 {
         tmux_interactive_mode_enable_sequence;
 }
 
-pub const LayoutHandle = if (builtin.os.tag == .windows) void else std.posix.fd_t;
+pub const LayoutHandle = if (builtin.target.os.tag == .windows) void else std.posix.fd_t;
 
 pub fn stdoutLayoutHandle() LayoutHandle {
-    if (comptime builtin.os.tag == .windows) return {};
+    if (comptime builtin.target.os.tag == .windows) return {};
     return std.posix.STDOUT_FILENO;
 }
 
 pub fn queryLayout(handle: LayoutHandle, footer_rows: u16) !types.Layout {
-    if (comptime builtin.os.tag == .windows) {
+    if (comptime builtin.target.os.tag == .windows) {
         const size = try windows_console.querySize();
         return layoutFromSize(size.rows, size.cols, footer_rows);
     } else {
@@ -77,7 +77,7 @@ pub fn isInvalidLayoutError(err: anyerror) bool {
 }
 
 pub fn moveCursorSequence(buf: []u8, row: u16, col: u16) ![]const u8 {
-    return std.fmt.bufPrint(buf, "\x1b[{d};{d}H", .{ row, col });
+    return std.mem.print(buf, "\x1b[{d};{d}H", .{ row, col });
 }
 
 test "moveCursorSequence formats correctly" {

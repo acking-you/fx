@@ -609,7 +609,7 @@ fn openExistingUsageFile(
     dir: std.Io.Dir,
     mode: std.Io.Dir.OpenFileOptions.Mode,
 ) !std.Io.File {
-    if (comptime builtin.os.tag == .windows) {
+    if (comptime builtin.target.os.tag == .windows) {
         return io_mod.openExistingRegularFile(dir, usage_file, mode);
     } else {
         return io_mod.openExistingRegularFile(dir, usage_file, mode) catch |err| switch (err) {
@@ -742,7 +742,7 @@ fn inspectTail(file: std.Io.File) !TailBoundary {
             start,
         );
         if (read_count != read_len) return error.UsageWriteFailed;
-        if (std.mem.lastIndexOfScalar(u8, buffer[0..read_count], '\n')) |newline| {
+        if (std.mem.findScalarLast(u8, buffer[0..read_count], '\n')) |newline| {
             return .{
                 .length = start + newline + 1,
                 .incomplete = true,

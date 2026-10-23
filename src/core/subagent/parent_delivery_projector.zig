@@ -881,7 +881,7 @@ test "parent delivery projector acknowledges retention gap then resumes after re
         });
         for (0..communication.max_deliveries) |index| {
             var id_buffer: [64]u8 = undefined;
-            const id = try std.fmt.bufPrint(&id_buffer, "other-target-{d}", .{index});
+            const id = try std.mem.print(&id_buffer, "other-target-{d}", .{index});
             _ = try communication.appendDelivery(alloc, &ledger, .{
                 .id = id,
                 .source_id = "child",
@@ -1162,11 +1162,11 @@ test "parent delivery projector bounds direct children before acknowledgement" {
     const child_count = communication.max_delivery_page + 1;
     for (0..child_count) |index| {
         var child_buffer: [32]u8 = undefined;
-        const child_id = try std.fmt.bufPrint(&child_buffer, "child-{d:0>3}", .{index});
+        const child_id = try std.mem.print(&child_buffer, "child-{d:0>3}", .{index});
         var operation_buffer: [32]u8 = undefined;
-        const operation_id = try std.fmt.bufPrint(&operation_buffer, "op-{d:0>3}", .{index});
+        const operation_id = try std.mem.print(&operation_buffer, "op-{d:0>3}", .{index});
         var payload_buffer: [32]u8 = undefined;
-        const payload = try std.fmt.bufPrint(&payload_buffer, "payload-{d:0>3}", .{index});
+        const payload = try std.mem.print(&payload_buffer, "payload-{d:0>3}", .{index});
         try preparePersistentChild(alloc, &env, "parent", child_id, child_id);
         try sendFromChild(alloc, &env, child_id, "parent", operation_id, payload);
     }
@@ -1189,26 +1189,22 @@ test "parent delivery projector bounds direct children before acknowledgement" {
     try std.testing.expect(std.mem.find(u8, prepared.content, "payload-000") != null);
     const last_included_index = prepared.acknowledgements.len - 1;
     const first_excluded_index = prepared.acknowledgements.len;
-    const last_included_payload = try std.fmt.allocPrint(
-        alloc,
+    const last_included_payload = try alloc.print(
         "payload-{d:0>3}",
         .{last_included_index},
     );
     defer alloc.free(last_included_payload);
-    const first_excluded_payload = try std.fmt.allocPrint(
-        alloc,
+    const first_excluded_payload = try alloc.print(
         "payload-{d:0>3}",
         .{first_excluded_index},
     );
     defer alloc.free(first_excluded_payload);
-    const last_included_child = try std.fmt.allocPrint(
-        alloc,
+    const last_included_child = try alloc.print(
         "child-{d:0>3}",
         .{last_included_index},
     );
     defer alloc.free(last_included_child);
-    const first_excluded_child = try std.fmt.allocPrint(
-        alloc,
+    const first_excluded_child = try alloc.print(
         "child-{d:0>3}",
         .{first_excluded_index},
     );
@@ -1249,7 +1245,7 @@ test "parent delivery projector bounds discovery before output pagination" {
 
     for (0..limits.relationship_scan + 1) |index| {
         var id_buffer: [32]u8 = undefined;
-        const id = try std.fmt.bufPrint(&id_buffer, "ordinary-{d:0>4}", .{index});
+        const id = try std.mem.print(&id_buffer, "ordinary-{d:0>4}", .{index});
         try env.createSession(alloc, id);
     }
 
@@ -1277,11 +1273,11 @@ test "parent delivery projector resumes bounded child discovery fairly after res
     const child_count = limits.relationship_scan + 1;
     for (0..child_count) |index| {
         var child_buffer: [32]u8 = undefined;
-        const child_id = try std.fmt.bufPrint(&child_buffer, "child-{d:0>3}", .{index});
+        const child_id = try std.mem.print(&child_buffer, "child-{d:0>3}", .{index});
         try preparePersistentChild(alloc, &env, "parent", child_id, child_id);
     }
     var late_child_buffer: [32]u8 = undefined;
-    const late_child_id = try std.fmt.bufPrint(
+    const late_child_id = try std.mem.print(
         &late_child_buffer,
         "child-{d:0>3}",
         .{child_count - 1},
@@ -1341,18 +1337,18 @@ test "parent delivery projector rotates past a backlogged first-page child acros
     const child_count = limits.turn + 1;
     for (0..child_count) |index| {
         var child_buffer: [32]u8 = undefined;
-        const child_id = try std.fmt.bufPrint(&child_buffer, "child-{d:0>3}", .{index});
+        const child_id = try std.mem.print(&child_buffer, "child-{d:0>3}", .{index});
         try preparePersistentChild(alloc, &env, "parent", child_id, child_id);
     }
     for (0..4) |index| {
         var operation_buffer: [32]u8 = undefined;
-        const operation_id = try std.fmt.bufPrint(
+        const operation_id = try std.mem.print(
             &operation_buffer,
             "early-operation-{d:0>2}",
             .{index},
         );
         var payload_buffer: [32]u8 = undefined;
-        const payload = try std.fmt.bufPrint(
+        const payload = try std.mem.print(
             &payload_buffer,
             "early-backlog-{d:0>2}",
             .{index},
@@ -1599,19 +1595,19 @@ test "parent delivery query recovers every pending allocate boundary exactly onc
 
     for (2..5) |fail_at| {
         var parent_buffer: [32]u8 = undefined;
-        const parent_id = try std.fmt.bufPrint(
+        const parent_id = try std.mem.print(
             &parent_buffer,
             "recover-parent-{d}",
             .{fail_at},
         );
         var child_buffer: [32]u8 = undefined;
-        const child_id = try std.fmt.bufPrint(
+        const child_id = try std.mem.print(
             &child_buffer,
             "recover-child-{d}",
             .{fail_at},
         );
         var operation_buffer: [32]u8 = undefined;
-        const operation_id = try std.fmt.bufPrint(
+        const operation_id = try std.mem.print(
             &operation_buffer,
             "recover-message-{d}",
             .{fail_at},
@@ -1694,7 +1690,7 @@ test "parent delivery legacy migration survives index republication and restart"
     try env.indexSession(alloc, "legacy-child");
     for (0..64) |index| {
         var id_buffer: [32]u8 = undefined;
-        const id = try std.fmt.bufPrint(
+        const id = try std.mem.print(
             &id_buffer,
             "ordinary-{d:0>3}",
             .{index},

@@ -10,7 +10,7 @@ pub fn operationIdAlloc(alloc: Allocator, invocation_id: []const u8) ![]u8 {
         var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(invocation_id, &digest, .{});
         const hex = std.fmt.bytesToHex(digest, .lower);
-        return std.fmt.allocPrint(alloc, "call_{s}", .{&hex});
+        return alloc.print("call_{s}", .{&hex});
     };
     return alloc.dupe(u8, invocation_id);
 }
@@ -27,8 +27,7 @@ pub fn boundOperationIdAlloc(
     var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(invocation_id, &digest, .{});
     const hex = std.fmt.bytesToHex(digest, .lower);
-    return std.fmt.allocPrint(
-        alloc,
+    return alloc.print(
         "fxop:2:{s}:{d}:{s}",
         .{ operationSourceTag(source), epoch, &hex },
     );

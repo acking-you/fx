@@ -290,7 +290,7 @@ const test_capture = Capture{
 test "resume view codec round trips its durable boundary and visible text" {
     const alloc = std.testing.allocator;
     const boundary = Boundary{
-        .log_generation = [_]u8{0x2a} ** 16,
+        .log_generation = @as([16]u8, @splat(0x2a)),
         .seq = 42,
         .event_log_bytes = 4096,
     };
@@ -322,7 +322,7 @@ test "resume view capture only paints at complete matching geometry" {
 test "resume view codec round trips safe terminal styling" {
     const alloc = std.testing.allocator;
     const boundary = Boundary{
-        .log_generation = [_]u8{0x2a} ** 16,
+        .log_generation = @as([16]u8, @splat(0x2a)),
         .seq = 42,
         .event_log_bytes = 4096,
     };
@@ -339,7 +339,7 @@ test "resume view codec round trips safe terminal styling" {
 test "resume view codec rejects unsafe or oversized visible text" {
     const alloc = std.testing.allocator;
     const boundary = Boundary{
-        .log_generation = [_]u8{0x17} ** 16,
+        .log_generation = @as([16]u8, @splat(0x17)),
         .seq = 7,
         .event_log_bytes = 512,
     };
@@ -390,7 +390,7 @@ test "resume view sidecar classifies exact and older durable boundaries" {
     defer verified.close();
 
     const boundary = Boundary{
-        .log_generation = [_]u8{0x31} ** 16,
+        .log_generation = @as([16]u8, @splat(0x31)),
         .seq = 11,
         .event_log_bytes = 2048,
     };
@@ -420,7 +420,7 @@ test "resume view sidecar rejects forward and cross-generation boundaries" {
     defer verified.close();
 
     const stored = Boundary{
-        .log_generation = [_]u8{0x31} ** 16,
+        .log_generation = @as([16]u8, @splat(0x31)),
         .seq = 11,
         .event_log_bytes = 2048,
     };
@@ -443,7 +443,7 @@ test "resume view sidecar rejects forward and cross-generation boundaries" {
     try std.testing.expect(forward_bytes == .stale);
 
     var cross_generation = try loadMatching(alloc, &verified, "session-1", .{
-        .log_generation = [_]u8{0x32} ** 16,
+        .log_generation = @as([16]u8, @splat(0x32)),
         .seq = stored.seq,
         .event_log_bytes = stored.event_log_bytes,
     });
@@ -458,7 +458,7 @@ test "resume view sidecar treats missing and corrupt cache data as fallback" {
     var verified = try openTestVerifiedDir(temp.dir);
     defer verified.close();
     const boundary = Boundary{
-        .log_generation = [_]u8{0x44} ** 16,
+        .log_generation = @as([16]u8, @splat(0x44)),
         .seq = 3,
         .event_log_bytes = 128,
     };

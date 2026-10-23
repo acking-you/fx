@@ -1,4 +1,5 @@
 const std = @import("std");
+const text_utils = @import("../shared/text_utils.zig");
 
 pub const description_max_bytes: usize = 1024;
 pub const truncation_marker = "... [truncated]";
@@ -435,7 +436,7 @@ test "object alternatives reject contradictory ordinary object metadata" {
 
 test "cappedDescriptionAlloc appends explicit truncation marker" {
     const alloc = std.testing.allocator;
-    const oversized = "x" ** (description_max_bytes + 20);
+    const oversized = text_utils.repeat("x", description_max_bytes + 20);
 
     const capped = try cappedDescriptionAlloc(alloc, oversized);
     defer alloc.free(capped);

@@ -39,9 +39,9 @@ test {
 
 fn allocDimmedTranscriptLine(alloc: std.mem.Allocator, text: []const u8) ![]u8 {
     if (std.mem.endsWith(u8, text, "\n")) {
-        return std.fmt.allocPrint(alloc, "{s}{s}{s}\n", .{ ui_render.dim_style, text[0 .. text.len - 1], reset_style });
+        return alloc.print("{s}{s}{s}\n", .{ ui_render.dim_style, text[0 .. text.len - 1], reset_style });
     }
-    return std.fmt.allocPrint(alloc, "{s}{s}{s}", .{ ui_render.dim_style, text, reset_style });
+    return alloc.print("{s}{s}{s}", .{ ui_render.dim_style, text, reset_style });
 }
 
 fn discardTable(_: *anyopaque, table: assistant_presentation.TablePayload) !void {
@@ -791,8 +791,7 @@ pub fn Runtime(comptime App: type) type {
                         resetStream(app, true);
                         app.stream.active = true;
                         app.stream.turn_started_ms = io_mod.milliTimestamp();
-                        const body = try std.fmt.allocPrint(
-                            app.alloc,
+                        const body = try app.alloc.print(
                             "Background command #{d} {s}; continuing the task.",
                             .{ background.process_id, if (background.running) "is still running after the watchdog interval" else if (background.failed) "failed" else "finished" },
                         );
@@ -1161,13 +1160,11 @@ pub fn Runtime(comptime App: type) type {
 fn formatWebSearchProgress(alloc: std.mem.Allocator, progress: types.WebSearchProgress) ![]u8 {
     var query_buf: [160]u8 = undefined;
     return switch (progress) {
-        .query_started => |query| std.fmt.allocPrint(
-            alloc,
+        .query_started => |query| alloc.print(
             "● Searching web\x1b[0m \x1b[38;5;245m{s}\x1b[0m",
             .{text_utils.clippedLabel(&query_buf, query, 120)},
         ),
-        .results_received => |entry| std.fmt.allocPrint(
-            alloc,
+        .results_received => |entry| alloc.print(
             "● Found {d} web result{s} for\x1b[0m \x1b[38;5;245m{s}\x1b[0m",
             .{ entry.result_count, if (entry.result_count == 1) "" else "s", text_utils.clippedLabel(&query_buf, entry.query, 120) },
         ),
@@ -1177,13 +1174,11 @@ fn formatWebSearchProgress(alloc: std.mem.Allocator, progress: types.WebSearchPr
 fn formatWebFetchProgress(alloc: std.mem.Allocator, progress: types.WebFetchProgress) ![]u8 {
     var url_buf: [types.WebFetchCompletion.max_url_len]u8 = undefined;
     return switch (progress) {
-        .fetching => |url| std.fmt.allocPrint(
-            alloc,
+        .fetching => |url| alloc.print(
             "● Fetching\x1b[0m \x1b[38;5;245m{s}\x1b[0m",
             .{text_utils.clippedLabel(&url_buf, url, 120)},
         ),
-        .converting => |url| std.fmt.allocPrint(
-            alloc,
+        .converting => |url| alloc.print(
             "● Converting\x1b[0m \x1b[38;5;245m{s}\x1b[0m",
             .{text_utils.clippedLabel(&url_buf, url, 120)},
         ),
@@ -1352,7 +1347,7 @@ const FakeWorker = struct {
         };
     }
 
-    fn interactiveAdmissionSnapshot(self: *FakeWorker) worker_runtime.InteractiveAdmissionSnapshot {
+    pub fn interactiveAdmissionSnapshot(self: *FakeWorker) worker_runtime.InteractiveAdmissionSnapshot {
         return self.admission_snapshot;
     }
 
@@ -1385,14 +1380,14 @@ const FakeWorker = struct {
         return self.active_turn_id;
     }
 
-    fn propagateHistoryTurn(self: *FakeWorker, alloc: std.mem.Allocator, turn: types.HistoryTurn, max_history_turns: usize) !void {
+    pub fn propagateHistoryTurn(self: *FakeWorker, alloc: std.mem.Allocator, turn: types.HistoryTurn, max_history_turns: usize) !void {
         _ = alloc;
         _ = turn;
         _ = max_history_turns;
         self.propagated_history_turns += 1;
     }
 
-    fn propagateGrant(self: *FakeWorker, alloc: std.mem.Allocator, tool_name: []const u8, target_path: []const u8) !void {
+    pub fn propagateGrant(self: *FakeWorker, alloc: std.mem.Allocator, tool_name: []const u8, target_path: []const u8) !void {
         _ = alloc;
         _ = tool_name;
         _ = target_path;
@@ -1432,7 +1427,7 @@ const FakeApprovalPrompt = struct {
         return changed;
     }
 
-    fn syncReview(self: *FakeApprovalPrompt, review: ?*const diff_mod.FileReview) bool {
+    pub fn syncReview(self: *FakeApprovalPrompt, review: ?*const diff_mod.FileReview) bool {
         const request = self.request orelse {
             const changed = self.review != null;
             self.review = null;
@@ -1620,7 +1615,7 @@ const FakeShell = struct {
         self.command_output_display = .{};
     }
 
-    fn openCommandOutputLifecycleId(self: *const FakeShell) ?types.ToolLifecycleId {
+    pub fn openCommandOutputLifecycleId(self: *const FakeShell) ?types.ToolLifecycleId {
         return self.lifecycle.openCommandOutputLifecycleId();
     }
 };
@@ -2159,7 +2154,7 @@ test "core.app_worker_runtime assistant chunk trace is metadata only" {
         ".",
     );
     defer alloc.free(trace_path);
-    const trace_file_path = try std.fs.path.join(
+    const trace_file_path = try std.Io.Dir.path.join(
         alloc,
         &.{ trace_path, "worker-trace.log" },
     );
@@ -4003,7 +3998,7 @@ test "core.app_worker_runtime failed turn terminalizes tool lifecycle before err
     try std.testing.expectEqual(@as(usize, 0), app.shell.lifecyclePinCount());
     var failed_status_expected: [64]u8 = undefined;
     try std.testing.expectEqualStrings(
-        try std.fmt.bufPrint(
+        try std.mem.print(
             &failed_status_expected,
             "{s}●{s} Tool failed",
             .{ ui_render.red_style, reset_style },

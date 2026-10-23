@@ -765,8 +765,7 @@ pub const Usage = struct {
             }
         } else return;
         if (index + 1 < self.incident_count) {
-            std.mem.copyForwards(
-                usage_report.Incident,
+            @memmove(
                 self.incidents[index .. self.incident_count - 1],
                 self.incidents[index + 1 .. self.incident_count],
             );
@@ -1354,8 +1353,7 @@ pub fn appendIncidentOwned(
         snapshot.incidents.len + 1,
     );
     if (snapshot.incidents.len > 0) {
-        std.mem.copyForwards(
-            usage_report.Incident,
+        @memmove(
             next[0..snapshot.incidents.len],
             snapshot.incidents,
         );

@@ -1,4 +1,5 @@
 const std = @import("std");
+const testing_allocator = @import("../shared/testing_allocator.zig");
 const builtin = @import("builtin");
 const debug_trace = @import("../shared/debug_trace.zig");
 const io_mod = @import("../shared/io.zig");
@@ -1020,7 +1021,7 @@ pub const Root = struct {
                 if (mode == .read_only) {
                     return .{
                         .sessions = null,
-                        .display_root = try std.fs.path.join(
+                        .display_root = try std.Io.Dir.path.join(
                             alloc,
                             &.{ home_path, profile_paths.root_dir_name, profile_paths.sessions_dir_name },
                         ),
@@ -1045,7 +1046,7 @@ pub const Root = struct {
                 if (mode == .read_only) {
                     return .{
                         .sessions = null,
-                        .display_root = try std.fs.path.join(
+                        .display_root = try std.Io.Dir.path.join(
                             alloc,
                             &.{ home_path, profile_paths.root_dir_name, profile_paths.sessions_dir_name },
                         ),
@@ -1082,7 +1083,7 @@ pub const Root = struct {
                 if (mode == .read_only) {
                     return .{
                         .sessions = null,
-                        .display_root = try std.fs.path.join(
+                        .display_root = try std.Io.Dir.path.join(
                             alloc,
                             &.{ home_path, profile_paths.root_dir_name, profile_paths.sessions_dir_name },
                         ),
@@ -1428,7 +1429,7 @@ fn resumeViewBoundary(position: CommitPosition) session_resume_view.Boundary {
 fn validateLeaf(name: []const u8) !void {
     if (name.len == 0 or std.mem.eql(u8, name, ".") or
         std.mem.eql(u8, name, "..") or
-        std.mem.indexOfAny(u8, name, "/\\") != null)
+        std.mem.findAny(u8, name, "/\\") != null)
     {
         return error.SessionPathUnsafe;
     }
@@ -2048,7 +2049,7 @@ fn requireU64(object: std.json.ObjectMap, key: []const u8) !u64 {
 
 fn watermarkName(alloc: Allocator, generation: Identifier) ![]u8 {
     const hex = identifierHex(generation);
-    return std.fmt.allocPrint(alloc, "commit.{s}.json", .{hex});
+    return alloc.print("commit.{s}.json", .{hex});
 }
 
 fn loadAuthority(
@@ -4085,7 +4086,7 @@ fn eventStat(
 }
 
 fn eventDevice(file: std.Io.File) !u64 {
-    return switch (builtin.os.tag) {
+    return switch (builtin.target.os.tag) {
         .linux => blk: {
             const linux = std.os.linux;
             while (true) {
@@ -4219,8 +4220,7 @@ fn compactCanonicalLog(
         },
     );
     const suffix = identifierHex(new_generation);
-    const temp_name = try std.fmt.allocPrint(
-        alloc,
+    const temp_name = try alloc.print(
         "events.compact.{s}.tmp",
         .{suffix},
     );
@@ -4370,8 +4370,7 @@ fn makeCleanupCandidatesForTest(
     const line = try session_event.encodeFrame(alloc, envelope);
     defer alloc.free(line);
     const suffix = identifierHex(generation);
-    const temp_name = try std.fmt.allocPrint(
-        alloc,
+    const temp_name = try alloc.print(
         "events.compact.{s}.tmp",
         .{suffix},
     );
@@ -7270,8 +7269,7 @@ test "automatic compaction recovers every injected transaction boundary" {
         const alloc = std.testing.allocator;
         var temp = try TempRoot.init(alloc);
         defer temp.deinit(alloc);
-        const session_id = try std.fmt.allocPrint(
-            alloc,
+        const session_id = try alloc.print(
             "session-log-compaction-boundary-{d}",
             .{index},
         );

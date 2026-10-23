@@ -1,4 +1,5 @@
 const std = @import("std");
+const testing_allocator = @import("../shared/testing_allocator.zig");
 const builtin = @import("builtin");
 const debug_trace = @import("../shared/debug_trace.zig");
 const vision_contracts = @import("../agent/runtime/vision_contracts.zig");
@@ -355,8 +356,7 @@ pub fn prepareFileMutationCall(
         request.workspace_root,
         input,
     )) {
-        .target_resolution_failure => |failure| return .{ .tool_failure = try std.fmt.allocPrint(
-            alloc,
+        .target_resolution_failure => |failure| return .{ .tool_failure = try alloc.print(
             "file mutation target resolution failed: {s}",
             .{@tagName(failure)},
         ) },
@@ -426,8 +426,7 @@ pub fn preflightPreparedFileMutation(
         );
     var policy_targets = switch (policy_result) {
         .target_resolution_failure => |failure| {
-            return .{ .tool_failure = try std.fmt.allocPrint(
-                arena,
+            return .{ .tool_failure = try arena.print(
                 "file mutation target resolution failed: {s}",
                 .{@tagName(failure)},
             ) };
@@ -527,8 +526,7 @@ pub fn preflightPreparedFileMutation(
         error.OutOfMemory => return error.OutOfMemory,
         error.UnsupportedFileGrantOffer,
         error.ScopeProjectionTooLarge,
-        => return .{ .tool_failure = try std.fmt.allocPrint(
-            arena,
+        => return .{ .tool_failure = try arena.print(
             "file mutation permission scope could not be represented safely ({s}). " ++
                 "The file was not changed. Verify the target against the current workspace; " ++
                 "use a workspace-relative path when that is the intended target. " ++
@@ -649,9 +647,9 @@ fn pathContainsComponentSequence(
     var matched: usize = 0;
     var index: usize = 0;
     while (index < path.len) {
-        while (index < path.len and std.fs.path.isSep(path[index])) : (index += 1) {}
+        while (index < path.len and std.Io.Dir.path.isSep(path[index])) : (index += 1) {}
         const start = index;
-        while (index < path.len and !std.fs.path.isSep(path[index])) : (index += 1) {}
+        while (index < path.len and !std.Io.Dir.path.isSep(path[index])) : (index += 1) {}
         if (start == index) break;
         const component = path[start..index];
         if (std.mem.eql(u8, component, expected[matched])) {
@@ -1238,8 +1236,7 @@ fn requestPermissionOutcomeResolved(
         if (command_call and (err == error.FileNotFound or err == error.NotDir)) {
             const args = try tool_args.parseToolArgsObject(arena, call.arguments_json);
             const workdir = tool_args.nullablePlaceholderStringArg(args, "workdir") orelse ".";
-            return .{ .tool_failure = try std.fmt.allocPrint(
-                arena,
+            return .{ .tool_failure = try arena.print(
                 "Invalid workdir for {s}: {s} ({s}). Relative paths are resolved from the default working directory: {s}. " ++
                     "The command was not run. Retry with an existing directory, or omit workdir to use the default working directory. " ++
                     "The retry is subject to normal permission checks.",
@@ -1995,7 +1992,7 @@ pub fn commandContext(
         .command = command,
         .resolved_cwd = cwd,
         .background = false,
-        .target_os = builtin.os.tag,
+        .target_os = builtin.target.os.tag,
         .environment = environment_value,
     };
 }
@@ -2131,8 +2128,7 @@ fn filePermissionStateDisplay(
     std.crypto.hash.sha2.Sha256.hash(prepared.after_content, &after_hash, .{});
     const after_hex = std.fmt.bytesToHex(after_hash[0..8].*, .lower);
     return switch (prepared.preimage) {
-        .absent => try std.fmt.allocPrint(
-            arena,
+        .absent => try arena.print(
             "{s} {s} preimage=absent after={s}",
             .{ prepared.tool_name, prepared.display_path, &after_hex },
         ),
@@ -2141,8 +2137,7 @@ fn filePermissionStateDisplay(
                 preimage.content_hash[0..8].*,
                 .lower,
             );
-            break :blk try std.fmt.allocPrint(
-                arena,
+            break :blk try arena.print(
                 "{s} {s} preimage={s} after={s}",
                 .{ prepared.tool_name, prepared.display_path, &before_hex, &after_hex },
             );
@@ -2247,8 +2242,7 @@ pub fn permissionTargetResolutionFailureMessage(
         error.HomeNotSet,
         error.InvalidPath,
         error.WorkspaceUnavailable,
-        => try std.fmt.allocPrint(
-            arena,
+        => try arena.print(
             "Permission target resolution failed for {s}: {s}",
             .{ tool_name, @errorName(err) },
         ),
@@ -2295,8 +2289,7 @@ fn commandPermissionTarget(
         context.environment,
         context.command,
     );
-    return std.fmt.allocPrint(
-        arena,
+    return arena.print(
         "{s}::{s}",
         .{ context.resolved_cwd, identity },
     );
@@ -2385,7 +2378,7 @@ test "command admission reports invalid workdir with default cwd recovery" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     const workspace = try io_mod.dirRealpathAlloc(arena, tmp.dir, ".");
-    const absolute_missing = try std.fs.path.join(arena, &.{ workspace, "missing-absolute" });
+    const absolute_missing = try std.Io.Dir.path.join(arena, &.{ workspace, "missing-absolute" });
     var worker: WorkerRuntime = .{};
     defer worker.deinit(alloc);
     var recording = RecordingPrompter{};
@@ -2487,7 +2480,7 @@ test "interactive Vision path approval names every canonical image" {
         .ask,
         &.{},
     );
-    const expected = try std.fmt.allocPrint(alloc, "vision {s}, {s}", .{ first, second });
+    const expected = try alloc.print("vision {s}, {s}", .{ first, second });
     defer alloc.free(expected);
     try std.testing.expectEqualStrings(expected, recording.last_label.?);
     const authority = switch (outcome.execution_authority orelse
@@ -2691,7 +2684,7 @@ test "prepared file mutation admission decodes and resolves exactly once without
     };
     defer prepared.deinit(arena);
 
-    const expected_target = try std.fs.path.join(arena, &.{ workspace, "nested", "file.txt" });
+    const expected_target = try std.Io.Dir.path.join(arena, &.{ workspace, "nested", "file.txt" });
     try std.testing.expectEqualStrings(expected_target, prepared.targetPath());
     try std.testing.expect(prepared.targets.proofValid());
     try std.testing.expectEqual(@as(usize, 1), file_mutation_decode_count);
@@ -2730,12 +2723,11 @@ test "external file action identity is canonical across call IDs and distinguish
     var arena_state = std.heap.ArenaAllocator.init(alloc);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const absolute_target = try std.fs.path.join(
+    const absolute_target = try std.Io.Dir.path.join(
         arena,
         &.{ external, "denied", "nested", "file.txt" },
     );
-    const absolute_arguments = try std.fmt.allocPrint(
-        arena,
+    const absolute_arguments = try arena.print(
         "{{\"path\":\"{s}\",\"content\":\"denied\\n\"}}",
         .{absolute_target},
     );
@@ -2793,7 +2785,7 @@ test "external file action identity is canonical across call IDs and distinguish
         error.FileNotFound,
         std.Io.Dir.accessAbsolute(
             std.testing.io,
-            try std.fs.path.join(arena, &.{ external, "denied" }),
+            try std.Io.Dir.path.join(arena, &.{ external, "denied" }),
             .{},
         ),
     );
@@ -2922,7 +2914,7 @@ test "prepared file mutation cleans every partial allocation failure" {
     defer alloc.free(workspace);
 
     try std.testing.checkAllAllocationFailures(
-        alloc,
+        testing_allocator.no_resize,
         checkFileMutationPreparationAllocationFailures,
         .{workspace},
     );
@@ -3333,8 +3325,7 @@ test "interactive file admission passes its canonical grant offer to the prompte
     );
     input.workspace_root = workspace;
     input.permission_prompter = recording.prompter();
-    const arguments_json = try std.fmt.allocPrint(
-        arena,
+    const arguments_json = try arena.print(
         "{{\"path\":\"{s}/note.txt\",\"content\":\"hello\\n\"}}",
         .{workspace},
     );
@@ -3593,9 +3584,8 @@ test "yolo file admission preserves canonical mutation authority" {
         },
     };
     input.permission_rules = .{ .rules = &rules };
-    const target = try std.fs.path.join(arena, &.{ workspace, "yolo.txt" });
-    const arguments = try std.fmt.allocPrint(
-        arena,
+    const target = try std.Io.Dir.path.join(arena, &.{ workspace, "yolo.txt" });
+    const arguments = try arena.print(
         "{{\"path\":\"{s}\",\"content\":\"ok\\n\"}}",
         .{target},
     );
@@ -3767,11 +3757,11 @@ test "live authority resolves a missing read target without changing ordinary ad
     try tmp.dir.createDirPath(io_mod.getIo(), "workspace/src");
     const workspace = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "workspace");
     defer alloc.free(workspace);
-    const expected = try std.fs.path.join(alloc, &.{ workspace, "src/missing.zig" });
+    const expected = try std.Io.Dir.path.join(alloc, &.{ workspace, "src/missing.zig" });
     defer alloc.free(expected);
     const external_root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
     defer alloc.free(external_root);
-    const external_expected = try std.fs.path.join(
+    const external_expected = try std.Io.Dir.path.join(
         alloc,
         &.{ external_root, "external-missing.zig" },
     );
@@ -3813,8 +3803,7 @@ test "live authority resolves a missing read target without changing ordinary ad
             .{
                 .id = "external-missing-read",
                 .name = "read_file",
-                .arguments_json = try std.fmt.allocPrint(
-                    arena_state.allocator(),
+                .arguments_json = try arena_state.allocator().print(
                     "{{\"path\":\"{s}\"}}",
                     .{external_expected},
                 ),
@@ -3832,7 +3821,7 @@ test "live authority preserves a non-directory read failure for tool execution" 
     blocking_file.close(io_mod.getIo());
     const workspace = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "workspace");
     defer alloc.free(workspace);
-    const expected = try std.fs.path.join(alloc, &.{ workspace, "not-a-dir/child.txt" });
+    const expected = try std.Io.Dir.path.join(alloc, &.{ workspace, "not-a-dir/child.txt" });
     defer alloc.free(expected);
 
     var arena_state = std.heap.ArenaAllocator.init(alloc);
@@ -3978,7 +3967,7 @@ test "external prepared file review carries frozen path and diff authority" {
         ),
     );
     input.workspace_root = workspace;
-    const target_path = try std.fs.path.join(
+    const target_path = try std.Io.Dir.path.join(
         arena,
         &.{ external, "desktop-test.txt" },
     );
@@ -3991,8 +3980,7 @@ test "external prepared file review carries frozen path and diff authority" {
         defer existing.close(io_mod.getIo());
         try existing.writeStreamingAll(io_mod.getIo(), "before\n");
     }
-    const arguments_json = try std.fmt.allocPrint(
-        arena,
+    const arguments_json = try arena.print(
         "{{\"path\":\"{s}\",\"content\":\"hello\\n\"}}",
         .{target_path},
     );
@@ -4099,9 +4087,8 @@ test "automatic workspace write uses reversible admission without reviewer" {
         ),
     );
     input.workspace_root = workspace;
-    const target_path = try std.fs.path.join(arena, &.{ workspace, "note.txt" });
-    const arguments_json = try std.fmt.allocPrint(
-        arena,
+    const target_path = try std.Io.Dir.path.join(arena, &.{ workspace, "note.txt" });
+    const arguments_json = try arena.print(
         "{{\"path\":\"{s}\",\"content\":\"hello\\n\"}}",
         .{target_path},
     );
@@ -4129,9 +4116,8 @@ test "automatic workspace write uses reversible admission without reviewer" {
     try std.testing.expect(authorization.prepared != null);
     try std.testing.expectEqualStrings(target_path, authorization.input.path());
 
-    const edit_target = try std.fs.path.join(arena, &.{ workspace, "editable.txt" });
-    const edit_arguments = try std.fmt.allocPrint(
-        arena,
+    const edit_target = try std.Io.Dir.path.join(arena, &.{ workspace, "editable.txt" });
+    const edit_arguments = try arena.print(
         "{{\"path\":\"{s}\",\"old_string\":\"before\",\"new_string\":\"after\"}}",
         .{edit_target},
     );
@@ -4200,9 +4186,8 @@ test "automatic added-root write bypasses reviewer while untrusted external writ
         .{ .id = "external-write", .root = external, .expected_review_calls = 0 },
     };
     for (cases) |case| {
-        const target_path = try std.fs.path.join(arena, &.{ case.root, "note.txt" });
-        const arguments_json = try std.fmt.allocPrint(
-            arena,
+        const target_path = try std.Io.Dir.path.join(arena, &.{ case.root, "note.txt" });
+        const arguments_json = try arena.print(
             "{{\"path\":\"{s}\",\"content\":\"hello\\n\"}}",
             .{target_path},
         );
@@ -4257,9 +4242,8 @@ test "automatic trusted-root write keeps persistence targets on reviewer path" {
         "Library/LaunchAgents/com.fx.smoke.plist",
     };
     for (relative_targets, 0..) |relative_target, index| {
-        const target_path = try std.fs.path.join(arena, &.{ workspace, relative_target });
-        const arguments_json = try std.fmt.allocPrint(
-            arena,
+        const target_path = try std.Io.Dir.path.join(arena, &.{ workspace, relative_target });
+        const arguments_json = try arena.print(
             "{{\"path\":\"{s}\",\"content\":\"test\\n\"}}",
             .{target_path},
         );
@@ -4314,9 +4298,8 @@ test "automatic trusted-root overwrite preserves configured read disclosure revi
         .action = .deny,
     }};
     input.permission_rules = .{ .rules = &rules };
-    const target_path = try std.fs.path.join(arena, &.{ workspace, "secret.txt" });
-    const arguments_json = try std.fmt.allocPrint(
-        arena,
+    const target_path = try std.Io.Dir.path.join(arena, &.{ workspace, "secret.txt" });
+    const arguments_json = try arena.print(
         "{{\"path\":\"{s}\",\"content\":\"after\\n\"}}",
         .{target_path},
     );

@@ -1,4 +1,5 @@
 const std = @import("std");
+const testing_allocator = @import("../shared/testing_allocator.zig");
 const debug_trace = @import("../shared/debug_trace.zig");
 const command_contract = @import("../execution/command_contract.zig");
 const io_mod = @import("../shared/io.zig");
@@ -101,8 +102,7 @@ pub const Foreground = struct {
             "cleanup_guarantee=best_effort\n" ++
             "message=command timed out; cleanup was attempted for the process group and tracked descendants, but fully detached descendants may remain\n";
         const output = if (timeout_ms) |ms|
-            try std.fmt.allocPrint(
-                arena,
+            try arena.print(
                 "timeout=true\ntimeout_ms={d}\n" ++ cleanup,
                 .{ms},
             )

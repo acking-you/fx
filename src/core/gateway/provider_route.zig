@@ -348,7 +348,7 @@ pub fn appendResponsesEndpointAlloc(
     if (std.mem.endsWith(u8, normalized, "/responses")) {
         return alloc.dupe(u8, normalized);
     }
-    return std.fmt.allocPrint(alloc, "{s}/responses", .{normalized});
+    return alloc.print("{s}/responses", .{normalized});
 }
 
 /// Normalizes an API root, `/responses`, or `/responses/compact` URL to the
@@ -364,9 +364,9 @@ pub fn appendResponsesCompactEndpointAlloc(
         return alloc.dupe(u8, normalized);
     }
     if (std.mem.endsWith(u8, normalized, "/responses")) {
-        return std.fmt.allocPrint(alloc, "{s}/compact", .{normalized});
+        return alloc.print("{s}/compact", .{normalized});
     }
-    return std.fmt.allocPrint(alloc, "{s}/responses/compact", .{normalized});
+    return alloc.print("{s}/responses/compact", .{normalized});
 }
 
 /// Normalizes a Codex API root or one of its Responses endpoints to
@@ -386,7 +386,7 @@ pub fn appendCodexSearchEndpointAlloc(
     } else if (std.mem.endsWith(u8, normalized, "/responses")) {
         normalized = std.mem.trimEnd(u8, normalized[0 .. normalized.len - "/responses".len], "/");
     }
-    return std.fmt.allocPrint(alloc, "{s}/alpha/search", .{normalized});
+    return alloc.print("{s}/alpha/search", .{normalized});
 }
 
 /// Resolves the model-catalog endpoint belonging to a Responses base URL.
@@ -405,7 +405,7 @@ pub fn appendModelsEndpointAlloc(
     if (std.mem.endsWith(u8, normalized, "/models")) {
         return alloc.dupe(u8, normalized);
     }
-    return std.fmt.allocPrint(alloc, "{s}/models", .{normalized});
+    return alloc.print("{s}/models", .{normalized});
 }
 
 pub fn validateBaseUrl(base_url: []const u8) ResolveEndpointError!void {

@@ -1,13 +1,13 @@
 const std = @import("std");
 const model_provider = @import("model_provider.zig");
 
-const provider_count = std.meta.fields(model_provider.ProviderId).len;
+const provider_count = @typeInfo(model_provider.ProviderId).@"enum".field_names.len;
 
 pub const Preferences = struct {
-    values: [provider_count]?[]u8 = [_]?[]u8{null} ** provider_count,
+    values: [provider_count]?[]u8 = @as([provider_count]?[]u8, @splat(null)),
 
     pub fn get(self: *const Preferences, provider: model_provider.ProviderId) ?[]const u8 {
-        return self.values[@intFromEnum(provider)];
+        return self.values[@backingInt(provider)];
     }
 
     pub fn putCopy(
@@ -26,7 +26,7 @@ pub const Preferences = struct {
         provider: model_provider.ProviderId,
         model: []u8,
     ) void {
-        const index = @intFromEnum(provider);
+        const index = @backingInt(provider);
         if (self.values[index]) |current| alloc.free(current);
         self.values[index] = model;
     }
@@ -35,7 +35,7 @@ pub const Preferences = struct {
         self: *Preferences,
         provider: model_provider.ProviderId,
     ) ?[]u8 {
-        const index = @intFromEnum(provider);
+        const index = @backingInt(provider);
         const value = self.values[index];
         self.values[index] = null;
         return value;

@@ -1,4 +1,6 @@
 const std = @import("std");
+const select_watch = @import("../shared/select_watch.zig");
+const ReadWatch = select_watch.Watch(select_watch.CancellationDeadline);
 const builtin = @import("builtin");
 const debug_trace = @import("../shared/debug_trace.zig");
 const io_mod = @import("../shared/io.zig");
@@ -118,7 +120,7 @@ fn accept_ready(
     cancel_flag: *std.atomic.Value(bool),
 ) !?std.Io.net.Stream {
     if (cancel_flag.load(.seq_cst)) return error.Cancelled;
-    if (comptime builtin.os.tag == .windows) {
+    if (comptime builtin.target.os.tag == .windows) {
         const stream = try socket_poll.accept_with_timeout(io_mod.getIo(), listener, @intCast(poll_ms));
         if (cancel_flag.load(.seq_cst)) {
             if (stream) |accepted| accepted.close(io_mod.getIo());
@@ -155,7 +157,7 @@ const Request = struct {
 
 const ReadEvent = union(enum) {
     request: anyerror!?Request,
-    timeout: anyerror!void,
+    watch: std.Io.Cancelable!select_watch.Outcome,
 };
 
 fn read_request_connection(
@@ -167,17 +169,13 @@ fn read_request_connection(
     return read_request_stream(alloc, stream, cancel_flag, allowed_cors_origin, false);
 }
 
-fn wait_read_timeout(io: std.Io, timeout_ms: u32) anyerror!void {
-    try io.sleep(.fromMilliseconds(timeout_ms), .awake);
-}
-
 fn cancel_read(alloc: Allocator, select: *std.Io.Select(ReadEvent)) void {
     while (select.cancel()) |event| switch (event) {
         .request => |result| {
             var request = result catch continue orelse continue;
             request.deinit(alloc);
         },
-        .timeout => {},
+        .watch => {},
     };
 }
 
@@ -187,36 +185,32 @@ fn read_request_with_timeout(
     cancel_flag: *std.atomic.Value(bool),
     allowed_cors_origin: ?[]const u8,
 ) !?Request {
+    const io = io_mod.getIo();
+    var watch: ReadWatch = .{};
     var buffer: [2]ReadEvent = undefined;
-    var select: std.Io.Select(ReadEvent) = .init(io_mod.getIo(), &buffer);
-    try select.concurrent(
-        .request,
-        read_request_connection,
-        .{ alloc, stream, cancel_flag, allowed_cors_origin },
-    );
-    select.concurrent(
-        .timeout,
-        wait_read_timeout,
-        .{ io_mod.getIo(), @as(u32, @intCast(silence_ms)) },
-    ) catch |err| {
-        cancel_read(alloc, &select);
+    var select: std.Io.Select(ReadEvent) = .init(io, &buffer);
+    const condition: select_watch.CancellationDeadline = .{
+        .cancel_flag = cancel_flag,
+        .deadline = std.Io.Clock.Timestamp.fromNow(io, .{ .clock = .awake, .raw = .fromMilliseconds(silence_ms) }),
+    };
+    try select.concurrent(.watch, ReadWatch.run, .{ &watch, io, condition });
+    select.concurrent(.request, read_request_connection, .{ alloc, stream, cancel_flag, allowed_cors_origin }) catch |err| {
+        watch.finish(&select);
         return err;
     };
     const event = select.await() catch |err| {
+        watch.stop(io);
         cancel_read(alloc, &select);
         return err;
     };
     var request = switch (event) {
         .request => |result| blk: {
-            select.cancelDiscard();
+            watch.finish(&select);
             break :blk try result;
         },
-        .timeout => |result| blk: {
-            result catch |err| {
-                cancel_read(alloc, &select);
-                return err;
-            };
+        .watch => |result| blk: {
             cancel_read(alloc, &select);
+            _ = try result;
             break :blk null;
         },
     };
@@ -289,7 +283,7 @@ fn readRequest(
     cancel_flag: *std.atomic.Value(bool),
     allowed_cors_origin: ?[]const u8,
 ) !?Request {
-    if (comptime builtin.os.tag == .windows) {
+    if (comptime builtin.target.os.tag == .windows) {
         return read_request_with_timeout(alloc, stream, cancel_flag, allowed_cors_origin);
     }
     return read_request_stream(alloc, stream, cancel_flag, allowed_cors_origin, true);
@@ -384,7 +378,7 @@ fn unrelated_connection_read_error(err: anyerror) bool {
         // Zig 0.16's Windows AFD reader reports an incoming TCP RST as the
         // catch-all status until std maps it explicitly.
         error.Unexpected,
-        => builtin.os.tag == .windows,
+        => builtin.target.os.tag == .windows,
         else => false,
     };
 }
@@ -749,7 +743,7 @@ test "browser callback survives unrelated requests before the redirect" {
 }
 
 fn expectResetPreconnectSurvives(hold_ms: u64) !void {
-    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag == .windows) return error.SkipZigTest;
     var listener = try bindTestListener();
     defer listener.deinit(io_mod.getIo());
 
@@ -782,7 +776,7 @@ fn expectResetPreconnectSurvives(hold_ms: u64) !void {
 }
 
 test "browser callback classifies the Windows AFD reset status as unrelated" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     try std.testing.expect(unrelated_connection_read_error(error.Unexpected));
     try std.testing.expect(unrelated_connection_read_error(error.ConnectionResetByPeer));
     try std.testing.expect(!unrelated_connection_read_error(error.OutOfMemory));

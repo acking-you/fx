@@ -159,19 +159,17 @@ pub const Paths = struct {
         if (!validBackendIdentity(backend_identity)) {
             return error.InvalidTmuxBackendIdentity;
         }
-        const session_name = try std.fmt.allocPrint(
-            alloc,
+        const session_name = try alloc.print(
             "fx-{s}",
             .{backend_identity},
         );
         errdefer alloc.free(session_name);
-        const target = try std.fmt.allocPrint(
-            alloc,
+        const target = try alloc.print(
             "{s}:terminal.0",
             .{session_name},
         );
         errdefer alloc.free(target);
-        const socket = try std.fs.path.join(alloc, &.{ transport_root, "tmux.sock" });
+        const socket = try std.Io.Dir.path.join(alloc, &.{ transport_root, "tmux.sock" });
         errdefer alloc.free(socket);
         const config = try artifactPath(alloc, durable_root, backend_identity, "config.json");
         errdefer alloc.free(config);
@@ -201,14 +199,12 @@ pub const Paths = struct {
         errdefer alloc.free(bootstrap);
         const command = try artifactPath(alloc, durable_root, backend_identity, "command");
         errdefer alloc.free(command);
-        const marker_socket = try std.fmt.allocPrint(
-            alloc,
+        const marker_socket = try alloc.print(
             "/tmp/fx-tmux-marker-{s}.sock",
             .{backend_identity},
         );
         errdefer alloc.free(marker_socket);
-        const capture_socket = try std.fmt.allocPrint(
-            alloc,
+        const capture_socket = try alloc.print(
             "/tmp/fx-tmux-capture-{s}.sock",
             .{backend_identity},
         );
@@ -375,8 +371,7 @@ pub const Backend = struct {
         defer alloc.free(quoted_executable);
         const quoted_config = try quoteShellWord(alloc, paths.config);
         defer alloc.free(quoted_config);
-        const launcher_command = try std.fmt.allocPrint(
-            alloc,
+        const launcher_command = try alloc.print(
             "exec {s} {s} {s}",
             .{ quoted_executable, launcher_mode, quoted_config },
         );
@@ -576,8 +571,7 @@ pub const Backend = struct {
         defer self.alloc.free(quoted_socket);
         const quoted_identity = try quoteShellWord(self.alloc, self.backend_identity);
         defer self.alloc.free(quoted_identity);
-        const command = try std.fmt.allocPrint(
-            self.alloc,
+        const command = try self.alloc.print(
             "exec {s} {s} {s} {s}",
             .{ quoted_executable, capture_mode, quoted_socket, quoted_identity },
         );
@@ -666,8 +660,7 @@ pub const Backend = struct {
     }
 
     pub fn write(self: *Backend, bytes: []const u8, paste: bool) !void {
-        const buffer_name = try std.fmt.allocPrint(
-            self.alloc,
+        const buffer_name = try self.alloc.print(
             "fx-{s}",
             .{self.backend_identity},
         );
@@ -974,7 +967,7 @@ pub fn runLauncher(
     defer debug_trace.shutdown();
     debug_trace.configureFromEnv(alloc, ".");
     const config_path = std.mem.sliceTo(raw_args[2], 0);
-    if (!std.fs.path.isAbsolute(config_path)) return error.InvalidTmuxLauncher;
+    if (!std.Io.Dir.path.isAbsolute(config_path)) return error.InvalidTmuxLauncher;
     var config_file = try std.Io.Dir.openFileAbsolute(
         io_mod.getIo(),
         config_path,
@@ -1126,7 +1119,7 @@ pub fn runLauncher(
         .signal => |signal| try writeLifecycle(
             parsed.value.lifecycle_path,
             .command_signal,
-            @intFromEnum(signal),
+            @backingInt(signal),
         ),
         .stopped, .unknown => try writeLifecycle(
             parsed.value.lifecycle_path,
@@ -1142,7 +1135,7 @@ pub fn runCapture(raw_args: []const [*:0]const u8) !void {
     if (!isCaptureModeRaw(raw_args)) return error.InvalidTmuxCapture;
     const socket_path = std.mem.sliceTo(raw_args[2], 0);
     const backend_identity = std.mem.sliceTo(raw_args[3], 0);
-    if (!std.fs.path.isAbsolute(socket_path) or
+    if (!std.Io.Dir.path.isAbsolute(socket_path) or
         !validBackendIdentity(backend_identity))
     {
         return error.InvalidTmuxCapture;
@@ -1319,12 +1312,12 @@ const LauncherControl = struct {
 };
 
 fn supported() bool {
-    return host_capabilities.terminalSupportForOs(builtin.os.tag).isSupported();
+    return host_capabilities.terminalSupportForOs(builtin.target.os.tag).isSupported();
 }
 
 test "tmux implementation guard follows canonical platform support" {
     try std.testing.expectEqual(
-        host_capabilities.terminalSupportForOs(builtin.os.tag).isSupported(),
+        host_capabilities.terminalSupportForOs(builtin.target.os.tag).isSupported(),
         supported(),
     );
 }
@@ -1907,15 +1900,15 @@ fn deinitManifest(alloc: Allocator, manifest: *ManifestWire) void {
 
 fn validateLauncherConfig(config: LauncherConfig) !void {
     if (config.argv.len == 0 or
-        !std.fs.path.isAbsolute(config.cwd) or
-        !std.fs.path.isAbsolute(config.control_path) or
-        !std.fs.path.isAbsolute(config.bootstrap_path) or
-        !std.fs.path.isAbsolute(config.lifecycle_path) or
-        !std.fs.path.isAbsolute(config.shell_identity_path) or
-        !std.fs.path.isAbsolute(config.manifest_ready_path) or
-        !std.fs.path.isAbsolute(config.release_path) or
-        !std.fs.path.isAbsolute(config.command_release_path) or
-        !std.fs.path.isAbsolute(config.tmux_socket) or
+        !std.Io.Dir.path.isAbsolute(config.cwd) or
+        !std.Io.Dir.path.isAbsolute(config.control_path) or
+        !std.Io.Dir.path.isAbsolute(config.bootstrap_path) or
+        !std.Io.Dir.path.isAbsolute(config.lifecycle_path) or
+        !std.Io.Dir.path.isAbsolute(config.shell_identity_path) or
+        !std.Io.Dir.path.isAbsolute(config.manifest_ready_path) or
+        !std.Io.Dir.path.isAbsolute(config.release_path) or
+        !std.Io.Dir.path.isAbsolute(config.command_release_path) or
+        !std.Io.Dir.path.isAbsolute(config.tmux_socket) or
         config.tmux_target.len == 0 or
         config.control_nonce.len != control_nonce_len or
         (config.command == null) != (config.command_path == null) or
@@ -1924,13 +1917,13 @@ fn validateLauncherConfig(config: LauncherConfig) !void {
         return error.InvalidTmuxLauncherConfig;
     }
     if (config.command_path) |path| {
-        if (!std.fs.path.isAbsolute(path)) return error.InvalidTmuxLauncherConfig;
+        if (!std.Io.Dir.path.isAbsolute(path)) return error.InvalidTmuxLauncherConfig;
     }
 }
 
 fn writeLifecycle(path: []const u8, kind: LifecycleKind, value: u32) !void {
     var bytes: [5]u8 = undefined;
-    bytes[0] = @intFromEnum(kind);
+    bytes[0] = @backingInt(kind);
     std.mem.writeInt(u32, bytes[1..5], value, .little);
     var file = try std.Io.Dir.createFileAbsolute(io_mod.getIo(), path, .{
         .truncate = false,
@@ -1954,7 +1947,7 @@ fn writeShellIdentity(
     pid: std.posix.pid_t,
 ) !void {
     var pid_buffer: [32]u8 = undefined;
-    const pid_text = try std.fmt.bufPrint(&pid_buffer, "{d}", .{pid});
+    const pid_text = try std.mem.print(&pid_buffer, "{d}", .{pid});
     const token = try process_provider.captureToken(
         alloc,
         pid_text,
@@ -2150,13 +2143,12 @@ fn artifactPath(
     identity: []const u8,
     suffix: []const u8,
 ) ![]u8 {
-    const name = try std.fmt.allocPrint(
-        alloc,
+    const name = try alloc.print(
         "tmux-{s}-{s}",
         .{ identity, suffix },
     );
     defer alloc.free(name);
-    return std.fs.path.join(alloc, &.{ root, name });
+    return std.Io.Dir.path.join(alloc, &.{ root, name });
 }
 
 fn validBackendIdentity(value: []const u8) bool {
@@ -2185,7 +2177,7 @@ fn quoteShellWord(alloc: Allocator, value: []const u8) ![]u8 {
 }
 
 fn formatU16(alloc: Allocator, value: u16) ![]u8 {
-    return std.fmt.allocPrint(alloc, "{d}", .{value});
+    return alloc.print("{d}", .{value});
 }
 
 fn monotonicMillis() i64 {
@@ -2363,17 +2355,17 @@ test "tmux launcher wait status classifies terminal results before stops" {
     );
     try std.testing.expectEqual(
         std.process.Child.Term{ .signal = .TERM },
-        launcherStatusToTerm(@intFromEnum(std.c.SIG.TERM)),
+        launcherStatusToTerm(@backingInt(std.c.SIG.TERM)),
     );
     try std.testing.expectEqual(
         std.process.Child.Term{ .signal = .SEGV },
-        launcherStatusToTerm(@intFromEnum(std.c.SIG.SEGV) | 0x80),
+        launcherStatusToTerm(@backingInt(std.c.SIG.SEGV) | 0x80),
     );
     try std.testing.expectEqual(
         std.process.Child.Term{ .stopped = .TTIN },
-        launcherStatusToTerm((@as(u32, @intFromEnum(std.c.SIG.TTIN)) << 8) | 0x7f),
+        launcherStatusToTerm((@as(u32, @backingInt(std.c.SIG.TTIN)) << 8) | 0x7f),
     );
-    const unknown_status: u32 = switch (builtin.os.tag) {
+    const unknown_status: u32 = switch (builtin.target.os.tag) {
         .linux => 0x101,
         .macos => 0x137f,
         else => return error.SkipZigTest,
@@ -2427,8 +2419,7 @@ test "tmux marker arrival deadlines follow authenticated phase transitions" {
 test "tmux peer deadline bounds accept receive partial frames and cancellation" {
     if (!supported()) return error.SkipZigTest;
     const alloc = std.testing.allocator;
-    const socket_path = try std.fmt.allocPrint(
-        alloc,
+    const socket_path = try alloc.print(
         "/tmp/fx-peer-deadline-{d}.sock",
         .{std.c.getpid()},
     );
@@ -2523,9 +2514,9 @@ test "checked tmux cleanup requires saved process absence without a socket" {
     defer tmp.cleanup();
     const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
     defer alloc.free(root);
-    const durable_root = try std.fs.path.join(alloc, &.{ root, "durable" });
+    const durable_root = try std.Io.Dir.path.join(alloc, &.{ root, "durable" });
     defer alloc.free(durable_root);
-    const transport_root = try std.fs.path.join(alloc, &.{ root, "transport" });
+    const transport_root = try std.Io.Dir.path.join(alloc, &.{ root, "transport" });
     defer alloc.free(transport_root);
     try std.Io.Dir.createDirAbsolute(std.testing.io, durable_root, .default_dir);
     try std.Io.Dir.createDirAbsolute(std.testing.io, transport_root, .default_dir);
@@ -2727,9 +2718,9 @@ test "lifecycle parser rejects partial and reordered control history" {
     defer tmp.cleanup();
     const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
     defer alloc.free(root);
-    const path = try std.fs.path.join(alloc, &.{ root, "lifecycle.bin" });
+    const path = try std.Io.Dir.path.join(alloc, &.{ root, "lifecycle.bin" });
     defer alloc.free(path);
-    try writePrivateFile(path, &.{ @intFromEnum(LifecycleKind.prepared), 0, 0, 0 }, true);
+    try writePrivateFile(path, &.{ @backingInt(LifecycleKind.prepared), 0, 0, 0 }, true);
     try std.testing.expectError(
         error.MalformedTmuxLifecycle,
         readLifecycle(alloc, path),

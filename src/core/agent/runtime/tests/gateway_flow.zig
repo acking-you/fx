@@ -1,4 +1,6 @@
+const text_utils = @import("../../../shared/text_utils.zig");
 const std = @import("std");
+const testing_allocator = @import("../../../shared/testing_allocator.zig");
 const agent_stream_provider = @import("../../stream_provider.zig");
 const builtin_tools = @import("../../../../builtins/tools.zig");
 const types = @import("../../../shared/types.zig");
@@ -435,7 +437,7 @@ fn writeTestImagePath(alloc: Allocator, tmp: *std.testing.TmpDir) ![]u8 {
 fn testSnapshotDir(alloc: Allocator, tmp: *std.testing.TmpDir) ![]u8 {
     const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
     defer alloc.free(root);
-    return std.fs.path.join(alloc, &.{ root, "snapshots" });
+    return std.Io.Dir.path.join(alloc, &.{ root, "snapshots" });
 }
 
 fn testCapturedImage(
@@ -523,8 +525,7 @@ fn oversizedVisionProviderResult(alloc: Allocator, summary_bytes: usize) ![]u8 {
     const summary = try alloc.alloc(u8, summary_bytes);
     defer alloc.free(summary);
     @memset(summary, 'a');
-    return std.fmt.allocPrint(
-        alloc,
+    return alloc.print(
         "{{\"images\":[{{\"image_id\":1,\"status\":\"ok\",\"summary\":\"{s}\",\"visible_text\":[],\"details\":[]}}]}}",
         .{summary},
     );
@@ -882,7 +883,7 @@ test "processQueuedPrompt delivers dense under-budget Vision evidence unchanged"
     const persisted = hooks.history_turns.items[0].assistant.execution.tool_steps[0].tool_results[0];
     try std.testing.expectEqual(types.PersistedToolStatus.success, persisted.status);
     try std.testing.expectEqual(@as(usize, 40), std.mem.count(u8, persisted.output, "visible item "));
-    try std.testing.expect(std.mem.find(u8, persisted.output, "x" ** 5000) != null);
+    try std.testing.expect(std.mem.find(u8, persisted.output, text_utils.repeat("x", 5000)) != null);
     try expectGatewayToolResultOutput(&gateway, 2, "call_vision_dense_evidence", persisted.output);
     try expectBodyNotContains(&gateway, 2, image_path);
 }
@@ -1367,7 +1368,7 @@ test "processQueuedPrompt keeps corrupt twenty-image members inside their origin
         try std.testing.expectEqual(expected[1], countNeedle(gateway.request_bodies.items[2], "\"type\":\"input_image\""));
         try std.testing.expectEqual(expected[2], countNeedle(gateway.request_bodies.items[3], "\"type\":\"input_image\""));
         var invalid_marker: [32]u8 = undefined;
-        const marker = try std.fmt.bufPrint(
+        const marker = try std.mem.print(
             &invalid_marker,
             "image_id={d}",
             .{corrupt_index + 1},
@@ -1928,10 +1929,10 @@ test "processQueuedPrompt recovers from Vision capacity failure with a narrower 
     try std.testing.expectEqual(@as(usize, 1), countNeedle(gateway.request_bodies.items[3], "\"type\":\"input_image\""));
     try expectBodyContains(&gateway, 2, "output_limit_exceeded");
     try expectBodyContains(&gateway, 2, "narrower focus or fewer images");
-    try expectBodyNotContains(&gateway, 2, "a" ** 1024);
+    try expectBodyNotContains(&gateway, 2, text_utils.repeat("a", 1024));
     try expectBodyContains(&gateway, 4, "narrow validated evidence");
     try expectBodyContains(&gateway, 4, "READY");
-    try expectBodyNotContains(&gateway, 4, "a" ** 1024);
+    try expectBodyNotContains(&gateway, 4, text_utils.repeat("a", 1024));
     const execution = hooks.history_turns.items[0].assistant.execution;
     try std.testing.expectEqual(@as(usize, 2), execution.tool_steps.len);
     try std.testing.expectEqual(types.PersistedToolStatus.failure, execution.tool_steps[0].tool_results[0].status);
@@ -2108,8 +2109,7 @@ test "vision does not retry a provider response over the output limit" {
 
     try std.testing.expectEqual(@as(usize, 1), script.calls);
     try std.testing.expect(std.mem.find(u8, result.model_output, "output_limit_exceeded") != null);
-    const expected_message = try std.fmt.allocPrint(
-        alloc,
+    const expected_message = try alloc.print(
         "Vision produced {d} bytes; the configured budget is 1024 bytes.",
         .{oversized.len},
     );
@@ -2181,7 +2181,7 @@ test "vision propagates cancellation raised on either provider attempt" {
 }
 
 test "vision surfaces allocation failure on either provider attempt" {
-    const alloc = std.testing.allocator;
+    const alloc = testing_allocator.no_resize;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const image_path = try writeTestImagePath(alloc, &tmp);
@@ -2445,7 +2445,7 @@ test "processQueuedPrompt routes images natively only when vision and file input
         const image = try testCapturedImage(alloc, &tmp, image_path, 1);
         defer types.freeImageAttachment(alloc, image);
         var images = [_]types.ImageAttachment{image};
-        const model = try std.fmt.allocPrint(alloc, "test/{s}", .{entry.label});
+        const model = try alloc.print("test/{s}", .{entry.label});
         defer alloc.free(model);
         const capability_overrides = [_]ModelCapabilityOverride{.{
             .model = model,
@@ -2651,7 +2651,7 @@ test "processQueuedPrompt traces selected live controls without request payloads
     defer tmp.cleanup();
     const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
     defer alloc.free(root);
-    const trace_path = try std.fs.path.join(alloc, &.{ root, "provider-options-trace.log" });
+    const trace_path = try std.Io.Dir.path.join(alloc, &.{ root, "provider-options-trace.log" });
     defer alloc.free(trace_path);
 
     debug_trace.resetForTest();
@@ -2820,7 +2820,7 @@ test "processQueuedPrompt resolves catalog capabilities for opaque effort" {
     defer tmp.cleanup();
     const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
     defer alloc.free(root);
-    const trace_path = try std.fs.path.join(alloc, &.{ root, "portable-reasoning-trace.log" });
+    const trace_path = try std.Io.Dir.path.join(alloc, &.{ root, "portable-reasoning-trace.log" });
     defer alloc.free(trace_path);
 
     debug_trace.resetForTest();
@@ -2866,7 +2866,7 @@ test "processQueuedPrompt traces why stale controls are omitted" {
     defer tmp.cleanup();
     const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
     defer alloc.free(root);
-    const trace_path = try std.fs.path.join(alloc, &.{ root, "stale-controls-trace.log" });
+    const trace_path = try std.Io.Dir.path.join(alloc, &.{ root, "stale-controls-trace.log" });
     defer alloc.free(trace_path);
 
     debug_trace.resetForTest();
@@ -3371,11 +3371,11 @@ test "processQueuedPrompt places transient overlay before history and current pr
 
     try std.testing.expectEqual(@as(usize, 1), gateway.request_bodies.items.len);
     const body = gateway.request_bodies.items[0];
-    const system_idx = std.mem.indexOf(u8, body, "system") orelse return error.TestExpectedEqual;
-    const static_idx = std.mem.indexOf(u8, body, "static project context unique") orelse return error.TestExpectedEqual;
-    const history_idx = std.mem.indexOf(u8, body, "past background prompt") orelse return error.TestExpectedEqual;
-    const current_idx = std.mem.indexOf(u8, body, "is it still running") orelse return error.TestExpectedEqual;
-    const runtime_idx = std.mem.indexOf(u8, body, "runtime tail context unique") orelse return error.TestExpectedEqual;
+    const system_idx = std.mem.find(u8, body, "system") orelse return error.TestExpectedEqual;
+    const static_idx = std.mem.find(u8, body, "static project context unique") orelse return error.TestExpectedEqual;
+    const history_idx = std.mem.find(u8, body, "past background prompt") orelse return error.TestExpectedEqual;
+    const current_idx = std.mem.find(u8, body, "is it still running") orelse return error.TestExpectedEqual;
+    const runtime_idx = std.mem.find(u8, body, "runtime tail context unique") orelse return error.TestExpectedEqual;
     try std.testing.expect(system_idx < static_idx);
     try std.testing.expect(static_idx < runtime_idx);
     try std.testing.expect(runtime_idx < history_idx);
@@ -3737,9 +3737,9 @@ test "processQueuedPrompt keeps completed history before the final current user 
     try expectGatewayPromptTextCount(&gateway, 0, "runtime context structural needle", 1);
     try expectGatewayPromptTextCount(&gateway, 0, "current structural prompt needle", 1);
     const body = gateway.request_bodies.items[0];
-    const history_idx = std.mem.indexOf(u8, body, "prior assistant structural needle") orelse return error.TestExpectedEqual;
-    const runtime_idx = std.mem.indexOf(u8, body, "runtime context structural needle") orelse return error.TestExpectedEqual;
-    const current_idx = std.mem.indexOf(u8, body, "current structural prompt needle") orelse return error.TestExpectedEqual;
+    const history_idx = std.mem.find(u8, body, "prior assistant structural needle") orelse return error.TestExpectedEqual;
+    const runtime_idx = std.mem.find(u8, body, "runtime context structural needle") orelse return error.TestExpectedEqual;
+    const current_idx = std.mem.find(u8, body, "current structural prompt needle") orelse return error.TestExpectedEqual;
     try std.testing.expect(runtime_idx < history_idx);
     try std.testing.expect(history_idx < current_idx);
     try expectGatewayPromptFinalUserText(&gateway, 0, "current structural prompt needle");
@@ -4272,7 +4272,7 @@ test "processQueuedPrompt retries replay-safe ReadFailed before success" {
     defer tmp.cleanup();
     const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
     defer alloc.free(root);
-    const trace_path = try std.fs.path.join(alloc, &.{ root, "read-failed-retry-trace.log" });
+    const trace_path = try std.Io.Dir.path.join(alloc, &.{ root, "read-failed-retry-trace.log" });
     defer alloc.free(trace_path);
 
     debug_trace.resetForTest();
@@ -6143,7 +6143,7 @@ test "processQueuedPrompt trace records history shape returned tool calls and wa
     defer tmp.cleanup();
     const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
     defer alloc.free(root);
-    const trace_path = try std.fs.path.join(alloc, &.{ root, "agent-loop-trace.log" });
+    const trace_path = try std.Io.Dir.path.join(alloc, &.{ root, "agent-loop-trace.log" });
     defer alloc.free(trace_path);
 
     debug_trace.resetForTest();
@@ -6202,7 +6202,7 @@ test "processQueuedPrompt assigns trace lineage to subagent runs" {
     defer tmp.cleanup();
     const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
     defer alloc.free(root);
-    const trace_path = try std.fs.path.join(alloc, &.{ root, "subagent-trace.log" });
+    const trace_path = try std.Io.Dir.path.join(alloc, &.{ root, "subagent-trace.log" });
     defer alloc.free(trace_path);
 
     debug_trace.resetForTest();
@@ -6240,7 +6240,7 @@ test "processQueuedPrompt trace emits one canonical result for tool execution er
     defer tmp.cleanup();
     const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
     defer alloc.free(root);
-    const trace_path = try std.fs.path.join(alloc, &.{ root, "tool-error-trace.log" });
+    const trace_path = try std.Io.Dir.path.join(alloc, &.{ root, "tool-error-trace.log" });
     defer alloc.free(trace_path);
 
     debug_trace.resetForTest();

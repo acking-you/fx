@@ -1,8 +1,10 @@
 const io_mod = @import("io.zig");
 const std = @import("std");
+const select_watch = @import("select_watch.zig");
+const AcceptWatch = select_watch.Watch(select_watch.CancellationDeadline);
 const builtin = @import("builtin");
 
-pub const Events = if (builtin.os.tag == .windows) struct {
+pub const Events = if (builtin.target.os.tag == .windows) struct {
     pub const in: i16 = 0x0300;
     pub const out: i16 = 0x0010;
     pub const err: i16 = 0x0001;
@@ -16,7 +18,7 @@ pub const Events = if (builtin.os.tag == .windows) struct {
     pub const nval: i16 = std.posix.POLL.NVAL;
 };
 
-pub const PollFd = if (builtin.os.tag == .windows) extern struct {
+pub const PollFd = if (builtin.target.os.tag == .windows) extern struct {
     fd: std.Io.net.Socket.Handle,
     events: i16,
     revents: i16,
@@ -26,7 +28,7 @@ pub const PollError = error{ Interrupted, SystemResources, NetworkDown, Unexpect
 
 const AcceptEvent = union(enum) {
     connection: anyerror!std.Io.net.Stream,
-    timeout: anyerror!void,
+    watch: std.Io.Cancelable!select_watch.Outcome,
 };
 
 fn accept_connection(
@@ -36,17 +38,13 @@ fn accept_connection(
     return server.accept(io);
 }
 
-fn wait_accept_timeout(io: std.Io, timeout_ms: u32) anyerror!void {
-    try io.sleep(.fromMilliseconds(timeout_ms), .awake);
-}
-
 fn cancel_accept(io: std.Io, select: *std.Io.Select(AcceptEvent)) void {
     while (select.cancel()) |event| switch (event) {
         .connection => |result| {
             const stream = result catch continue;
             stream.close(io);
         },
-        .timeout => {},
+        .watch => {},
     };
 }
 
@@ -59,35 +57,37 @@ pub fn accept_with_timeout(
     server: *std.Io.net.Server,
     timeout_ms: u32,
 ) !?std.Io.net.Stream {
+    var watch: AcceptWatch = .{};
     var buffer: [2]AcceptEvent = undefined;
     var select: std.Io.Select(AcceptEvent) = .init(io, &buffer);
-    try select.concurrent(.connection, accept_connection, .{ io, server });
-    select.concurrent(.timeout, wait_accept_timeout, .{ io, timeout_ms }) catch |err| {
-        cancel_accept(io, &select);
+    const condition: select_watch.CancellationDeadline = .{
+        .deadline = std.Io.Clock.Timestamp.fromNow(io, .{ .clock = .awake, .raw = .fromMilliseconds(timeout_ms) }),
+    };
+    try select.concurrent(.watch, AcceptWatch.run, .{ &watch, io, condition });
+    select.concurrent(.connection, accept_connection, .{ io, server }) catch |err| {
+        watch.finish(&select);
         return err;
     };
     const event = select.await() catch |err| {
+        watch.stop(io);
         cancel_accept(io, &select);
         return err;
     };
     return switch (event) {
         .connection => |result| blk: {
-            select.cancelDiscard();
+            watch.finish(&select);
             break :blk try result;
         },
-        .timeout => |result| blk: {
-            result catch |err| {
-                cancel_accept(io, &select);
-                return err;
-            };
+        .watch => |result| blk: {
             cancel_accept(io, &select);
+            _ = try result;
             break :blk null;
         },
     };
 }
 
 pub fn poll(fds: []PollFd, timeout_ms: i32) PollError!usize {
-    if (comptime builtin.os.tag == .windows) {
+    if (comptime builtin.target.os.tag == .windows) {
         const rc = WSAPoll(fds.ptr, @intCast(fds.len), timeout_ms);
         if (rc >= 0) return @intCast(rc);
         return error.NetworkDown;
@@ -106,7 +106,7 @@ pub fn poll(fds: []PollFd, timeout_ms: i32) PollError!usize {
 }
 
 pub fn setTimeouts(socket: std.Io.net.Socket.Handle, timeout_ms: u32) !void {
-    if (comptime builtin.os.tag == .windows) {
+    if (comptime builtin.target.os.tag == .windows) {
         const native_socket = @intFromPtr(socket);
         if (setsockopt(native_socket, 0xffff, 0x1006, @ptrCast(&timeout_ms), @sizeOf(u32)) != 0 or
             setsockopt(native_socket, 0xffff, 0x1005, @ptrCast(&timeout_ms), @sizeOf(u32)) != 0)
@@ -141,7 +141,7 @@ extern "ws2_32" fn WSAPoll(fds: [*]PollFd, count: u32, timeout_ms: i32) callconv
 extern "ws2_32" fn setsockopt(socket: usize, level: c_int, option: c_int, value: [*]const u8, value_len: c_int) callconv(.winapi) c_int;
 
 test "Windows AFD listener accepts a connection arriving during the wait" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     const io = std.testing.io;
     var address = try std.Io.net.IpAddress.parse("127.0.0.1", 0);
     var server = try address.listen(io, .{ .reuse_address = true });

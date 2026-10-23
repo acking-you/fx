@@ -19,9 +19,7 @@ const builtin_context = @import("builtins/context.zig");
 const builtin_gateway = @import("builtins/responses.zig");
 const builtin_modes = @import("builtins/modes.zig");
 
-const c = @cImport({
-    @cInclude("node_api.h");
-});
+const c = @import("node_api");
 
 const Allocator = std.mem.Allocator;
 const max_drain_bytes = 1024 * 1024;
@@ -82,7 +80,7 @@ const InputQueue = struct {
         const queued = self.bytes.items.len - self.offset;
         if (data.len > max_input_bytes or queued > max_input_bytes - data.len) return error.InputQueueFull;
         if (self.offset > 0) {
-            std.mem.copyForwards(u8, self.bytes.items[0..queued], self.bytes.items[self.offset..]);
+            @memmove(self.bytes.items[0..queued], self.bytes.items[self.offset..]);
             self.bytes.items.len = queued;
             self.offset = 0;
         }
@@ -329,7 +327,7 @@ const FetchBridge = struct {
         const queued = self.response.items.len - self.response_offset;
         if (data.len > max_fetch_response_bytes or queued > max_fetch_response_bytes - data.len) return .backpressure;
         if (self.response_offset > 0) {
-            std.mem.copyForwards(u8, self.response.items[0..queued], self.response.items[self.response_offset..]);
+            @memmove(self.response.items[0..queued], self.response.items[self.response_offset..]);
             self.response.items.len = queued;
             self.response_offset = 0;
         }
@@ -801,7 +799,7 @@ fn fetch_handle_arg(env: c.napi_env, value: c.napi_value) ?fetch_state.Handle {
 
 fn fetch_operation_value(env: c.napi_env, result: FetchOperationResult) c.napi_value {
     var value: c.napi_value = undefined;
-    if (!statusOk(env, c.napi_create_uint32(env, @intFromEnum(result), &value), "could not create fetch operation result")) return null;
+    if (!statusOk(env, c.napi_create_uint32(env, @backingInt(result), &value), "could not create fetch operation result")) return null;
     return value;
 }
 

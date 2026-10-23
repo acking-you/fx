@@ -37,7 +37,7 @@ pub fn call(ctx: tool_dispatch.DispatchContext, erased: tool_dispatch.ToolInput)
     defer if (recent_input_json) |owned| ctx.allocator.free(owned);
     const turn_search_id = if (ctx.session_id == null)
         if (ctx.output_chunk_lifecycle_id) |lifecycle|
-            std.fmt.allocPrint(ctx.allocator, "fx-turn-{d}", .{lifecycle.turn_id}) catch
+            ctx.allocator.print("fx-turn-{d}", .{lifecycle.turn_id}) catch
                 return error.OutOfMemory
         else
             null
@@ -412,7 +412,7 @@ test "Codex web search input keeps the previous visible turn through the current
 }
 
 test "Codex web search bounds previous assistant context without splitting utf8" {
-    const long = ("x " ** 3_000) ++ "★";
+    const long = (text_utils.repeat("x ", 3_000)) ++ "★";
     const raw = try buildRecentInputJson(
         std.testing.allocator,
         "current_request: current question\nrecent_root_user_request: previous question\n",

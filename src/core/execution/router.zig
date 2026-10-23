@@ -26,7 +26,7 @@ pub fn prepareAuthorizedRoute(
     command_ctx: command_admission.CommandContext,
     authority: command_admission.CommandExecutionAuthority,
 ) !PreparedCommandRoute {
-    if (command_ctx.target_os != builtin.os.tag) return error.CommandTargetMismatch;
+    if (command_ctx.target_os != builtin.target.os.tag) return error.CommandTargetMismatch;
     return switch (authority) {
         .direct_only => |fingerprint| blk: {
             if (!fingerprint.matches(command_ctx)) return error.CommandAdmissionChanged;
@@ -120,7 +120,7 @@ pub fn validateConfigContext(
     command_ctx: command_admission.CommandContext,
 ) !void {
     _ = cfg;
-    if (command_ctx.target_os != builtin.os.tag) return error.CommandTargetMismatch;
+    if (command_ctx.target_os != builtin.target.os.tag) return error.CommandTargetMismatch;
 }
 
 fn context(command: []const u8, background: bool) command_admission.CommandContext {
@@ -128,7 +128,7 @@ fn context(command: []const u8, background: bool) command_admission.CommandConte
         .command = command,
         .resolved_cwd = "/tmp",
         .background = background,
-        .target_os = builtin.os.tag,
+        .target_os = builtin.target.os.tag,
     };
 }
 
@@ -247,7 +247,7 @@ test "router rejects shell fingerprint and target mismatches" {
     );
 
     var changed_target = ctx;
-    changed_target.target_os = if (builtin.os.tag == .macos) .linux else .macos;
+    changed_target.target_os = if (builtin.target.os.tag == .macos) .linux else .macos;
     try std.testing.expectError(
         error.CommandTargetMismatch,
         validateConfigContext(.{ .max_command_output_bytes = 1024 }, changed_target),

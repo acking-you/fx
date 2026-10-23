@@ -1,3 +1,4 @@
+const text_utils = @import("../shared/text_utils.zig");
 const std = @import("std");
 const debug_trace = @import("../shared/debug_trace.zig");
 const image_attachments = @import("../images/image_attachments.zig");
@@ -367,17 +368,11 @@ pub fn Runtime(comptime App: type) type {
             for (entries) |*entry| {
                 if (entry.draft.review_draft) |*review| {
                     if (review.pasted_blocks.len > 0) {
-                        entry.pasted_blocks = .{
-                            .items = review.pasted_blocks,
-                            .capacity = review.pasted_blocks.len,
-                        };
+                        entry.pasted_blocks = .fromOwnedSlice(review.pasted_blocks);
                         review.pasted_blocks = &.{};
                     }
                     if (review.image_tokens.len > 0) {
-                        entry.image_tokens = .{
-                            .items = review.image_tokens,
-                            .capacity = review.image_tokens.len,
-                        };
+                        entry.image_tokens = .fromOwnedSlice(review.image_tokens);
                         review.image_tokens = &.{};
                     }
                 }
@@ -1111,7 +1106,7 @@ test "queued prompt review restores compact paste and commits expanded execution
 
     const placeholder = "[Pasted text #4, 1 line]";
     const compact = "before " ++ placeholder ++ " after";
-    const backing = "x" ** (paste_blocks.large_paste_char_threshold + 1);
+    const backing = text_utils.repeat("x", (paste_blocks.large_paste_char_threshold + 1));
     const expanded = "before " ++ backing ++ " after";
     var prompt = try makeReviewTestPrompt(alloc, expanded);
     errdefer worker_runtime.freeQueuedPrompt(alloc, prompt);
@@ -1332,7 +1327,7 @@ test "queued image line kill survives deleting its queue card and yanks verified
     defer alloc.free(source_path);
     const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
     defer alloc.free(root);
-    const snapshot_dir = try std.fs.path.join(alloc, &.{ root, "snapshots" });
+    const snapshot_dir = try std.Io.Dir.path.join(alloc, &.{ root, "snapshots" });
     defer alloc.free(snapshot_dir);
 
     var app = ReviewTestApp{ .alloc = alloc };

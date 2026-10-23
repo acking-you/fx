@@ -208,7 +208,7 @@ pub fn streamPrepared(
 ) !stream_provider.Result {
     if (request.cancel_flag.load(.seq_cst)) return stream_provider.failResult(error.Cancelled);
     const account_id = request.credential.account_id.?;
-    const auth_header = try std.fmt.allocPrint(alloc, "Bearer {s}", .{request.credential.secret});
+    const auth_header = try alloc.print("Bearer {s}", .{request.credential.secret});
     defer secret.zeroAndFree(alloc, auth_header);
     const request_endpoint = if (io_mod.getenv(e2e_endpoint_env)) |override| endpoint: {
         if (!gateway_client.isLoopbackUrl(override)) return error.InvalidE2EXaiGrokEndpoint;
@@ -1041,8 +1041,7 @@ test "xAI Grok request deadline closes slow headers and stalled SSE" {
         var fixture = try TestResponseFixture.init(mode);
         defer fixture.deinit();
         try fixture.start();
-        const url = try std.fmt.allocPrint(
-            std.testing.allocator,
+        const url = try std.testing.allocator.print(
             "http://127.0.0.1:{d}/responses",
             .{fixture.port()},
         );
@@ -1076,8 +1075,7 @@ test "xAI Grok error-body reader accepts the exact bound and replaces one beyond
         var fixture = try TestResponseFixture.init(mode);
         defer fixture.deinit();
         try fixture.start();
-        const url = try std.fmt.allocPrint(
-            std.testing.allocator,
+        const url = try std.testing.allocator.print(
             "http://127.0.0.1:{d}/responses",
             .{fixture.port()},
         );

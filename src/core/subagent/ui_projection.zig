@@ -1,3 +1,4 @@
+const text_utils = @import("../shared/text_utils.zig");
 const std = @import("std");
 const approval_persistence = @import("approval_persistence.zig");
 const approval_registry = @import("approval_registry.zig");
@@ -1479,15 +1480,13 @@ fn activitySummary(alloc: Allocator, payload: communication.DeliveryPayload) ![]
     return switch (payload) {
         .message => |value| dupeBounded(alloc, value),
         .milestone => |value| dupeBounded(alloc, value),
-        .terminal => |state| std.fmt.allocPrint(alloc, "state: {s}", .{@tagName(state)}),
-        .interval => |value| std.fmt.allocPrint(
-            alloc,
+        .terminal => |state| alloc.print("state: {s}", .{@tagName(state)}),
+        .interval => |value| alloc.print(
             "state: {s} ({d} coalesced updates)",
             .{ @tagName(value.state), value.coalesced_ticks },
         ),
         .approval => |value| dupeBounded(alloc, value),
-        .tool_activity => |value| std.fmt.allocPrint(
-            alloc,
+        .tool_activity => |value| alloc.print(
             "{s}: {s}",
             .{ value.tool_name[0..@min(value.tool_name.len, max_summary_bytes)], @tagName(value.phase) },
         ),
@@ -1543,10 +1542,9 @@ fn dupeBounded(alloc: Allocator, value: []const u8) ![]u8 {
 test "approval command projection preserves content beyond summary bounds" {
     const alloc = std.testing.allocator;
     const tail = "COMMAND_TAIL_MUST_REMAIN_VISIBLE";
-    const command = try std.fmt.allocPrint(
-        alloc,
+    const command = try alloc.print(
         "# exec_command profile=user shell=/bin/zsh\n{s}{s}",
-        .{ "x" ** max_summary_bytes, tail },
+        .{ text_utils.repeat("x", max_summary_bytes), tail },
     );
     defer alloc.free(command);
 
@@ -1558,7 +1556,7 @@ test "approval command projection preserves content beyond summary bounds" {
         .child_id = "child",
         .root_id = "root",
         .work_id = "work",
-        .prepared_fingerprint = [_]u8{7} ** 32,
+        .prepared_fingerprint = @as([32]u8, @splat(7)),
         .label = "exec_command long command",
         .explanation = null,
         .command = command,
@@ -1796,7 +1794,7 @@ test "bounded ledger projection exposes unread activity approvals and stale stat
             .child_id = "child",
             .root_id = "root",
             .work_id = "work-1",
-            .prepared_fingerprint = [_]u8{1} ** 32,
+            .prepared_fingerprint = @as([32]u8, @splat(1)),
             .label = "read file",
             .explanation = "needs permission",
             .file = .{
@@ -1873,7 +1871,7 @@ test "file approval projection cleans every failing allocation" {
         .child_id = "child",
         .root_id = "root",
         .work_id = "work",
-        .prepared_fingerprint = [_]u8{3} ** 32,
+        .prepared_fingerprint = @as([32]u8, @splat(3)),
         .label = "file_mutation",
         .explanation = "allocation sweep",
         .file = .{
@@ -1970,10 +1968,10 @@ test "authoritative bounded pages relocate a later configured child after a stal
 
     for (0..tree_limit + 1) |index| {
         var id_buf: [32]u8 = undefined;
-        const child_id = try std.fmt.bufPrint(&id_buf, "child-{d:0>3}", .{index});
+        const child_id = try std.mem.print(&id_buf, "child-{d:0>3}", .{index});
         try env.createSession(alloc, child_id);
         var operation_buf: [32]u8 = undefined;
-        const operation_id = try std.fmt.bufPrint(&operation_buf, "create-{d:0>3}", .{index});
+        const operation_id = try std.mem.print(&operation_buf, "create-{d:0>3}", .{index});
         var command = try domain.validateCommand(alloc, .{ .create = .{
             .name = child_id,
             .mode = .persistent,
@@ -2145,10 +2143,10 @@ test "pending approval pages reach beyond eight independently of the bounded tre
 
     for (0..tree_limit + 1) |index| {
         var id_buf: [32]u8 = undefined;
-        const child_id = try std.fmt.bufPrint(&id_buf, "child-{d:0>3}", .{index});
+        const child_id = try std.mem.print(&id_buf, "child-{d:0>3}", .{index});
         try env.createSession(alloc, child_id);
         var operation_buf: [32]u8 = undefined;
-        const operation_id = try std.fmt.bufPrint(&operation_buf, "create-{d:0>3}", .{index});
+        const operation_id = try std.mem.print(&operation_buf, "create-{d:0>3}", .{index});
         var command = try domain.validateCommand(alloc, .{ .create = .{
             .name = child_id,
             .mode = .persistent,
@@ -2186,9 +2184,9 @@ test "pending approval pages reach beyond eight independently of the bounded tre
     );
     for (1..10) |index| {
         var approval_buf: [32]u8 = undefined;
-        const approval_id = try std.fmt.bufPrint(&approval_buf, "approval-{d:0>2}", .{index});
+        const approval_id = try std.mem.print(&approval_buf, "approval-{d:0>2}", .{index});
         var child_buf: [32]u8 = undefined;
-        const child_id = try std.fmt.bufPrint(
+        const child_id = try std.mem.print(
             &child_buf,
             "child-{d:0>3}",
             .{index % tree_limit},
@@ -2624,10 +2622,10 @@ fn makeProjectionTaggedHistory(alloc: Allocator, count: usize) ![]session.Histor
     }
     while (built < count) : (built += 1) {
         var prompt_buf: [64]u8 = undefined;
-        const prompt = try std.fmt.bufPrint(&prompt_buf, "stored prompt {d}", .{built});
+        const prompt = try std.mem.print(&prompt_buf, "stored prompt {d}", .{built});
         turns[built] = try session.makeAssistantTurn(alloc, prompt, "stored answer");
         var work_buf: [32]u8 = undefined;
-        const work_id = try std.fmt.bufPrint(&work_buf, "work-{d:0>2}", .{built});
+        const work_id = try std.mem.print(&work_buf, "work-{d:0>2}", .{built});
         try session.copyWorkIdToTurn(alloc, &turns[built], work_id);
     }
     return turns;
@@ -2684,9 +2682,9 @@ test "child chat loads bounded authoritative pages and reports stale cursors" {
 
     for (0..25) |index| {
         var work_buf: [32]u8 = undefined;
-        const work_id = try std.fmt.bufPrint(&work_buf, "work-{d:0>2}", .{index});
+        const work_id = try std.mem.print(&work_buf, "work-{d:0>2}", .{index});
         var content_buf: [64]u8 = undefined;
-        const content = try std.fmt.bufPrint(&content_buf, "stored prompt {d}", .{index});
+        const content = try std.mem.print(&content_buf, "stored prompt {d}", .{index});
         var send = try domain.validateCommand(alloc, .{ .message = .{ .send = .{
             .id = child_id,
             .content = content,

@@ -111,7 +111,7 @@ fn responsesEndpointAlloc(alloc: Allocator, raw_base_url: []const u8) ![]u8 {
     if (std.mem.endsWith(u8, base_url, "/responses")) {
         return alloc.dupe(u8, base_url);
     }
-    return std.fmt.allocPrint(alloc, "{s}/responses", .{base_url});
+    return alloc.print("{s}/responses", .{base_url});
 }
 
 fn buildRequestAlloc(

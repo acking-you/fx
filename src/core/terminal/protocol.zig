@@ -286,8 +286,8 @@ const WireKind = struct {
 fn encodeKind(kind: contracts.MessageKind) WireKind {
     return switch (kind) {
         .hello => .{ .kind = 0, .subject = 0 },
-        .request => |action| .{ .kind = 1, .subject = @intFromEnum(action) },
-        .response => |action| .{ .kind = 2, .subject = @intFromEnum(action) },
+        .request => |action| .{ .kind = 1, .subject = @backingInt(action) },
+        .response => |action| .{ .kind = 2, .subject = @backingInt(action) },
         .cancel => .{ .kind = 4, .subject = 0 },
     };
 }
@@ -295,12 +295,12 @@ fn encodeKind(kind: contracts.MessageKind) WireKind {
 fn decodeKind(kind: u8, subject: u8) DecodeError!contracts.MessageKind {
     return switch (kind) {
         0 => if (subject == 0) .hello else error.InvalidFrameSubject,
-        1 => if (subject <= @intFromEnum(contracts.Action.close))
-            .{ .request = @enumFromInt(subject) }
+        1 => if (subject <= @backingInt(contracts.Action.close))
+            .{ .request = @fromBackingInt(@intCast(subject)) }
         else
             error.InvalidFrameSubject,
-        2 => if (subject <= @intFromEnum(contracts.Action.close))
-            .{ .response = @enumFromInt(subject) }
+        2 => if (subject <= @backingInt(contracts.Action.close))
+            .{ .response = @fromBackingInt(@intCast(subject)) }
         else
             error.InvalidFrameSubject,
         3 => error.InvalidFrameKind,

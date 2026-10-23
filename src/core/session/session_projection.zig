@@ -250,7 +250,7 @@ pub fn eventFileStatFingerprint(stat: EventFileStat, expected_size: u64) !Digest
 
     var encoded: [8 * 5 + 16 * 2 + 1]u8 = undefined;
     var offset: usize = 0;
-    encoded[offset] = @intFromEnum(stat.kind);
+    encoded[offset] = @backingInt(stat.kind);
     offset += 1;
     writeInt(&encoded, &offset, u64, stat.device);
     writeInt(&encoded, &offset, u64, stat.inode);
@@ -852,7 +852,7 @@ fn testManifest() Manifest {
         .total_output_tokens = 20,
         .last_event_seq = 9,
         .event_log_bytes = 4096,
-        .event_log_stat_fingerprint = [_]u8{0x55} ** 32,
+        .event_log_stat_fingerprint = @as([32]u8, @splat(0x55)),
         .generation_base_seq = 1,
         .generation_base_bytes = 512,
         .checkpoint_seq = null,

@@ -1,4 +1,5 @@
 const std = @import("std");
+const testing_allocator = @import("../../core/shared/testing_allocator.zig");
 const assistant_presentation = @import("../../core/agent/assistant_presentation.zig");
 const diff = @import("../../core/output/diff.zig");
 const types = @import("../../core/shared/types.zig");
@@ -496,7 +497,7 @@ test "resume projection finalizes complete flow before one retained-tail pass" {
     });
     for (0..12) |index| {
         var text: [64]u8 = undefined;
-        const line = try std.fmt.bufPrint(&text, "historical marker {d}\n", .{index});
+        const line = try std.mem.print(&text, "historical marker {d}\n", .{index});
         _ = try projection.appendRawClassified(line, .unknown_raw);
     }
     try projection.finalize();
@@ -558,7 +559,7 @@ test "resume projection installs complete publication and retained continuation 
     defer projection.deinit();
     for (0..12) |index| {
         var text: [64]u8 = undefined;
-        const line = try std.fmt.bufPrint(&text, "publication marker {d}\n", .{index});
+        const line = try std.mem.print(&text, "publication marker {d}\n", .{index});
         _ = try projection.appendRawClassified(line, .unknown_raw);
     }
     try projection.finalize();
@@ -787,7 +788,7 @@ fn checkResumeProjectionAllocationFailures(alloc: Allocator) !void {
 
 test "resume projection releases every failed detached build" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkResumeProjectionAllocationFailures,
         .{},
     );
@@ -810,7 +811,7 @@ fn checkLiveResumeProjectionAllocationFailures(alloc: Allocator) !void {
 
 test "live resume projection releases every failed detached build" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkLiveResumeProjectionAllocationFailures,
         .{},
     );

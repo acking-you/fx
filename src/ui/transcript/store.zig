@@ -3131,7 +3131,7 @@ pub fn appendCappedWithinCapacity(
         debug_trace.logf("transcript_cap", "trimmed {d} leading bytes before append (prior_len={d} text.len={d} cap={d})", .{ cut, list.items.len, text.len, cap });
 
         const remaining = list.items.len - cut;
-        std.mem.copyForwards(u8, list.items[0..remaining], list.items[cut..]);
+        @memmove(list.items[0..remaining], list.items[cut..]);
         list.items.len = remaining;
 
         if (replaceable_last_line.*) {
