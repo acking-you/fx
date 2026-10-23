@@ -36,6 +36,7 @@ pub fn networkFailureEvidence(
 
 fn isRetryableAgentNetworkError(err: anyerror) bool {
     return err == error.TlsInitializationFailed or
+        err == error.ConnectionSetupFailed or
         err == error.ConnectionSetupTimedOut or
         err == error.UnknownHostName or
         err == error.NameServerFailure or
@@ -104,6 +105,7 @@ test "native network failure evidence covers setup send read and resume failures
     };
     const cases = [_]Cases{
         .{ .err = error.TlsInitializationFailed },
+        .{ .err = error.ConnectionSetupFailed },
         .{ .err = error.ConnectionSetupTimedOut },
         .{ .err = error.UnknownHostName },
         .{ .err = error.NameServerFailure },
@@ -784,7 +786,9 @@ fn decideConnectionSetup(snapshot: ConnectionSetupSnapshot) ConnectionSetupDecis
 }
 
 fn isRetryableConnectionSetupError(err: anyerror) bool {
-    return err == error.TlsInitializationFailed or isRetryableGatewayError(err);
+    return err == error.TlsInitializationFailed or
+        err == error.ConnectionSetupFailed or
+        isRetryableGatewayError(err);
 }
 
 const ConnectionSetupTiming = struct {
@@ -972,16 +976,21 @@ const RequestOpenOperation = struct {
     request_open_override: ?RequestOpenOverride,
 
     fn run(self: *@This()) anyerror!std.http.Client.Request {
-        if (self.request_open_override) |request_open| {
-            return request_open.run(
+        const request = if (self.request_open_override) |request_open|
+            request_open.run(
                 request_open.ctx,
                 self.client,
                 .POST,
                 self.uri,
                 self.options,
-            );
-        }
-        return self.client.request(.POST, self.uri, self.options);
+            )
+        else
+            self.client.request(.POST, self.uri, self.options);
+        // Opening sends no request bytes. std.Io reports an unclassified
+        // errno as Unexpected; on POSIX this includes connect(2) failing with
+        // EISCONN when a stray cancellation signal interrupted a connection
+        // that then completed. Report it as a retryable setup failure.
+        return request catch |err| if (err == error.Unexpected) error.ConnectionSetupFailed else err;
     }
 };
 
@@ -2891,6 +2900,7 @@ pub const TestModelCatalogFixture = struct {
 const RequestOpenProbe = struct {
     attempts: usize = 0,
     tls_failure_attempt: ?usize = null,
+    unexpected_failure_attempt: ?usize = null,
     delays_ms: [3]i64 = .{ 0, 0, 0 },
 
     fn requestOpenOverride(self: *@This()) RequestOpenOverride {
@@ -2915,6 +2925,9 @@ const RequestOpenProbe = struct {
         }
         if (self.tls_failure_attempt == attempt_index) {
             return error.TlsInitializationFailed;
+        }
+        if (self.unexpected_failure_attempt == attempt_index) {
+            return error.Unexpected;
         }
         return client.request(method, uri, options);
     }
@@ -3075,6 +3088,41 @@ test "transport-owned TLS setup retries before send" {
     try harness.start();
 
     var probe = RequestOpenProbe{ .tls_failure_attempt = 0 };
+    var cancel_flag = std.atomic.Value(bool).init(false);
+    var callback_ctx: u8 = 0;
+    var result = try streamGatewayCompletionCoreWithOptions(
+        std.testing.allocator,
+        .{
+            .api_key = "test-key",
+            .model = "test/model",
+            .retry_count = 2,
+            .chat_url = harness.url,
+            .payload = "{}",
+        },
+        @ptrCast(&callback_ctx),
+        discardConnectionSetupTestChunk,
+        null,
+        &cancel_flag,
+        false,
+        .{
+            .setup_timing = .{ .timeout_ms = 1000 },
+            .request_open_override = probe.requestOpenOverride(),
+        },
+    );
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), probe.attempts);
+    try std.testing.expectEqualStrings("ok", result.completion.content.?);
+    harness.fixture.deinit();
+    if (harness.fixture.failure) |err| return err;
+}
+
+test "transport-owned setup retries an unclassified request-open failure" {
+    var harness = try ConnectionSetupHarness.init(.success, false);
+    defer harness.deinit();
+    try harness.start();
+
+    var probe = RequestOpenProbe{ .unexpected_failure_attempt = 0 };
     var cancel_flag = std.atomic.Value(bool).init(false);
     var callback_ctx: u8 = 0;
     var result = try streamGatewayCompletionCoreWithOptions(
