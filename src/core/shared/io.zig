@@ -1056,6 +1056,46 @@ pub fn sleep(ns: u64) void {
     getIo().sleep(.{ .nanoseconds = @intCast(ns) }, .real) catch {};
 }
 
+/// Waits until `event` is set or `deadline` has passed, and returns whether
+/// the event was set. `Event.waitTimeout` reports every wakeup that leaves the
+/// event unset as `Timeout`, including EINTR from a stray std.Io cancellation
+/// signal, so the clock is checked before treating it as expiry.
+pub fn waitEventUntil(event: *std.Io.Event, deadline: std.Io.Clock.Timestamp) std.Io.Cancelable!bool {
+    const zio = getIo();
+    while (true) {
+        event.waitTimeout(zio, .{ .deadline = deadline }) catch |err| switch (err) {
+            error.Timeout => {
+                const now = std.Io.Clock.Timestamp.now(zio, deadline.clock);
+                if (std.Io.Clock.Timestamp.compare(now, .lt, deadline)) continue;
+                return false;
+            },
+            error.Canceled => |e| return e,
+        };
+        return true;
+    }
+}
+
+test "event deadline wait ignores wakeups before the deadline" {
+    const zio = getIo();
+    var event: std.Io.Event = .unset;
+    const deadline = std.Io.Clock.Timestamp.fromNow(zio, .{
+        .clock = .awake,
+        .raw = .fromMilliseconds(200),
+    });
+    const Waker = struct {
+        fn run(target: *std.Io.Event) void {
+            getIo().sleep(.fromMilliseconds(20), .awake) catch {};
+            getIo().futexWake(std.Io.Event, target, 1);
+        }
+    };
+    const waker = try std.Thread.spawn(.{}, Waker.run, .{&event});
+    defer waker.join();
+
+    try std.testing.expect(!try waitEventUntil(&event, deadline));
+    const now = std.Io.Clock.Timestamp.now(zio, .awake);
+    try std.testing.expect(!std.Io.Clock.Timestamp.compare(now, .lt, deadline));
+}
+
 pub fn makeDirRecursive(path: []const u8) !void {
     const zio = getIo();
     if (std.fs.path.isAbsolute(path)) {

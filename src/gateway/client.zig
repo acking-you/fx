@@ -2172,10 +2172,7 @@ fn waitForBoundedDeadlineOrDone(
     deadline: std.Io.Clock.Timestamp,
     control_done: *std.Io.Event,
 ) anyerror!void {
-    control_done.waitTimeout(io_mod.getIo(), .{ .deadline = deadline }) catch |err| switch (err) {
-        error.Timeout => return,
-        else => return err,
-    };
+    _ = try io_mod.waitEventUntil(control_done, deadline);
 }
 
 fn waitForBoundedCancellation(cancel_flag: *std.atomic.Value(bool)) anyerror!void {
