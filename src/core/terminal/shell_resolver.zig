@@ -1,10 +1,17 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const contracts = @import("contracts.zig");
 const command_environment = @import("../execution/command_environment.zig");
 const io_mod = @import("../shared/io.zig");
 
 const Allocator = std.mem.Allocator;
+
+const ShellSelection = union(enum) {
+    user_login,
+    executable: struct {
+        path: []const u8,
+        clean_start: bool = false,
+    },
+};
 
 pub const ResolveError = error{
     MissingLoginShell,
@@ -181,9 +188,9 @@ pub const Invocation = struct {
     }
 };
 
-pub fn resolve(
+fn resolve(
     configured_login_shell: ?[]const u8,
-    shell: contracts.ShellSpec,
+    shell: ShellSelection,
 ) ResolveError!Invocation {
     const Selection = struct {
         path: []const u8,
@@ -283,32 +290,6 @@ pub fn environment(
     };
 }
 
-pub fn profileShell(
-    alloc: Allocator,
-    configured_login_shell: ?[]const u8,
-    profile: Profile,
-) (ResolveError || Allocator.Error)!contracts.ShellSpec {
-    return switch (profile) {
-        .clean => blk: {
-            const path = try supportedLoginShell(configured_login_shell);
-            _ = try resolve(null, .{ .executable = .{ .path = path, .clean_start = true } });
-            break :blk .{ .executable = .{
-                .path = try alloc.dupe(u8, path),
-                .clean_start = true,
-            } };
-        },
-        .user => blk: {
-            const configured = configured_login_shell orelse
-                break :blk .user_login;
-            const path = try supportedLoginShell(configured);
-            if (std.mem.eql(u8, path, configured)) break :blk .user_login;
-            break :blk .{ .executable = .{
-                .path = try alloc.dupe(u8, path),
-            } };
-        },
-    };
-}
-
 const captured_zsh_user_prelude = "\\builtin trap - TERM; ";
 
 pub fn capturedInvocation(
@@ -385,109 +366,10 @@ pub fn commandInvocation(
     return invocation;
 }
 
-pub fn formatInvocationCommand(
-    alloc: Allocator,
-    invocation: *const Invocation,
-) Allocator.Error![]u8 {
-    var output: std.ArrayList(u8) = .empty;
-    errdefer output.deinit(alloc);
-    for (invocation.argv(), 0..) |word, index| {
-        if (index != 0) try output.append(alloc, ' ');
-        try appendShellWord(&output, alloc, word);
-    }
-    return output.toOwnedSlice(alloc);
-}
-
 fn removeInteractiveFlag(invocation: *Invocation) void {
     std.debug.assert(invocation.len > 0);
     std.debug.assert(std.mem.eql(u8, invocation.values[invocation.len - 1], "-i"));
     invocation.len -= 1;
-}
-
-pub fn buildBootstrap(
-    alloc: Allocator,
-    executable: []const u8,
-    control_path: []const u8,
-    nonce: []const u8,
-    command_path: ?[]const u8,
-) Allocator.Error![]u8 {
-    var output: std.ArrayList(u8) = .empty;
-    errdefer output.deinit(alloc);
-
-    try output.appendSlice(alloc, "set +x; ");
-    if (command_path) |path| {
-        try output.appendSlice(alloc, "fx_terminal_command=$(< ");
-        try appendShellWord(&output, alloc, path);
-        try output.appendSlice(alloc, ") || exit 125; ");
-    }
-    try appendMarker(&output, alloc, executable, control_path, nonce, "shell-ready");
-    if (command_path) |_| {
-        try output.appendSlice(alloc, " || exit 125; ");
-        try appendMarker(
-            &output,
-            alloc,
-            executable,
-            control_path,
-            nonce,
-            "command-started",
-        );
-        try output.appendSlice(
-            alloc,
-            " || exit 125; builtin eval -- \"$fx_terminal_command\"; " ++
-                "fx_terminal_status=$?; exit \"$fx_terminal_status\"\n",
-        );
-    } else {
-        try output.appendSlice(alloc, " || exit 125\n");
-    }
-    return output.toOwnedSlice(alloc);
-}
-
-pub fn buildSourceCommand(
-    alloc: Allocator,
-    bootstrap_path: []const u8,
-) Allocator.Error![]u8 {
-    var output: std.ArrayList(u8) = .empty;
-    errdefer output.deinit(alloc);
-    try output.appendSlice(alloc, ". ");
-    try appendShellWord(&output, alloc, bootstrap_path);
-    try output.append(alloc, '\n');
-    return output.toOwnedSlice(alloc);
-}
-
-fn appendMarker(
-    output: *std.ArrayList(u8),
-    alloc: Allocator,
-    executable: []const u8,
-    control_path: []const u8,
-    nonce: []const u8,
-    event: []const u8,
-) Allocator.Error!void {
-    try appendShellWord(output, alloc, executable);
-    inline for (.{
-        "--fx-internal-terminal-control",
-        control_path,
-        nonce,
-        event,
-    }) |word| {
-        try output.append(alloc, ' ');
-        try appendShellWord(output, alloc, word);
-    }
-}
-
-fn appendShellWord(
-    output: *std.ArrayList(u8),
-    alloc: Allocator,
-    word: []const u8,
-) Allocator.Error!void {
-    try output.append(alloc, '\'');
-    for (word) |byte| {
-        if (byte == '\'') {
-            try output.appendSlice(alloc, "'\"'\"'");
-        } else {
-            try output.append(alloc, byte);
-        }
-    }
-    try output.append(alloc, '\'');
 }
 
 test "resolver builds Bash and zsh interactive argv" {
@@ -728,17 +610,7 @@ test "captured profiles use exact non-PTY argv" {
     }
 }
 
-test "captured invocation provider projection shell-quotes every argv word" {
-    const invocation = try capturedInvocation(std.testing.allocator, .{ .clean = "/bin/zsh" }, "printf '%s' ok");
-    const command = try formatInvocationCommand(std.testing.allocator, &invocation);
-    defer std.testing.allocator.free(command);
-    try std.testing.expectEqualStrings(
-        "'/bin/zsh' '-f' '-c' 'printf '\"'\"'%s'\"'\"' ok'",
-        command,
-    );
-}
-
-test "profile normalization defaults captured and persistent execution to user" {
+test "profile normalization defaults captured execution to user" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -746,14 +618,9 @@ test "profile normalization defaults captured and persistent execution to user" 
     try std.testing.expect((try environment(arena, "/bin/zsh", null)).eql(.{ .user = "/bin/zsh" }));
     try std.testing.expect((try environment(arena, "/bin/zsh", .clean)).eql(.{ .clean = "/bin/zsh" }));
     try std.testing.expect((try environment(arena, "/bin/zsh", .user)).eql(.{ .user = "/bin/zsh" }));
-    try std.testing.expectEqual(contracts.ShellSpec.user_login, try profileShell(arena, "/bin/zsh", .user));
-    try std.testing.expectEqualStrings(
-        "/bin/zsh",
-        (try profileShell(arena, "/bin/zsh", .clean)).executable.path,
-    );
 }
 
-test "unsupported login shell profiles fall back for captured and persistent execution" {
+test "unsupported login shell profiles fall back for captured execution" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -768,78 +635,4 @@ test "unsupported login shell profiles fall back for captured and persistent exe
     const clean_invocation = try capturedInvocation(arena, clean_environment, "printf clean");
     try std.testing.expectEqualStrings(fallback, user_invocation.path);
     try std.testing.expectEqualStrings(fallback, clean_invocation.path);
-
-    try std.testing.expectEqualStrings(
-        fallback,
-        (try profileShell(arena, "/opt/homebrew/bin/fish", .user)).executable.path,
-    );
-    try std.testing.expectEqualStrings(
-        fallback,
-        (try profileShell(arena, "/opt/homebrew/bin/fish", .clean)).executable.path,
-    );
-}
-
-test "bootstrap quotes private paths and separates command completion" {
-    const commandless = try buildBootstrap(
-        std.testing.allocator,
-        "/tmp/fx'bin",
-        "/tmp/control",
-        "nonce",
-        null,
-    );
-    defer std.testing.allocator.free(commandless);
-    try std.testing.expectEqualStrings(
-        "set +x; '/tmp/fx'\"'\"'bin' '--fx-internal-terminal-control' " ++
-            "'/tmp/control' 'nonce' 'shell-ready' || exit 125\n",
-        commandless,
-    );
-
-    const command = try buildBootstrap(
-        std.testing.allocator,
-        "/tmp/fx",
-        "/tmp/control",
-        "nonce",
-        "/tmp/command",
-    );
-    defer std.testing.allocator.free(command);
-    try std.testing.expect(
-        std.mem.find(u8, command, "'command-started'") != null,
-    );
-    try std.testing.expect(
-        std.mem.find(u8, command, "builtin eval --") != null,
-    );
-    try std.testing.expect(
-        std.mem.find(u8, command, "exit \"$fx_terminal_status\"") != null,
-    );
-
-    const source = try buildSourceCommand(
-        std.testing.allocator,
-        "/tmp/bootstrap'file",
-    );
-    defer std.testing.allocator.free(source);
-    try std.testing.expectEqualStrings(
-        ". '/tmp/bootstrap'\"'\"'file'\n",
-        source,
-    );
-}
-
-fn checkBootstrapAllocationFailures(alloc: Allocator) !void {
-    const bootstrap = try buildBootstrap(
-        alloc,
-        "/tmp/fx",
-        "/tmp/control",
-        "nonce",
-        "/tmp/command",
-    );
-    defer alloc.free(bootstrap);
-    const source = try buildSourceCommand(alloc, "/tmp/bootstrap");
-    defer alloc.free(source);
-}
-
-test "bootstrap construction cleans every allocation failure" {
-    try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
-        checkBootstrapAllocationFailures,
-        .{},
-    );
 }

@@ -85,24 +85,14 @@ const subagent_execution = @import("core/subagent/execution.zig");
 const types = @import("core/shared/types.zig");
 const image_attachments = @import("core/images/image_attachments.zig");
 const permissions = @import("core/permissions/permissions.zig");
-const command_runner = @import("core/execution/command_runner.zig");
 const command_admission = @import("core/permissions/command_admission.zig");
 const permission_auto_classifier = @import("core/permissions/auto_classifier.zig");
 const auto_classifier_context = @import("core/permissions/auto_classifier_context.zig");
 const agent_runtime = @import("core/agent/agent_runtime.zig");
 const assistant_presentation = @import("core/agent/assistant_presentation.zig");
-const background_process_provider = @import(
-    "core/execution/background_process_provider.zig",
-);
-const background_process = @import("tools/shell/background_process.zig");
-const terminal_client_runtime = @import("core/terminal/client.zig");
-const app_terminal_takeover_runtime = @import("core/app/app_terminal_takeover_runtime.zig");
-const terminal_host = @import("core/terminal/host.zig");
-const terminal_native_session = @import("core/terminal/native_session.zig");
 const unified_exec_runtime = @import("core/execution/unified_exec.zig");
 const lifecycle_prompt = @import("core/execution/lifecycle_prompt.zig");
 const exec_mode = @import("core/execution/exec_mode.zig");
-const terminal_tmux_session = @import("core/terminal/tmux_session.zig");
 const session_runtime = @import("core/session/session.zig");
 const session_codec = @import("core/session/session_codec.zig");
 const session_child_store = @import("core/session/session_child_store.zig");
@@ -581,9 +571,7 @@ const App = struct {
 
     worker_thread: ?std.Thread = null,
     worker: WorkerRuntime = .{},
-    terminal_client: terminal_client_runtime.Runtime = .{},
     unified_exec: unified_exec_runtime.Manager = unified_exec_runtime.Manager.init(std.heap.c_allocator),
-    terminal_takeover: app_terminal_takeover_runtime.Controller = .{},
     subagents: ui_subagents.Controller = .{},
     change_tracker: change_tracker_mod.ChangeTracker = .{},
     skills: skill_runtime.Runtime = .{},
@@ -632,10 +620,6 @@ const App = struct {
             .shell = .{ .stdout_file = std.Io.File.stdout() },
             .subagents = ui_subagents.Controller.init(),
             .lifecycle_runtime = hooks.Runtime.init(alloc),
-            .terminal_client = terminal_client_runtime.Runtime.init(if (comptime host_target.is_wasm)
-                background_process_provider.unavailable_provider
-            else
-                background_process.provider),
             .unified_exec = unified_exec_runtime.Manager.init(std.heap.c_allocator),
         };
         usage_dashboard_runtime.Runtime.initInto(&app.usage_dashboard, std.heap.c_allocator);
@@ -813,13 +797,10 @@ const App = struct {
         self.worker.requestShutdown();
         self.file_index.requestStop();
 
-        self.terminal_takeover.shutdown(App, self);
         self.releaseTerminal();
         if (self.worker_thread) |thread| thread.join();
         self.worker.setEventWake(null, null);
         self.terminal.deinitEventWake();
-        self.terminal_takeover.deinit(self.alloc);
-        self.terminal_client.deinit();
         self.unified_exec.deinit();
         self.provider_switch.deinit();
         self.provider_logout.deinit();
@@ -2147,13 +2128,6 @@ const App = struct {
         try self.shell.writeNotice(self.alloc, &self.metrics, notice, record);
     }
 
-    pub fn requestTerminalOpen(
-        self: *App,
-        session_id: []const u8,
-    ) app_terminal_takeover_runtime.OpenRequestResult {
-        return self.terminal_takeover.requestOpen(self.alloc, session_id);
-    }
-
     pub fn appendDomainNotice(self: *App, notice: types.SemanticNotice) !u32 {
         return self.shell.appendSemanticNotice(self.alloc, notice);
     }
@@ -2621,11 +2595,7 @@ const App = struct {
         }
         InputSubmitRuntime.collectPendingSubmissionFacts(self);
 
-        if (!self.terminal_takeover.blocksFxSurface(&self.terminal)) {
-            try self.collectThemeFacts();
-        } else {
-            self.terminal_input_runtime.terminal_theme_monitor.poll(io_mod.milliTimestamp());
-        }
+        try self.collectThemeFacts();
 
         app_permission_runtime.Runtime(App).tick(
             self,
@@ -2677,10 +2647,7 @@ const App = struct {
         try self.processNextCooperativePrompt();
 
         const cols_before_resize = self.shell.layout.cols;
-        if (self.terminal_takeover.blocksFxSurface(&self.terminal)) {
-            self.shell.layout = self.terminal.queryLayout(footer_rows) catch
-                self.shell.layout;
-        } else if (self.terminal_input_runtime.native_clear_probe.active() or
+        if (self.terminal_input_runtime.native_clear_probe.active() or
             self.terminal_input_runtime.native_clear_probe.awaitingLateResponse())
         {
             try self.collectNativeClearProbeFacts();
@@ -2700,7 +2667,6 @@ const App = struct {
                 }
             };
         }
-        try self.terminal_takeover.collect(App, self);
 
         // Terminal width changed with the modal open, so the footer
         // panel needs to re-wrap labels and descriptions.
@@ -2787,16 +2753,14 @@ const App = struct {
                 }, true);
             }
         }
-        if (!self.terminal_takeover.blocksFxSurface(&self.terminal)) {
-            const input_now_ms = io_mod.milliTimestamp();
-            InputAppRuntime.expireTerminalInputGestures(self, input_now_ms);
-            const terminal_input = self.terminal_input_runtime.flushTerminalAction(
-                input_now_ms,
-                input_escape_timeout_ms,
-                InputAppRuntime.terminalPasteActive(self),
-            );
-            try self.routeTerminalInputIngress(terminal_input);
-        }
+        const input_now_ms = io_mod.milliTimestamp();
+        InputAppRuntime.expireTerminalInputGestures(self, input_now_ms);
+        const terminal_input = self.terminal_input_runtime.flushTerminalAction(
+            input_now_ms,
+            input_escape_timeout_ms,
+            InputAppRuntime.terminalPasteActive(self),
+        );
+        try self.routeTerminalInputIngress(terminal_input);
         try WorkerAppRuntime.tick(self, app_callbacks.Bindings(App).workerEventHandlers(self));
         const now_ns = io_mod.nanoTimestamp();
         if (!self.approval_prompt.isActive() and !self.question_prompt.isActive()) {
@@ -2810,7 +2774,6 @@ const App = struct {
     pub fn loopCommitFrame(ctx: *anyopaque) !void {
         const self: *App = @ptrCast(@alignCast(ctx));
         if (!try WorkerAppRuntime.authorizeInteractiveAdmission(self)) return;
-        if (try self.terminal_takeover.commit(App, self)) return;
         if (self.terminal_input_runtime.native_clear_probe.active()) return;
         _ = self.admitPendingResizeSignal("post_input");
         try self.flushRequestedFrame();
@@ -2864,7 +2827,6 @@ const App = struct {
 
     fn handleAfterThemeMonitorByte(self: *App, byte: u8) !void {
         if (try self.routeActivePasteTransportByte(byte)) return;
-        if (try self.terminal_takeover.handleByte(App, self, byte)) return;
         if (!self.terminal_input_runtime.terminal_cursor_probe.interceptsInput()) {
             if (try self.beginNativeClearProbe(byte)) return;
             try self.handleTerminalInputByte(byte);
@@ -2923,9 +2885,7 @@ const App = struct {
             switch (source) {
                 .cursor_probe => {
                     if (try self.routeActivePasteTransportByte(byte)) return;
-                    if (!try self.terminal_takeover.handleByte(App, self, byte)) {
-                        try self.handleCursorDeferredInputByte(byte);
-                    }
+                    try self.handleCursorDeferredInputByte(byte);
                 },
                 .theme_monitor => try self.handleAfterThemeMonitorByte(byte),
             }
@@ -2935,7 +2895,6 @@ const App = struct {
         switch (ui_input.terminalInputOwner(
             &self.terminal_input_runtime.terminal_theme_monitor,
             InputAppRuntime.terminalPasteActive(self),
-            true,
         )) {
             .theme_monitor => {
                 try self.handleThemeMonitorByte(byte);
@@ -2946,10 +2905,9 @@ const App = struct {
                 std.debug.assert(routed);
                 return;
             },
-            .takeover, .fx_input => {},
+            .fx_input => {},
         }
 
-        if (try self.terminal_takeover.handleByte(App, self, byte)) return;
         if (self.terminal_input_runtime.terminal_theme_monitor.enabled) {
             try self.handleThemeMonitorByte(byte);
             return;
@@ -2968,9 +2926,6 @@ const App = struct {
 
     pub fn loopNextCollectedByte(ctx: *anyopaque) ?u8 {
         const self: *App = @ptrCast(@alignCast(ctx));
-        if (self.terminal_takeover.blocksFxSurface(&self.terminal)) {
-            return self.terminal_input_runtime.takeDeferredThemeMonitorByte();
-        }
         return self.terminal_input_runtime.takeDeferredTerminalInputByte();
     }
 };
@@ -3025,80 +2980,6 @@ fn mainC(c_argc: c_int, c_argv: [*][*:0]c_char, c_envp: [*:null]?[*:0]c_char) !v
     const raw_args = rawArgs(c_argc, c_argv);
     const raw_env: RawEnviron = @ptrCast(c_envp);
 
-    if (comptime terminal_host.isSupported()) {
-        if (terminal_tmux_session.isCaptureModeRaw(raw_args)) {
-            io_mod.setRawEnviron(raw_env);
-            const process_args = argsFromRaw(raw_args);
-            var threaded = std.Io.Threaded.init(processAllocator(), .{
-                .argv0 = .init(process_args),
-                .environ = .{ .block = environBlockFromRaw(raw_env) },
-            });
-            defer threaded.deinit();
-            io_mod.setIo(threaded.io());
-            try terminal_tmux_session.runCapture(raw_args);
-            return;
-        }
-        if (terminal_tmux_session.isLauncherModeRaw(raw_args)) {
-            io_mod.setRawEnviron(raw_env);
-            const process_args = argsFromRaw(raw_args);
-            var threaded = std.Io.Threaded.init(processAllocator(), .{
-                .argv0 = .init(process_args),
-                .environ = .{ .block = environBlockFromRaw(raw_env) },
-            });
-            defer threaded.deinit();
-            io_mod.setIo(threaded.io());
-            try terminal_tmux_session.runLauncher(
-                processAllocator(),
-                background_process.provider,
-                raw_args,
-            );
-            return;
-        }
-        if (terminal_native_session.isControlModeRaw(raw_args)) {
-            io_mod.setRawEnviron(raw_env);
-            const process_args = argsFromRaw(raw_args);
-            var threaded = std.Io.Threaded.init(processAllocator(), .{
-                .argv0 = .init(process_args),
-                .environ = .{ .block = environBlockFromRaw(raw_env) },
-            });
-            defer threaded.deinit();
-            io_mod.setIo(threaded.io());
-            try terminal_native_session.runControlMarker(raw_args);
-            return;
-        }
-        if (terminal_native_session.isLauncherModeRaw(raw_args)) {
-            io_mod.setRawEnviron(raw_env);
-            const process_args = argsFromRaw(raw_args);
-            var threaded = std.Io.Threaded.init(processAllocator(), .{
-                .argv0 = .init(process_args),
-                .environ = .{ .block = environBlockFromRaw(raw_env) },
-            });
-            defer threaded.deinit();
-            io_mod.setIo(threaded.io());
-            try terminal_native_session.runLauncher(processAllocator());
-            return;
-        }
-        if (terminal_host.isInternalModeRaw(raw_args)) {
-            io_mod.setRawEnviron(raw_env);
-            const process_args = argsFromRaw(raw_args);
-            var threaded = std.Io.Threaded.init(processAllocator(), .{
-                .argv0 = .init(process_args),
-                .environ = .{ .block = environBlockFromRaw(raw_env) },
-            });
-            defer threaded.deinit();
-            io_mod.setIo(threaded.io());
-            defer debug_trace.shutdown();
-            debug_trace.configureFromEnv(processAllocator(), ".");
-            try terminal_host.run(
-                processAllocator(),
-                try terminal_host.Config.fromEnvironment(
-                    background_process.provider,
-                ),
-            );
-            return;
-        }
-    }
-
     if (shouldRunBenchmarkNoArgRaw(raw_args, raw_env)) {
         switch (cli_surface.parse(builtin_commands.top_level_registry, &.{})) {
             .interactive => exitFast(0),
@@ -3108,18 +2989,6 @@ fn mainC(c_argc: c_int, c_argv: [*][*:0]c_char, c_envp: [*:null]?[*:0]c_char) !v
 
     var cli_arg_buf: [64][:0]const u8 = undefined;
     const cli_args = if (raw_args.len <= 1) &.{} else try cliArgsFromRaw(raw_args, &cli_arg_buf);
-    if (command_runner.isForegroundSessionInvocation(cli_args)) {
-        io_mod.setRawEnviron(raw_env);
-        const process_args = argsFromRaw(raw_args);
-        var threaded = std.Io.Threaded.init(processAllocator(), .{
-            .argv0 = .init(process_args),
-            .environ = .{ .block = environBlockFromRaw(raw_env) },
-        });
-        defer threaded.deinit();
-        io_mod.setIo(threaded.io());
-        try command_runner.runForegroundSessionBootstrap(cli_args);
-        return;
-    }
     if (cli_args.len > 0 and isTopLevelHelp(cli_args)) {
         try writeTopLevelHelpFast(raw_env);
         exitFast(0);
@@ -3503,7 +3372,6 @@ fn fullEntryConfig() app_entry_runtime.Config {
         .gateway_chat_url = builtin_gateway.default_chat_url,
         .gateway_provider = native_gateway_provider,
         .provider_set = builtin_providers.native,
-        .background_process_provider = background_process.provider,
         .url_opener = url_opener.native_opener,
         .secret_store = host.unavailable_secret_store,
         .prompt_policy = builtin_context.prompt_policy,
@@ -3535,7 +3403,6 @@ fn localEntryConfig() app_entry_runtime.Config {
         .gateway_chat_url = builtin_gateway.default_chat_url,
         .gateway_provider = native_gateway_provider,
         .provider_set = builtin_providers.native,
-        .background_process_provider = background_process.provider,
         .url_opener = url_opener.native_opener,
         .secret_store = host.unavailable_secret_store,
         .prompt_policy = .{ .system_prompt = "" },
@@ -3567,7 +3434,6 @@ fn emptyEntryConfig() app_entry_runtime.Config {
         .gateway_chat_url = "",
         .gateway_provider = native_gateway_provider,
         .provider_set = builtin_providers.native,
-        .background_process_provider = background_process.provider,
         .url_opener = url_opener.native_opener,
         .secret_store = host.unavailable_secret_store,
         .prompt_policy = .{ .system_prompt = "" },
@@ -3959,7 +3825,6 @@ test {
     _ = @import("gateway/xai_grok_usage.zig");
     _ = @import("core/app/app_process_runtime.zig");
     _ = @import("core/app/app_render_runtime.zig");
-    _ = @import("core/app/app_terminal_takeover_runtime.zig");
     _ = @import("core/app/app_runtime_setup.zig");
     _ = @import("core/app/app_session_runtime.zig");
     _ = @import("core/app/app_worker_runtime.zig");
@@ -4023,8 +3888,6 @@ test {
     _ = @import("core/shared/message.zig");
     _ = @import("core/shared/token_estimate.zig");
     _ = @import("core/shell_command/command_effect.zig");
-    _ = @import("core/execution/router.zig");
-    _ = @import("core/permissions/direct_command.zig");
     _ = @import("core/permissions/auto_classifier.zig");
     _ = @import("core/permissions/command_admission.zig");
     _ = @import("core/config/model_capabilities.zig");
@@ -4034,7 +3897,7 @@ test {
     _ = @import("core/workspace/current_branch.zig");
     _ = @import("core/permissions/permission_gate.zig");
     _ = @import("core/permissions/permissions.zig");
-    _ = @import("core/background/process_supervisor.zig");
+    _ = @import("core/background/process_identity.zig");
     _ = @import("core/execution/process_tree.zig");
     _ = @import("core/config/prompt_policy.zig");
     _ = @import("core/workspace/record_tape.zig");
@@ -4064,18 +3927,7 @@ test {
     _ = @import("core/subagent/approval_registry.zig");
     _ = @import("core/subagent/approval_persistence.zig");
     _ = @import("core/subagent/work_events.zig");
-    _ = @import("core/terminal/contracts.zig");
-    _ = @import("core/terminal/monitor.zig");
-    _ = @import("core/terminal/operation.zig");
-    _ = @import("core/terminal/protocol.zig");
-    _ = @import("core/terminal/host_policy.zig");
     _ = @import("core/terminal/shell_resolver.zig");
-    _ = @import("core/terminal/native_session.zig");
-    _ = @import("core/terminal/recovery.zig");
-    _ = @import("core/terminal/store.zig");
-    _ = @import("core/terminal/host.zig");
-    _ = @import("core/terminal/tmux_session.zig");
-    _ = @import("core/terminal/client.zig");
     _ = @import("core/app/input_approval_runtime.zig");
     _ = @import("acp/sessions.zig");
     _ = @import("core/shared/text_utils.zig");

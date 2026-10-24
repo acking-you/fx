@@ -81,7 +81,7 @@ def verify(binary, revision):
             try:
                 send(1, "initialize", {"protocolVersion": 1})
                 receive(lambda value: value.get("id") == 1)
-                send(2, "session/new", {"cwd": str(root / "workspace"), "mcpServers": []})
+                send(2, "session/new", {"cwd": str(root / "workspace")})
                 session = receive(lambda value: value.get("id") == 2)["result"]["sessionId"]
                 send(3, "session/prompt", {"sessionId": session, "prompt": [{"type": "text", "text": "Start streaming"}]})
                 receive(lambda value: "STREAM_STARTED" in json.dumps(value))

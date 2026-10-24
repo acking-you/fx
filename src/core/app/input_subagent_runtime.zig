@@ -6,7 +6,6 @@ const input_visual_layout = @import("../../ui/input/visual_layout.zig");
 const shell_runtime = @import("../../ui/shell_runtime.zig");
 const transcript_runtime = @import("../../ui/transcript/runtime.zig");
 const app_render_runtime = @import("app_render_runtime.zig");
-const app_terminal_takeover_runtime = @import("app_terminal_takeover_runtime.zig");
 const input_selection_runtime = @import("input_selection_runtime.zig");
 const app_session_runtime = @import("app_session_runtime.zig");
 const command_specs = @import("../slash_commands/command_specs.zig");
@@ -339,7 +338,6 @@ pub fn SubagentRuntime(comptime App: type) type {
                 .load_more_attach_candidates => try loadAttachCandidatesAndRedraw(app, true),
                 .submit_manager_mutation => try submitManagerMutationAndRedraw(app),
                 .resolve_child_approval => try resolveChildApprovalAndRedraw(app),
-                .open_terminal => try openSelectedTerminal(app),
                 .redraw => try redraw(app),
             }
         }
@@ -363,24 +361,7 @@ pub fn SubagentRuntime(comptime App: type) type {
                 .load_more_attach_candidates => try loadAttachCandidatesAndRedraw(app, true),
                 .submit_manager_mutation => try submitManagerMutationAndRedraw(app),
                 .resolve_child_approval => try resolveChildApprovalAndRedraw(app),
-                .open_terminal => try openSelectedTerminal(app),
                 .redraw => try redraw(app),
-            }
-        }
-
-        fn openSelectedTerminal(app: *App) !void {
-            requestSelectedTerminalOpen(app);
-            try redraw(app);
-        }
-
-        fn requestSelectedTerminalOpen(app: *App) void {
-            if (comptime @hasDecl(@TypeOf(app.subagents), "selectedTerminalId") and
-                @hasDecl(App, "requestTerminalOpen"))
-            {
-                const session_id = app.subagents.selectedTerminalId() orelse return;
-                switch (app.requestTerminalOpen(session_id)) {
-                    .accepted, .occupied, .rejected => {},
-                }
             }
         }
 
@@ -1026,41 +1007,4 @@ test "child exit submission recognizes only canonical local exit commands" {
     try std.testing.expectEqual(.message, classifyChildSubmission(registry, "/models"));
     try std.testing.expectEqual(.open_skills, classifyChildSubmission(registry, "/skills"));
     try std.testing.expectEqual(.message, classifyChildSubmission(registry, "/skills now"));
-}
-
-const TerminalOpenTestSubagents = struct {
-    selected_id: []const u8 = "terminal-a",
-    manager_active: bool = true,
-
-    fn selectedTerminalId(self: *const TerminalOpenTestSubagents) ?[]const u8 {
-        return self.selected_id;
-    }
-};
-
-const TerminalOpenTestApp = struct {
-    subagents: TerminalOpenTestSubagents = .{},
-    open_result: app_terminal_takeover_runtime.OpenRequestResult = .occupied,
-    requested_id: ?[]const u8 = null,
-    inline_draft: []const u8 = "preserved inline draft",
-    inline_cursor: usize = 9,
-
-    fn requestTerminalOpen(
-        self: *TerminalOpenTestApp,
-        session_id: []const u8,
-    ) app_terminal_takeover_runtime.OpenRequestResult {
-        self.requested_id = session_id;
-        return self.open_result;
-    }
-};
-
-test "manager handles occupied terminal open without losing selection or inline draft" {
-    var app = TerminalOpenTestApp{};
-
-    SubagentRuntime(TerminalOpenTestApp).requestSelectedTerminalOpen(&app);
-
-    try std.testing.expect(app.subagents.manager_active);
-    try std.testing.expectEqualStrings("terminal-a", app.subagents.selected_id);
-    try std.testing.expectEqualStrings("terminal-a", app.requested_id.?);
-    try std.testing.expectEqualStrings("preserved inline draft", app.inline_draft);
-    try std.testing.expectEqual(@as(usize, 9), app.inline_cursor);
 }

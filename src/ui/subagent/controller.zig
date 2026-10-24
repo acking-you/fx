@@ -3,7 +3,6 @@ const permission_request = @import("../../core/permissions/permission_request.zi
 const types = @import("../../core/shared/types.zig");
 const manager_mod = @import("../../core/subagent/manager.zig");
 const projection = @import("../../core/subagent/ui_projection.zig");
-const terminal_projection = @import("../../core/terminal/ui_projection.zig");
 const execution = @import("../../core/subagent/execution.zig");
 const domain = @import("../../core/subagent/domain.zig");
 const input_action = @import("../../core/input/input_action.zig");
@@ -63,7 +62,7 @@ pub const Controller = struct {
     }
 
     pub fn hasEntries(self: Controller) bool {
-        return self.count() > 0 or self.runtime.selectedTerminalId() != null;
+        return self.count() > 0;
     }
 
     pub fn snapshotEntries(self: Controller, alloc: Allocator) ![]subagent_runtime.EntryView {
@@ -76,18 +75,6 @@ pub const Controller = struct {
 
     pub fn replaceSnapshot(self: *Controller, alloc: Allocator, snapshot: projection.Snapshot) !bool {
         return self.runtime.replaceSnapshot(alloc, snapshot);
-    }
-
-    pub fn replaceTerminalSnapshot(
-        self: *Controller,
-        alloc: Allocator,
-        snapshot: terminal_projection.Snapshot,
-    ) !bool {
-        return self.runtime.replaceTerminalSnapshot(alloc, snapshot);
-    }
-
-    pub fn selectedTerminalId(self: *const Controller) ?[]const u8 {
-        return self.runtime.selectedTerminalId();
     }
 
     pub fn pageCursor(self: Controller) ?[]const u8 {

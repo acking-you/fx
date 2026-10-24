@@ -1,7 +1,6 @@
 const std = @import("std");
 
-/// Stable identity for a live OS process. Terminal persistence uses this to
-/// distinguish PID reuse from the process instance it originally launched.
+/// Parses process identities in historical read-only background records.
 pub const ProcessInstanceToken = struct {
     bytes: [128]u8 = undefined,
     len: u8 = 0,
@@ -60,53 +59,6 @@ pub const ProcessInstanceToken = struct {
     }
 };
 
-pub const TokenMatch = enum {
-    matched,
-    missing,
-    mismatched,
-    unavailable,
-};
-
-pub var process_token_match_for_test: ?*const fn ([]const u8, ProcessInstanceToken) TokenMatch = null;
-pub var process_token_capture_for_test: ?*const fn (
-    std.mem.Allocator,
-    []const u8,
-) anyerror!ProcessInstanceToken = null;
-
-pub fn captureProcessInstanceToken(
-    alloc: std.mem.Allocator,
-    pid_text: []const u8,
-) !ProcessInstanceToken {
-    if (process_token_capture_for_test) |callback| {
-        return callback(alloc, pid_text);
-    }
-    return error.ProcessIdentityUnsupported;
-}
-
-pub fn matchProcessInstanceToken(
-    alloc: std.mem.Allocator,
-    pid_text: []const u8,
-    expected: ProcessInstanceToken,
-) TokenMatch {
-    if (process_token_match_for_test) |callback| {
-        return callback(pid_text, expected);
-    }
-    const actual = captureProcessInstanceToken(alloc, pid_text) catch |err| {
-        return switch (err) {
-            error.ProcessNotFound => .missing,
-            else => .unavailable,
-        };
-    };
-    return if (actual.eql(expected)) .matched else .mismatched;
-}
-
-pub fn pathBelongsToWorkspace(path: []const u8, workspace_root: []const u8) bool {
-    if (std.mem.eql(u8, path, workspace_root)) return true;
-    if (!std.mem.startsWith(u8, path, workspace_root)) return false;
-    if (path.len <= workspace_root.len) return false;
-    return path[workspace_root.len] == std.fs.path.sep;
-}
-
 fn isLowerHex(value: []const u8, expected_len: usize) bool {
     if (value.len != expected_len) return false;
     for (value) |byte| {
@@ -158,46 +110,4 @@ test "process instance tokens preserve canonical platform identity" {
             ProcessInstanceToken.parse(text),
         );
     }
-}
-
-test "process identity hooks classify matches and missing processes" {
-    const expected = try ProcessInstanceToken.parse(
-        "linux:00112233445566778899aabbccddeeff:123",
-    );
-    const Stub = struct {
-        fn capture(
-            _: std.mem.Allocator,
-            pid: []const u8,
-        ) anyerror!ProcessInstanceToken {
-            if (std.mem.eql(u8, pid, "missing")) return error.ProcessNotFound;
-            return ProcessInstanceToken.parse(
-                if (std.mem.eql(u8, pid, "same"))
-                    "linux:00112233445566778899aabbccddeeff:123"
-                else
-                    "linux:00112233445566778899aabbccddeeff:124",
-            );
-        }
-    };
-    process_token_capture_for_test = Stub.capture;
-    defer process_token_capture_for_test = null;
-
-    try std.testing.expectEqual(
-        TokenMatch.matched,
-        matchProcessInstanceToken(std.testing.allocator, "same", expected),
-    );
-    try std.testing.expectEqual(
-        TokenMatch.mismatched,
-        matchProcessInstanceToken(std.testing.allocator, "other", expected),
-    );
-    try std.testing.expectEqual(
-        TokenMatch.missing,
-        matchProcessInstanceToken(std.testing.allocator, "missing", expected),
-    );
-}
-
-test "workspace path membership requires a component boundary" {
-    try std.testing.expect(pathBelongsToWorkspace("/repo", "/repo"));
-    try std.testing.expect(pathBelongsToWorkspace("/repo/src", "/repo"));
-    try std.testing.expect(!pathBelongsToWorkspace("/repository", "/repo"));
-    try std.testing.expect(!pathBelongsToWorkspace("/other", "/repo"));
 }

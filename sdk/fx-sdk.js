@@ -2,8 +2,6 @@ const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const strictDecoder = new TextDecoder("utf-8", { fatal: true });
 const workspaceInfoLimit = 4 * 1024;
-const workspaceCommandLimit = 64 * 1024;
-const workspaceOutputLimit = 64 * 1024;
 const streamReadsPerTaskYield = 32;
 
 function validWorkspacePath(path) {
@@ -19,7 +17,7 @@ function prepareWorkspaceAdapter(workspace) {
   try {
     const info = workspace.info;
     const permission = workspace.permission;
-    if (!info || typeof workspace.exec !== "function" || info.version !== 1 ||
+    if (!info || info.version !== 1 ||
       !validWorkspacePath(info.root) || !validWorkspacePath(info.cwd) ||
       !validWorkspacePath(info.home) || info.cwd !== info.root ||
       info.gitAvailable !== false || info.ephemeral !== true ||
@@ -37,17 +35,10 @@ function prepareWorkspaceAdapter(workspace) {
     };
     const encoded = encoder.encode(JSON.stringify(value));
     if (encoded.length > workspaceInfoLimit) return { present: true, valid: false };
-    return { present: true, valid: true, adapter: workspace, info: value, encoded };
+    return { present: true, valid: true, encoded };
   } catch {
     return { present: true, valid: false };
   }
-}
-
-function utf8Prefix(value, limit) {
-  if (value.length <= limit) return value;
-  let end = limit;
-  while (end > 0 && (value[end] & 0xc0) === 0x80) end -= 1;
-  return value.subarray(0, end);
 }
 
 export const fxSdkApiVersion = 1;
@@ -216,7 +207,6 @@ function yieldToHostTask() {
 function createRuntime(options) {
   const stdin = new ByteQueue();
   const streams = new Map();
-  const workspaceExecs = new Set();
   const workspace = prepareWorkspaceAdapter(options.workspace);
   const args = ["fx", ...(options.args || [])];
   const env = Object.entries(options.env || {}).map(([key, value]) => `${key}=${value}`);
@@ -588,97 +578,8 @@ function createRuntime(options) {
     return workspace.encoded.length;
   }
 
-  function workspaceExec(commandPtr, commandLen, timeoutMs, outputPtr, outputCap, resultPtr) {
-    if (!workspace.present) return Promise.resolve(-2);
-    if (!workspace.valid) return Promise.resolve(-4);
-    const commandBytes = checkedBytes(commandPtr, commandLen);
-    const output = checkedBytes(outputPtr, outputCap);
-    const resultBytes = checkedBytes(resultPtr, 32);
-    if (!commandBytes || !output || !resultBytes || commandLen > workspaceCommandLimit ||
-      outputCap > workspaceOutputLimit || !Number.isInteger(timeoutMs) ||
-      timeoutMs < 1 || timeoutMs > 30_000) return Promise.resolve(-4);
-    let command;
-    try {
-      command = strictDecoder.decode(commandBytes);
-    } catch {
-      return Promise.resolve(-4);
-    }
-    if (command.includes("\0")) return Promise.resolve(-4);
-
-    const controller = new AbortController();
-    let resolveAbort;
-    const aborted = new Promise((resolve) => { resolveAbort = resolve; });
-    const state = {
-      controller,
-      status: null,
-      abort(status) {
-        if (this.status !== null) return;
-        this.status = status;
-        resolveAbort(status);
-        controller.abort(new DOMException(
-          status === -5 ? "workspace command timed out" : "workspace command aborted",
-          status === -5 ? "TimeoutError" : "AbortError",
-        ));
-      },
-    };
-    workspaceExecs.add(state);
-    const timer = setTimeout(() => state.abort(-5), timeoutMs);
-    const execution = Promise.resolve().then(() => workspace.adapter.exec({
-      command,
-      cwd: workspace.info.cwd,
-      signal: controller.signal,
-      timeoutMs,
-      outputLimitBytes: workspaceOutputLimit,
-    })).then((value) => {
-      if (state.status !== null) return state.status;
-      if (!value || !Number.isInteger(value.exitCode) || value.exitCode < -0x80000000 ||
-        value.exitCode > 0x7fffffff || typeof value.stdout !== "string" ||
-        typeof value.stderr !== "string") return -1;
-      const stdout = encoder.encode(value.stdout);
-      const stderr = encoder.encode(value.stderr);
-      if (stdout.length > 0xffffffff || stderr.length > 0xffffffff) return -1;
-
-      let stdoutCap = stdout.length;
-      let stderrCap = stderr.length;
-      if (stdout.length + stderr.length > outputCap) {
-        stdoutCap = Math.min(stdout.length, Math.ceil(outputCap / 2));
-        stderrCap = Math.min(stderr.length, Math.floor(outputCap / 2));
-        let remaining = outputCap - stdoutCap - stderrCap;
-        const stdoutExtra = Math.min(remaining, stdout.length - stdoutCap);
-        stdoutCap += stdoutExtra;
-        remaining -= stdoutExtra;
-        stderrCap += Math.min(remaining, stderr.length - stderrCap);
-      }
-      const stdoutPreview = utf8Prefix(stdout, stdoutCap);
-      const stderrPreview = utf8Prefix(stderr, stderrCap);
-      output.set(stdoutPreview, 0);
-      output.set(stderrPreview, stdoutPreview.length);
-      const copied = stdoutPreview.length + stderrPreview.length;
-      const view = new DataView(memory().buffer, resultPtr, 32);
-      view.setInt32(0, value.exitCode, true);
-      view.setUint32(4, 0, true);
-      view.setUint32(8, stdoutPreview.length, true);
-      view.setUint32(12, stdout.length, true);
-      view.setUint32(16, stdoutPreview.length, true);
-      view.setUint32(20, stderrPreview.length, true);
-      view.setUint32(24, stderr.length, true);
-      view.setUint32(28, copied < stdout.length + stderr.length ? 1 : 0, true);
-      return 0;
-    }).catch((error) => {
-      if (state.status !== null) return state.status;
-      if (error?.name === "TimeoutError") return -5;
-      if (error?.name === "AbortError") return -3;
-      return -1;
-    });
-    return Promise.race([execution, aborted]).finally(() => {
-      clearTimeout(timer);
-      workspaceExecs.delete(state);
-    });
-  }
-
   function abortHostEffects() {
     streams.forEach((state) => state.controller.abort());
-    workspaceExecs.forEach((state) => state.abort(-3));
   }
 
   const unavailable = () => 52;
@@ -731,7 +632,6 @@ function createRuntime(options) {
     fx_prompt_history_available() { return options.promptHistoryStore ? 1 : 0; },
     fx_workspace_available() { return workspace.present ? 1 : 0; },
     fx_workspace_info: workspaceInfo,
-    fx_workspace_exec: new WebAssembly.Suspending(workspaceExec),
     fx_http_stream_open: streamOpen,
     fx_http_stream_status: new WebAssembly.Suspending(streamStatus),
     fx_http_stream_next: new WebAssembly.Suspending(streamNext),

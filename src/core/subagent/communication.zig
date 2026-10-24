@@ -4809,14 +4809,13 @@ test "approval replay identity includes work label explanation and normalized gr
     try std.testing.expectError(error.ApprovalConflict, registerApproval(alloc, &ledger, changed));
 }
 
-test "near-limit captured commands persist subagent approvals across profiles" {
+test "large captured commands persist subagent approvals across profiles" {
     const command_environment = @import("../execution/command_environment.zig");
-    const terminal_contracts = @import("../terminal/contracts.zig");
     const alloc = std.testing.allocator;
     var arena_state = std.heap.ArenaAllocator.init(alloc);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const command = try arena.alloc(u8, terminal_contracts.max_command_bytes);
+    const command = try arena.alloc(u8, 64 * 1024);
     @memset(command, 0x01);
     command[0] = '#';
     command[command.len - 1] = '\n';

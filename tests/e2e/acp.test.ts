@@ -39,7 +39,6 @@ import {
 } from "./tmux-helpers";
 const TIMEOUT = 30_000;
 const LIVE_TIMEOUT = 120_000;
-const TERMINAL_HOST_EXIT_TIMEOUT_MS = 20_000;
 const SEEDED_GATEWAY_TOKEN = "seeded-access-token";
 const TERMINAL_FIXTURE_SHELL = terminalFixtureShell();
 
@@ -1000,15 +999,6 @@ function createShortIsolatedRoot(prefix: string) {
   };
 }
 
-async function waitForTerminalHostExit(root: string): Promise<void> {
-  const identityPath = join(root, "home", ".fx", "terminal-host", "host.json");
-  const deadline = Date.now() + TERMINAL_HOST_EXIT_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    if (!existsSync(identityPath)) return;
-    await Bun.sleep(25);
-  }
-  throw new Error(`terminal host did not exit for ${root}`);
-}
 
 function writeProjectOmissionFixture(root: ReturnType<typeof createIsolatedRoot>) {
   const rootRules = join(root.workspace, "AGENTS.md");

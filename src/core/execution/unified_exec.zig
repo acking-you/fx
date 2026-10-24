@@ -4,7 +4,7 @@ const debug_trace = @import("../shared/debug_trace.zig");
 const io_mod = @import("../shared/io.zig");
 const pseudo_terminal = @import("pseudo_terminal.zig");
 const command_contract = @import("command_contract.zig");
-const command_runner = @import("command_runner.zig");
+const command_artifact = @import("command_artifact.zig");
 const exec_mode = @import("exec_mode.zig");
 const session_child_store = @import("../session/session_child_store.zig");
 const shell_resolver = @import("../terminal/shell_resolver.zig");
@@ -827,7 +827,7 @@ const Process = struct {
     artifact_total: usize = 0,
     artifact_stdout_pending: std.ArrayList(u8) = .empty,
     artifact_stderr_pending: std.ArrayList(u8) = .empty,
-    artifact: ?command_runner.CommandArtifact = null,
+    artifact: ?command_artifact.CommandArtifact = null,
     artifact_failed: bool = false,
     command: []u8,
     cwd: []u8,
@@ -1219,7 +1219,7 @@ const Process = struct {
         var stdout_buffer: HeadTailBuffer = .{};
         var stderr_buffer: HeadTailBuffer = .{};
         var term: ?std.process.Child.Term = null;
-        var artifact_paths: ?command_runner.CommandArtifact.Paths = null;
+        var artifact_paths: ?command_artifact.CommandArtifact.Paths = null;
         self.mutex.lockUncancelable(io_mod.getIo());
         switch (consumer) {
             .model => {
@@ -1424,7 +1424,7 @@ const Process = struct {
         };
         if (self.artifact_total <= self.artifact_threshold and !self.artifact_eager) return;
 
-        var artifact = command_runner.createCommandArtifact(
+        var artifact = command_artifact.createCommandArtifact(
             self.alloc,
             self.artifact_capability,
             self.artifact_dir,

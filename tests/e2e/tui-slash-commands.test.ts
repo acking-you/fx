@@ -81,11 +81,11 @@ describe.skipIf(TMUX_SKIP)("tui: no-key slash commands", () => {
 
       await session.sendText("/ps");
       const pane = await session.waitForText(
-        "No background commands or terminals are running.",
+        "No background commands are running.",
         5_000,
       );
       expect(pane).toContain(
-        "No background commands or terminals are running.",
+        "No background commands are running.",
       );
       expect(readFileSync(launched.stderrPath, "utf8")).toBe("");
 
