@@ -48,5 +48,4 @@ pub const Command = enum {
     load_more_attach_candidates,
     submit_manager_mutation,
     resolve_child_approval,
-    open_terminal,
 };

@@ -308,7 +308,7 @@ Hosts may provide adapters for runtime state and external effects:
 | `sessionStore` | Persists agent or terminal sessions |
 | `promptHistoryStore` | Stores terminal prompt history |
 | `openUrl` | Opens authentication and verification URLs |
-| `workspace` | Provides the constrained browser workspace adapter |
+| `workspace` | Provides bounded browser workspace metadata |
 
 ## Security boundaries
 
@@ -337,9 +337,9 @@ The embedded runtime tells the model not to retry unavailable network work
 through shell commands. Use locally installed fx when the full native tool
 suite is required.
 
-The optional browser workspace may still provide bounded workspace metadata
-to the host adapter. The WebAssembly surface does not advertise a model-facing
-shell: `terminal`, `exec_command`, and `write_stdin` are all native-only.
+The optional browser workspace provides bounded workspace metadata through
+`info` and `permission`; no `exec` callback is required or invoked. The WebAssembly
+surface does not advertise a model-facing shell: `terminal`, `exec_command`, and `write_stdin` are all native-only.
 
 ## Local development
 

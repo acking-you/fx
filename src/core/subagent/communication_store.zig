@@ -988,14 +988,13 @@ test "communication codec round trips owned durable state" {
     try std.testing.expectEqualStrings("hello", ledger.deliveries[0].payload.message);
 }
 
-test "schema v6 persists near-limit captured command approvals" {
+test "schema v6 persists large captured command approvals" {
     const command_environment = @import("../execution/command_environment.zig");
-    const terminal_contracts = @import("../terminal/contracts.zig");
     const alloc = std.testing.allocator;
     var arena_state = std.heap.ArenaAllocator.init(alloc);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const command = try arena.alloc(u8, terminal_contracts.max_command_bytes);
+    const command = try arena.alloc(u8, 64 * 1024);
     @memset(command, 0x01);
     command[0] = '#';
     command[command.len - 1] = '\n';

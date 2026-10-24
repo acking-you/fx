@@ -15,7 +15,6 @@ const manager_mod = @import("../../core/subagent/manager.zig");
 const permission_request = @import("../../core/permissions/permission_request.zig");
 const projection = @import("../../core/subagent/ui_projection.zig");
 const resume_admission = @import("../../core/subagent/resume_admission.zig");
-const terminal_projection = @import("../../core/terminal/ui_projection.zig");
 const skill_contract = @import("../../core/skills/skill_contract.zig");
 const input_action = @import("../../core/input/input_action.zig");
 const core_input_runtime = @import("../../core/input/runtime.zig");
@@ -114,8 +113,6 @@ pub const Route = union(enum) {
 };
 
 pub const Command = subagent_input.Command;
-
-const RootSelection = enum { child, terminal };
 
 pub const Action = subagent_input.Action;
 
@@ -859,10 +856,7 @@ pub const Runtime = struct {
     loading: bool = true,
     degraded: ?manager_mod.FailureCode = null,
     snapshot: ?projection.Snapshot = null,
-    terminal_snapshot: ?terminal_projection.Snapshot = null,
     selected_id: ?[]u8 = null,
-    selected_terminal_id: ?[]u8 = null,
-    root_selection: RootSelection = .child,
     archived_selected_id: ?[]u8 = null,
     routes: std.ArrayList(Route) = .empty,
     page_cursor: ?[]u8 = null,
@@ -872,7 +866,6 @@ pub const Runtime = struct {
     pending_approval_selection: usize = 0,
     focus: Focus = .child_list,
     list_scroll: usize = 0,
-    terminal_scroll: usize = 0,
     archived_scroll: usize = 0,
     detail_scroll: usize = 0,
     child: ChildRouteState = .{},
@@ -905,7 +898,6 @@ pub const Runtime = struct {
 
     pub fn deinit(self: *Runtime, alloc: Allocator) void {
         self.clearProjection(alloc);
-        self.clearTerminalProjection(alloc);
         self.clearRoutes(alloc);
         self.routes.deinit(alloc);
         self.page_history.deinit(alloc);
@@ -1024,60 +1016,6 @@ pub const Runtime = struct {
 
     pub fn setCountProjection(self: *Runtime, projected_count: usize) void {
         if (self.snapshot == null) self.count_projection = projected_count;
-    }
-
-    pub fn clearTerminalProjection(self: *Runtime, alloc: Allocator) void {
-        if (self.terminal_snapshot) |*snapshot| snapshot.deinit();
-        self.terminal_snapshot = null;
-        if (self.selected_terminal_id) |id| alloc.free(id);
-        self.selected_terminal_id = null;
-        self.root_selection = .child;
-        self.terminal_scroll = 0;
-    }
-
-    pub fn replaceTerminalSnapshot(
-        self: *Runtime,
-        alloc: Allocator,
-        next_snapshot: terminal_projection.Snapshot,
-    ) !bool {
-        var next = next_snapshot;
-        errdefer next.deinit();
-        if (terminalSnapshotsEqual(self.terminal_snapshot, next)) {
-            next.deinit();
-            return false;
-        }
-        var selected: ?[]u8 = null;
-        errdefer if (selected) |id| alloc.free(id);
-        if (self.selected_terminal_id) |current| {
-            if (findVisibleTerminal(next.rows, current) != null) {
-                selected = try alloc.dupe(u8, current);
-            }
-        }
-        if (selected == null) {
-            if (firstVisibleTerminal(next.rows)) |row| {
-                selected = try alloc.dupe(u8, row.session_id);
-            }
-        }
-        if (self.terminal_snapshot) |*snapshot| snapshot.deinit();
-        if (self.selected_terminal_id) |id| alloc.free(id);
-        self.terminal_snapshot = next;
-        self.selected_terminal_id = selected;
-        if (self.selectedNode() == null and selected != null and
-            self.routes.items.len == 0)
-        {
-            self.root_selection = .terminal;
-        } else if (selected == null) {
-            self.root_selection = .child;
-            self.terminal_scroll = 0;
-        }
-        return true;
-    }
-
-    pub fn selectedTerminalId(self: *const Runtime) ?[]const u8 {
-        if (self.routes.items.len != 0 or self.root_selection != .terminal) {
-            return null;
-        }
-        return self.selected_terminal_id;
     }
 
     pub fn setDegraded(self: *Runtime, alloc: Allocator, failure: manager_mod.FailureCode) void {
@@ -3327,9 +3265,6 @@ pub const Runtime = struct {
             if (delta < 0) self.detail_scroll -|= 1 else self.detail_scroll +|= 1;
             return .redraw;
         }
-        if (!archived and self.routes.items.len == 0) {
-            return self.moveRootSelection(alloc, delta);
-        }
         const snapshot = self.snapshot orelse return .none;
         const selected = if (archived) self.archived_selected_id else self.selected_id;
         const current = if (selected) |id|
@@ -3339,86 +3274,6 @@ pub const Runtime = struct {
         const next = nextNodeIndex(snapshot.nodes, current, delta, archived) orelse return .none;
         try self.setSelectedBorrowed(alloc, snapshot.nodes[next].child_id, archived);
         return .redraw;
-    }
-
-    fn moveRootSelection(
-        self: *Runtime,
-        alloc: Allocator,
-        delta: i2,
-    ) !Command {
-        const child_snapshot = self.snapshot;
-        const terminal_snapshot = self.terminal_snapshot;
-        if (self.root_selection == .child) {
-            if (child_snapshot) |snapshot| {
-                const current = if (self.selected_id) |id|
-                    indexOfNode(snapshot.nodes, id)
-                else
-                    firstNodeIndex(snapshot.nodes, false);
-                if (current) |index| {
-                    if (adjacentNodeIndex(snapshot.nodes, index, delta, false)) |next| {
-                        try self.setSelectedBorrowed(alloc, snapshot.nodes[next].child_id, false);
-                        return .redraw;
-                    }
-                }
-            }
-            if (terminal_snapshot) |snapshot| {
-                const terminal = if (delta > 0)
-                    firstVisibleTerminal(snapshot.rows)
-                else
-                    lastVisibleTerminal(snapshot.rows);
-                if (terminal) |row| {
-                    try self.setSelectedTerminalBorrowed(alloc, row.session_id);
-                    self.root_selection = .terminal;
-                    return .redraw;
-                }
-            }
-            const snapshot = child_snapshot orelse return .none;
-            const node = if (delta > 0)
-                firstNode(snapshot.nodes, false)
-            else
-                lastNode(snapshot.nodes, false);
-            const wrapped = node orelse return .none;
-            try self.setSelectedBorrowed(alloc, wrapped.child_id, false);
-            return .redraw;
-        }
-
-        if (terminal_snapshot) |snapshot| {
-            if (self.selected_terminal_id) |id| {
-                if (adjacentVisibleTerminal(snapshot.rows, id, delta)) |row| {
-                    try self.setSelectedTerminalBorrowed(alloc, row.session_id);
-                    return .redraw;
-                }
-            }
-        }
-        if (child_snapshot) |snapshot| {
-            const node = if (delta > 0)
-                firstNode(snapshot.nodes, false)
-            else
-                lastNode(snapshot.nodes, false);
-            if (node) |child| {
-                try self.setSelectedBorrowed(alloc, child.child_id, false);
-                self.root_selection = .child;
-                return .redraw;
-            }
-        }
-        const snapshot = terminal_snapshot orelse return .none;
-        const terminal = if (delta > 0)
-            firstVisibleTerminal(snapshot.rows)
-        else
-            lastVisibleTerminal(snapshot.rows);
-        const wrapped = terminal orelse return .none;
-        try self.setSelectedTerminalBorrowed(alloc, wrapped.session_id);
-        return .redraw;
-    }
-
-    fn setSelectedTerminalBorrowed(
-        self: *Runtime,
-        alloc: Allocator,
-        id: []const u8,
-    ) !void {
-        const owned = try alloc.dupe(u8, id);
-        if (self.selected_terminal_id) |old| alloc.free(old);
-        self.selected_terminal_id = owned;
     }
 
     fn movePage(self: *Runtime, alloc: Allocator, down: bool) !Command {
@@ -3550,11 +3405,6 @@ pub const Runtime = struct {
     fn openSelected(self: *Runtime, alloc: Allocator) !Command {
         const archived = self.archivedListActive();
         if (self.routes.items.len != 0 and !archived) return self.openActivity(alloc);
-        if (!archived and self.root_selection == .terminal and
-            self.selected_terminal_id != null)
-        {
-            return .open_terminal;
-        }
         const node = (if (archived) self.archivedSelectedNode() else self.selectedNode()) orelse return .none;
         self.child.clearViewPreservingDraft(alloc);
         self.restoreSelectedChildViewport(node.child_id);
@@ -3915,27 +3765,6 @@ pub const Runtime = struct {
         const max_scroll = visible_count -| visible_rows;
         scroll.* = @min(scroll.*, max_scroll);
     }
-
-    fn clampTerminalScroll(self: *Runtime, visible_rows: usize) void {
-        const snapshot = self.terminal_snapshot orelse {
-            self.terminal_scroll = 0;
-            return;
-        };
-        const selected_id = self.selected_terminal_id orelse {
-            self.terminal_scroll = 0;
-            return;
-        };
-        const selected = visibleTerminalIndex(snapshot.rows, selected_id) orelse {
-            self.terminal_scroll = 0;
-            return;
-        };
-        if (selected < self.terminal_scroll) self.terminal_scroll = selected;
-        if (selected >= self.terminal_scroll + visible_rows) {
-            self.terminal_scroll = selected + 1 - visible_rows;
-        }
-        const max_scroll = countVisibleTerminals(snapshot.rows) -| visible_rows;
-        self.terminal_scroll = @min(self.terminal_scroll, max_scroll);
-    }
 };
 
 test "repeated editor defaults are initialized through one runtime path" {
@@ -3998,8 +3827,8 @@ pub fn paint(
             &row,
             layout.rows,
             owner,
-            "Agents & processes · main chat approval pending",
-            "Agents & processes · ",
+            "Agents · main chat approval pending",
+            "Agents · ",
             " approval pending",
         );
     } else {
@@ -4058,10 +3887,10 @@ fn writeManagerTitle(
     var line: std.Io.Writer.Allocating = .init(alloc);
     defer line.deinit();
     try line.writer.writeAll(ui_render.bold_style);
-    try line.writer.writeAll("Agents & processes");
+    try line.writer.writeAll("Agents");
     try line.writer.writeAll(ui_render.reset_style);
     const complete_active_count = if (runtime.snapshot) |snapshot|
-        runtime.terminal_snapshot != null and !hasTreePagination(snapshot)
+        !hasTreePagination(snapshot)
     else
         false;
     if (complete_active_count) {
@@ -4081,9 +3910,6 @@ fn managerActiveCount(runtime: *const Runtime) usize {
                 else => false,
             }) count += 1;
         }
-    }
-    if (runtime.terminal_snapshot) |snapshot| {
-        count += countVisibleTerminals(snapshot.rows);
     }
     return count;
 }
@@ -4197,16 +4023,7 @@ fn paintRoot(
         try writeLine(alloc, writer, cols, row, limit, "No manager snapshot available.");
         return;
     };
-    const visible_terminal_count = if (runtime.terminal_snapshot) |terminal_snapshot|
-        countVisibleTerminals(terminal_snapshot.rows)
-    else
-        0;
-    const terminal_reserve = if (runtime.root_selection == .terminal and
-        visible_terminal_count > 0)
-        @min(limit -| row.*, visible_terminal_count + 2)
-    else
-        0;
-    const child_limit = limit -| terminal_reserve;
+    const child_limit = limit;
 
     if (row.* + 2 < child_limit) try writeLine(alloc, writer, cols, row, child_limit, "");
     const agent_count = countNodes(snapshot.nodes, false);
@@ -4264,38 +4081,6 @@ fn paintRoot(
         );
     }
     try paintPageStatus(alloc, writer, snapshot, cols, row, child_limit);
-    const terminal_body_rows = @max(visible_terminal_count, 1);
-    if (limit -| row.* > terminal_body_rows + 1) {
-        try writeLine(alloc, writer, cols, row, limit, "");
-    }
-    if (limit -| row.* > 1) {
-        try writeSectionHeading(
-            alloc,
-            writer,
-            cols,
-            row,
-            limit,
-            "Background processes",
-            visible_terminal_count,
-        );
-    }
-    if (runtime.terminal_snapshot) |terminal_snapshot| {
-        if (countVisibleTerminals(terminal_snapshot.rows) == 0) {
-            try writeDimLine(alloc, writer, cols, row, limit, "  No background processes");
-        } else {
-            try paintTerminalRows(
-                alloc,
-                writer,
-                runtime,
-                terminal_snapshot.rows,
-                cols,
-                row,
-                limit,
-            );
-        }
-    } else {
-        try writeDimLine(alloc, writer, cols, row, limit, "  No background processes");
-    }
 }
 
 fn writeSectionHeading(
@@ -4329,82 +4114,6 @@ fn writeDimLine(
     try line.writer.writeAll(text);
     try line.writer.writeAll(ui_render.reset_style);
     try writeLine(alloc, writer, cols, row, limit, line.written());
-}
-
-fn paintTerminalRows(
-    alloc: Allocator,
-    writer: *std.Io.Writer,
-    runtime: *Runtime,
-    rows: []const terminal_projection.Row,
-    cols: u16,
-    output_row: *usize,
-    limit: usize,
-) !void {
-    const visible_rows = limit -| output_row.*;
-    if (visible_rows == 0) return;
-    runtime.clampTerminalScroll(visible_rows);
-    var visible_index: usize = 0;
-    for (rows) |terminal| {
-        if (!terminalVisible(terminal)) continue;
-        if (visible_index < runtime.terminal_scroll) {
-            visible_index += 1;
-            continue;
-        }
-        if (output_row.* >= limit) break;
-        visible_index += 1;
-        const selected = runtime.root_selection == .terminal and
-            runtime.selected_terminal_id != null and
-            std.mem.eql(u8, runtime.selected_terminal_id.?, terminal.session_id);
-        var line: std.ArrayList(u8) = .empty;
-        defer line.deinit(alloc);
-        try composeTerminalRow(alloc, &line, terminal, selected, cols);
-        try writeLine(alloc, writer, cols, output_row, limit, line.items);
-    }
-}
-
-fn composeTerminalRow(
-    alloc: Allocator,
-    row: *std.ArrayList(u8),
-    terminal: terminal_projection.Row,
-    selected: bool,
-    cols: u16,
-) !void {
-    var safe_label = try text_utils.encodeTerminalSafe(alloc, terminal.label, 256);
-    defer safe_label.deinit(alloc);
-    var safe_id = try text_utils.encodeTerminalSafe(alloc, terminal.session_id, 128);
-    defer safe_id.deinit(alloc);
-
-    try row.appendSlice(alloc, if (selected) ui_render.selected_completion_style else ui_render.reset_style);
-    try row.appendSlice(alloc, if (selected) "› " else "  ");
-
-    const width: usize = cols;
-    const prefix_width: usize = 2;
-    const status = @tagName(terminal.lifecycle);
-    const status_width = display_width.visibleWidth(status);
-    const show_status = width >= prefix_width + status_width + 4;
-    const left_limit = if (show_status) width - status_width - 3 else width;
-    const available = left_limit -| prefix_width;
-    const distinct_id = !std.mem.eql(u8, terminal.label, terminal.session_id);
-    const id_budget: usize = if (distinct_id and available >= 18)
-        @min(@as(usize, 12), available / 3)
-    else
-        0;
-    const label_budget = available -| if (id_budget > 0) id_budget + 2 else 0;
-    try row_text.appendSingleLineMiddleEllipsized(alloc, row, safe_label.bytes, label_budget);
-    try row.appendSlice(alloc, ui_render.reset_style);
-    if (id_budget > 0) {
-        try row.appendSlice(alloc, "  ");
-        try row.appendSlice(alloc, ui_render.dim_style);
-        try row_text.appendSingleLineMiddleEllipsized(alloc, row, safe_id.bytes, id_budget);
-        try row.appendSlice(alloc, ui_render.reset_style);
-    }
-    if (show_status) {
-        const status_col = width - status_width - 1;
-        try row_text.appendSpacesToColumn(alloc, row, status_col);
-        try row.appendSlice(alloc, if (selected) ui_render.selected_completion_style else ui_render.dim_style);
-        try row.appendSlice(alloc, status);
-        try row.appendSlice(alloc, ui_render.reset_style);
-    }
 }
 
 fn paintArchived(
@@ -4473,8 +4182,7 @@ fn paintNodeRows(
         }
         if (row.* >= limit) break;
         visible_index += 1;
-        const selected = (archived or runtime.root_selection == .child) and
-            selected_id != null and
+        const selected = selected_id != null and
             std.mem.eql(u8, selected_id.?, node.child_id);
         var line: std.ArrayList(u8) = .empty;
         defer line.deinit(alloc);
@@ -5488,159 +5196,6 @@ fn nextNodeIndex(
     return null;
 }
 
-fn adjacentNodeIndex(
-    nodes: []const projection.Node,
-    current: usize,
-    delta: i2,
-    archived: bool,
-) ?usize {
-    if (delta < 0) {
-        var index = current;
-        while (index > 0) {
-            index -= 1;
-            if ((nodes[index].state == .archived) == archived) return index;
-        }
-        return null;
-    }
-    var index = current + 1;
-    while (index < nodes.len) : (index += 1) {
-        if ((nodes[index].state == .archived) == archived) return index;
-    }
-    return null;
-}
-
-fn lastNode(nodes: []const projection.Node, archived: bool) ?*const projection.Node {
-    var index = nodes.len;
-    while (index > 0) {
-        index -= 1;
-        if ((nodes[index].state == .archived) == archived) return &nodes[index];
-    }
-    return null;
-}
-
-fn terminalVisible(row: terminal_projection.Row) bool {
-    return row.attention.attention == .background and
-        (row.lifecycle == .starting or row.lifecycle == .running);
-}
-
-fn countVisibleTerminals(rows: []const terminal_projection.Row) usize {
-    var count: usize = 0;
-    for (rows) |row| if (terminalVisible(row)) {
-        count += 1;
-    };
-    return count;
-}
-
-fn visibleTerminalIndex(
-    rows: []const terminal_projection.Row,
-    session_id: []const u8,
-) ?usize {
-    var visible_index: usize = 0;
-    for (rows) |row| {
-        if (!terminalVisible(row)) continue;
-        if (std.mem.eql(u8, row.session_id, session_id)) return visible_index;
-        visible_index += 1;
-    }
-    return null;
-}
-
-fn firstVisibleTerminal(
-    rows: []const terminal_projection.Row,
-) ?*const terminal_projection.Row {
-    for (rows) |*row| if (terminalVisible(row.*)) return row;
-    return null;
-}
-
-fn lastVisibleTerminal(
-    rows: []const terminal_projection.Row,
-) ?*const terminal_projection.Row {
-    var index = rows.len;
-    while (index > 0) {
-        index -= 1;
-        if (terminalVisible(rows[index])) return &rows[index];
-    }
-    return null;
-}
-
-fn findVisibleTerminal(
-    rows: []const terminal_projection.Row,
-    session_id: []const u8,
-) ?*const terminal_projection.Row {
-    for (rows) |*row| {
-        if (terminalVisible(row.*) and
-            std.mem.eql(u8, row.session_id, session_id)) return row;
-    }
-    return null;
-}
-
-fn adjacentVisibleTerminal(
-    rows: []const terminal_projection.Row,
-    session_id: []const u8,
-    delta: i2,
-) ?*const terminal_projection.Row {
-    var current: ?usize = null;
-    for (rows, 0..) |row, index| {
-        if (std.mem.eql(u8, row.session_id, session_id)) {
-            current = index;
-            break;
-        }
-    }
-    const start = current orelse return firstVisibleTerminal(rows);
-    if (delta < 0) {
-        var index = start;
-        while (index > 0) {
-            index -= 1;
-            if (terminalVisible(rows[index])) return &rows[index];
-        }
-        return null;
-    }
-    var index = start + 1;
-    while (index < rows.len) : (index += 1) {
-        if (terminalVisible(rows[index])) return &rows[index];
-    }
-    return null;
-}
-
-test "terminal manager exposes only projected background rows" {
-    var session_id = "terminal-row".*;
-    var label = "shell".*;
-    var row = terminal_projection.Row{
-        .session_id = &session_id,
-        .label = &label,
-        .lifecycle = .running,
-        .attention = .{
-            .attention = .user_takeover,
-            .write_lease = .human,
-        },
-        .backend = .native,
-    };
-
-    try std.testing.expect(!terminalVisible(row));
-    row.attention = .{ .attention = .background };
-    try std.testing.expect(terminalVisible(row));
-    row.lifecycle = .exited;
-    try std.testing.expect(!terminalVisible(row));
-}
-
-fn terminalSnapshotsEqual(
-    current: ?terminal_projection.Snapshot,
-    next: terminal_projection.Snapshot,
-) bool {
-    const existing = current orelse return false;
-    if (existing.rows.len != next.rows.len) return false;
-    for (existing.rows, next.rows) |left, right| {
-        if (!std.mem.eql(u8, left.session_id, right.session_id) or
-            !std.mem.eql(u8, left.label, right.label) or
-            left.lifecycle != right.lifecycle or
-            !std.meta.eql(left.attention, right.attention) or
-            left.backend != right.backend)
-        {
-            return false;
-        }
-    }
-    return true;
-}
-
 fn countNodes(nodes: []const projection.Node, archived: bool) usize {
     var count: usize = 0;
     for (nodes) |node| {
@@ -5723,100 +5278,6 @@ test "escape pops one route while root escape is a no-op and ctrl x closes" {
     try std.testing.expectEqual(Command.close_manager, runtime.handle(alloc, .toggle));
 }
 
-test "manager inventory navigates mixed immutable rows and emits terminal open intent" {
-    const alloc = std.testing.allocator;
-    var runtime = Runtime{};
-    defer runtime.deinit(alloc);
-    try std.testing.expect(try runtime.replaceSnapshot(
-        alloc,
-        try testSnapshot(alloc, 1, &.{"child"}),
-    ));
-    const rows = try alloc.alloc(terminal_projection.Row, 2);
-    rows[0] = .{
-        .session_id = try alloc.dupe(u8, "terminal-a"),
-        .label = try alloc.dupe(u8, "serve"),
-        .lifecycle = .running,
-        .attention = .{},
-        .backend = .native,
-    };
-    rows[1] = .{
-        .session_id = try alloc.dupe(u8, "terminal-b"),
-        .label = try alloc.dupe(u8, "watch"),
-        .lifecycle = .starting,
-        .attention = .{},
-        .backend = .tmux,
-    };
-    try std.testing.expect(try runtime.replaceTerminalSnapshot(alloc, .{
-        .alloc = alloc,
-        .rows = rows,
-    }));
-
-    try std.testing.expectEqual(Command.redraw, try runtime.handle(alloc, .down));
-    try std.testing.expectEqualStrings("terminal-a", runtime.selectedTerminalId().?);
-    try std.testing.expectEqual(Command.redraw, try runtime.handle(alloc, .down));
-    try std.testing.expectEqualStrings("terminal-b", runtime.selectedTerminalId().?);
-    try std.testing.expectEqual(Command.open_terminal, try runtime.handle(alloc, .enter));
-    try std.testing.expectEqual(Command.none, try runtime.handle(alloc, .escape));
-    try std.testing.expectEqual(Command.close_manager, try runtime.handle(alloc, .toggle));
-
-    const rendered = try paint(
-        alloc,
-        &runtime,
-        .{ .rows = 12, .cols = 100, .content_bottom = 8, .divider_top_row = 9, .input_row = 10, .divider_bottom_row = 11, .hint_row = 12 },
-        null,
-    );
-    defer alloc.free(rendered);
-    try std.testing.expect(std.mem.find(u8, rendered, "Background processes 2") != null);
-    try std.testing.expect(std.mem.find(u8, rendered, "› watch") != null);
-    try std.testing.expect(std.mem.find(u8, rendered, "terminal-b") != null);
-    try std.testing.expect(std.mem.find(u8, rendered, "starting") != null);
-    try std.testing.expect(std.mem.find(
-        u8,
-        rendered,
-        "↑↓ select   enter inspect   c new agent   t attach   r archives   ctrl-x close",
-    ) != null);
-}
-
-test "manager inventory leads with process labels and shortens secondary IDs" {
-    const alloc = std.testing.allocator;
-    var runtime = Runtime{};
-    defer runtime.deinit(alloc);
-    try std.testing.expect(try runtime.replaceSnapshot(
-        alloc,
-        try testSnapshot(alloc, 1, &.{}),
-    ));
-    const rows = try alloc.alloc(terminal_projection.Row, 1);
-    rows[0] = .{
-        .session_id = try alloc.dupe(u8, "1786460757753-1786460757753277000-ef75d8fd94fdab1"),
-        .label = try alloc.dupe(u8, "/bin/zsh"),
-        .lifecycle = .running,
-        .attention = .{},
-        .backend = .native,
-    };
-    try std.testing.expect(try runtime.replaceTerminalSnapshot(alloc, .{
-        .alloc = alloc,
-        .rows = rows,
-    }));
-
-    const rendered = try paint(
-        alloc,
-        &runtime,
-        .{ .rows = 12, .cols = 80, .content_bottom = 8, .divider_top_row = 9, .input_row = 10, .divider_bottom_row = 11, .hint_row = 12 },
-        null,
-    );
-    defer alloc.free(rendered);
-    try std.testing.expect(std.mem.find(u8, rendered, "Agents & processes") != null);
-    try std.testing.expect(std.mem.find(u8, rendered, " · 1 active") != null);
-    try std.testing.expect(std.mem.find(u8, rendered, "Agents 0") != null);
-    try std.testing.expect(std.mem.find(u8, rendered, "Background processes 1") != null);
-    try std.testing.expect(std.mem.find(u8, rendered, "› /bin/zsh") != null);
-    try std.testing.expect(std.mem.find(u8, rendered, "178646…fdab1") != null);
-    try std.testing.expect(std.mem.find(u8, rendered, "running") != null);
-    try std.testing.expect(std.mem.find(u8, rendered, "No background processes") == null);
-    try std.testing.expect(std.mem.find(u8, rendered, "ctrl-x close") != null);
-    try std.testing.expect(std.mem.find(u8, rendered, "Ctrl-X") == null);
-}
-
 test "manager root footers preserve the close shortcut at responsive boundaries" {
     const non_paginated_widths = [_]u16{ 12, 63, 64, 71, 72, 77, 78 };
     for (non_paginated_widths) |width| {
@@ -5854,10 +5315,6 @@ test "manager title omits an incomplete active total while agents are paginated"
     var snapshot = try testSnapshot(alloc, 1, &.{});
     snapshot.next_cursor = try alloc.dupe(u8, "next-page");
     try std.testing.expect(try runtime.replaceSnapshot(alloc, snapshot));
-    try std.testing.expect(try runtime.replaceTerminalSnapshot(alloc, .{
-        .alloc = alloc,
-        .rows = try alloc.alloc(terminal_projection.Row, 0),
-    }));
 
     const rendered = try paint(
         alloc,
@@ -5866,81 +5323,12 @@ test "manager title omits an incomplete active total while agents are paginated"
         null,
     );
     defer alloc.free(rendered);
-    try std.testing.expect(std.mem.find(u8, rendered, "Agents & processes") != null);
+    try std.testing.expect(std.mem.find(u8, rendered, "Agents") != null);
     try std.testing.expect(std.mem.find(u8, rendered, " · 0 active") == null);
-}
-
-test "manager title requires complete agent and process projections for active total" {
-    const alloc = std.testing.allocator;
-    var runtime = Runtime{};
-    defer runtime.deinit(alloc);
-    try std.testing.expect(try runtime.replaceSnapshot(
-        alloc,
-        try testSnapshot(alloc, 1, &.{"worker"}),
-    ));
-
-    const missing_processes = try paint(
-        alloc,
-        &runtime,
-        .{ .rows = 8, .cols = 80, .content_bottom = 4, .divider_top_row = 5, .input_row = 6, .divider_bottom_row = 7, .hint_row = 8 },
-        null,
-    );
-    defer alloc.free(missing_processes);
-    try std.testing.expect(std.mem.find(u8, missing_processes, " active") == null);
-
-    const rows = try alloc.alloc(terminal_projection.Row, 1);
-    rows[0] = .{
-        .session_id = try alloc.dupe(u8, "terminal-a"),
-        .label = try alloc.dupe(u8, "serve"),
-        .lifecycle = .running,
-        .attention = .{},
-        .backend = .native,
-    };
-    try std.testing.expect(try runtime.replaceTerminalSnapshot(alloc, .{
-        .alloc = alloc,
-        .rows = rows,
-    }));
-    const complete = try paint(
-        alloc,
-        &runtime,
-        .{ .rows = 8, .cols = 80, .content_bottom = 4, .divider_top_row = 5, .input_row = 6, .divider_bottom_row = 7, .hint_row = 8 },
-        null,
-    );
-    defer alloc.free(complete);
-    try std.testing.expect(std.mem.find(u8, complete, " · 2 active") != null);
-
-    runtime.setDegraded(alloc, .store_failure);
-    const degraded = try paint(
-        alloc,
-        &runtime,
-        .{ .rows = 8, .cols = 80, .content_bottom = 4, .divider_top_row = 5, .input_row = 6, .divider_bottom_row = 7, .hint_row = 8 },
-        null,
-    );
-    defer alloc.free(degraded);
-    try std.testing.expect(std.mem.find(u8, degraded, " active") == null);
 }
 
 test "manager rows align status after odd-budget wide glyph ellipsis" {
     const alloc = std.testing.allocator;
-
-    var terminal_row: std.ArrayList(u8) = .empty;
-    defer terminal_row.deinit(alloc);
-    const terminal_label = try alloc.dupe(u8, "界界");
-    defer alloc.free(terminal_label);
-    const terminal_id = try alloc.dupe(u8, "界界");
-    defer alloc.free(terminal_id);
-    try composeTerminalRow(alloc, &terminal_row, .{
-        .session_id = terminal_id,
-        .label = terminal_label,
-        .lifecycle = .running,
-        .attention = .{},
-        .backend = .native,
-    }, false, 15);
-    try std.testing.expectEqual(
-        @as(usize, 14),
-        display_width.visibleWidthIgnoringAnsi(terminal_row.items),
-    );
-    try std.testing.expect(std.mem.find(u8, terminal_row.items, "…") != null);
 
     var snapshot = try testSnapshot(alloc, 1, &.{"界界"});
     defer snapshot.deinit(alloc);
@@ -5954,68 +5342,6 @@ test "manager rows align status after odd-budget wide glyph ellipsis" {
     try std.testing.expect(std.mem.find(u8, node_row.items, "…") != null);
 }
 
-test "manager inventory keeps the selected terminal visible in a paginated viewport" {
-    const alloc = std.testing.allocator;
-    var runtime = Runtime{};
-    defer runtime.deinit(alloc);
-
-    var snapshot = try testSnapshot(
-        alloc,
-        1,
-        &.{ "child-0", "child-1", "child-2", "child-3", "child-4", "child-5" },
-    );
-    snapshot.next_cursor = try alloc.dupe(u8, "page-006");
-    try std.testing.expect(try runtime.replaceSnapshot(alloc, snapshot));
-
-    const rows = try alloc.alloc(terminal_projection.Row, 3);
-    rows[0] = .{
-        .session_id = try alloc.dupe(u8, "terminal-a"),
-        .label = try alloc.dupe(u8, "serve"),
-        .lifecycle = .running,
-        .attention = .{},
-        .backend = .native,
-    };
-    rows[1] = .{
-        .session_id = try alloc.dupe(u8, "terminal-b"),
-        .label = try alloc.dupe(u8, "watch"),
-        .lifecycle = .running,
-        .attention = .{},
-        .backend = .tmux,
-    };
-    rows[2] = .{
-        .session_id = try alloc.dupe(u8, "terminal-c"),
-        .label = try alloc.dupe(u8, "tests"),
-        .lifecycle = .starting,
-        .attention = .{},
-        .backend = .native,
-    };
-    try std.testing.expect(try runtime.replaceTerminalSnapshot(alloc, .{
-        .alloc = alloc,
-        .rows = rows,
-    }));
-
-    for (0..8) |_| try std.testing.expectEqual(
-        Command.redraw,
-        try runtime.handle(alloc, .down),
-    );
-    try std.testing.expectEqualStrings("terminal-c", runtime.selectedTerminalId().?);
-    try std.testing.expectEqual(Command.open_terminal, try runtime.handle(alloc, .enter));
-
-    const rendered = try paint(
-        alloc,
-        &runtime,
-        .{ .rows = 9, .cols = 100, .content_bottom = 7, .divider_top_row = 8, .input_row = 8, .divider_bottom_row = 8, .hint_row = 9 },
-        null,
-    );
-    defer alloc.free(rendered);
-    try std.testing.expect(std.mem.find(u8, rendered, "› tests") != null);
-    try std.testing.expect(std.mem.find(u8, rendered, "terminal-c") != null);
-    try std.testing.expect(std.mem.find(u8, rendered, "starting") != null);
-    try std.testing.expect(std.mem.find(u8, rendered, "More children available: ] next page.") != null);
-    try std.testing.expect(std.mem.find(u8, rendered, "ctrl-x close") != null);
-    try std.testing.expect(std.mem.find(u8, rendered, " active") == null);
-}
-
 test "renderer covers loading empty populated interrupted archived degraded unicode and narrow dimensions" {
     const alloc = std.testing.allocator;
     var runtime = Runtime{};
@@ -6023,7 +5349,7 @@ test "renderer covers loading empty populated interrupted archived degraded unic
     const layout = types.Layout{ .rows = 8, .cols = 48, .content_bottom = 4, .divider_top_row = 5, .input_row = 6, .divider_bottom_row = 7, .hint_row = 8 };
     const loading = try paint(alloc, &runtime, layout, null);
     defer alloc.free(loading);
-    try std.testing.expect(std.mem.find(u8, loading, "Agents & processes") != null);
+    try std.testing.expect(std.mem.find(u8, loading, "Agents") != null);
     try std.testing.expect(std.mem.find(u8, loading, "Loading agents") != null);
     try std.testing.expect(std.mem.find(u8, loading, "last lines:") == null);
 
@@ -6840,7 +6166,7 @@ test "manager title and notification identify a pending child approval owner" {
     try std.testing.expect(std.mem.find(
         u8,
         screen,
-        "Agents & processes · approval-child approval pending",
+        "Agents · approval-child approval pending",
     ) != null);
     try std.testing.expect(std.mem.find(
         u8,
@@ -7214,7 +6540,7 @@ test "archived route excludes archived children from the active tree and opens r
     const detail = try paint(alloc, &runtime, layout, null);
     defer alloc.free(detail);
     try std.testing.expect(std.mem.find(u8, detail, "archived-child") != null);
-    try std.testing.expect(std.mem.find(u8, detail, "Agents & processes") != null);
+    try std.testing.expect(std.mem.find(u8, detail, "Agents") != null);
 }
 
 test "live archival preserves the routed immutable child without stealing focus" {
@@ -7275,7 +6601,7 @@ test "child detail renders owned configuration on a narrow terminal" {
     defer alloc.free(rendered);
     try std.testing.expect(std.mem.find(u8, rendered, "Model: openai/gpt-5") != null);
     try std.testing.expect(std.mem.find(u8, rendered, "Permission mode: auto") != null);
-    try std.testing.expect(std.mem.find(u8, rendered, "Agents & processes") != null);
+    try std.testing.expect(std.mem.find(u8, rendered, "Agents") != null);
 }
 
 test "all manager routes expose authoritative detail and ctrl x exits without navigation side effects" {
@@ -7328,7 +6654,7 @@ test "all manager routes expose authoritative detail and ctrl x exits without na
     );
     const child = try paint(alloc, &runtime, layout, null);
     defer alloc.free(child);
-    try std.testing.expect(std.mem.find(u8, child, "Agents & processes") != null);
+    try std.testing.expect(std.mem.find(u8, child, "Agents") != null);
     try std.testing.expect(std.mem.find(u8, child, "child-id") != null);
     try std.testing.expectEqualStrings(
         "provider_http_error: HTTP 502",

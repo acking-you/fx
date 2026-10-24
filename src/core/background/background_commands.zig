@@ -6,10 +6,6 @@ const Selection = union(enum) {
     id: u64,
 };
 
-fn terminalVisibleInProcessStatus(row: anytype) bool {
-    return row.lifecycle == .running or row.lifecycle == .starting;
-}
-
 fn parseSelectionOrUsage(app: anytype, target: []const u8) !?Selection {
     const trimmed = std.mem.trim(u8, target, " \t");
     if (trimmed.len == 0 or std.mem.eql(u8, trimmed, "last")) return .last;
@@ -28,26 +24,18 @@ pub fn Commands(comptime App: type) type {
         pub fn show(app: *App) !void {
             const commands = try app.unified_exec.snapshotProcesses(app.alloc);
             defer unified_exec.Manager.freeProcessSnapshots(app.alloc, commands);
-            var terminals = try app.terminal_client.terminalProjection(app.alloc);
-            defer terminals.deinit();
-            var terminal_count: usize = 0;
-            for (terminals.rows) |row| {
-                if (terminalVisibleInProcessStatus(row)) terminal_count += 1;
-            }
-            return writeSnapshot(app, commands, terminals.rows, terminal_count);
+            return writeSnapshot(app, commands);
         }
 
         fn writeSnapshot(
             app: *App,
             commands: []const unified_exec.Manager.ProcessSnapshot,
-            terminal_rows: anytype,
-            terminal_count: usize,
         ) !void {
-            if (commands.len == 0 and terminal_count == 0) {
+            if (commands.len == 0) {
                 try app.writeDomainNotice(.{
                     .topic = "background",
                     .tone = .neutral,
-                    .body = "No background commands or terminals are running.",
+                    .body = "No background commands are running.",
                 }, true);
                 return;
             }
@@ -55,8 +43,8 @@ pub fn Commands(comptime App: type) type {
             var out: std.Io.Writer.Allocating = .init(app.alloc);
             defer out.deinit();
             try out.writer.print("{d} background process{s}\n", .{
-                commands.len + terminal_count,
-                if (commands.len + terminal_count == 1) "" else "s",
+                commands.len,
+                if (commands.len == 1) "" else "s",
             });
             for (commands) |command| {
                 try out.writer.print(
@@ -69,13 +57,6 @@ pub fn Commands(comptime App: type) type {
                         command.cwd,
                         command.mode.label(),
                     },
-                );
-            }
-            for (terminal_rows) |row| {
-                if (!terminalVisibleInProcessStatus(row)) continue;
-                try out.writer.print(
-                    " - [{s}] [{s}] {s}\n   backend: {s}\n   output: press Ctrl+X and select Processes\n",
-                    .{ row.session_id, @tagName(row.lifecycle), row.label, @tagName(row.backend) },
                 );
             }
 
@@ -123,14 +104,4 @@ pub fn Commands(comptime App: type) type {
             }, true);
         }
     };
-}
-
-test "background command module owns only Unified Exec process control" {
-    const source = @embedFile("background_commands.zig");
-    try std.testing.expect(
-        std.mem.find(u8, source, "Background" ++ "Runtime") == null,
-    );
-    try std.testing.expect(
-        std.mem.find(u8, source, "snapshot" ++ "Tasks") == null,
-    );
 }

@@ -20,9 +20,6 @@ const gateway_provider = @import("../gateway/gateway_provider.zig");
 const model_catalog = @import("../gateway/model_catalog.zig");
 const provider_route = @import("../gateway/provider_route.zig");
 const provider_set = @import("../gateway/provider_set.zig");
-const background_process_provider = @import(
-    "../execution/background_process_provider.zig",
-);
 const github_publish = @import("../github/github_publish.zig");
 const github_workflows = @import("../github/github_workflows.zig");
 const host = @import("../hosts/host.zig");
@@ -146,8 +143,6 @@ pub const Config = struct {
     gateway_chat_url: []const u8,
     gateway_provider: gateway_provider.Provider,
     provider_set: provider_set.Set,
-    background_process_provider: background_process_provider.Provider =
-        background_process_provider.unavailable_provider,
     url_opener: host.UrlOpener,
     secret_store: host.SecretStore,
     prompt_policy: prompt_policy.Policy,
@@ -885,7 +880,6 @@ fn runNonInteractiveWithDeps(
                 .gateway_models_path = cfg.models_path,
                 .gateway_provider = cfg.gateway_provider,
                 .provider_set = cfg.provider_set,
-                .background_process_provider = cfg.background_process_provider,
                 .secret_store = cfg.secret_store,
                 .prompt_policy = cfg.prompt_policy,
                 .ignored_list_entries = cfg.ignored_list_entries,
@@ -2333,7 +2327,6 @@ fn workflowConfig(cfg: Config) @import("cli_ask.zig").Config {
         .gateway_models_path = cfg.models_path,
         .gateway_provider = cfg.gateway_provider,
         .provider_set = cfg.provider_set,
-        .background_process_provider = cfg.background_process_provider,
         .secret_store = cfg.secret_store,
         .prompt_policy = cfg.prompt_policy,
         .skill_root_policy = cfg.skill_root_policy,

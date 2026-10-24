@@ -446,6 +446,49 @@ async function runFailingToolScenario(args: {
 
 describe("filesystem path handling", () => {
   test(
+    "parallel grep preserves per-file results and complete counts through runtime dispatch",
+    async () => {
+      const root = createIsolatedRoot();
+      try {
+        const files = join(root.workspace, "batch");
+        mkdirSync(files);
+        for (let index = 0; index < 128; index++) {
+          writeFileSync(
+            join(files, `file-${String(index).padStart(4, "0")}.txt`),
+            `PARALLEL_NEEDLE ${index} first\nother\nPARALLEL_NEEDLE ${index} second\n`,
+          );
+        }
+
+        await runFirstCallToolScenario({
+          root,
+          id: "parallel_matches",
+          name: "grep_files",
+          input: { pattern: "PARALLEL_NEEDLE", path: "batch", head_limit: 8 },
+          expectedResultRequest: [],
+          expectedResultOutput: [
+            "showing 1-8 of 256",
+            ...Array.from({ length: 4 }, (_, index) => [
+              `file-${String(index).padStart(4, "0")}.txt:1: PARALLEL_NEEDLE ${index} first`,
+              `file-${String(index).padStart(4, "0")}.txt:3: PARALLEL_NEEDLE ${index} second`,
+            ]).flat(),
+          ],
+        });
+        await runFirstCallToolScenario({
+          root,
+          id: "parallel_count",
+          name: "grep_files",
+          input: { pattern: "PARALLEL_NEEDLE", path: "batch", mode: "count" },
+          expectedResultRequest: [],
+          expectedResultOutput: ["count 256 matching lines in 128 files"],
+        });
+      } finally {
+        rmSync(root.root, { recursive: true, force: true });
+      }
+    },
+    TIMEOUT,
+  );
+
+  test(
     "active added roots reach read cwd and search admission without loading their instructions",
     async () => {
       const root = createIsolatedRoot();

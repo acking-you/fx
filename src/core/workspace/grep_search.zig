@@ -306,6 +306,9 @@ const FileOutcome = struct {
 /// reach the merged result.
 const ParallelScan = struct {
     /// Thread-safe and temporary: candidate resolution and per-file matches.
+    /// Zig 0.17's ArenaAllocator supports concurrent allocation when its
+    /// backing scratch allocator is thread-safe. Only the caller deinitializes
+    /// that arena, after runParallelScan has joined every worker.
     work: Allocator,
     workspace_root: []const u8,
     provider_root: []const u8,
@@ -1413,6 +1416,7 @@ test "grep search parallel scan matches single-threaded order and cap truncation
             const want = try std.mem.print(&want_buf, "many/file-{d:0>4}.txt", .{position / 2});
             try std.testing.expect(std.mem.endsWith(u8, match.absolute_path, want));
             try std.testing.expectEqual(2 * (position % 2) + 1, match.line_number);
+            try std.testing.expectEqualStrings(if (position % 2 == 0) "needle one" else "needle two", match.line);
         }
 
         const counted = try countDirectoryMatchesWithIgnored(std.testing.allocator, arena_state.allocator(), workspace, workspace, "needle", false, tool_files.default_skipped_names, null);

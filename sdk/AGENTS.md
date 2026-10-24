@@ -15,7 +15,7 @@ The SDK has two WebAssembly surfaces and one shared JavaScript host layer:
 | Interactive terminal entry point for `fx-term.wasm` | `src/wasm_term_main.zig` and `runWasmTerminal` in `src/main.zig` |
 | Native and WebAssembly capability policy | `src/core/hosts/runtime_profile.zig` |
 | Host-backed terminal session persistence | `src/core/app/app_session_runtime.zig` and `sdk/fx-sdk.js` |
-| Browser workspace metadata and bounded host adapter | `src/core/hosts/js_host_workspace.zig` and `sdk/fx-sdk.js` |
+| Browser workspace metadata | `src/core/hosts/js_host_workspace.zig` and `sdk/fx-sdk.js` |
 | Browser OAuth transport and URL opening | `src/core/auth/js_host_auth.zig` and `src/core/hosts/js_host_url_opener.zig` |
 | WASI target, optimization mode, threading, and artifact names | `build.zig` |
 | Core browser fixture and its automation contract | `sdk/index.html` and `sdk/tests/test-core-browser.mjs` |
@@ -31,8 +31,8 @@ Do not treat the demos or this file as the implementation contract. When prose a
 - Detect JavaScript Promise Integration (JSPI) by capability through `supportsJspi()`. Do not replace feature detection with browser or version sniffing. Keep loader errors, demo fallback states, and the compatibility statement in `sdk/README.md` consistent.
 - Treat JavaScript host stores as durable contracts. Session snapshots are opaque bytes with optimistic revisions. Preserve `FX_SESSION_REVISION_CONFLICT`. Persist configuration only after fx accepts it, and do not collapse prompt-history outcomes into generic success.
 - Preserve cancellation and lifecycle behavior. Fetch cancellation must reach the host `AbortSignal`; terminal subscriptions must be released exactly once; `abort()` must settle `exited` and must not leave input or resize listeners attached.
-- The WebAssembly runtime is not the native runtime. Keep native tools disabled. The optional workspace host can still provide bounded workspace metadata and its host-side adapter, but fx must not advertise model-facing `terminal`, `exec_command`, or `write_stdin` tools there. The adapter is not a shell fallback. Any new model-facing capability requires its own typed host boundary, permission review where applicable, and coverage on the affected surface.
-- Keep workspace version 1 constrained to an ephemeral, non-git workspace whose normalized `cwd` equals `root`. Preserve command and output limits, the 30-second maximum deadline, and Ctrl+C cancellation through the shared host-effect abort path.
+- The WebAssembly runtime is not the native runtime. Keep native tools disabled. The optional workspace host can still provide bounded workspace metadata, but fx must not advertise model-facing `terminal`, `exec_command`, or `write_stdin` tools there. There is no workspace command execution bridge. Any new model-facing capability requires its own typed host boundary, permission review where applicable, and coverage on the affected surface.
+- Keep workspace version 1 constrained to an ephemeral, non-git workspace whose normalized `cwd` equals `root`. Keep metadata bounded to 4 KiB and validate normalized paths before exposing them to the runtime.
 - `window.__fxCoreTest` and `document.body.dataset.state` are test interfaces for the core debugger. If either changes intentionally, update the browser test in the same change.
 - The live demos may pass a locally stored credential into the WebAssembly environment. Never print, serialize into artifacts, or add test assertions containing that credential.
 
@@ -45,7 +45,7 @@ Do not treat the demos or this file as the implementation contract. When prose a
 | Live Gateway request or model-catalog translation | Core tests plus the opt-in live smoke test when a credential is available |
 | Terminal adapter, input encoding, resize, cleanup, config, or prompt history | Terminal build and the headless terminal suite |
 | Terminal session persistence | Terminal build plus `sdk/tests/test-term-session-resume.mjs` |
-| Browser workspace metadata, permissions, execution, limits, or cancellation | Terminal build plus `sdk/node/test-term-workspace.mjs` |
+| Browser workspace metadata | Metadata unit tests, both WASM builds, `sdk/node/test-term-features.mjs`, and `sdk/tests/test-core-home-unavailable.mjs` |
 | `encodeXtermKeyEvent()` or `xtermAdapter()` only | `sdk/node/test-xterm-adapter.mjs` |
 | Core debugger query behavior or automation state | `sdk/tests/test-core-browser.mjs` |
 | Terminal demo asset references, integrity, or cache policy | Package into a fresh temporary directory and inspect the generated HTML, manifest, and headers |
@@ -96,5 +96,5 @@ Do not commit `zig-out/`, `sdk/dist/`, or other generated artifacts. Run `git di
 - Flag a public contract change that lacks a focused regression test. Require a README update only when supported public behavior or setup changed.
 - Flag code that makes one surface silently depend on the other surface's composition or capability profile.
 - Flag user-agent checks for JSPI, swallowed session revision conflicts, premature config writes, lost prompt-history outcomes, or terminal listener leaks.
-- Flag workspace adapters that bypass typed metadata validation, permission admission, resource limits, or the shared cancellation path.
+- Flag workspace adapters that bypass typed metadata validation or resource limits.
 - Flag deployment changes that give mutable HTML the same long-lived cache policy as content-addressed JavaScript or WebAssembly assets.

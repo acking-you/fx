@@ -1,5 +1,5 @@
 const std = @import("std");
-const process_identity = @import("process_supervisor.zig");
+const process_identity = @import("process_identity.zig");
 const session_child_store = @import("../session/session_child_store.zig");
 
 const Allocator = std.mem.Allocator;

@@ -26,7 +26,7 @@ upstream product feature is now available in BYOK.
 
 | Area | Result |
 | --- | --- |
-| Request watches | Adopt upstream `select_watch` and extend its stop-and-join pattern to the fork's generic bounded requests, catalog fetches, direct HTTP fetch, OAuth callback reads, terminal monitor networking, and image-normalizer process waits. |
+| Request watches | Adopt upstream `select_watch` and extend its stop-and-join pattern to the fork's generic bounded requests, catalog fetches, direct HTTP fetch, OAuth callback reads and image-normalizer process waits. |
 | Zig toolchain | Adopt Zig 0.17.0 across source, build configuration, CI, native packaging, and development documentation. Keep the fork's binary, embedded C ABI, NAPI and WASM build owners. Test filters now use repeated `-Dtest-filter=...` options. |
 | Workspace discovery | Adopt upstream's native indexer and its single public facade for picker, glob, and grep discovery. Git metadata is read as data without spawning git. Preserve BYOK's immutable access scopes, captured index prefixes, generation ownership, and cancellation. |
 | Terminal and input | Accept compatible shared terminal engine, Unicode width, OSC hyperlink, parser, keypad, navigation, and rendering fixes. Keep transcript mutation and paint ownership on the UI thread. |
@@ -47,22 +47,18 @@ wait; these paths stop the watch and drain/dispose any late result.
 | `tools/web/http_fetch.zig` | DNS waits and Windows connects use watches. Failure to start or await the competing task joins DNS work before its stack storage can disappear. Late connections are closed. |
 | `core/shared/socket_poll.zig` | Windows accept stops its deadline watch on success and closes a late accepted connection on cancellation. |
 | `core/auth/browser_callback.zig` | Callback reads watch both cancellation and the silence deadline; late requests are deinitialized. |
-| `core/terminal/native_session.zig` | Monitor resolution and connection share the same watch contract and dispose late addresses/streams. |
 | `core/images/image_attachments.zig` | A normal child exit stops the watch. A canceled child wait kills and reaps the normalizer on its owning worker before join, including the POSIX case where the interrupted wait cleared the process handle. |
 
 All remaining `Select.cancel`/`cancelDiscard` calls are exceptional drains,
-completed-watch disposal, or the intentional regression test. Command-runner
-futures terminate their process and await it instead of canceling a live
-future. Application methods named `cancel` set product state or cancellation
-flags; they are not std task cancellation.
+completed-watch disposal, or the intentional regression test. Application
+methods named `cancel` set product state or cancellation flags; they are not
+std task cancellation.
 
 The watch checks its absolute clock deadline after every wakeup. A regression
 repeatedly wakes an unset event and verifies that the actual deadline elapses.
 The old gateway and HTTP deadline loops are removed. `io.waitEventUntil` remains
-for two non-watch owners found in the audit: child notification waits and the
-terminal host's idle grace period. They now use the clock-checking helper so a
-spurious wakeup cannot expire the wait or stop an idle host early. Reaper and
-monitor wakeups are polling hints and already re-check their own state.
+for child notification waits. It uses the clock-checking helper so a spurious
+wakeup cannot expire the wait early.
 
 The setup-only `Unexpected` to `ConnectionSetupFailed` recovery stays. Zig
 0.17.0 still cancels `connectMany` in `std/Io/net/HostName.zig` after connection
@@ -109,10 +105,9 @@ shutdown, silent-stream cancellation, and session reuse checks. Every Darwin
 archive member reports `data%8=0`. The full INFX workspace suite and infx-sys
 link check pass with the default macOS linker.
 
-Remaining focused regression checks, the requested contention stress runs, and
-exact-head Full CI are recorded in the draft PR as they finish. The
-PR must stay draft until the maintainer authorizes readiness, and must not be
-merged, released, or filed upstream without separate authorization.
+Focused regression checks, contention stress runs, and exact-head Full CI are
+recorded in the PR. The maintainer authorized integration after validation.
+Release and upstream filing remain separate work.
 
 ### CI compatibility follow-up
 
@@ -173,3 +168,31 @@ Binary-size comparison uses the cache environment variable accepted by both
 compiler generations. It selects the base revision's declared Zig version, so
 this compiler migration still compares a valid old binary with the new one.
 The updated workflow passes actionlint.
+
+
+## Integration with the terminal cleanup
+
+The review branch merges BYOK commit `109d5a26`, retaining PR #52's removal of
+hosted terminal services, takeover UI, synchronous command execution, and the
+unused WASM workspace execution bridge. Shared rendering uses
+`render_contracts.zig`; the extracted command-output artifact owner uses Zig
+0.17's `std.Io.Dir.path` API. Tests and helpers owned only by the retired
+execution paths stay removed.
+
+The parallel-grep allocator review was checked against the pinned Zig 0.17
+standard library. That version's `ArenaAllocator.allocator()` is thread-safe
+when its backing allocator is thread-safe, using atomic arena bookkeeping.
+Runtime dispatch supplies the session allocator as scratch storage, and both
+match and count scans join every worker before merging results and destroying
+the arena. The claimed shared-arena race assumes the older allocator contract
+and does not apply to this toolchain. No additional lock is needed. The
+1,500-file regression also checks retained line text, and the existing
+file-tool E2E owner covers multi-batch matching and counting through the real
+runtime. Its PGSO training classification remains appropriate for ordinary
+workspace search.
+
+The combined tree passes the ReleaseSafe native/C ABI build, 259 focused Zig
+tests (three skipped), 13 real-binary CLI/ACP/TUI scenarios, and four direct-write
+audit tests. Both WASM surfaces build; core routing/cancellation/metadata and
+terminal features/session resume pass. PGSO tooling completes 203 tests with
+five skips. Exact-head Full CI is recorded in the PR before integration.

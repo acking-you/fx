@@ -56,7 +56,7 @@ python3 -m scripts.pgso all \
 
 `build` verifies the control, bitcode, instrumented link, profile-section alignment, signature, and one profile-producing smoke. `train` additionally runs the versioned corpus and creates a checked candidate. Both are useful diagnostics but finish with `eligible: false` because they do not run the complete release-safety gate.
 
-`all` runs the complete fresh-build path: training, profile use, candidate verification, the candidate behavior corpus, six startup comparisons, and six heavy-workload comparisons. It is the canonical CI entry point. `report --output-dir <path>` is the only command that may reuse an existing directory, and it only reads a complete eligible manifest.
+`all` runs the complete fresh-build path: training, profile use, candidate verification, the candidate behavior corpus, five startup comparisons, and six heavy-workload comparisons. It is the canonical CI entry point. `report --output-dir <path>` is the only command that may reuse an existing directory, and it only reads a complete eligible manifest.
 
 The production workflow runs the same gate as a distributed DAG. One seed job
 builds the control, bitcode, and instrumented binary. Up to twenty training
@@ -64,7 +64,7 @@ jobs execute non-overlapping corpus assignments, one coordinator validates and
 merges every shard profile, builds three dedicated heavy-workload benchmark
 pairs, adds their hash-compatible speed evidence to the production profile,
 and builds the candidate. Up to twenty behavior jobs then verify
-non-overlapping candidate assignments. The six startup and six heavy-workload
+non-overlapping candidate assignments. The five startup and six heavy-workload
 comparisons run on twelve fresh machines. Every performance job measures its
 immutable control and candidate on the same machine.
 
@@ -114,7 +114,7 @@ release. Overwrite applies only to an identical attempt-qualified name.
 
 ## Corpus
 
-[`corpus.json`](corpus.json) references existing test owners instead of copying their behavior. Training contains six direct CLI commands and twenty-three deterministic E2E files covering CLI, configuration, tools, Gateway lifecycle, fake web and vision routes, ACP, sessions, terminal hosting, TUI startup, resizing, rendering, permissions, interruption, subagents, and recovery. A bounded `profile_runs` count can weight a direct training command without duplicating manifest entries or final behavior checks. Thirteen additional deterministic E2E files verify the final candidate without influencing LLVM's hot and cold classification.
+[`corpus.json`](corpus.json) references existing test owners instead of copying their behavior. Training contains five direct CLI commands and twenty-two deterministic E2E files covering CLI, configuration, tools, Gateway lifecycle, fake web and vision routes, ACP, sessions, TUI startup, resizing, rendering, permissions, interruption, subagents, and recovery. A bounded `profile_runs` count can weight a direct training command without duplicating manifest entries or final behavior checks. Thirteen additional deterministic E2E files verify the final candidate without influencing LLVM's hot and cold classification.
 
 Every root `tests/e2e/*.test.ts` file must be classified as training, verification-only, or intentionally excluded. The corpus loader fails on missing, duplicate, stale, or unclassified files, so a new E2E owner cannot silently bypass release qualification. New tests added to an already classified file inherit that file's classification.
 
@@ -132,7 +132,7 @@ Candidate behavior qualification records each scenario's debug trace under `cand
 
 ## Qualification policy
 
-Startup compares `help`, `--version`, `status --json`, `background --json`, `doctor --json`, and `sessions --json`. It first executes each verified immutable artifact once to require successful output and empty stderr. Timing then uses pinned Hyperfine with no intermediate shell, ten warmups per artifact in each of at least 100 alternating rounds, and at least 1,000 measured samples per artifact. No contiguous block exceeds ten measured runs, so short machine-noise bursts are distributed between control and candidate while p95 retains 50 tail observations. Startup measurement sets `FX_DISABLE_KEYCHAIN=1` so the compiler comparison cannot be dominated by host-global macOS Keychain subprocess latency; the deterministic behavior corpus remains responsible for exercising Keychain integration. No per-sample Python process management or evidence-file write is included in the timed boundary, and measurement never replaces `zig-out/bin/fx`. Heavy qualification compares file indexing at 100,000 paths, UI activity, and approval transcript, diff, combined, and large-payload workloads.
+Startup compares `help`, `--version`, `status --json`, `doctor --json`, and `sessions --json`. It first executes each verified immutable artifact once to require successful output and empty stderr. Timing then uses pinned Hyperfine with no intermediate shell, ten warmups per artifact in each of at least 100 alternating rounds, and at least 1,000 measured samples per artifact. No contiguous block exceeds ten measured runs, so short machine-noise bursts are distributed between control and candidate while p95 retains 50 tail observations. Startup measurement sets `FX_DISABLE_KEYCHAIN=1` so the compiler comparison cannot be dominated by host-global macOS Keychain subprocess latency; the deterministic behavior corpus remains responsible for exercising Keychain integration. No per-sample Python process management or evidence-file write is included in the timed boundary, and measurement never replaces `zig-out/bin/fx`. Heavy qualification compares file indexing at 100,000 paths, UI activity, and approval transcript, diff, combined, and large-payload workloads.
 
 Heavy comparisons use at least 50 measured samples for each artifact and alternate pair order AB then BA. Command failures and timeouts fail qualification and are never replaced. A candidate fails when either p50 or p95 is more than 10% slower than its matching control. The existing Linux startup workflow remains the authority for the repository's absolute 2 ms command budget.
 

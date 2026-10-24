@@ -4,9 +4,6 @@ const app_process_runtime = @import("app_process_runtime.zig");
 const app_session_runtime = @import("app_session_runtime.zig");
 const acp_runner = @import("../cli/acp_runner.zig");
 const cli_surface = @import("../cli/cli_surface.zig");
-const background_process_provider = @import(
-    "../execution/background_process_provider.zig",
-);
 const gateway_provider = @import("../gateway/gateway_provider.zig");
 const provider_set = @import("../gateway/provider_set.zig");
 const host = @import("../hosts/host.zig");
@@ -71,8 +68,6 @@ pub const Config = struct {
     gateway_chat_url: []const u8,
     gateway_provider: gateway_provider.Provider,
     provider_set: provider_set.Set,
-    background_process_provider: background_process_provider.Provider =
-        background_process_provider.unavailable_provider,
     url_opener: host.UrlOpener,
     secret_store: host.SecretStore,
     prompt_policy: prompt_policy.Policy,
@@ -341,7 +336,6 @@ fn cliSurfaceConfig(cfg: Config) cli_surface.Config {
         .gateway_chat_url = cfg.gateway_chat_url,
         .gateway_provider = cfg.gateway_provider,
         .provider_set = cfg.provider_set,
-        .background_process_provider = cfg.background_process_provider,
         .url_opener = cfg.url_opener,
         .secret_store = cfg.secret_store,
         .prompt_policy = cfg.prompt_policy,
@@ -701,10 +695,6 @@ test "app entry returns after handled CLI success without initializing app" {
         return error.TestExpectedEqual;
     try std.testing.expect(captured_search.execute_fn == expected_search.execute_fn);
     try std.testing.expect(capture.seen_config.?.provider_set.gateway.model_catalog.?.fetch_fn == test_builtin_gateway.model_catalog_provider.fetch_fn);
-    try std.testing.expect(
-        capture.seen_config.?.background_process_provider.spawn_prepared_fn ==
-            cfg.background_process_provider.spawn_prepared_fn,
-    );
     try std.testing.expect(capture.seen_config.?.url_opener.context == cfg.url_opener.context);
     try std.testing.expect(capture.seen_config.?.url_opener.open_fn == cfg.url_opener.open_fn);
     try std.testing.expect(capture.seen_config.?.secret_store.context == cfg.secret_store.context);

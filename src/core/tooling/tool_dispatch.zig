@@ -1,5 +1,6 @@
 const testing_allocator = @import("../shared/testing_allocator.zig");
 const std = @import("std");
+const command_contract = @import("../execution/command_contract.zig");
 const command_admission = @import("../permissions/command_admission.zig");
 const core_permissions = @import("../permissions/permissions.zig");
 const core_types = @import("../shared/types.zig");
@@ -13,7 +14,6 @@ const change_tracker = @import("../workspace/change_tracker.zig");
 const read_tracker_mod = @import("../workspace/read_tracker.zig");
 const session_child_store = @import("../session/session_child_store.zig");
 const command_replay_store = @import("../session/command_replay_store.zig");
-const command_runner = @import("../execution/command_runner.zig");
 const subagent_tool_provider = @import("../subagent/tool_provider.zig");
 const text_utils = @import("../shared/text_utils.zig");
 const web_fetch_runtime = @import("web_fetch_runtime.zig");
@@ -194,7 +194,7 @@ pub const DispatchContext = struct {
     /// independent from the model-facing execution tools.
     session_id: ?[]const u8 = null,
     output_chunk_ctx: ?*anyopaque = null,
-    on_output_chunk: ?command_runner.CommandOutputCallback = null,
+    on_output_chunk: ?command_contract.CommandOutputCallback = null,
     /// Optional arena-owned metadata sink used by direct command tools to
     /// expose retained output artifacts to the presentation layer.
     command_result_json_sink: ?*?[]const u8 = null,
@@ -203,7 +203,7 @@ pub const DispatchContext = struct {
     session_child_capability: ?*session_child_store.SessionChildCapability = null,
     ephemeral_command_replay: ?*command_replay_store.EphemeralStore = null,
     /// Core-owned process manager for the model-facing Unified Exec tools.
-    /// It is independent from the hosted terminal engine and survives turns.
+    /// It survives turns.
     unified_exec: ?*unified_exec_runtime.Manager = null,
     exec_mode: exec_mode.Mode = .codex,
     command_timeout_ms: ?usize = null,

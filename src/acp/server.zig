@@ -41,7 +41,6 @@ const provider_usage = @import("../core/session/provider_usage.zig");
 const account_usage_runtime = @import("../core/app/account_usage_runtime.zig");
 const image_attachments = @import("../core/images/image_attachments.zig");
 const worker_runtime = @import("../core/agent/worker_runtime.zig");
-const terminal_client_runtime = @import("../core/terminal/client.zig");
 const unified_exec_runtime = @import("../core/execution/unified_exec.zig");
 const subagent_tool_host = @import("../core/subagent/tool_host.zig");
 const subagent_authority = @import("../core/subagent/authority.zig");
@@ -398,7 +397,6 @@ pub const ServerState = struct {
     skills: skill_runtime.Runtime = .{},
     context_snapshot: context_contract.GatheredContextSnapshot = .{},
     worker: worker_runtime.WorkerRuntime = .{},
-    terminal_client: terminal_client_runtime.Runtime = .{},
     unified_exec: unified_exec_runtime.Manager = unified_exec_runtime.Manager.init(std.heap.c_allocator),
     provider_job_thread: ?std.Thread = null,
     provider_job_running: std.atomic.Value(bool) = .init(false),
@@ -429,7 +427,6 @@ pub const ServerState = struct {
         reapProviderJob(self, true);
         self.provider_login.deinit(self.alloc);
         self.provider_setup.deinit();
-        self.terminal_client.deinit();
         closeActiveSession(self) catch |err| {
             debug_trace.logf(
                 "session",
@@ -978,9 +975,6 @@ pub fn runWithTransport(
         .cfg = cfg,
         .writer = writer_value,
         .web_search_runtime = web_search_runtime.Runtime.init(.{}),
-        .terminal_client = terminal_client_runtime.Runtime.init(
-            cfg.background_process_provider,
-        ),
         .lifecycle_runtime = lifecycle_runtime,
         .lifecycle_view = lifecycle_view,
     };

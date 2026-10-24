@@ -309,7 +309,6 @@ Send the exact local command `/ps` through `session/prompt`:
 - Whether the agent turn is idle, starting, or running
 - The active turn ID
 - The number of queued steer messages
-- Running durable terminal sessions
 - Unified Exec commands that crossed their yield window, including exited
   commands not yet collected by the model
 
@@ -319,7 +318,7 @@ The request then completes with the normal ACP prompt response:
 {"jsonrpc":"2.0","id":12,"result":{"stopReason":"end_turn"}}
 ```
 
-## List background terminals as structured data
+## List background commands as structured data
 
 Clients that need structured state should use `fx/backgroundTerminals/list` instead of parsing `/ps` text:
 
@@ -332,13 +331,6 @@ Example result:
 ```json
 {
   "data": [
-    {
-      "kind": "terminal",
-      "id": "TERMINAL_SESSION_ID",
-      "command": "zig build test",
-      "state": "running",
-      "backend": "native"
-    },
     {
       "kind": "unifiedExec",
       "id": 7,
@@ -353,8 +345,8 @@ Example result:
 }
 ```
 
-The response projects both process owners at request time. `kind` is `terminal`
-for hosted terminal sessions and `unifiedExec` for yielded model commands.
+The response projects session-local Unified Exec commands at request time.
+Each entry has `kind: "unifiedExec"`; the existing method name remains unchanged.
 
 ## Unified Exec commands
 

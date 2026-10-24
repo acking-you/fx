@@ -242,7 +242,7 @@ The model receives the active workspace directory and the same resolved shell us
 
 For codebase discovery, bash-first mode hides the overlapping `list_files`, `glob_files`, `grep_files`, and `semantic_search` tools and tells the model to use the unified shell with `rg` and `rg --files`. It is on by default whenever the permission mode does not stop for approval (`auto` or `yolo`) and off in `ask`; `/bash-first on|off|auto` (or ACP `fx/toolMode/set`) overrides that. The setting applies to the next turn. See [Bash-first workspace mode](docs/bash-first-mode.md).
 
-The hosted terminal engine remains available for explicit interactive terminal takeover and replay. It is separate from the model-facing command tools and is not used as a shell fallback.
+Use `/background` or `/ps` to inspect Unified Exec processes. Ctrl+X manages child agents. The former hosted terminal service and interactive terminal takeover have been removed; transcript recording and replay remain available.
 
 fx starts in `auto` permission mode. Routine understood development actions run directly. Each unresolved action receives one narrow safety review based on the current user request and the exact pending action. A clear result authorizes only that action. A caution or unavailable review holds the action and returns advice to the agent without opening a permission prompt or ending the turn. Permission diagnostics distinguish unavailable review stages, including credential validation, timeouts, provider rejection, and malformed reviewer output. These classified trace events do not include credentials, endpoints, or raw provider responses.
 

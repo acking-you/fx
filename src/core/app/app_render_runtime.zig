@@ -7,7 +7,6 @@ const app_commands = @import("app_commands.zig");
 const app_lifecycle = @import("app_lifecycle.zig");
 const app_permission_runtime = @import("app_permission_runtime.zig");
 const app_session_runtime = @import("app_session_runtime.zig");
-const terminal_ui_projection = @import("../terminal/ui_projection.zig");
 const worker_runtime = @import("../agent/worker_runtime.zig");
 const auth_runtime = @import("../auth/auth_runtime.zig");
 const model_capabilities = @import("../config/model_capabilities.zig");
@@ -2926,15 +2925,6 @@ pub fn Runtime(comptime App: type) type {
                     requestSubagentSurfaceFrame(app, .subagent_panel);
                 },
             }
-            if (comptime @hasField(App, "terminal_client") and
-                @hasDecl(@TypeOf(app.terminal_client), "terminalProjection") and
-                @hasDecl(@TypeOf(app.subagents), "replaceTerminalSnapshot"))
-            {
-                const terminal_snapshot = try app.terminal_client.terminalProjection(app.alloc);
-                if (try app.subagents.replaceTerminalSnapshot(app.alloc, terminal_snapshot)) {
-                    requestSubagentSurfaceFrame(app, .subagent_panel);
-                }
-            }
         }
 
         pub fn refreshChildChat(
@@ -4616,37 +4606,6 @@ const coordinator_test_slash_registry = command_specs.SlashRegistry{
     .commands = coordinator_test_slash_specs[0..],
 };
 
-const CoordinatorTestTerminalClient = struct {
-    snapshot_alloc: std.mem.Allocator = std.testing.allocator,
-    snapshot_count: usize = 0,
-    source_running: bool = false,
-
-    pub fn terminalProjection(
-        self: *CoordinatorTestTerminalClient,
-        _: std.mem.Allocator,
-    ) std.mem.Allocator.Error!terminal_ui_projection.Snapshot {
-        self.snapshot_count += 1;
-        const rows = try self.snapshot_alloc.alloc(
-            terminal_ui_projection.Row,
-            @intFromBool(self.source_running),
-        );
-        errdefer self.snapshot_alloc.free(rows);
-        if (self.source_running) {
-            const session_id = try self.snapshot_alloc.dupe(u8, "terminal-test");
-            errdefer self.snapshot_alloc.free(session_id);
-            rows[0] = .{
-                .session_id = session_id,
-                .label = try self.snapshot_alloc.dupe(u8, "test command"),
-                .lifecycle = .running,
-                .attention = .{},
-                .backend = .native,
-            };
-        }
-        self.source_running = false;
-        return .{ .alloc = self.snapshot_alloc, .rows = rows };
-    }
-};
-
 const CoordinatorTestApp = struct {
     alloc: std.mem.Allocator,
     terminal: shell_runtime.TerminalState = .{},
@@ -4679,7 +4638,6 @@ const CoordinatorTestApp = struct {
     gateway_metadata: model_capabilities.GatewayMetadata = .{},
     permission_state: app_permission_runtime.State = .{},
     upgrader: CoordinatorTestUpgrader = .{},
-    terminal_client: CoordinatorTestTerminalClient = .{},
 
     pub fn slashRegistry(_: *const CoordinatorTestApp) command_specs.SlashRegistry {
         return coordinator_test_slash_registry;
@@ -4780,9 +4738,6 @@ fn initCoordinatorProjectionTestApp(
             },
             .owned_top_row = 1,
             .viewport_top_row = 1,
-        },
-        .terminal_client = .{
-            .source_running = true,
         },
     };
     errdefer app.deinit();
@@ -5049,31 +5004,6 @@ test "core.app_render_runtime requested-frame flush commits and acknowledges one
     try std.testing.expect(try coordinatorGridContains(app.shell.shadow_vt.?.*, "requested frame content"));
 }
 
-test "core.app_render_runtime inline frame omits background terminal chrome and animation" {
-    const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var file = try tmp.dir.createFile(std.testing.io, "terminal-projection.log", .{ .read = true });
-    defer file.close(io_mod.getIo());
-    var app = try initCoordinatorProjectionTestApp(alloc, file);
-    defer app.deinit();
-
-    app.shell.render_requests.request(.first_frame);
-    try Runtime(CoordinatorTestApp).flushRequestedFrame(&app);
-
-    try std.testing.expectEqual(@as(usize, 0), app.terminal_client.snapshot_count);
-    try std.testing.expect(app.terminal_client.source_running);
-    try std.testing.expect(!app.shell.render_requests.animation_visible);
-    try std.testing.expect(!(try coordinatorGridContains(
-        app.shell.shadow_vt.?.*,
-        "background (",
-    )));
-    try std.testing.expect(!(try coordinatorGridContains(
-        app.shell.shadow_vt.?.*,
-        "ctrl+x manager",
-    )));
-}
-
 noinline fn readCoordinatorFrameBytes(alloc: std.mem.Allocator, file: std.Io.File, read_offset: *u64) ![]u8 {
     const total = try file.length(io_mod.getIo());
     const want: usize = @intCast(total - read_offset.*);
@@ -5110,213 +5040,6 @@ noinline fn coordinatorGridOccurrenceCount(grid: vt_emulator.Grid, needle: []con
         count += std.mem.count(u8, buf.items, needle);
     }
     return count;
-}
-
-test "core.app_render_runtime takeover manager return rebuilds the narrow inline viewport" {
-    const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var file = try tmp.dir.createFile(std.testing.io, "takeover-manager-return.log", .{ .read = true });
-    defer file.close(io_mod.getIo());
-
-    var app = CoordinatorTestApp{
-        .alloc = alloc,
-        .shell = .{
-            .stdout_file = file,
-            .layout = .{
-                .rows = 36,
-                .cols = 120,
-                .content_bottom = 32,
-                .divider_top_row = 33,
-                .input_row = 34,
-                .divider_bottom_row = 35,
-                .hint_row = 36,
-            },
-            .owned_top_row = 1,
-            .viewport_top_row = 1,
-        },
-    };
-    defer app.deinit();
-    try app.selected_model.appendSlice(alloc, "test-model");
-    try app.shell.initBacking(alloc);
-    try app.shell.enableShadowVt(alloc);
-    var physical = try vt_emulator.Grid.init(alloc, 120, 36);
-    defer physical.deinit();
-    var read_offset: u64 = 0;
-    try app.input_runtime.textReplacementState().replace(alloc, "LANE1_COMPOSER_DRAFT_ABCDE");
-    app.input_runtime.edit_state.cursor -= 5;
-
-    const transcript =
-        "INLINE_OLD_TOP_ORPHAN_01_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n" ++
-        "INLINE_OLD_TOP_ORPHAN_02_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB\n" ++
-        "INLINE_OLD_TOP_ORPHAN_03_CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n" ++
-        "INLINE_OLD_TOP_ORPHAN_04_DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD\n" ++
-        "INLINE_ROW_05\n" ++
-        "INLINE_ROW_06\n" ++
-        "INLINE_ROW_07\n" ++
-        "INLINE_ROW_08\n" ++
-        "INLINE_ROW_09\n" ++
-        "INLINE_ROW_10\n" ++
-        "INLINE_ROW_11\n" ++
-        "INLINE_ROW_12\n" ++
-        "INLINE_ROW_13\n" ++
-        "INLINE_ROW_14\n" ++
-        "INLINE_ROW_15\n" ++
-        "INLINE_TAIL_MARKER";
-    try app.shell.writeTranscript(alloc, &app.metrics, transcript, true);
-    app.shell.render_requests.request(.first_frame);
-    try Runtime(CoordinatorTestApp).flushRequestedFrame(&app);
-    const initial_bytes = try readCoordinatorFrameBytes(alloc, file, &read_offset);
-    defer alloc.free(initial_bytes);
-    try physical.feed(initial_bytes);
-    try std.testing.expect(app.shell.cursor_row > 8);
-
-    app.subagents.open(alloc);
-    try app_lifecycle.enterSubagentManagerScreen(&app.terminal, &app.shell, &app.metrics);
-    Runtime(CoordinatorTestApp).requestSubagentSurfaceFrame(&app, .subagent_panel);
-    try Runtime(CoordinatorTestApp).flushRequestedFrame(&app);
-    const manager_bytes = try readCoordinatorFrameBytes(alloc, file, &read_offset);
-    defer alloc.free(manager_bytes);
-    try physical.feed(manager_bytes);
-
-    try app_lifecycle.leaveSubagentManagerScreen(&app.terminal, &app.shell, &app.metrics);
-    try app_lifecycle.enterTerminalSessionScreen(&app.terminal, &app.shell, &app.metrics);
-    try app_lifecycle.writeLifecycleTerminalBytes(
-        &app.shell,
-        &app.metrics,
-        "TAKEOVER_120X36\n",
-    );
-    const takeover_bytes = try readCoordinatorFrameBytes(alloc, file, &read_offset);
-    defer alloc.free(takeover_bytes);
-    try physical.feed(takeover_bytes);
-
-    app.shell.layout = .{
-        .rows = 24,
-        .cols = 88,
-        .content_bottom = 20,
-        .divider_top_row = 21,
-        .input_row = 22,
-        .divider_bottom_row = 23,
-        .hint_row = 24,
-    };
-    try app.shell.shadow_vt.?.resize(88, 24);
-    try physical.resize(88, 24);
-    try app_lifecycle.writeLifecycleTerminalBytes(
-        &app.shell,
-        &app.metrics,
-        "TAKEOVER_88X24\n",
-    );
-    const resize_88_bytes = try readCoordinatorFrameBytes(alloc, file, &read_offset);
-    defer alloc.free(resize_88_bytes);
-    try physical.feed(resize_88_bytes);
-
-    app.shell.layout = .{
-        .rows = 12,
-        .cols = 60,
-        .content_bottom = 8,
-        .divider_top_row = 9,
-        .input_row = 10,
-        .divider_bottom_row = 11,
-        .hint_row = 12,
-    };
-    try app.shell.shadow_vt.?.resize(60, 12);
-    try physical.resize(60, 12);
-    try app_lifecycle.writeLifecycleTerminalBytes(
-        &app.shell,
-        &app.metrics,
-        "TAKEOVER_60X12\n",
-    );
-    const resize_60_bytes = try readCoordinatorFrameBytes(alloc, file, &read_offset);
-    defer alloc.free(resize_60_bytes);
-    try physical.feed(resize_60_bytes);
-
-    try app_lifecycle.handoffTerminalSessionToSubagentManager(
-        &app.terminal,
-        &app.shell,
-        &app.metrics,
-    );
-    Runtime(CoordinatorTestApp).requestSubagentSurfaceFrame(&app, .subagent_panel);
-    try Runtime(CoordinatorTestApp).flushRequestedFrame(&app);
-    const returned_manager_bytes = try readCoordinatorFrameBytes(alloc, file, &read_offset);
-    defer alloc.free(returned_manager_bytes);
-    try physical.feed(returned_manager_bytes);
-    try Runtime(CoordinatorTestApp).toggleSubagentView(&app);
-    const manager_close_bytes = try readCoordinatorFrameBytes(alloc, file, &read_offset);
-    defer alloc.free(manager_close_bytes);
-    try std.testing.expectEqual(
-        @as(usize, 1),
-        std.mem.count(u8, manager_bytes, "\x1b[?1049h"),
-    );
-    try std.testing.expectEqual(
-        @as(usize, 1),
-        std.mem.count(u8, takeover_bytes, "\x1b[?1049h"),
-    );
-    try std.testing.expectEqual(
-        @as(usize, 1),
-        std.mem.count(u8, takeover_bytes, "\x1b[?1049l"),
-    );
-    try std.testing.expectEqual(
-        @as(usize, 0),
-        std.mem.count(u8, returned_manager_bytes, "\x1b[?1049h"),
-    );
-    try std.testing.expectEqual(
-        @as(usize, 0),
-        std.mem.count(u8, returned_manager_bytes, "\x1b[?1049l"),
-    );
-    try std.testing.expectEqual(
-        @as(usize, 0),
-        std.mem.count(u8, manager_close_bytes, "\x1b[?1049h"),
-    );
-    try std.testing.expectEqual(
-        @as(usize, 1),
-        std.mem.count(u8, manager_close_bytes, "\x1b[?1049l"),
-    );
-    try std.testing.expect(std.mem.find(
-        u8,
-        returned_manager_bytes,
-        ui_terminal.interactiveModeEnableSequence(io_mod.getenv("TMUX")),
-    ) != null);
-    for ([_][]const u8{
-        "\x1b[?2026l",
-        "\x1b[?1000l\x1b[?1002l\x1b[?1004l\x1b[?1006l",
-        "\x1b[?1l\x1b>",
-        "\x1b[?2004l\x1b[<u",
-    }) |restored_mode| {
-        try std.testing.expect(std.mem.find(
-            u8,
-            returned_manager_bytes,
-            restored_mode,
-        ) != null);
-    }
-    try physical.feed(manager_close_bytes);
-    try physical.feed("\x1b[5;30HORPHANED_OLD_CELLS");
-    try Runtime(CoordinatorTestApp).flushRequestedFrame(&app);
-    const inline_bytes = try readCoordinatorFrameBytes(alloc, file, &read_offset);
-    defer alloc.free(inline_bytes);
-    try physical.feed(inline_bytes);
-
-    const grid = physical;
-    try std.testing.expect(!(try coordinatorGridContains(grid, "ORPHANED_OLD_CELLS")));
-    try std.testing.expect(!(try coordinatorGridContains(grid, "INLINE_OLD_TOP_ORPHAN")));
-    try std.testing.expectEqual(
-        @as(usize, 1),
-        try coordinatorGridOccurrenceCount(grid, "INLINE_TAIL_MARKER"),
-    );
-    var row: std.ArrayList(u8) = .empty;
-    defer row.deinit(alloc);
-    try grid.rowTextTrimmed(1, &row);
-    try std.testing.expectEqualStrings("INLINE_ROW_08", row.items);
-    row.clearRetainingCapacity();
-    try grid.rowTextTrimmed(8, &row);
-    try std.testing.expectEqualStrings("INLINE_ROW_15", row.items);
-    try std.testing.expectEqualStrings(
-        "LANE1_COMPOSER_DRAFT_ABCDE",
-        app.input_runtime.edit_state.input.items,
-    );
-    try std.testing.expectEqual(
-        "LANE1_COMPOSER_DRAFT_ABCDE".len - 5,
-        app.input_runtime.edit_state.cursor,
-    );
 }
 
 test "core.app_render_runtime first requested startup frame commits through the ordinary coordinator" {

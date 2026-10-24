@@ -53,14 +53,6 @@
       "requires_tmux": false
     },
     {
-      "name": "direct-background",
-      "argv": ["{binary}", "background", "--json"],
-      "cwd": ".",
-      "env_set": {"FX_SKIP_ONBOARDING": "1"},
-      "timeout_seconds": 60,
-      "requires_tmux": false
-    },
-    {
       "name": "direct-doctor",
       "argv": ["{binary}", "doctor", "--json"],
       "cwd": ".",
@@ -88,7 +80,6 @@
     {"name": "e2e-web-fetch-fake-network", "argv": ["bun", "test", "--max-concurrency", "1", "./web-fetch-fake-network.test.ts"], "test_file": "web-fetch-fake-network.test.ts"},
     {"name": "e2e-acp", "argv": ["bun", "test", "--max-concurrency", "1", "./acp.test.ts"], "test_file": "acp.test.ts"},
     {"name": "e2e-session-recovery", "argv": ["bun", "test", "--max-concurrency", "1", "./session-recovery.test.ts"], "test_file": "session-recovery.test.ts"},
-    {"name": "e2e-terminal-host", "argv": ["bun", "test", "--max-concurrency", "1", "./terminal-host.test.ts"], "test_file": "terminal-host.test.ts"},
     {"name": "e2e-tui-startup", "argv": ["bun", "test", "--max-concurrency", "1", "./tui-startup.test.ts"], "test_file": "tui-startup.test.ts"},
     {"name": "e2e-permission-errors", "argv": ["bun", "test", "--max-concurrency", "1", "./permission-errors.test.ts"], "test_file": "permission-errors.test.ts"},
     {"name": "e2e-tui-resize", "argv": ["bun", "test", "--max-concurrency", "1", "./tui-resize.test.ts"], "test_file": "tui-resize.test.ts"},

@@ -41,18 +41,15 @@ pub const DeferredTerminalInputSource = enum {
 pub const TerminalInputOwner = enum {
     theme_monitor,
     paste,
-    takeover,
     fx_input,
 };
 
 pub fn terminalInputOwner(
     monitor: *const theme_monitor.Monitor,
     paste_active: bool,
-    takeover_active: bool,
 ) TerminalInputOwner {
     if (monitor.ownsInput()) return .theme_monitor;
     if (paste_active) return .paste;
-    if (takeover_active) return .takeover;
     if (monitor.enabled) return .theme_monitor;
     return .fx_input;
 }
@@ -528,95 +525,6 @@ test "terminal input carries typed question decisions and focused edits" {
     );
 }
 
-test "fx terminal reply ownership survives takeover transition" {
-    const alloc = std.testing.allocator;
-    var monitor = theme_monitor.Monitor{};
-    monitor.start();
-
-    try std.testing.expect(monitor.takeQueryRequest(0) == null);
-    for ("\x1b[?997;1n") |byte| _ = monitor.feed(byte, 1);
-    try std.testing.expectEqual(
-        theme_monitor.QueryRequest.response_fence,
-        monitor.takeQueryRequest(1000).?,
-    );
-
-    var child: std.ArrayList(u8) = .empty;
-    defer child.deinit(alloc);
-    var composer: std.ArrayList(u8) = .empty;
-    defer composer.deinit(alloc);
-
-    const Driver = struct {
-        fn forwarded(
-            takeover_active: bool,
-            bytes: []const u8,
-            child_bytes: *std.ArrayList(u8),
-            composer_bytes: *std.ArrayList(u8),
-        ) !void {
-            if (takeover_active) {
-                try child_bytes.appendSlice(alloc, bytes);
-            } else {
-                try composer_bytes.appendSlice(alloc, bytes);
-            }
-        }
-
-        fn byte(
-            theme: *theme_monitor.Monitor,
-            takeover_active: bool,
-            input_byte: u8,
-            now_ms: i64,
-            child_bytes: *std.ArrayList(u8),
-            composer_bytes: *std.ArrayList(u8),
-        ) !void {
-            switch (terminalInputOwner(theme, false, takeover_active)) {
-                .paste => unreachable,
-                .takeover => try child_bytes.append(alloc, input_byte),
-                .fx_input => try composer_bytes.append(alloc, input_byte),
-                .theme_monitor => switch (theme.feed(input_byte, now_ms)) {
-                    .pending, .consumed => {},
-                    .forward => |bytes| try forwarded(
-                        takeover_active,
-                        bytes.slice(),
-                        child_bytes,
-                        composer_bytes,
-                    ),
-                },
-            }
-        }
-    };
-
-    const response = "\x1b[?1;2;4c";
-    for (response[0..3]) |byte| {
-        try Driver.byte(&monitor, true, byte, 1001, &child, &composer);
-    }
-    for (response[3..]) |byte| {
-        try Driver.byte(&monitor, true, byte, 1002, &child, &composer);
-    }
-    try std.testing.expectEqual(@as(usize, 0), child.items.len);
-    try std.testing.expectEqual(@as(usize, 0), composer.items.len);
-
-    for (response) |byte| {
-        try Driver.byte(&monitor, true, byte, 1003, &child, &composer);
-    }
-    try std.testing.expectEqualStrings(response, child.items);
-
-    const raw_input = "\x1b[Akey";
-    for (raw_input) |byte| {
-        try Driver.byte(&monitor, true, byte, 1004, &child, &composer);
-    }
-    try std.testing.expectEqualStrings(response ++ raw_input, child.items);
-    try std.testing.expectEqual(@as(usize, 0), composer.items.len);
-
-    try Driver.byte(&monitor, false, 0x1b, 1005, &child, &composer);
-    try Driver.byte(&monitor, true, '[', 1005, &child, &composer);
-    monitor.poll(1005 + theme_monitor.response_idle_timeout_ms);
-    while (monitor.takeDeferredByte()) |byte| {
-        try Driver.forwarded(true, &.{byte}, &child, &composer);
-        try std.testing.expect(monitor.consumeDeferredInputDispatch());
-    }
-    try std.testing.expectEqualStrings(response ++ raw_input ++ "\x1b[", child.items);
-    try std.testing.expectEqual(@as(usize, 0), composer.items.len);
-}
-
 test "terminal reply ownership precedes active paste transport" {
     var monitor = theme_monitor.Monitor{};
     monitor.start();
@@ -629,7 +537,7 @@ test "terminal reply ownership precedes active paste transport" {
     );
     try std.testing.expectEqual(
         TerminalInputOwner.theme_monitor,
-        terminalInputOwner(&monitor, true, false),
+        terminalInputOwner(&monitor, true),
     );
 
     for ("\x1b[?1;2;4c") |byte| {
@@ -637,7 +545,7 @@ test "terminal reply ownership precedes active paste transport" {
     }
     try std.testing.expectEqual(
         TerminalInputOwner.paste,
-        terminalInputOwner(&monitor, true, false),
+        terminalInputOwner(&monitor, true),
     );
 }
 
