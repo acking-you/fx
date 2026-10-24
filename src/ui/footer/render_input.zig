@@ -83,7 +83,7 @@ pub const ModelMenuProjection = struct {
     query: []const u8 = "",
 
     pub fn providerFilter(self: ModelMenuProjection) model_cache_runtime.ModelProviderFilter {
-        return @enumFromInt(@min(self.provider_index, model_cache_runtime.model_provider_filter_count - 1));
+        return @fromBackingInt(@intCast(@min(self.provider_index, model_cache_runtime.model_provider_filter_count - 1)));
     }
 
     pub fn filteredItemCount(self: ModelMenuProjection) usize {
@@ -560,7 +560,7 @@ fn turnActivityProjection(
     }
     const frame = activity_status.spinnerFrame(ctx.now_ms, ctx.stream.turn_started_ms);
     return .{ .turn_thinking = .{
-        .label = std.fmt.bufPrint(buf, "{s} Working", .{frame}) catch "⠋ Working",
+        .label = std.mem.print(buf, "{s} Working", .{frame}) catch "⠋ Working",
     } };
 }
 

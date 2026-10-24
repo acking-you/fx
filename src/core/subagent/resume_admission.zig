@@ -427,7 +427,7 @@ test "actionable catalog advances across a bounded hidden-only page" {
     try env.createVisibleSession(alloc, "ordinary");
     for (0..domain.max_page_limit + 1) |index| {
         var id_buffer: [32]u8 = undefined;
-        const id = try std.fmt.bufPrint(&id_buffer, "one-off-{d:0>2}", .{index});
+        const id = try std.mem.print(&id_buffer, "one-off-{d:0>2}", .{index});
         try env.createVisibleSession(alloc, id);
         try env.createControl(alloc, id, .one_off);
     }

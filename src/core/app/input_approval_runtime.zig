@@ -1,3 +1,4 @@
+const text_utils = @import("../shared/text_utils.zig");
 const std = @import("std");
 const debug_trace = @import("../shared/debug_trace.zig");
 const edit_contract = @import("../input/editor_state.zig");
@@ -493,7 +494,7 @@ test "approval wheel keeps scrolling a committed command review after review syn
     defer app.deinit();
     const request: permission_request.PermissionRequest = .{
         .id = 42,
-        .label = "exec_command " ++ ("x" ** 2_400),
+        .label = "exec_command " ++ (text_utils.repeat("x", 2_400)),
     };
     try std.testing.expect(try app.approval_prompt.syncRequest(alloc, request));
     try std.testing.expect(try approval_screen.needsScreen(
@@ -764,7 +765,7 @@ const ApprovalBridgeApp = struct {
         self.input_runtime.deinit(self.alloc);
     }
 
-    fn refreshSubagentManagerProjection(self: *ApprovalBridgeApp) !void {
+    pub fn refreshSubagentManagerProjection(self: *ApprovalBridgeApp) !void {
         const host = self.session_persistence.subagent_host.?;
         var loaded = try subagent_projection.load(self.alloc, .{
             .root_id = host.root_id,

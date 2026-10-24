@@ -146,14 +146,14 @@ pub fn callExec(ctx: tool_dispatch.DispatchContext, erased: tool_dispatch.ToolIn
     const input = erased.as(ExecInput);
     const manager = ctx.unified_exec orelse return .{ .failure = try ctx.allocator.dupe(u8, "exec_command is unavailable on this host") };
     const cwd = pathing.resolveWorkspaceOrExternalPath(ctx.allocator, ctx.workspace_root, input.workdir) catch |err| {
-        return .{ .failure = try std.fmt.allocPrint(ctx.allocator, "exec_command working directory is invalid: {s}", .{@errorName(err)}) };
+        return .{ .failure = try ctx.allocator.print("exec_command working directory is invalid: {s}", .{@errorName(err)}) };
     };
     defer ctx.allocator.free(cwd);
     const command_context: command_admission.CommandContext = .{
         .command = input.cmd,
         .resolved_cwd = cwd,
         .background = false,
-        .target_os = builtin.os.tag,
+        .target_os = builtin.target.os.tag,
         .environment = .{ .user = input.shell },
     };
     const fingerprint = switch (ctx.execution_authority orelse {
@@ -184,7 +184,7 @@ pub fn callExec(ctx: tool_dispatch.DispatchContext, erased: tool_dispatch.ToolIn
         .mode = ctx.exec_mode,
     }) catch |err| {
         if (err == error.Cancelled) return error.Cancelled;
-        return .{ .failure = try std.fmt.allocPrint(ctx.allocator, "exec_command failed: {s}", .{@errorName(err)}) };
+        return .{ .failure = try ctx.allocator.print("exec_command failed: {s}", .{@errorName(err)}) };
     };
     defer result.deinit(ctx.allocator);
     reportResultMemory(ctx, result) catch return error.OutOfMemory;
@@ -211,7 +211,7 @@ pub fn callWrite(ctx: tool_dispatch.DispatchContext, erased: tool_dispatch.ToolI
         .cancel_flag = ctx.cancel_flag,
     }) catch |err| {
         if (err == error.Cancelled) return error.Cancelled;
-        return .{ .failure = try std.fmt.allocPrint(ctx.allocator, "write_stdin failed: {s}", .{@errorName(err)}) };
+        return .{ .failure = try ctx.allocator.print("write_stdin failed: {s}", .{@errorName(err)}) };
     };
     defer result.deinit(ctx.allocator);
     reportResultMemory(ctx, result) catch return error.OutOfMemory;
@@ -244,7 +244,7 @@ fn outputSink(ctx: tool_dispatch.DispatchContext) ?unified_exec.Manager.OutputSi
 fn reportResultMemory(ctx: tool_dispatch.DispatchContext, result: unified_exec.Manager.Result) !void {
     var memory: types.ToolResultMemory = .{};
     if (result.output_file) |path| {
-        memory.command_artifact_handle = try ctx.allocator.dupe(u8, std.fs.path.basename(path));
+        memory.command_artifact_handle = try ctx.allocator.dupe(u8, std.Io.Dir.path.basename(path));
     }
     if (result.status == .exited) {
         if (result.signal) |signal| {

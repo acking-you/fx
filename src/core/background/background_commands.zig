@@ -87,7 +87,7 @@ pub fn Commands(comptime App: type) type {
             };
             if (process_id) |id| {
                 if (app.unified_exec.terminate(id)) {
-                    const body = try std.fmt.allocPrint(app.alloc, "Stopped background command #{d}.", .{id});
+                    const body = try app.alloc.print("Stopped background command #{d}.", .{id});
                     defer app.alloc.free(body);
                     try app.writeDomainNotice(.{
                         .topic = "background",

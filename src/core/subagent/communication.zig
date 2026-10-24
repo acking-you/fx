@@ -1,3 +1,4 @@
+const testing_allocator = @import("../shared/testing_allocator.zig");
 const std = @import("std");
 const permission_request = @import("../permissions/permission_request.zig");
 const permissions = @import("../permissions/permissions.zig");
@@ -281,7 +282,7 @@ pub const Approval = struct {
     work_id: ?[]u8,
     relationship: ?RelationshipApproval = null,
     prepared_fingerprint: [32]u8,
-    identity_fingerprint: [32]u8 = [_]u8{0} ** 32,
+    identity_fingerprint: [32]u8 = @as([32]u8, @splat(0)),
     label: []u8,
     explanation: ?[]u8,
     command: ?[]u8 = null,
@@ -1013,7 +1014,7 @@ fn selectNewGrants(
     grants: []const types.PermissionGrant,
     admitted: *[domain.max_admission_items]bool,
 ) usize {
-    admitted.* = [_]bool{false} ** domain.max_admission_items;
+    admitted.* = @as([domain.max_admission_items]bool, @splat(false));
     var count: usize = 0;
     for (grants, 0..) |grant, index| {
         if (permissions.sessionGrantAllowed(
@@ -2946,7 +2947,7 @@ pub fn applyAlwaysGrants(
         validateApprovalProjection(grant.target_path) catch
             return error.InvalidApproval;
     }
-    var admitted = [_]bool{false} ** domain.max_admission_items;
+    var admitted = @as([domain.max_admission_items]bool, @splat(false));
     const added_count = selectNewGrants(
         ledger.authority_grants,
         grants,
@@ -3824,7 +3825,7 @@ test "human cursor retention remains usable across target a to b to a" {
 
     for (0..max_deliveries) |index| {
         var id_buffer: [64]u8 = undefined;
-        const id = try std.fmt.bufPrint(&id_buffer, "human-b-{d}", .{index});
+        const id = try std.mem.print(&id_buffer, "human-b-{d}", .{index});
         _ = try appendDelivery(alloc, &ledger, .{
             .id = id,
             .source_id = "child",
@@ -3887,7 +3888,7 @@ test "parent turn cursor retention remains usable across target a to b to a" {
 
     for (0..max_deliveries) |index| {
         var id_buffer: [64]u8 = undefined;
-        const id = try std.fmt.bufPrint(&id_buffer, "turn-b-{d}", .{index});
+        const id = try std.mem.print(&id_buffer, "turn-b-{d}", .{index});
         _ = try appendDelivery(alloc, &ledger, .{
             .id = id,
             .source_id = "child",
@@ -3953,7 +3954,7 @@ test "human first read after target eviction exposes and recovers retention gap"
     });
     for (0..max_deliveries) |index| {
         var id_buffer: [64]u8 = undefined;
-        const id = try std.fmt.bufPrint(&id_buffer, "human-fill-{d}", .{index});
+        const id = try std.mem.print(&id_buffer, "human-fill-{d}", .{index});
         _ = try appendDelivery(alloc, &ledger, .{
             .id = id,
             .source_id = "child",
@@ -4018,7 +4019,7 @@ test "parent turn first read projects gap then resumes retained delivery" {
     });
     for (0..max_deliveries) |index| {
         var id_buffer: [64]u8 = undefined;
-        const id = try std.fmt.bufPrint(&id_buffer, "parent-fill-{d}", .{index});
+        const id = try std.mem.print(&id_buffer, "parent-fill-{d}", .{index});
         _ = try appendDelivery(alloc, &ledger, .{
             .id = id,
             .source_id = "child",
@@ -4175,7 +4176,7 @@ fn checkRetentionGapAllocationFailures(alloc: Allocator) !void {
 
 test "retention gap projection and recovery free every partial allocation" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkRetentionGapAllocationFailures,
         .{},
     );
@@ -4199,7 +4200,7 @@ test "evicted delivery operation identity expires before mutation and newer epoc
     _ = try appendDelivery(alloc, &ledger, old_input);
     for (0..max_deliveries) |index| {
         var id_buffer: [64]u8 = undefined;
-        const id = try std.fmt.bufPrint(&id_buffer, "expiry-fill-{d}", .{index});
+        const id = try std.mem.print(&id_buffer, "expiry-fill-{d}", .{index});
         _ = try appendDelivery(alloc, &ledger, .{
             .id = id,
             .source_id = "child",
@@ -4240,7 +4241,7 @@ test "older model process can issue new delivery after newer process advances re
     defer ledger.deinit(alloc);
     for (0..max_deliveries + 1) |index| {
         var invocation_buffer: [64]u8 = undefined;
-        const invocation = try std.fmt.bufPrint(
+        const invocation = try std.mem.print(
             &invocation_buffer,
             "newer-model-process-{d}",
             .{index},
@@ -4288,7 +4289,7 @@ test "lower-clock human restart can issue new delivery after replay compaction" 
     defer ledger.deinit(alloc);
     for (0..max_deliveries + 1) |index| {
         var invocation_buffer: [64]u8 = undefined;
-        const invocation = try std.fmt.bufPrint(
+        const invocation = try std.mem.print(
             &invocation_buffer,
             "newer-human-process-{d}",
             .{index},
@@ -4414,7 +4415,7 @@ test "late committed issuance caps delivery replay horizon" {
     });
     for (1..max_deliveries) |index| {
         var id_buffer: [64]u8 = undefined;
-        const id = try std.fmt.bufPrint(&id_buffer, "fill-{d}", .{index});
+        const id = try std.mem.print(&id_buffer, "fill-{d}", .{index});
         _ = try appendDelivery(alloc, &ledger, .{
             .id = id,
             .source_id = "child",
@@ -4722,7 +4723,7 @@ test "parent projection retention tracks only parent-visible deliveries" {
     );
     for (0..max_deliveries) |index| {
         var id_buffer: [64]u8 = undefined;
-        const id = try std.fmt.bufPrint(&id_buffer, "ui-activity-{d}", .{index});
+        const id = try std.mem.print(&id_buffer, "ui-activity-{d}", .{index});
         _ = try appendDelivery(alloc, &ledger, .{
             .id = id,
             .source_id = "child",
@@ -4775,7 +4776,7 @@ test "approval replay identity includes work label explanation and normalized gr
         .child_id = "child",
         .root_id = "root",
         .work_id = "work-a",
-        .prepared_fingerprint = [_]u8{9} ** 32,
+        .prepared_fingerprint = @as([32]u8, @splat(9)),
         .label = "prepared action",
         .explanation = "bounded explanation",
         .command = "# exec_command profile=user shell=/bin/zsh\nzig build test",
@@ -4838,8 +4839,7 @@ test "large captured commands persist subagent approvals across profiles" {
             environment,
             command,
         );
-        const grant_target = try std.fmt.allocPrint(
-            arena,
+        const grant_target = try arena.print(
             "/tmp/workspace::{s}",
             .{command_identity},
         );
@@ -4857,7 +4857,7 @@ test "large captured commands persist subagent approvals across profiles" {
             .child_id = "child",
             .root_id = "root",
             .work_id = "work",
-            .prepared_fingerprint = [_]u8{11} ** 32,
+            .prepared_fingerprint = @as([32]u8, @splat(11)),
             .label = "captured command",
             .explanation = null,
             .command = approval_command,
@@ -4920,7 +4920,7 @@ test "file approval projection is owned validated and replay-bound" {
         .child_id = "child",
         .root_id = "root",
         .work_id = "work",
-        .prepared_fingerprint = [_]u8{7} ** 32,
+        .prepared_fingerprint = @as([32]u8, @splat(7)),
         .label = "file_mutation",
         .explanation = "review the exact change",
         .file = file,
@@ -4966,7 +4966,7 @@ test "relationship approvals reject file review projections" {
             .prospective_parent_id = "root",
             .operation_id = "relationship-file",
         },
-        .prepared_fingerprint = [_]u8{2} ** 32,
+        .prepared_fingerprint = @as([32]u8, @splat(2)),
         .label = "attach child",
         .explanation = null,
         .file = testFileApprovalRequest(),
@@ -4984,7 +4984,7 @@ fn checkFileApprovalRegistrationAllocationFailures(alloc: Allocator) !void {
         .child_id = "child",
         .root_id = "root",
         .work_id = "work",
-        .prepared_fingerprint = [_]u8{8} ** 32,
+        .prepared_fingerprint = @as([32]u8, @splat(8)),
         .label = "file_mutation",
         .explanation = "allocation sweep",
         .file = testFileApprovalRequest(),
@@ -4996,7 +4996,7 @@ fn checkFileApprovalRegistrationAllocationFailures(alloc: Allocator) !void {
 
 test "file approval registration cleans every failing allocation" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkFileApprovalRegistrationAllocationFailures,
         .{},
     );
@@ -5049,14 +5049,14 @@ test "relationship approval identity is exact and allowed approval survives rete
 
     for (0..max_approvals - 1) |index| {
         var id_buffer: [32]u8 = undefined;
-        const id = try std.fmt.bufPrint(&id_buffer, "retained-tool-{d}", .{index});
+        const id = try std.mem.print(&id_buffer, "retained-tool-{d}", .{index});
         try std.testing.expectEqual(.registered, try registerApproval(alloc, &ledger, .{
             .id = id,
             .kind = .tool,
             .child_id = "child",
             .root_id = "root",
             .work_id = "work",
-            .prepared_fingerprint = [_]u8{3} ** 32,
+            .prepared_fingerprint = @as([32]u8, @splat(3)),
             .label = "tool action",
             .explanation = null,
             .grants = &.{},
@@ -5073,7 +5073,7 @@ test "relationship approval identity is exact and allowed approval survives rete
         .child_id = "child",
         .root_id = "root",
         .work_id = "work",
-        .prepared_fingerprint = [_]u8{4} ** 32,
+        .prepared_fingerprint = @as([32]u8, @splat(4)),
         .label = "tool action",
         .explanation = null,
         .grants = &.{},
@@ -5093,7 +5093,7 @@ test "approval compaction retains an out-of-order latest resolution" {
         .child_id = "child",
         .root_id = "root",
         .work_id = "work",
-        .prepared_fingerprint = [_]u8{3} ** 32,
+        .prepared_fingerprint = @as([32]u8, @splat(3)),
         .label = "tool action",
         .explanation = null,
         .grants = &.{},
@@ -5196,7 +5196,7 @@ test "parent message sizes around one trusted envelope remain admissible" {
         defer alloc.free(content);
         @memset(content, 'x');
         var id_buffer: [64]u8 = undefined;
-        const id = try std.fmt.bufPrint(
+        const id = try std.mem.print(
             &id_buffer,
             "trusted-envelope-boundary-{d}",
             .{index},
@@ -5569,7 +5569,7 @@ test "stopped work notification captures do not accumulate" {
             ledger.work_notifications[ledger.work_notifications.len - 1].next_due_ms = null;
         }
         var work_id_buffer: [64]u8 = undefined;
-        const work_id = try std.fmt.bufPrint(&work_id_buffer, "work-{d}", .{index});
+        const work_id = try std.mem.print(&work_id_buffer, "work-{d}", .{index});
         try upsertWorkNotification(
             alloc,
             &ledger,
@@ -5725,7 +5725,7 @@ test "approval response is exact once and always grants precede wake effect" {
         .child_id = try alloc.dupe(u8, "child"),
         .root_id = try alloc.dupe(u8, "root"),
         .work_id = try alloc.dupe(u8, "22222222222222222222222222222222"),
-        .prepared_fingerprint = [_]u8{7} ** 32,
+        .prepared_fingerprint = @as([32]u8, @splat(7)),
         .label = try alloc.dupe(u8, "run git status"),
         .explanation = null,
         .grants = grants,
@@ -5788,7 +5788,7 @@ test "restart approval reconciliation follows exact terminal work identity" {
                 .child_id = "child",
                 .root_id = "root",
                 .work_id = input.work_id,
-                .prepared_fingerprint = [_]u8{1} ** 32,
+                .prepared_fingerprint = @as([32]u8, @splat(1)),
                 .label = "prepared action",
                 .explanation = null,
                 .grants = &.{},
@@ -5809,7 +5809,7 @@ test "restart approval reconciliation follows exact terminal work identity" {
                 .prospective_parent_id = "root",
                 .operation_id = "relationship-operation",
             },
-            .prepared_fingerprint = [_]u8{2} ** 32,
+            .prepared_fingerprint = @as([32]u8, @splat(2)),
             .label = "attach child",
             .explanation = null,
             .grants = &.{},
@@ -5869,7 +5869,7 @@ test "approval rejects wrong stale detached cancelled and closed responses" {
         .child_id = try alloc.dupe(u8, "child"),
         .root_id = try alloc.dupe(u8, "root"),
         .work_id = try alloc.dupe(u8, "work"),
-        .prepared_fingerprint = [_]u8{1} ** 32,
+        .prepared_fingerprint = @as([32]u8, @splat(1)),
         .label = try alloc.dupe(u8, "prepared"),
         .explanation = null,
         .grants = try alloc.alloc(types.PermissionGrant, 0),
@@ -5928,7 +5928,7 @@ test "default notifications are terminal only and retention is bounded" {
     defer ledger.deinit(alloc);
     var id_buffer: [64]u8 = undefined;
     for (0..max_deliveries + 2) |index| {
-        const id = try std.fmt.bufPrint(&id_buffer, "delivery-{d}", .{index});
+        const id = try std.mem.print(&id_buffer, "delivery-{d}", .{index});
         _ = try appendDelivery(alloc, &ledger, .{
             .id = id,
             .source_id = "child",
@@ -6008,7 +6008,7 @@ fn checkCommunicationAllocationFailures(alloc: Allocator) !void {
         .child_id = "child",
         .root_id = "root",
         .work_id = "work",
-        .prepared_fingerprint = [_]u8{1} ** 32,
+        .prepared_fingerprint = @as([32]u8, @splat(1)),
         .label = "prepared action",
         .explanation = "bounded explanation",
         .grants = &grants,
@@ -6041,7 +6041,7 @@ fn checkCommunicationAllocationFailures(alloc: Allocator) !void {
 
 test "new communication values clean every failing allocation path" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkCommunicationAllocationFailures,
         .{},
     );

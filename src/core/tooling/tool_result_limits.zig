@@ -28,8 +28,7 @@ pub fn prepareModelOutput(
     const capped = try truncateText(scratch, .{
         .text = masked,
         .max_bytes = max_bytes,
-        .marker = try std.fmt.allocPrint(
-            scratch,
+        .marker = try scratch.print(
             "\n... [tool result truncated for {s}: original {d} bytes; cap is {d} bytes]\n",
             .{ tool_name, masked.len, max_bytes },
         ),
@@ -135,7 +134,7 @@ test "prepareModelOutput masks quoted sensitive assignments" {
 
 test "prepareModelOutput caps chatty output with explicit marker" {
     const alloc = std.testing.allocator;
-    var bytes = [_]u8{'x'} ** 256;
+    var bytes: [256]u8 = @splat('x');
     const output = try prepareModelOutput(alloc, "grep_files", bytes[0..], 128);
     defer alloc.free(@constCast(output));
 
@@ -145,7 +144,7 @@ test "prepareModelOutput caps chatty output with explicit marker" {
 
 test "prepareModelOutput keeps complete codepoints at the cap" {
     const alloc = std.testing.allocator;
-    const text = "x" ++ ("\xc3\xa9" ** 300);
+    const text = "x" ++ text_utils.repeat("\xc3\xa9", 300);
     for ([_]usize{ 128, 129 }) |cap| {
         const output = try prepareModelOutput(alloc, "grep_files", text, cap);
         defer alloc.free(@constCast(output));

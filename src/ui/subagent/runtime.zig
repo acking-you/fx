@@ -1,3 +1,4 @@
+const testing_allocator = @import("../../core/shared/testing_allocator.zig");
 const std = @import("std");
 const debug_trace = @import("../../core/shared/debug_trace.zig");
 const display_width = @import("../../core/shared/display_width.zig");
@@ -209,8 +210,7 @@ const MutationAttempt = struct {
     ) ![]const u8 {
         if (self.operation_id == null) {
             self.counter +%= 1;
-            self.operation_id = try std.fmt.allocPrint(
-                alloc,
+            self.operation_id = try alloc.print(
                 "manager-ui:{s}:{s}:{d}:{d}",
                 .{ @tagName(kind), target_id, timestamp_ms, self.counter },
             );
@@ -251,7 +251,7 @@ const FormState = struct {
     kind: FormKind = .none,
     target_id: ?[]u8 = null,
     expected_generation: ?u64 = null,
-    editors: [form_editor_count]core_input_runtime.Runtime = [_]core_input_runtime.Runtime{.{}} ** form_editor_count,
+    editors: [form_editor_count]core_input_runtime.Runtime = @as([form_editor_count]core_input_runtime.Runtime, @splat(.{})),
     field_index: usize = 0,
     permission_mode: types.PermissionMode = .yolo,
     notifications_enabled: bool = false,
@@ -2098,8 +2098,7 @@ pub const Runtime = struct {
         }
         if (self.child.invocation_id == null) {
             self.child.operation_counter +%= 1;
-            self.child.invocation_id = try std.fmt.allocPrint(
-                alloc,
+            self.child.invocation_id = try alloc.print(
                 "child-chat:{s}:{d}:{d}",
                 .{ child_id, timestamp_ms, self.child.operation_counter },
             );
@@ -3486,14 +3485,14 @@ pub const Runtime = struct {
             try self.form.replaceEditor(
                 alloc,
                 .interval,
-                try std.fmt.bufPrint(&number_buf, "{d}", .{value}),
+                try std.mem.print(&number_buf, "{d}", .{value}),
             );
         }
         if (configuration.notifications.report_duration_ms) |value| {
             try self.form.replaceEditor(
                 alloc,
                 .duration,
-                try std.fmt.bufPrint(&number_buf, "{d}", .{value}),
+                try std.mem.print(&number_buf, "{d}", .{value}),
             );
         }
         const child_id = try alloc.dupe(u8, node.child_id);
@@ -5087,7 +5086,7 @@ fn writeFormattedLine(
     comptime format: []const u8,
     args: anytype,
 ) !void {
-    const line = try std.fmt.allocPrint(alloc, format, args);
+    const line = try alloc.print(format, args);
     defer alloc.free(line);
     try writeLine(alloc, writer, cols, row, limit, line);
 }
@@ -5530,10 +5529,9 @@ test "child command approval route exposes complete scroll review and resolves" 
     var snapshot = try testSnapshot(alloc, 1, &.{"child"});
     alloc.free(snapshot.nodes[0].approvals);
     snapshot.nodes[0].approvals = try alloc.alloc(projection.Approval, 1);
-    const command = try std.fmt.allocPrint(
-        alloc,
+    const command = try alloc.print(
         "# exec_command profile=user shell=/bin/zsh\n{s}COMMAND_TAIL_VISIBLE",
-        .{"printf review-line\\n\n" ** 20},
+        .{text_utils.repeat("printf review-line\\n\n", 20)},
     );
     snapshot.nodes[0].approvals[0] = .{
         .id = try alloc.dupe(u8, "command-approval-id"),
@@ -7636,7 +7634,7 @@ test "manager route without a composer discards paste with an observable reason"
     defer tmp.cleanup();
     const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
     defer alloc.free(root);
-    const trace_path = try std.fs.path.join(alloc, &.{ root, "manager-paste.log" });
+    const trace_path = try std.Io.Dir.path.join(alloc, &.{ root, "manager-paste.log" });
     defer alloc.free(trace_path);
 
     debug_trace.resetForTest();
@@ -7921,14 +7919,14 @@ fn checkCheckpointTwoRouteAllocationFailures(alloc: Allocator) !void {
 
 test "child route switching frees partial pages drafts and operation identity" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkChildRouteAllocationFailures,
         .{},
     );
 }
 
 test "checkpoint two owned forms routes and results clean up across allocation failures" {
-    var probe = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var probe = std.testing.FailingAllocator.init(testing_allocator.no_resize, .{});
     try checkCheckpointTwoRouteAllocationFailures(probe.allocator());
     const allocation_count = probe.alloc_index;
     try std.testing.expectEqual(probe.allocated_bytes, probe.freed_bytes);
@@ -8085,7 +8083,7 @@ fn pendingApprovalPageTestSnapshot(
         alloc.free(pending);
     }
     for (approval_ids) |approval_id| {
-        const child_id = try std.fmt.allocPrint(alloc, "child-{s}", .{approval_id});
+        const child_id = try alloc.print("child-{s}", .{approval_id});
         errdefer alloc.free(child_id);
         const child_name = try alloc.dupe(u8, child_id);
         errdefer alloc.free(child_name);

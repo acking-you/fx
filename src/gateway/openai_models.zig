@@ -1,3 +1,4 @@
+const testing_allocator = @import("../core/shared/testing_allocator.zig");
 const std = @import("std");
 const model_catalog = @import("../core/gateway/model_catalog.zig");
 const sort_utils = @import("../core/shared/sort_utils.zig");
@@ -284,7 +285,7 @@ test "OpenAI catalog rejects malformed or conflicting BYOK capability metadata" 
         "\"reasoning_efforts\":{}",
         "\"reasoning_efforts\":[{\"value\":\"high\",\"default\":true},{\"value\":\"low\",\"default\":true}]",
     }) |fields| {
-        const json = try std.fmt.allocPrint(std.testing.allocator, "{{\"data\":[{{\"id\":\"custom\",{s}}}]}}", .{fields});
+        const json = try std.testing.allocator.print("{{\"data\":[{{\"id\":\"custom\",{s}}}]}}", .{fields});
         defer std.testing.allocator.free(json);
         try std.testing.expectError(error.MalformedResponse, parse(std.testing.allocator, json, .full));
     }
@@ -301,7 +302,7 @@ fn checkAllocationFailures(alloc: Allocator) !void {
 
 test "OpenAI catalog cleans all partial allocations" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkAllocationFailures,
         .{},
     );

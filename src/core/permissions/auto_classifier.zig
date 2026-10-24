@@ -1178,13 +1178,13 @@ test "automatic review unavailable diagnostics distinguish failures without raw 
     defer tmp.cleanup();
     const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
     defer alloc.free(root);
-    const trace_path = try std.fs.path.join(alloc, &.{ root, "review.log" });
+    const trace_path = try std.Io.Dir.path.join(alloc, &.{ root, "review.log" });
     defer alloc.free(trace_path);
     debug_trace.resetForTest();
     defer debug_trace.resetForTest();
     try debug_trace.configureForTestWithScopes(alloc, trace_path, "permission");
 
-    const secret = "private-provider-payload Bearer sk-private-credential\n" ** 256;
+    const secret = text_utils.repeat("private-provider-payload Bearer sk-private-credential\n", 256);
     const completions = [_]types.ModelCompletion{
         .{ .content = secret },
         .{},
@@ -1494,8 +1494,8 @@ test "prior tool result selection is entry bounded and keeps the newest window" 
     var contents: [20][16]u8 = undefined;
     var messages: [21]types.ChatMessage = undefined;
     for (messages[0..20], 0..) |*message, index| {
-        const call_id = try std.fmt.bufPrint(&call_ids[index], "call-{d}", .{index});
-        const content = try std.fmt.bufPrint(&contents[index], "result-{d}", .{index});
+        const call_id = try std.mem.print(&call_ids[index], "call-{d}", .{index});
+        const content = try std.mem.print(&contents[index], "result-{d}", .{index});
         message.* = .{
             .role = .tool,
             .content = content,
@@ -1520,8 +1520,8 @@ test "prior tool result selection is entry bounded and keeps the newest window" 
 
 test "prior tool result evidence is byte bounded masked and terminal safe" {
     const entries = [_]PriorToolResultEntry{
-        .{ .tool_call_id = "first", .tool_name = "read_file", .content = "FIRST_RESULT " ++ ("a" ** 2000) },
-        .{ .tool_call_id = "last", .tool_name = "read_file", .content = "LAST_RESULT API_KEY=super-secret\x1b[31m" ++ ("z" ** 2000) },
+        .{ .tool_call_id = "first", .tool_name = "read_file", .content = "FIRST_RESULT " ++ (text_utils.repeat("a", 2000)) },
+        .{ .tool_call_id = "last", .tool_name = "read_file", .content = "LAST_RESULT API_KEY=super-secret\x1b[31m" ++ (text_utils.repeat("z", 2000)) },
     };
     var cancel_flag = std.atomic.Value(bool).init(false);
     const deadline = std.Io.Clock.Timestamp.fromNow(io_mod.getIo(), .{
@@ -1606,7 +1606,7 @@ test "automatic review rejects malformed extra and legacy decision assessments" 
         "{\"risk\":\"low\",\"decision\":\"allow\",\"rationale\":\"legacy allow\"}",
         "{\"risk\":\"low\",\"decision\":\"ask\",\"rationale\":\"legacy ask\"}",
         "{\"risk\":\"low\",\"decision\":\"deny\",\"rationale\":\"legacy deny\"}",
-        "{\"risk\":\"low\",\"decision\":\"clear\",\"rationale\":\"" ++ ("x" ** 241) ++ "\"}",
+        "{\"risk\":\"low\",\"decision\":\"clear\",\"rationale\":\"" ++ (text_utils.repeat("x", 241)) ++ "\"}",
     };
     for (cases) |arguments_json| {
         try std.testing.expectEqual(
@@ -1703,7 +1703,7 @@ test "automatic review does not send redacted action evidence" {
 
 test "automatic review preserves prepared file lines within its evidence byte budget" {
     const alloc = std.testing.allocator;
-    const long_line = "x" ** 2048;
+    const long_line = text_utils.repeat("x", 2048);
     var content: std.Io.Writer.Allocating = .init(alloc);
     defer content.deinit();
     try content.writer.writeAll(long_line);
@@ -1988,7 +1988,7 @@ test "automatic review rejects an oversized complete packet without sending" {
         .send_fn = FakeTransport.send,
         .build_fn = buildTestReviewPayload,
     }, null, 1000);
-    const oversized_root = "x" ** (max_review_packet_bytes + 1);
+    const oversized_root = text_utils.repeat("x", (max_review_packet_bytes + 1));
     const outcome = try reviewer.review(std.testing.allocator, .{
         .review_turn = .{
             .model = "openai/gpt-5",
@@ -2059,7 +2059,7 @@ test "automatic review sends complete action evidence above sixteen kib" {
         .action = .{ .tool = .{
             .tool_name = "exec_command",
             .arguments_json = "{\"cmd\":\"npm install\"}",
-            .schema_json = "{\"description\":\"" ++ ("s" ** (20 * 1024)) ++ "\"}",
+            .schema_json = "{\"description\":\"" ++ (text_utils.repeat("s", (20 * 1024))) ++ "\"}",
         } },
     });
     defer outcome.deinit(std.testing.allocator);
@@ -2106,7 +2106,7 @@ test "automatic review excludes assistant preamble and images" {
     };
 
     const long_preamble = "OPTIONAL_PREAMBLE_PREFIX" ++
-        ("p" ** max_review_packet_bytes) ++
+        text_utils.repeat("p", max_review_packet_bytes) ++
         "OPTIONAL_PREAMBLE_TAIL";
     var fake = FakeTransport{};
     const reviewer = Reviewer.withTransport(.{

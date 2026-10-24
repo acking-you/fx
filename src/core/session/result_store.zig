@@ -1,3 +1,4 @@
+const testing_allocator = @import("../shared/testing_allocator.zig");
 const std = @import("std");
 const io_mod = @import("../shared/io.zig");
 const text_utils = @import("../shared/text_utils.zig");
@@ -223,8 +224,7 @@ fn storeLargeResultAtHandleManaged(
 }
 
 pub fn formatStoredResultOutput(alloc: Allocator, handle: []const u8, preview: []const u8, stored_bytes: usize) ![]u8 {
-    return std.fmt.allocPrint(
-        alloc,
+    return alloc.print(
         "<tool_result_preview handle=\"{s}\" stored_bytes=\"{d}\">\n{s}\n</tool_result_preview>\n" ++
             "<tool_result_handle>{s}</tool_result_handle>\n" ++
             "Full redacted result is stored outside session JSON. Use read_tool_result with this handle to inspect a byte range or literal query.",
@@ -264,8 +264,7 @@ pub fn readByRangeManaged(
     const end = @min(text.len, start + requested);
     const safe_start = text_utils.utf8ForwardBoundary(text, start);
     const safe_end = text_utils.utf8BackwardBoundary(text, end);
-    return std.fmt.allocPrint(
-        alloc,
+    return alloc.print(
         "<tool_result handle=\"{s}\" start_byte=\"{d}\" end_byte=\"{d}\" total_bytes=\"{d}\">\n{s}\n</tool_result>",
         .{ handle, safe_start + 1, safe_end, text.len, text[safe_start..safe_end] },
     );
@@ -375,8 +374,7 @@ pub fn deleteManaged(
 }
 
 fn cappedInlineOutput(alloc: Allocator, tool_name: []const u8, text: []const u8, max_bytes: usize) ![]u8 {
-    const marker = try std.fmt.allocPrint(
-        alloc,
+    const marker = try alloc.print(
         "\n... [tool result truncated for {s}: original {d} bytes; cap is {d} bytes]\n",
         .{ tool_name, text.len, max_bytes },
     );
@@ -401,8 +399,7 @@ fn makeHandle(alloc: Allocator, tool_call_id: []const u8, tool_name: []const u8,
     const call_hex = std.fmt.bytesToHex(call_digest[0..8].*, .lower);
     const safe_tool = try safeHandlePart(alloc, tool_name);
     defer alloc.free(safe_tool);
-    return std.fmt.allocPrint(
-        alloc,
+    return alloc.print(
         "result-{s}-{s}-{s}.txt",
         .{ safe_tool, &call_hex, &content_hex },
     );
@@ -466,7 +463,7 @@ test "large result storage creates stable handle and bounded preview" {
     const dir = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
     defer alloc.free(dir);
 
-    var bytes = [_]u8{'x'} ** (large_result_threshold_bytes + 128);
+    var bytes: [large_result_threshold_bytes + 128]u8 = @splat('x');
     const prepared = try prepare(alloc, dir, "call/1", "run_command", bytes.len, bytes[0..], 64 * 1024);
     defer alloc.free(prepared.model_output);
     defer alloc.free(@constCast(prepared.memory.output_handle.?));
@@ -486,7 +483,7 @@ test "large result storage creates stable handle and bounded preview" {
 test "inline cap and stored preview keep complete codepoints" {
     const alloc = std.testing.allocator;
 
-    const inline_text = "x" ++ ("\xc3\xa9" ** 300);
+    const inline_text = "x" ++ text_utils.repeat("\xc3\xa9", 300);
     for ([_]usize{ 128, 129 }) |cap| {
         const prepared = try prepare(alloc, null, "call/2", "grep_files", inline_text.len, inline_text, cap);
         defer alloc.free(prepared.model_output);
@@ -500,7 +497,7 @@ test "inline cap and stored preview keep complete codepoints" {
     defer tmp.cleanup();
     const dir = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
     defer alloc.free(dir);
-    const stored_text = "x" ++ ("\xc3\xa9" ** 8200);
+    const stored_text = "x" ++ text_utils.repeat("\xc3\xa9", 8200);
     const stored = try prepare(alloc, dir, "call/3", "run_command", stored_text.len, stored_text, 64 * 1024);
     defer alloc.free(stored.model_output);
     defer alloc.free(@constCast(stored.memory.output_handle.?));
@@ -517,7 +514,7 @@ test "large result handles never expose token-shaped call ids" {
     const dir = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
     defer alloc.free(dir);
 
-    var bytes = [_]u8{'x'} ** (large_result_threshold_bytes + 1);
+    var bytes: [large_result_threshold_bytes + 1]u8 = @splat('x');
     const secret_id = "sk-abcdefghijklmnop";
     const prepared = try prepare(
         alloc,
@@ -546,7 +543,7 @@ const PrepareRoute = enum {
 };
 
 fn expectLargeResultPreparationLeavesNoOrphan(route: PrepareRoute) !void {
-    const base = std.testing.allocator;
+    const base = testing_allocator.no_resize;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.createDirPath(io_mod.getIo(), "results");
@@ -560,7 +557,7 @@ fn expectLargeResultPreparationLeavesNoOrphan(route: PrepareRoute) !void {
     );
     defer capability.deinit();
 
-    var bytes = [_]u8{'x'} ** (large_result_threshold_bytes + 128);
+    var bytes: [large_result_threshold_bytes + 128]u8 = @splat('x');
     var reached_success = false;
     var fail_index: usize = 0;
     while (fail_index < 128) : (fail_index += 1) {
@@ -622,7 +619,7 @@ test "managed large result preparation removes committed files on later allocati
 fn expectExistingLargeResultSurvivesPreparationFailure(
     route: PrepareRoute,
 ) !void {
-    const base = std.testing.allocator;
+    const base = testing_allocator.no_resize;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.createDirPath(io_mod.getIo(), "results");
@@ -636,7 +633,7 @@ fn expectExistingLargeResultSurvivesPreparationFailure(
     );
     defer capability.deinit();
 
-    var bytes = [_]u8{'x'} ** (large_result_threshold_bytes + 128);
+    var bytes: [large_result_threshold_bytes + 128]u8 = @splat('x');
     const seeded_handle = try storeLargeResultManaged(
         base,
         &capability,
@@ -789,7 +786,7 @@ test "managed result reader reaches head middle and tail through bounded pages" 
     const middle = try reader.readPage(alloc, reader.size / 2, full_read_chunk_bytes);
     defer alloc.free(middle);
     try std.testing.expectEqual(@as(usize, full_read_chunk_bytes), middle.len);
-    try std.testing.expect(std.mem.indexOfScalar(u8, middle, 'x') != null);
+    try std.testing.expect(std.mem.findScalar(u8, middle, 'x') != null);
 
     const tail_offset = reader.size - "\nFULL_READER_TAIL\n".len;
     const tail = try reader.readPage(alloc, tail_offset, full_read_chunk_bytes);
@@ -902,7 +899,7 @@ test "managed result create read stat delete remains contained after route swap"
     );
     defer alloc.free(ranged);
     try std.testing.expect(std.mem.find(u8, ranged, "alpha") != null);
-    const outside_path = try std.fs.path.join(
+    const outside_path = try std.Io.Dir.path.join(
         alloc,
         &.{ "outside", handle },
     );

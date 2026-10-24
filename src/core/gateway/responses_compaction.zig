@@ -1,3 +1,4 @@
+const testing_allocator = @import("../shared/testing_allocator.zig");
 const std = @import("std");
 const responses_output_items = @import("../shared/responses_output_items.zig");
 
@@ -839,12 +840,12 @@ fn checkCompactResponseAllocationFailures(alloc: Allocator) !void {
 
 test "Responses compact codecs clean up every allocation failure" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkCompactRequestAllocationFailures,
         .{},
     );
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkCompactResponseAllocationFailures,
         .{},
     );

@@ -235,14 +235,14 @@ fn artifactName(
 fn artifactPath(alloc: Allocator, dir: []const u8, stem: []const u8, suffix: []const u8) ![]u8 {
     const name = try std.fmt.allocPrint(alloc, "{s}{s}", .{ stem, suffix });
     defer alloc.free(name);
-    return std.fs.path.join(alloc, &.{ dir, name });
+    return std.Io.Dir.path.join(alloc, &.{ dir, name });
 }
 
 fn fallbackCommandArtifactDir(alloc: Allocator) ![]u8 {
     const temp_root = io_mod.getenv("TMPDIR") orelse "/tmp";
     const pid_text = try std.fmt.allocPrint(alloc, "{d}", .{currentProcessId()});
     defer alloc.free(pid_text);
-    return std.fs.path.join(alloc, &.{ temp_root, command_artifact_fallback_dir_name, pid_text });
+    return std.Io.Dir.path.join(alloc, &.{ temp_root, command_artifact_fallback_dir_name, pid_text });
 }
 
 fn currentProcessId() u64 {

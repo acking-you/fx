@@ -83,7 +83,7 @@ pub fn collect(
         snapshot.auth.deinit(alloc);
     }
 
-    const workspace_detail = try std.fmt.allocPrint(alloc, "using workspace {s}", .{snapshot.workspace_root});
+    const workspace_detail = try alloc.print("using workspace {s}", .{snapshot.workspace_root});
     try appendCheckOwned(&checks, alloc, "workspace", .ok, workspace_detail);
 
     const paths = try config_runtime.discoverPaths(alloc, snapshot.workspace_root);
@@ -221,8 +221,7 @@ fn appendResolvedStartupCheck(
     snapshot.permission_mode = try resolvePermissionMode(settings.permission_mode);
     snapshot.agent_step_limit = try resolveAgentStepLimit(default_agent_step_limit, settings.max_agent_steps);
 
-    const detail = try std.fmt.allocPrint(
-        alloc,
+    const detail = try alloc.print(
         "resolved model={s}, permission_mode={s}, agent_step_limit={d}",
         .{ snapshot.model, permissionModeLabel(snapshot.permission_mode), snapshot.agent_step_limit },
     );
@@ -235,13 +234,13 @@ fn appendConfigLoadFailureCheck(checks: *std.ArrayList(Check), alloc: Allocator,
 }
 
 fn formatConfigLoadFailure(alloc: Allocator, prefix: []const u8, err: anyerror) ![]u8 {
-    return std.fmt.allocPrint(alloc, "{s}: {s}", .{ prefix, @errorName(err) });
+    return alloc.print("{s}: {s}", .{ prefix, @errorName(err) });
 }
 
 fn appendStateChecks(checks: *std.ArrayList(Check), alloc: Allocator, workspace_root: []const u8) !void {
     var store = session_store.Store.initReadOnly(alloc, workspace_root) catch |err| {
         const status: CheckStatus = if (err == error.HomeNotSet) .warn else .fail;
-        const detail = try std.fmt.allocPrint(alloc, "failed to inspect workspace state: {s}", .{@errorName(err)});
+        const detail = try alloc.print("failed to inspect workspace state: {s}", .{@errorName(err)});
         try appendCheckOwned(checks, alloc, "state", status, detail);
         return;
     };
@@ -253,7 +252,7 @@ fn appendStateChecks(checks: *std.ArrayList(Check), alloc: Allocator, workspace_
         return;
     }
 
-    const state_detail = try std.fmt.allocPrint(alloc, "state dir ready at {s} (per-session managed state created on demand)", .{store.sessions_dir});
+    const state_detail = try alloc.print("state dir ready at {s} (per-session managed state created on demand)", .{store.sessions_dir});
     try appendCheckOwned(checks, alloc, "state", .ok, state_detail);
 
     var inspection = try store.inspectForDoctorBounded(alloc, default_session_diagnostics_limit);
@@ -283,8 +282,7 @@ fn appendSessionDiagnosticsTruncatedCheck(
     alloc: Allocator,
     inspected_count: usize,
 ) !void {
-    const detail = try std.fmt.allocPrint(
-        alloc,
+    const detail = try alloc.print(
         "session diagnostics truncated after {d} session director{s} to keep doctor bounded",
         .{ inspected_count, if (inspected_count == 1) "y" else "ies" },
     );
@@ -315,7 +313,7 @@ fn appendSessionsCountCheck(
         return;
     }
 
-    const detail = try std.fmt.allocPrint(alloc, "{d} saved session(s); latest={s}", .{ count, latest_id });
+    const detail = try alloc.print("{d} saved session(s); latest={s}", .{ count, latest_id });
     try appendCheckOwned(checks, alloc, "sessions", .ok, detail);
 }
 
@@ -331,16 +329,14 @@ fn appendSessionDiagnosticChecks(
                 alloc,
                 diagnostic.session_id,
             ) catch |err| {
-                const detail = try std.fmt.allocPrint(
-                    alloc,
+                const detail = try alloc.print(
                     "session {s}: cleanup_candidate report_only=true error={s}",
                     .{ diagnostic.session_id, @errorName(err) },
                 );
                 try appendCheckOwned(checks, alloc, "session", .warn, detail);
                 continue;
             };
-            const detail = try std.fmt.allocPrint(
-                alloc,
+            const detail = try alloc.print(
                 "session {s}: cleanup_candidate cleanup_removed={d} report_only={d} ignored={d}",
                 .{
                     diagnostic.session_id,
@@ -391,8 +387,7 @@ fn appendSessionDiagnosticChecks(
             &recovery_buffer,
         );
         const detail = if (diagnostic.growth_bytes) |growth_bytes|
-            try std.fmt.allocPrint(
-                alloc,
+            try alloc.print(
                 "session {s}: {s} bytes={d} growth_bytes={d} growth_frames={d}; recovery={s}",
                 .{
                     diagnostic.session_id,
@@ -404,14 +399,12 @@ fn appendSessionDiagnosticChecks(
                 },
             )
         else if (diagnostic.bytes) |bytes|
-            try std.fmt.allocPrint(
-                alloc,
+            try alloc.print(
                 "session {s}: {s} bytes={d}; recovery={s}",
                 .{ diagnostic.session_id, @tagName(diagnostic.kind), bytes, recovery },
             )
         else
-            try std.fmt.allocPrint(
-                alloc,
+            try alloc.print(
                 "session {s}: {s}{s}; recovery={s}",
                 .{
                     diagnostic.session_id,
@@ -456,7 +449,7 @@ fn recoveryActionForSessionDiagnostic(
         .commit_watermark_missing,
         .commit_watermark_invalid,
         .commit_watermark_mismatched,
-        => std.fmt.bufPrint(
+        => std.mem.print(
             buffer,
             "run fx session recover {s}; it creates a separate resumable copy and leaves the source unchanged",
             .{session_id},
@@ -465,7 +458,7 @@ fn recoveryActionForSessionDiagnostic(
         .projection_invalid,
         .canonical_state_invalid,
         .invalid_commit_intent,
-        => std.fmt.bufPrint(
+        => std.mem.print(
             buffer,
             "back up ~/.fx/sessions, then inspect this session with fx session {s} --json",
             .{session_id},
@@ -560,7 +553,7 @@ fn formatConfigPresence(alloc: Allocator, user_exists: bool, repo_exists: bool) 
 }
 
 fn fileExists(path: []const u8) !bool {
-    if (comptime @import("builtin").os.tag != .windows) {
+    if (comptime @import("builtin").target.os.tag != .windows) {
         return accessPath(path);
     }
     std.Io.Dir.accessAbsolute(io_mod.getIo(), path, .{}) catch |err| switch (err) {
@@ -571,9 +564,9 @@ fn fileExists(path: []const u8) !bool {
 }
 
 fn hasGitMetadata(alloc: Allocator, workspace_root: []const u8) !bool {
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const git_path = std.fmt.bufPrint(&path_buf, "{s}" ++ std.fs.path.sep_str ++ ".git", .{workspace_root}) catch {
-        const owned = try std.fs.path.join(alloc, &.{ workspace_root, ".git" });
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const git_path = std.mem.print(&path_buf, "{s}" ++ std.Io.Dir.path.sep_str ++ ".git", .{workspace_root}) catch {
+        const owned = try std.Io.Dir.path.join(alloc, &.{ workspace_root, ".git" });
         defer alloc.free(owned);
         return try fileExists(owned);
     };
@@ -587,13 +580,13 @@ fn commandInPath(alloc: Allocator, command_name: []const u8) !bool {
 }
 
 fn commandInPathValue(alloc: Allocator, command_name: []const u8, path_env: []const u8) !bool {
-    var it = std.mem.splitScalar(u8, path_env, std.fs.path.delimiter);
+    var it = std.mem.splitScalar(u8, path_env, std.Io.Dir.path.delimiter);
     while (it.next()) |entry| {
         if (entry.len == 0) continue;
 
-        var candidate_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const candidate = std.fmt.bufPrint(&candidate_buf, "{s}" ++ std.fs.path.sep_str ++ "{s}", .{ entry, command_name }) catch {
-            const owned = try std.fs.path.join(alloc, &.{ entry, command_name });
+        var candidate_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const candidate = std.mem.print(&candidate_buf, "{s}" ++ std.Io.Dir.path.sep_str ++ "{s}", .{ entry, command_name }) catch {
+            const owned = try std.Io.Dir.path.join(alloc, &.{ entry, command_name });
             defer alloc.free(owned);
             if (pathExists(owned)) return true;
             continue;
@@ -608,11 +601,11 @@ fn commandInPathValue(alloc: Allocator, command_name: []const u8, path_env: []co
 }
 
 fn pathExists(path: []const u8) bool {
-    if (comptime @import("builtin").os.tag != .windows) {
+    if (comptime @import("builtin").target.os.tag != .windows) {
         return accessPath(path) catch false;
     }
 
-    if (std.fs.path.isAbsolute(path)) {
+    if (std.Io.Dir.path.isAbsolute(path)) {
         std.Io.Dir.accessAbsolute(io_mod.getIo(), path, .{}) catch return false;
         return true;
     }
@@ -622,8 +615,8 @@ fn pathExists(path: []const u8) bool {
 }
 
 fn accessPath(path: []const u8) !bool {
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{path}) catch return false;
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path_z = std.mem.printSentinel(&path_buf, "{s}", .{path}, 0) catch return false;
     const rc = std.c.access(path_z.ptr, std.c.F_OK);
     if (rc == 0) return true;
     return switch (std.posix.errno(rc)) {
@@ -841,7 +834,7 @@ test "command in path checks explicit path entries" {
     const bin_root = try io_mod.dirRealpathAlloc(std.testing.allocator, tmp.dir, "bin");
     defer std.testing.allocator.free(bin_root);
 
-    const path_env = try std.fmt.allocPrint(std.testing.allocator, "{s}", .{bin_root});
+    const path_env = try std.testing.allocator.print("{s}", .{bin_root});
     defer std.testing.allocator.free(path_env);
 
     try std.testing.expect(try commandInPathValue(std.testing.allocator, "gh", path_env));

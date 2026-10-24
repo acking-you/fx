@@ -1,4 +1,5 @@
 const std = @import("std");
+const testing_allocator = @import("../../core/shared/testing_allocator.zig");
 const build_checkpoint = @import("../render_engine/build_checkpoint.zig");
 const transcript_blocks = @import("../render_engine/transcript_blocks.zig");
 const types = @import("../../core/shared/types.zig");
@@ -350,7 +351,7 @@ fn clipSummary(
     if (cols == 0) return try alloc.dupe(u8, "");
     if (cols == 1) return try alloc.dupe(u8, "…");
     const prefix = display_width.prefixByWidth(text, cols - 1);
-    return try std.fmt.allocPrint(alloc, "{s}…", .{prefix});
+    return try alloc.print("{s}…", .{prefix});
 }
 
 fn applySummaryStyle(
@@ -482,7 +483,7 @@ fn formatGroupBlock(
         } orelse if (detail) |record| record.tool_name else "tool activity";
         static_index += 1;
         const connector = if (!focused_in_group and static_index == static_count) "└" else "├";
-        const child = try std.fmt.allocPrint(scratch, "{s} {s}", .{ connector, phrase });
+        const child = try scratch.print("{s} {s}", .{ connector, phrase });
         const clipped = try clipSummary(scratch, child, cols);
         try out.writer.writeByte('\n');
         if (style.text_style.len > 0) try out.writer.writeAll(style.text_style);
@@ -520,7 +521,7 @@ fn formatExpandedChild(
         .raw_bytes => |raw| try normalizeStatusPhrase(scratch, raw.bytes),
         else => null,
     } orelse if (detail) |record| record.tool_name else "tool activity";
-    const child = try std.fmt.allocPrint(scratch, "{s} {s}", .{ connector, phrase });
+    const child = try scratch.print("{s} {s}", .{ connector, phrase });
     const clipped = try clipSummary(scratch, child, cols);
     return alloc.dupe(u8, clipped);
 }
@@ -548,7 +549,7 @@ fn installExpandedGroup(
         const child = try formatExpandedChild(alloc, entry, detail, connector, cols);
         defer alloc.free(child);
         const bytes = if (child_index == 0)
-            try std.fmt.allocPrint(alloc, "{s}\n{s}", .{ header, child })
+            try alloc.print("{s}\n{s}", .{ header, child })
         else
             try alloc.dupe(u8, child);
         try projection.setOwnedOverride(alloc, status_index, .tool_status, bytes);
@@ -1618,7 +1619,7 @@ fn checkPresentationGroupingAllocationFailures(alloc: std.mem.Allocator) !void {
 
 test "presentation grouping is atomic across allocation failures" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkPresentationGroupingAllocationFailures,
         .{},
     );

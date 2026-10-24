@@ -972,7 +972,7 @@ pub fn CompletionRuntime(comptime App: type) type {
         }
 
         fn setModelComposerText(app: *App, comptime fmt: []const u8, args: anytype) !void {
-            const text = try std.fmt.allocPrint(app.alloc, fmt, args);
+            const text = try app.alloc.print(fmt, args);
             defer app.alloc.free(text);
             try app.input_runtime.textReplacementState().replace(app.alloc, text);
         }
@@ -1528,7 +1528,7 @@ test "command skills navigation measures a width-changed queued editor before fr
     defer app.deinit();
     app.skills.items = @constCast(&skills);
     app.skills.openMenu();
-    try app.input_runtime.textReplacementState().replace(alloc, "x" ** 60);
+    try app.input_runtime.textReplacementState().replace(alloc, text_utils.repeat("x", 60));
 
     const entries = try alloc.alloc(input_queue_runtime.ReviewEntry, 2);
     entries[0] = try makeSkillsNavigationReviewEntry(alloc, 1, "stored");

@@ -54,7 +54,7 @@ jobs:
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: "0.16.0"
+          version: "0.17.0"
           use-cache: false
 
       - name: Test size reporter
@@ -67,11 +67,10 @@ jobs:
           evidence_dir="$RUNNER_TEMP/fx-binary-size-evidence"
           mkdir -p "$evidence_dir"
           test "$(git rev-parse HEAD)" = "$HEAD_SHA"
-          zig build \
+          ZIG_GLOBAL_CACHE_DIR="$RUNNER_TEMP/fx-global-cache" zig build \
             -Dtarget=${{ matrix.target }} \
             -Doptimize=ReleaseSafe \
-            --cache-dir "$RUNNER_TEMP/fx-head-cache" \
-            --global-cache-dir "$RUNNER_TEMP/fx-global-cache"
+            --cache-dir "$RUNNER_TEMP/fx-head-cache"
           cp zig-out/bin/fx "$evidence_dir/head-fx"
           file "$evidence_dir/head-fx" > "$evidence_dir/head-file.txt"
           cat "$evidence_dir/head-file.txt"
@@ -82,6 +81,21 @@ jobs:
             size -A -d "$evidence_dir/head-fx" > "$evidence_dir/head-sections.txt"
           fi
           cat "$evidence_dir/head-sections.txt"
+
+      - name: Read base toolchain
+        id: base-toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          base_version="$(git show "$BASE_SHA:build.zig.zon" | sed -n 's/^[[:space:]]*\.minimum_zig_version = "\([^"]*\)".*/\1/p')"
+          test -n "$base_version"
+          printf 'version=%s\n' "$base_version" >> "$GITHUB_OUTPUT"
+
+      - name: Setup base Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ steps.base-toolchain.outputs.version }}
+          use-cache: false
 
       - name: Build base binary
         shell: bash
@@ -97,11 +111,10 @@ jobs:
           test "$(git -C "$base_worktree" rev-parse HEAD)" = "$BASE_SHA"
           (
             cd "$base_worktree"
-            zig build \
+            ZIG_GLOBAL_CACHE_DIR="$RUNNER_TEMP/fx-global-cache" zig build \
               -Dtarget=${{ matrix.target }} \
               -Doptimize=ReleaseSafe \
-              --cache-dir "$RUNNER_TEMP/fx-base-cache" \
-              --global-cache-dir "$RUNNER_TEMP/fx-global-cache"
+              --cache-dir "$RUNNER_TEMP/fx-base-cache"
           )
           cp "$base_worktree/zig-out/bin/fx" "$evidence_dir/base-fx"
           file "$evidence_dir/base-fx" > "$evidence_dir/base-file.txt"

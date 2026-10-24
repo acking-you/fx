@@ -189,7 +189,7 @@ pub const Runtime = struct {
 };
 
 fn validPath(path: []const u8) bool {
-    return path.len > 0 and path.len <= 16 * 1024 and std.fs.path.isAbsolute(path) and
+    return path.len > 0 and path.len <= 16 * 1024 and std.Io.Dir.path.isAbsolute(path) and
         std.mem.findScalar(u8, path, 0) == null;
 }
 
@@ -202,7 +202,7 @@ fn ensureIo() void {
         threaded_io = std.Io.Threaded.init(std.heap.c_allocator, .{});
         io_mod.setIo(threaded_io.?.io());
         io_mod.setEmbeddedIo(environment_scope.wrapIo(io_mod.getIo()));
-        if (comptime builtin.os.tag == .windows) {
+        if (comptime builtin.target.os.tag == .windows) {
             io_mod.setEnvironBlock(.global);
         } else {
             io_mod.setRawEnviron(@ptrCast(std.c.environ));

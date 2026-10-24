@@ -236,7 +236,7 @@ test "turn review cache reuses only exact valid caution" {
 
     var arguments_buffer: [128]u8 = undefined;
     for (1..65) |index| {
-        const arguments = try std.fmt.bufPrint(
+        const arguments = try std.mem.print(
             &arguments_buffer,
             "{{\"cmd\":\"rm -rf generated-{d}\"}}",
             .{index},
@@ -256,7 +256,7 @@ test "turn review cache reuses only exact valid caution" {
         });
     }
     try std.testing.expectEqual(max_turn_review_cautions, cache.cautions.items.len);
-    const overflow_arguments = try std.fmt.bufPrint(
+    const overflow_arguments = try std.mem.print(
         &arguments_buffer,
         "{{\"cmd\":\"rm -rf generated-{d}\"}}",
         .{@as(usize, 64)},
@@ -451,7 +451,7 @@ fn classifyPermissionTarget(hooks: *const AgentRuntimeDeps, arena: Allocator, ca
         return if (err == error.PathOutsideWorkspace) "true" else "unknown";
     };
     const path_part = if (std.mem.indexOf(u8, target, "::")) |sep| target[0..sep] else target;
-    if (!std.fs.path.isAbsolute(path_part)) return "not_path";
+    if (!std.Io.Dir.path.isAbsolute(path_part)) return "not_path";
     return if (pathing.pathInside(workspace_root, path_part)) "false" else "true";
 }
 
@@ -661,12 +661,11 @@ test "preserved external file denial stops equivalent retry before effects or di
     const arena = arena_state.allocator();
     const tools = [_]tool_dispatch.Tool{test_builtin_tools.write_file};
     const registry: tool_dispatch.Registry = .{ .tools = &tools };
-    const target = try std.fs.path.join(
+    const target = try std.Io.Dir.path.join(
         arena,
         &.{ external, "denied", "nested", "file.txt" },
     );
-    const first_arguments = try std.fmt.allocPrint(
-        arena,
+    const first_arguments = try arena.print(
         "{{\"path\":\"{s}\",\"content\":\"private-value\\n\"}}",
         .{target},
     );
@@ -742,7 +741,7 @@ test "preserved external file denial stops equivalent retry before effects or di
         error.FileNotFound,
         std.Io.Dir.accessAbsolute(
             std.testing.io,
-            try std.fs.path.join(arena, &.{ external, "denied" }),
+            try std.Io.Dir.path.join(arena, &.{ external, "denied" }),
             .{},
         ),
     );

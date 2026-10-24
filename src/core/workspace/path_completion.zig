@@ -24,7 +24,7 @@ const ParsedQuery = struct {
 
 pub fn queryMode(query: []const u8) QueryMode {
     for (query) |byte| {
-        if (std.fs.path.isSep(byte)) return .explicit_path;
+        if (std.Io.Dir.path.isSep(byte)) return .explicit_path;
     }
     return .workspace_index;
 }
@@ -116,7 +116,7 @@ pub fn isCurrentCandidateKind(
 fn parseExplicitQuery(query: []const u8) ?ParsedQuery {
     var separator_index: ?usize = null;
     for (query, 0..) |byte, index| {
-        if (std.fs.path.isSep(byte)) separator_index = index;
+        if (std.Io.Dir.path.isSep(byte)) separator_index = index;
     }
     const separator = separator_index orelse return null;
     const parent = if (separator == 0) query[0..1] else query[0..separator];
@@ -199,7 +199,7 @@ fn pathSlot(storage: []u8, index: usize) []u8 {
 }
 
 fn writeTestFile(dir: std.Io.Dir, path: []const u8) !void {
-    if (std.fs.path.dirname(path)) |parent| try dir.createDirPath(std.testing.io, parent);
+    if (std.Io.Dir.path.dirname(path)) |parent| try dir.createDirPath(std.testing.io, parent);
     var file = try dir.createFile(std.testing.io, path, .{ .truncate = true });
     file.close(std.testing.io);
 }
@@ -275,16 +275,16 @@ test "path completion resolves parent and absolute forms without recursive trave
     try std.testing.expectEqualStrings("../outside/external.txt", results[1].path);
 
     var absolute_query_storage: [file_index.max_path_len]u8 = undefined;
-    const absolute_query = try std.fmt.bufPrint(&absolute_query_storage, "{s}/ex", .{outside});
+    const absolute_query = try std.mem.print(&absolute_query_storage, "{s}/ex", .{outside});
     const absolute_count = try complete(root, absolute_query, &results, &spans, &paths);
     try std.testing.expectEqual(@as(usize, 1), absolute_count);
     var expected_storage: [file_index.max_path_len]u8 = undefined;
-    const expected = try std.fmt.bufPrint(&expected_storage, "{s}/external.txt", .{outside});
+    const expected = try std.mem.print(&expected_storage, "{s}/external.txt", .{outside});
     try std.testing.expectEqualStrings(expected, results[0].path);
 }
 
 test "path completion follows listed symlinks and filters unsafe names" {
-    if (comptime builtin.os.tag == .windows or builtin.os.tag == .wasi) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag == .windows or builtin.target.os.tag == .wasi) return error.SkipZigTest;
 
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});

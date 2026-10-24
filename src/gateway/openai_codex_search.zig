@@ -1,3 +1,4 @@
+const testing_allocator = @import("../core/shared/testing_allocator.zig");
 const std = @import("std");
 const responses_search = @import("../core/gateway/responses_search.zig");
 const provider_route = @import("../core/gateway/provider_route.zig");
@@ -307,7 +308,7 @@ fn checkMaterializationAllocationFailures(alloc: Allocator) !void {
 
 test "Codex search result ownership survives allocation failures" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkMaterializationAllocationFailures,
         .{},
     );

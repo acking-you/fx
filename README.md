@@ -292,7 +292,7 @@ Add reusable instructions and supporting resources with skills, or delegate inde
 
 ## Build from source
 
-Building fx requires [Zig 0.16.0+](https://ziglang.org/download/):
+Building fx requires [Zig 0.17.0+](https://ziglang.org/download/):
 
 ```bash
 git clone --branch byok https://github.com/acking-you/fx.git

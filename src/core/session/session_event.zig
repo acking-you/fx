@@ -1,3 +1,4 @@
+const testing_allocator = @import("../shared/testing_allocator.zig");
 const std = @import("std");
 const session = @import("session.zig");
 const session_codec = @import("session_codec.zig");
@@ -289,7 +290,7 @@ pub fn decodeFrame(alloc: Allocator, line: []const u8) !Envelope {
     if (line.len == 0 or line[line.len - 1] != '\n') {
         return failEnvelope(error.InvalidEventFrame);
     }
-    if (std.mem.indexOfScalar(u8, line[0 .. line.len - 1], '\n') != null) {
+    if (std.mem.findScalar(u8, line[0 .. line.len - 1], '\n') != null) {
         return failEnvelope(error.InvalidEventFrame);
     }
 
@@ -758,11 +759,7 @@ const ReplacementStateReader = struct {
         start: StateReplacementStarted,
     ) !void {
         if (start.encoded_bytes == 0 or start.chunk_count == 0 or
-            start.chunk_count != std.math.divCeil(
-                u64,
-                start.encoded_bytes,
-                raw_state_chunk_bytes,
-            ) catch return error.InvalidReplacement)
+            start.chunk_count != @divCeil(start.encoded_bytes, @as(u64, raw_state_chunk_bytes)))
         {
             return error.InvalidReplacement;
         }
@@ -1614,7 +1611,7 @@ fn sha256(bytes: []const u8) Digest {
 }
 
 test "session event kind contract contains exactly ten stable variants" {
-    try std.testing.expectEqual(@as(usize, 10), @typeInfo(Kind).@"enum".fields.len);
+    try std.testing.expectEqual(@as(usize, 10), @typeInfo(Kind).@"enum".field_names.len);
     try std.testing.expectEqualStrings("session_started", @tagName(Kind.session_started));
     try std.testing.expectEqualStrings("preferences_changed", @tagName(Kind.preferences_changed));
     try std.testing.expectEqualStrings("workspace_rebound", @tagName(Kind.workspace_rebound));
@@ -2122,7 +2119,7 @@ test "single event application updates caller-owned state without replaying its 
 }
 
 test "single event application preserves caller-owned state on allocation failure" {
-    const alloc = std.testing.allocator;
+    const alloc = testing_allocator.no_resize;
     const generation = identifier(0xa1);
     const event = Envelope{
         .log_generation = generation,
@@ -2174,7 +2171,7 @@ test "single event application preserves caller-owned state on allocation failur
         }
     };
     try std.testing.checkAllAllocationFailures(
-        alloc,
+        testing_allocator.no_resize,
         AllocationCheck.run,
         .{ line, generation },
     );
@@ -2595,7 +2592,7 @@ fn checkHistoryProvenanceReplayAllocationFailures(alloc: Allocator) !void {
 
 test "history provenance replay frees every partial allocation" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkHistoryProvenanceReplayAllocationFailures,
         .{},
     );

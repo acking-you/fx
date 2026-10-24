@@ -9,6 +9,7 @@
 //!          │
 //!          └── unsupported or over bounds ──> ordinary code-block fallback
 
+const testing_allocator = @import("../../core/shared/testing_allocator.zig");
 const std = @import("std");
 const display_width = @import("../../core/shared/display_width.zig");
 const model = @import("mermaid/model.zig");
@@ -204,7 +205,7 @@ fn check_render_allocation_failures(alloc: Allocator) !void {
 
 test "mermaid renderer cleans partial allocations" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         check_render_allocation_failures,
         .{},
     );

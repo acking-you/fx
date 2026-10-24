@@ -451,7 +451,7 @@ fn expectDecodeFailure(args_json: []const u8, code: []const u8) !void {
         },
         .failure => |message| {
             defer alloc.free(message);
-            const needle = try std.fmt.allocPrint(alloc, "\"error_code\":\"{s}\"", .{code});
+            const needle = try alloc.print("\"error_code\":\"{s}\"", .{code});
             defer alloc.free(needle);
             try std.testing.expect(std.mem.find(u8, message, needle) != null);
         },
@@ -641,8 +641,7 @@ test "decode accepts every relationship and lifecycle action" {
         try expectCommandTag(args, .relationship);
     }
     inline for (.{ "cancel", "resume", "close", "reopen" }) |action| {
-        const args = try std.fmt.allocPrint(
-            std.testing.allocator,
+        const args = try std.testing.allocator.print(
             "{{\"command\":{{\"lifecycle\":{{\"id\":\"01J00000000000000000000000\",\"action\":\"{s}\"}}}}}}",
             .{action},
         );
@@ -677,7 +676,7 @@ test "decode rejects oversized content before runtime effects" {
     const content = try alloc.alloc(u8, domain.max_message_bytes + 1);
     defer alloc.free(content);
     @memset(content, 'x');
-    const args = try std.fmt.allocPrint(alloc, "{{\"command\":{{\"message\":{{\"send\":{{\"id\":\"01J00000000000000000000000\",\"content\":\"{s}\"}}}}}}}}", .{content});
+    const args = try alloc.print("{{\"command\":{{\"message\":{{\"send\":{{\"id\":\"01J00000000000000000000000\",\"content\":\"{s}\"}}}}}}}}", .{content});
     defer alloc.free(args);
     try expectDecodeFailure(args, "invalid_message");
 }

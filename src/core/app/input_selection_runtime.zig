@@ -85,7 +85,7 @@ const TestClipboard = struct {
         self.copied.deinit(alloc);
     }
 
-    fn clipboard(self: *TestClipboard) host.Clipboard {
+    pub fn clipboard(self: *TestClipboard) host.Clipboard {
         return .{ .context = self, .copy_fn = copy };
     }
 

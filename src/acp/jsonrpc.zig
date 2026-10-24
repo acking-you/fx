@@ -1,3 +1,4 @@
+const testing_allocator = @import("../core/shared/testing_allocator.zig");
 const std = @import("std");
 const builtin = @import("builtin");
 const io_mod = @import("../core/shared/io.zig");
@@ -303,7 +304,7 @@ pub const Reader = struct {
     // Unix ACP uses raw read(2) because Linux may pass socket-based stdin to
     // child processes. Windows and WASI use the injected std.Io backend.
     fn readStdin(_: ?*anyopaque, destination: []u8) usize {
-        if (comptime host_target.is_wasm or builtin.os.tag == .windows) {
+        if (comptime host_target.is_wasm or builtin.target.os.tag == .windows) {
             return std.Io.File.stdin().readStreaming(
                 io_mod.getIo(),
                 &.{destination},
@@ -454,7 +455,7 @@ test "Reader propagates allocation failure without publishing a partial frame" {
     };
     var reader = Reader.initForTesting(&source, ChunkedTestSource.read);
     var failing = std.testing.FailingAllocator.init(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         .{ .fail_index = 0 },
     );
     try std.testing.expectError(

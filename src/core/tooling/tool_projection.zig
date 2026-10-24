@@ -1,3 +1,4 @@
+const testing_allocator = @import("../shared/testing_allocator.zig");
 const std = @import("std");
 const builtin = @import("builtin");
 const model_tool_schema = @import("model_tool_schema.zig");
@@ -641,7 +642,7 @@ fn buildToolProjection(alloc: Allocator, tool_set: tool_set_contract.ToolSet, ki
         const shell = shell_resolver.configuredOrDefaultLoginShellInto(&shell_buffer);
         const syntax = shell_resolver.commandSyntax(shell) orelse return error.UnsupportedShell;
         const shell_name: []const u8 = switch (syntax) {
-            .bash => if (builtin.os.tag == .windows) "Git Bash" else "Bash",
+            .bash => if (builtin.target.os.tag == .windows) "Git Bash" else "Bash",
             .zsh => "Zsh",
             .cmd => "Command Prompt",
             .powershell => "PowerShell",
@@ -736,7 +737,7 @@ fn isBashFirstHiddenTool(tool: tool_dispatch.Tool) bool {
 }
 
 fn unifiedExecSupported() bool {
-    return std.process.can_spawn and builtin.os.tag != .wasi;
+    return std.process.can_spawn and builtin.target.os.tag != .wasi;
 }
 
 /// A provider-executed tool is never dispatched locally, so an unsettled `ask`
@@ -893,7 +894,7 @@ test "model tool projection identifies the actual default command shell" {
     var shell_buffer: [4096]u8 = undefined;
     const shell = shell_resolver.configuredOrDefaultLoginShellInto(&shell_buffer);
     const expected: []const u8 = switch (shell_resolver.commandSyntax(shell).?) {
-        .bash => if (builtin.os.tag == .windows) "Git Bash (Bash syntax)" else "Bash (Bash syntax)",
+        .bash => if (builtin.target.os.tag == .windows) "Git Bash (Bash syntax)" else "Bash (Bash syntax)",
         .zsh => "Zsh (Zsh syntax)",
         .cmd => "Command Prompt (cmd.exe syntax)",
         .powershell => "PowerShell (PowerShell syntax)",
@@ -1008,7 +1009,7 @@ fn checkEffectiveToolProjectionAllocationFailures(alloc: Allocator) !void {
 
 test "effective tool projection cleans up every partial allocation failure" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkEffectiveToolProjectionAllocationFailures,
         .{},
     );

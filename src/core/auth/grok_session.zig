@@ -1,3 +1,4 @@
+const text_utils = @import("../shared/text_utils.zig");
 const std = @import("std");
 const debug_trace = @import("../shared/debug_trace.zig");
 const host_target = @import("../hosts/target.zig");
@@ -369,7 +370,7 @@ test "Grok account identity is bounded and safe for HTTP headers" {
     try std.testing.expect(validAccountId("acct_123"));
     try std.testing.expect(!validAccountId(""));
     try std.testing.expect(!validAccountId("acct\r\ninjected"));
-    try std.testing.expect(!validAccountId("a" ** (max_account_id_bytes + 1)));
+    try std.testing.expect(!validAccountId(text_utils.repeat("a", (max_account_id_bytes + 1))));
 
     const invalid =
         \\{"version":1,"access_token":"access","refresh_token":"refresh","expires_at_ms":1234,"account_id":"acct\ninjected"}

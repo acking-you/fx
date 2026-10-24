@@ -1,3 +1,4 @@
+const testing_allocator = @import("../../core/shared/testing_allocator.zig");
 const std = @import("std");
 const shared_theme = @import("../../core/shared/theme.zig");
 const io_mod = @import("../../core/shared/io.zig");
@@ -14,6 +15,7 @@ const transcript_writer = @import("writer.zig");
 const ui_render = @import("../render.zig");
 const user_message_card = @import("../assistant/user_message_card.zig");
 const vt_emulator = @import("../../core/terminal/engine.zig");
+const text_utils = @import("../../core/shared/text_utils.zig");
 
 const Allocator = std.mem.Allocator;
 const Layout = types.Layout;
@@ -546,9 +548,9 @@ test "structured user turn source keeps full prompt beyond byte cache cap" {
     defer source.deinit(alloc);
 
     try std.testing.expect(source.bytes.len > runtime.max_transcript_bytes);
-    try std.testing.expect(std.mem.indexOf(u8, source.bytes, "LONG_PASTE_FIRST_MARKER") != null);
-    try std.testing.expect(std.mem.indexOf(u8, source.bytes, "LONG_PASTE_LAST_MARKER") != null);
-    try std.testing.expect(std.mem.indexOf(u8, source.bytes, "assistant after long prompt") != null);
+    try std.testing.expect(std.mem.find(u8, source.bytes, "LONG_PASTE_FIRST_MARKER") != null);
+    try std.testing.expect(std.mem.find(u8, source.bytes, "LONG_PASTE_LAST_MARKER") != null);
+    try std.testing.expect(std.mem.find(u8, source.bytes, "assistant after long prompt") != null);
 }
 
 test "large current user turn survives assistant retention pass" {
@@ -576,8 +578,8 @@ test "large current user turn survives assistant retention pass" {
 
     var source = try runtime.prepareTranscriptSource(alloc, null);
     defer source.deinit(alloc);
-    try std.testing.expect(std.mem.indexOf(u8, source.bytes, "LONG_PASTE_FIRST_MARKER") != null);
-    try std.testing.expect(std.mem.indexOf(u8, source.bytes, "assistant begins") != null);
+    try std.testing.expect(std.mem.find(u8, source.bytes, "LONG_PASTE_FIRST_MARKER") != null);
+    try std.testing.expect(std.mem.find(u8, source.bytes, "assistant begins") != null);
 }
 
 test "finalize transcript transition rejects frame inline row mismatch" {
@@ -910,7 +912,7 @@ test "semantic row identity remains exact beyond 65535 rows" {
     const boundary_indices = [_]usize{ 65_534, 65_535, 65_536, row_count - 1 };
     for (boundary_indices) |index| {
         var marker_buf: [32]u8 = undefined;
-        const marker = try std.fmt.bufPrint(
+        const marker = try std.mem.print(
             &marker_buf,
             "semantic-row-{d}",
             .{index},
@@ -1237,7 +1239,7 @@ fn createProductionCappedFoldedRecoveryTransition(
     var fold_index: usize = 0;
     while (fold_index < viewport_rows) : (fold_index += 1) {
         var fold_buf: [16]u8 = undefined;
-        const fold = try std.fmt.bufPrint(&fold_buf, "fold{d}", .{fold_index});
+        const fold = try std.mem.print(&fold_buf, "fold{d}", .{fold_index});
         try appendFoldedLineForTest(&runtime, alloc, 0, fold);
     }
 
@@ -2034,7 +2036,7 @@ fn checkSemanticNoticeAppendAllocationFailures(alloc: Allocator) !void {
 
 test "semantic notice append is allocator safe" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkSemanticNoticeAppendAllocationFailures,
         .{},
     );
@@ -2076,7 +2078,7 @@ fn checkSemanticNoticeReplacementAllocationFailures(alloc: Allocator) !void {
 
 test "semantic notice replacement is atomic across allocation failures" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkSemanticNoticeReplacementAllocationFailures,
         .{},
     );
@@ -2600,7 +2602,7 @@ test "folded inexact growth advances only materialized viewport rows" {
     var growth_index: usize = 0;
     while (growth_index < growth_rows) : (growth_index += 1) {
         var line_buf: [16]u8 = undefined;
-        const line = try std.fmt.bufPrint(
+        const line = try std.mem.print(
             &line_buf,
             "\ng{d:0>5}",
             .{growth_index},
@@ -2636,7 +2638,7 @@ test "folded inexact growth advances only materialized viewport rows" {
     var fold_index: usize = 0;
     while (fold_index < viewport_rows) : (fold_index += 1) {
         var fold_buf: [16]u8 = undefined;
-        const fold = try std.fmt.bufPrint(&fold_buf, "fold{d}", .{fold_index});
+        const fold = try std.mem.print(&fold_buf, "fold{d}", .{fold_index});
         try appendFoldedLineForTest(&runtime, alloc, 0, fold);
     }
 
@@ -3151,12 +3153,12 @@ test "folded inexact growth advances only materialized viewport rows" {
         "g00011\n" ++
         "g00012";
     try std.testing.expectEqualStrings(expected_history, history.items);
-    try std.testing.expect(std.mem.indexOf(u8, history.items, "\n\n") == null);
+    try std.testing.expect(std.mem.find(u8, history.items, "\n\n") == null);
 
     fold_index = 0;
     while (fold_index < viewport_rows) : (fold_index += 1) {
         var expected_buf: [16]u8 = undefined;
-        const expected = try std.fmt.bufPrint(
+        const expected = try std.mem.print(
             &expected_buf,
             "│ fold{d}",
             .{fold_index},
@@ -3169,7 +3171,7 @@ test "folded inexact growth advances only materialized viewport rows" {
     growth_index = 0;
     while (growth_index < growth_rows + followup_rows) : (growth_index += 1) {
         var expected_buf: [16]u8 = undefined;
-        const expected = try std.fmt.bufPrint(
+        const expected = try std.mem.print(
             &expected_buf,
             "g{d:0>5}",
             .{growth_index},
@@ -3643,7 +3645,7 @@ test "width change does not compare semantic offsets across projections" {
         .selection = testSelection(9),
     };
     defer prepared.deinit(alloc);
-    try prepared.line_visual_rows.appendSlice(alloc, &([_]u16{1} ** 16));
+    try prepared.line_visual_rows.appendSlice(alloc, &@as([16]u16, @splat(1)));
 
     const facts = runtime.planTranscriptScroll(&prepared);
     try std.testing.expect(facts.source_compatible);
@@ -5496,14 +5498,14 @@ test "finalized transcript transition owns append suffix and commits one anchor"
 
 test "transcript transition staging preserves prior commit across allocation failures" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkTranscriptTransitionStagingAllocationFailures,
         .{},
     );
 }
 
 test "committed transcript transition installation performs no allocation" {
-    const backing = std.testing.allocator;
+    const backing = testing_allocator.no_resize;
     var failing = std.testing.FailingAllocator.init(backing, .{});
     const alloc = failing.allocator();
     var runtime = TranscriptRuntime{
@@ -5576,7 +5578,7 @@ test "partial transcript transition records exact recovery debt" {
         .cursor = .{ .cursor_row = 4, .cursor_col = 1, .replaceable_row = 4 },
     };
     defer prepared.deinit(alloc);
-    try prepared.line_visual_rows.appendSlice(alloc, &([_]u16{1} ** 16));
+    try prepared.line_visual_rows.appendSlice(alloc, &@as([16]u16, @splat(1)));
     const scroll_plan = render_engine.frame_scroll_plan.merge(runtime.layout.rows, 1, 0, 5);
     var plan = testPaintPlan(&runtime, prepared.selection);
     const target_layout = render_engine.frame_layout.CommittedLayoutSnapshot.fromPaintPlan(plan);
@@ -5737,7 +5739,7 @@ test "recovery area-only endpoint movement preserves semantic debt" {
     const alloc = std.testing.allocator;
     const stable_flow = "stable\n";
     const attempt_flow = stable_flow ++ "attempt\n";
-    const attempt_rows = [_]u16{1} ** 10;
+    const attempt_rows: [10]u16 = @splat(1);
     var runtime = TranscriptRuntime{
         .layout = transcriptTestLayout(20, 10, 6),
         .owned_top_row = 5,
@@ -5774,8 +5776,8 @@ test "recovery source growth plus area movement counts only source visual growth
     const stable_flow = "stable\n";
     const attempt_flow = stable_flow ++ "attempt\n";
     const grown_flow = attempt_flow ++ "growth one\ngrowth two\n";
-    const attempt_rows = [_]u16{1} ** 10;
-    const grown_rows = [_]u16{1} ** 12;
+    const attempt_rows: [10]u16 = @splat(1);
+    const grown_rows: [12]u16 = @splat(1);
     var runtime = TranscriptRuntime{
         .layout = transcriptTestLayout(20, 10, 6),
         .owned_top_row = 5,
@@ -6010,7 +6012,7 @@ test "incompatible recovery source stays on rebase path after partial repaint" {
     const attempt_flow = stable_flow ++ "attempt\n";
     const replacement_flow = "replacement\n";
     const grown_replacement_flow = replacement_flow ++ "growth\n";
-    const attempt_rows = [_]u16{1} ** 10;
+    const attempt_rows: [10]u16 = @splat(1);
     var runtime = TranscriptRuntime{
         .layout = transcriptTestLayout(20, 10, 6),
         .owned_top_row = 5,
@@ -6795,7 +6797,7 @@ test "recovery projection moves cursor for zero-row trailing newline growth" {
 test "recovery projection relocates replaceable row through production painter" {
     const alloc = std.testing.allocator;
     const flow = "a\nb\nc\nreplace";
-    const replaceable_start = std.mem.lastIndexOfScalar(u8, flow, '\n').? + 1;
+    const replaceable_start = std.mem.findScalarLast(u8, flow, '\n').? + 1;
     var runtime = TranscriptRuntime{
         .layout = transcriptTestLayout(20, 8, 5),
         .owned_top_row = 1,
@@ -7010,7 +7012,7 @@ test "committed deferred shrink installs target geometry before recovery stabili
     const alloc = std.testing.allocator;
     const stable_flow = "0\n1\n2\n3";
     const attempt_flow = stable_flow ++ "\n4\n5\n6\n7\n8\n9";
-    const visual_rows = [_]u16{1} ** 10;
+    const visual_rows: [10]u16 = @splat(1);
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -7178,8 +7180,8 @@ test "recovery forward area movement stabilizes at acknowledged semantic endpoin
     const stable_flow = "stable\n";
     const attempt_flow = stable_flow ++ "attempt\n";
     const grown_flow = attempt_flow ++ "growth one\ngrowth two\n";
-    const attempt_rows = [_]u16{1} ** 10;
-    const grown_rows = [_]u16{1} ** 12;
+    const attempt_rows: [10]u16 = @splat(1);
+    const grown_rows: [12]u16 = @splat(1);
     var runtime = TranscriptRuntime{
         .layout = transcriptTestLayout(20, 10, 6),
         .owned_top_row = 5,
@@ -7365,7 +7367,7 @@ test "recovery backward area movement stabilizes at acknowledged semantic endpoi
     const alloc = std.testing.allocator;
     const stable_flow = "stable\n";
     const attempt_flow = stable_flow ++ "attempt\n";
-    const attempt_rows = [_]u16{1} ** 10;
+    const attempt_rows: [10]u16 = @splat(1);
     var runtime = TranscriptRuntime{
         .layout = transcriptTestLayout(20, 10, 6),
         .owned_top_row = 5,
@@ -7496,7 +7498,7 @@ test "same-width backward footer candidate retains one coherent stable anchor" {
         },
     };
     defer prepared.deinit(alloc);
-    var line_rows = [_]u16{4} ** 100;
+    var line_rows: [100]u16 = @splat(4);
     for (line_rows[0..17]) |*rows| rows.* = 5;
     line_rows[87] = 3;
     try prepared.line_visual_rows.appendSlice(alloc, &line_rows);
@@ -7769,7 +7771,7 @@ fn checkPrepareTranscriptSourceAllocationFailures(alloc: Allocator) !void {
 
 test "structured transcript source frees every partial allocation" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkPrepareTranscriptSourceAllocationFailures,
         .{},
     );
@@ -7833,7 +7835,7 @@ fn checkPreviewPreparationFailureLeavesRuntimeUnchanged(alloc: Allocator) !void 
 
 test "preview preparation failure leaves cache entries anchors and repaint state unchanged" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkPreviewPreparationFailureLeavesRuntimeUnchanged,
         .{},
     );
@@ -8712,7 +8714,7 @@ test "command output consolidation preserves committed prompt scrollback anchor"
     var live_entry_ids: [18]u32 = undefined;
     for (0..18) |index| {
         var line: [48]u8 = undefined;
-        const text = try std.fmt.bufPrint(&line, "SYSTEM OUTPUT {d:0>2}\\n", .{index + 1});
+        const text = try std.mem.print(&line, "SYSTEM OUTPUT {d:0>2}\\n", .{index + 1});
         const bytes = try alloc.dupe(u8, text);
         live_entry_ids[index] = try runtime.appendRawBytesEntryClassified(
             alloc,
@@ -8726,7 +8728,7 @@ test "command output consolidation preserves committed prompt scrollback anchor"
         return error.TestExpectedAssistantSegments;
     for (0..24) |index| {
         var line: [48]u8 = undefined;
-        const text = try std.fmt.bufPrint(&line, "assistant table row {d}\n", .{index + 1});
+        const text = try std.mem.print(&line, "assistant table row {d}\n", .{index + 1});
         try first_assistant.text.appendSlice(alloc, text);
     }
     // The assistant content above is complete; report producer closure so
@@ -8787,7 +8789,7 @@ test "command output consolidation preserves committed prompt scrollback anchor"
         return error.TestExpectedAssistantSegments;
     for (0..60) |index| {
         var line: [40]u8 = undefined;
-        const text = try std.fmt.bufPrint(&line, "follow-up table row {d}\n", .{index + 1});
+        const text = try std.mem.print(&line, "follow-up table row {d}\n", .{index + 1});
         try second_assistant.text.appendSlice(alloc, text);
     }
 
@@ -8999,13 +9001,13 @@ test "command output consolidation replaces live row before following transcript
     var source = try runtime.prepareTranscriptSource(alloc, null);
     defer source.deinit(alloc);
 
-    const before_pos = std.mem.indexOf(u8, source.bytes, "before") orelse
+    const before_pos = std.mem.find(u8, source.bytes, "before") orelse
         return error.MissingBeforeRow;
-    const after_pos = std.mem.indexOf(u8, source.bytes, "after") orelse
+    const after_pos = std.mem.find(u8, source.bytes, "after") orelse
         return error.MissingAfterRow;
 
     try std.testing.expect(before_pos < after_pos);
-    try std.testing.expect(std.mem.indexOf(u8, source.bytes, "middle") == null);
+    try std.testing.expect(std.mem.find(u8, source.bytes, "middle") == null);
     try std.testing.expectEqualStrings("middle", runtime.command_output_blocks.items[0].lines.items[0].text);
 }
 
@@ -9031,17 +9033,17 @@ test "command output consolidation preserves rows between noncontiguous live row
     var source = try runtime.prepareTranscriptSource(alloc, null);
     defer source.deinit(alloc);
 
-    const before_pos = std.mem.indexOf(u8, source.bytes, "before") orelse
+    const before_pos = std.mem.find(u8, source.bytes, "before") orelse
         return error.MissingBeforeRow;
-    const intervening_pos = std.mem.indexOf(u8, source.bytes, "intervening") orelse
+    const intervening_pos = std.mem.find(u8, source.bytes, "intervening") orelse
         return error.MissingInterveningRow;
-    const after_pos = std.mem.indexOf(u8, source.bytes, "after") orelse
+    const after_pos = std.mem.find(u8, source.bytes, "after") orelse
         return error.MissingAfterRow;
 
     try std.testing.expect(before_pos < intervening_pos);
     try std.testing.expect(intervening_pos < after_pos);
-    try std.testing.expect(std.mem.indexOf(u8, source.bytes, "command-one") == null);
-    try std.testing.expect(std.mem.indexOf(u8, source.bytes, "command-two") == null);
+    try std.testing.expect(std.mem.find(u8, source.bytes, "command-one") == null);
+    try std.testing.expect(std.mem.find(u8, source.bytes, "command-two") == null);
     try std.testing.expectEqualStrings("command-one", runtime.command_output_blocks.items[0].lines.items[0].text);
     try std.testing.expectEqualStrings("command-two", runtime.command_output_blocks.items[0].lines.items[1].text);
 }
@@ -9060,7 +9062,7 @@ test "command output folding preserves rows between noncontiguous live rows" {
     _ = try runtime.appendRawTranscriptEntryClassified(alloc, "before\n", .subagent_status);
     for (0..5) |index| {
         var line: [32]u8 = undefined;
-        const text = try std.fmt.bufPrint(&line, "command-visible-{d}\n", .{index + 1});
+        const text = try std.mem.print(&line, "command-visible-{d}\n", .{index + 1});
         try runtime.writeCommandOutputChunk(alloc, &metrics, styles, .stdout, text, true);
     }
     _ = try runtime.appendRawTranscriptEntryClassified(alloc, "intervening\n", .subagent_status);
@@ -9540,7 +9542,7 @@ test "command output display caps at five physical rows" {
 
     var line_index: usize = 0;
     while (line_index < 26) : (line_index += 1) {
-        const line = try std.fmt.allocPrint(std.testing.allocator, "line-{d}\n", .{line_index});
+        const line = try std.testing.allocator.print("line-{d}\n", .{line_index});
         defer std.testing.allocator.free(line);
         try runtime.writeCommandOutputChunk(std.testing.allocator, &metrics, styles, .stdout, line, true);
     }
@@ -9582,8 +9584,8 @@ test "structured retention prunes old raw transcript entries past cap" {
 
     try std.testing.expect(transcript_store.retainedStructuredBytes(&runtime) <= runtime.max_retained_transcript_bytes);
     try std.testing.expect(runtime.entries.items.len < 3);
-    try std.testing.expect(std.mem.indexOf(u8, runtime.transcript.items, "raw-one") == null);
-    try std.testing.expect(std.mem.indexOf(u8, runtime.transcript.items, "raw-three") != null);
+    try std.testing.expect(std.mem.find(u8, runtime.transcript.items, "raw-one") == null);
+    try std.testing.expect(std.mem.find(u8, runtime.transcript.items, "raw-three") != null);
 }
 
 test "structured retention compacts a large pruning pass in entry order" {
@@ -9600,7 +9602,7 @@ test "structured retention compacts a large pruning pass in entry order" {
     defer runtime.deinit(alloc);
 
     for (0..2048) |index| {
-        const line = try std.fmt.allocPrint(alloc, "retained-entry-{d:0>4}\n", .{index});
+        const line = try alloc.print("retained-entry-{d:0>4}\n", .{index});
         _ = runtime.appendRawBytesEntryClassified(alloc, line, .unknown_raw) catch |err| {
             alloc.free(line);
             return err;
@@ -9616,8 +9618,8 @@ test "structured retention compacts a large pruning pass in entry order" {
     for (runtime.entries.items[1..], runtime.entries.items[0 .. runtime.entries.items.len - 1]) |entry, previous| {
         try std.testing.expect(previous.id() < entry.id());
     }
-    try std.testing.expect(std.mem.indexOf(u8, runtime.transcript.items, "retained-entry-0000") == null);
-    try std.testing.expect(std.mem.indexOf(u8, runtime.transcript.items, "retained-entry-2047") != null);
+    try std.testing.expect(std.mem.find(u8, runtime.transcript.items, "retained-entry-0000") == null);
+    try std.testing.expect(std.mem.find(u8, runtime.transcript.items, "retained-entry-2047") != null);
 }
 
 test "assistant streaming retention trims active segment text" {
@@ -9643,8 +9645,8 @@ test "assistant streaming retention trims active segment text" {
     try std.testing.expect(runtime.entries.items[0] == .assistant_turn);
     const text = runtime.entries.items[0].assistant_turn.segments.text.items;
     try std.testing.expect(text.len <= runtime.max_retained_transcript_bytes);
-    try std.testing.expect(std.mem.indexOf(u8, text, "cccccccc") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "aaaaaaaa") == null);
+    try std.testing.expect(std.mem.find(u8, text, "cccccccc") != null);
+    try std.testing.expect(std.mem.find(u8, text, "aaaaaaaa") == null);
     try std.testing.expect(transcript_store.retainedStructuredBytes(&runtime) <= runtime.max_retained_transcript_bytes);
 }
 
@@ -9652,7 +9654,7 @@ test "hidden command output becomes count-only at the hard cap" {
     var sink = try std.Io.Dir.openFileAbsolute(io_mod.getIo(), "/dev/null", .{ .mode = .write_only });
     defer sink.close(io_mod.getIo());
 
-    const alloc = std.testing.allocator;
+    const alloc = testing_allocator.no_resize;
     var runtime = TranscriptRuntime{
         .stdout_file = sink,
         .layout = .{ .rows = 24, .cols = 80, .content_bottom = 21, .divider_top_row = 22, .input_row = 23, .divider_bottom_row = 24, .hint_row = 22 },
@@ -9697,8 +9699,7 @@ test "hidden command output becomes count-only at the hard cap" {
     try runtime.flushCommandOutputSummary(alloc, &metrics, styles, true);
     const block = runtime.command_output_blocks.items[0];
     try std.testing.expectEqual(@as(usize, 8), block.total_lines);
-    const expected_summary = try std.fmt.allocPrint(
-        alloc,
+    const expected_summary = try alloc.print(
         "│ … {d} lines more (ctrl o to view)",
         .{block.total_lines - @min(@as(usize, 5), block.lines.items.len)},
     );
@@ -9723,7 +9724,7 @@ test "command output becomes count-only at the hard cap" {
     var sink = try std.Io.Dir.openFileAbsolute(io_mod.getIo(), "/dev/null", .{ .mode = .write_only });
     defer sink.close(io_mod.getIo());
 
-    const alloc = std.testing.allocator;
+    const alloc = testing_allocator.no_resize;
     var runtime = TranscriptRuntime{
         .stdout_file = sink,
         .layout = .{ .rows = 24, .cols = 80, .content_bottom = 21, .divider_top_row = 22, .input_row = 23, .divider_bottom_row = 24, .hint_row = 22 },
@@ -9760,7 +9761,7 @@ test "blank hidden command output becomes count-only at the hard cap" {
     var sink = try std.Io.Dir.openFileAbsolute(io_mod.getIo(), "/dev/null", .{ .mode = .write_only });
     defer sink.close(io_mod.getIo());
 
-    const alloc = std.testing.allocator;
+    const alloc = testing_allocator.no_resize;
     var runtime = TranscriptRuntime{
         .stdout_file = sink,
         .layout = .{ .rows = 24, .cols = 80, .content_bottom = 21, .divider_top_row = 22, .input_row = 23, .divider_bottom_row = 24, .hint_row = 22 },
@@ -9891,8 +9892,8 @@ test "resize preparation uses retained entries after pruning without rewriting c
 
     try std.testing.expectEqual(rendered_cols_before, runtime.last_rendered_cols);
     try std.testing.expectEqualStrings(cache_before, runtime.transcript.items);
-    try std.testing.expect(std.mem.indexOf(u8, prepared.bytes, "latest-entry-stays") != null);
-    try std.testing.expect(std.mem.indexOf(u8, prepared.bytes, "old-entry") == null);
+    try std.testing.expect(std.mem.find(u8, prepared.bytes, "latest-entry-stays") != null);
+    try std.testing.expect(std.mem.find(u8, prepared.bytes, "old-entry") == null);
 }
 
 test "clearTranscript after retention pruning frees retained entries and command output blocks" {
@@ -10306,7 +10307,7 @@ test "streamAssistantChunk opens a new assistant_turn when there is no trailing 
     try std.testing.expect(runtime.entries.items[0] == .assistant_turn);
     try std.testing.expectEqual(id, runtime.entries.items[0].id());
     try std.testing.expectEqualStrings("first chunk", runtime.entries.items[0].assistant_turn.segments.text.items);
-    try std.testing.expect(std.mem.indexOf(u8, runtime.transcript.items, "first chunk") != null);
+    try std.testing.expect(std.mem.find(u8, runtime.transcript.items, "first chunk") != null);
 }
 
 test "streamAssistantChunk extends the trailing assistant_turn on subsequent chunks" {
@@ -10424,7 +10425,7 @@ fn checkOrdinaryAssistantStreamAllocationFailures(
     test_case: AssistantStreamFastPathCase,
     witness: *AssistantStreamFastPathFailureWitness,
 ) !void {
-    const continuation = [_]u8{'b'} ** 4096;
+    const continuation: [4096]u8 = @splat('b');
     const chunk: []const u8 = switch (test_case) {
         .opening => "first chunk",
         .continuation => &continuation,
@@ -10536,7 +10537,7 @@ fn checkOrdinaryAssistantStreamAllocationFailures(
 test "ordinary assistant stream admission is atomic across allocation failures" {
     var opening_witness = AssistantStreamFastPathFailureWitness{};
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkOrdinaryAssistantStreamAllocationFailures,
         .{ .opening, &opening_witness },
     );
@@ -10544,7 +10545,7 @@ test "ordinary assistant stream admission is atomic across allocation failures" 
 
     var continuation_witness = AssistantStreamFastPathFailureWitness{};
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkOrdinaryAssistantStreamAllocationFailures,
         .{ .continuation, &continuation_witness },
     );
@@ -10622,7 +10623,7 @@ fn checkOpeningAssistantStreamAllocationFailures(alloc: Allocator) !void {
 
 test "opening a recorded assistant stream is atomic across allocation failures" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkOpeningAssistantStreamAllocationFailures,
         .{},
     );
@@ -10706,14 +10707,14 @@ fn checkExtendingAssistantStreamAllocationFailures(alloc: Allocator) !void {
 
 test "extending a recorded assistant stream is atomic across allocation failures" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkExtendingAssistantStreamAllocationFailures,
         .{},
     );
 }
 
 test "paced assistant continuations do not clone retained history per chunk" {
-    const backing = std.testing.allocator;
+    const backing = testing_allocator.no_resize;
     var counted = std.testing.FailingAllocator.init(backing, .{});
     const alloc = counted.allocator();
     var runtime = TranscriptRuntime{
@@ -10771,7 +10772,7 @@ test "streamAssistantChunk opens a new assistant_turn after a user_turn" {
 }
 
 test "appendUserTurnOwned frees text, images, and image slices when entries.append OOMs" {
-    const base = std.testing.allocator;
+    const base = testing_allocator.no_resize;
     // Fail after all transferred slices exist, when the entries list first grows.
     var failing = std.testing.FailingAllocator.init(base, .{ .fail_index = 4 });
     const alloc = failing.allocator();
@@ -10918,14 +10919,12 @@ fn check_user_prompt_card_admission_success(
     );
     defer alloc.free(card);
     const separator = if (input.has_prior_turns) "" else "\n";
-    const expected_transcript = try std.fmt.allocPrint(
-        alloc,
+    const expected_transcript = try alloc.print(
         "seed{s}{s}",
         .{ separator, card },
     );
     defer alloc.free(expected_transcript);
-    const expected_reconstructed = try std.fmt.allocPrint(
-        alloc,
+    const expected_reconstructed = try alloc.print(
         "seed\n\n{s}",
         .{card},
     );
@@ -11586,7 +11585,7 @@ fn checkThemeRetintAllocationFailures(alloc: Allocator) !void {
 
 test "theme retint is atomic across allocation failures" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkThemeRetintAllocationFailures,
         .{},
     );
@@ -11755,12 +11754,12 @@ fn check_user_prompt_card_admission_allocation_failures(
 
 test "recorded user prompt card admission is atomic across allocation failures" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         check_user_prompt_card_admission_allocation_failures,
         .{UserPromptCardAdmissionCase.text_with_separator},
     );
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         check_user_prompt_card_admission_allocation_failures,
         .{UserPromptCardAdmissionCase.image_with_skill_token},
     );
@@ -12274,7 +12273,7 @@ fn checkRecordedTranscriptWriteAllocationFailures(alloc: Allocator) !void {
 
 test "recorded transcript write is atomic across entry cache and retention allocation failures" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkRecordedTranscriptWriteAllocationFailures,
         .{},
     );
@@ -12412,7 +12411,7 @@ fn checkContextNoticeAllocationFailures(alloc: Allocator) !void {
 
 test "context notice admission is atomic across entry cache and retention allocation failures" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkContextNoticeAllocationFailures,
         .{},
     );
@@ -12777,7 +12776,7 @@ fn checkVisibleRecordedCommandOutputAllocationFailures(alloc: Allocator) !void {
 
 test "visible recorded command output admission is atomic across allocation failures" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkVisibleRecordedCommandOutputAllocationFailures,
         .{},
     );
@@ -12899,7 +12898,7 @@ fn checkRecordedCommandOutputConsolidationAllocationFailures(alloc: Allocator) !
 
 test "recorded command output consolidation is atomic across allocation failures" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkRecordedCommandOutputConsolidationAllocationFailures,
         .{},
     );
@@ -12993,7 +12992,7 @@ test "recorded command output consolidation preserves a capped canonical anchor 
 }
 
 test "recorded command output completion does not allocate without a matching block" {
-    const alloc = std.testing.allocator;
+    const alloc = testing_allocator.no_resize;
     var runtime = TranscriptRuntime{ .layout = transcriptTestLayout(80, 12, 8) };
     defer runtime.deinit(alloc);
     var metrics = Metrics{};
@@ -13120,7 +13119,7 @@ test "writeTranscriptBytes does NOT append an entry" {
     try runtime.writeTranscriptBytes(alloc, &metrics, "structured writer bytes\n", true);
 
     try std.testing.expectEqual(@as(usize, 0), runtime.entries.items.len);
-    try std.testing.expect(std.mem.indexOf(u8, runtime.transcript.items, "structured writer bytes") != null);
+    try std.testing.expect(std.mem.find(u8, runtime.transcript.items, "structured writer bytes") != null);
 }
 
 test "appendReplaceableTranscriptLineSilent mirrors a raw_bytes entry" {
@@ -13192,8 +13191,8 @@ test "updateRawBytesEntry swaps bytes when entry is in middle" {
     try std.testing.expectEqualStrings("block A updated\n", runtime.entries.items[0].raw_bytes.bytes);
     try std.testing.expect(runtime.entries.items[1] == .raw_bytes);
     try std.testing.expectEqualStrings("block B\n", runtime.entries.items[1].raw_bytes.bytes);
-    try std.testing.expect(std.mem.indexOf(u8, runtime.transcript.items, "block A updated\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, runtime.transcript.items, "block B\n") != null);
+    try std.testing.expect(std.mem.find(u8, runtime.transcript.items, "block A updated\n") != null);
+    try std.testing.expect(std.mem.find(u8, runtime.transcript.items, "block B\n") != null);
     try std.testing.expect(!runtime.replaceable_last_line);
 }
 
@@ -13233,9 +13232,9 @@ test "updateRawBytesEntry updates modal entry in place after intervening append"
     try std.testing.expect(ok);
     try std.testing.expectEqual(@as(usize, 2), runtime.entries.items.len);
     try std.testing.expectEqualStrings("modal v2\n", runtime.entries.items[0].raw_bytes.bytes);
-    try std.testing.expect(std.mem.indexOf(u8, runtime.transcript.items, "modal v2\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, runtime.transcript.items, "stream chunk\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, runtime.transcript.items, "modal v1") == null);
+    try std.testing.expect(std.mem.find(u8, runtime.transcript.items, "modal v2\n") != null);
+    try std.testing.expect(std.mem.find(u8, runtime.transcript.items, "stream chunk\n") != null);
+    try std.testing.expect(std.mem.find(u8, runtime.transcript.items, "modal v1") == null);
 }
 
 test "tool status raw entry updates after command output appends" {
@@ -13638,7 +13637,7 @@ fn checkCompactParallelFallbackAllocationFailures(alloc: Allocator) !void {
 
 test "compact parallel fallbacks are atomic across allocation failures" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkCompactParallelFallbackAllocationFailures,
         .{},
     );
@@ -14291,7 +14290,7 @@ test "transcript lifecycle identity updates are idempotent and atomic" {
             .activity_kind = .read,
         } });
     }
-    const authoritative_id = lifecycleId(1, "authoritative-" ++ ("x" ** 800));
+    const authoritative_id = lifecycleId(1, "authoritative-" ++ text_utils.repeat("x", 800));
     const record_capacity_before = runtime.lifecycle_state.records.capacity();
     _ = try runtime.applyToolLifecycle(alloc, .{ .authoritative_started = .{
         .id = authoritative_id,
@@ -14646,7 +14645,7 @@ test "transcript lifecycle terminal and finalization transitions stay batch safe
         } });
         var expected: [128]u8 = undefined;
         const expected_line = if (case.kind == .cancelled)
-            try std.fmt.bufPrint(
+            try std.mem.print(
                 &expected,
                 "{s}{s}{s} {s}{s}{s} · What can fx do differently?\n",
                 .{
@@ -14659,7 +14658,7 @@ test "transcript lifecycle terminal and finalization transitions stay batch safe
                 },
             )
         else
-            try std.fmt.bufPrint(
+            try std.mem.print(
                 &expected,
                 "{s}{s}{s} {s}\n",
                 .{ case.marker_style, case.marker, ui_render.reset_style, case.summary },
@@ -14688,7 +14687,7 @@ test "transcript lifecycle terminal and finalization transitions stay batch safe
         .outcome = .{ .kind = .completed, .summary = "● Late completion" },
     } });
     var late_completion_expected: [128]u8 = undefined;
-    try expectRawEntryBytes(&runtime, old_entry_id, try std.fmt.bufPrint(
+    try expectRawEntryBytes(&runtime, old_entry_id, try std.mem.print(
         &late_completion_expected,
         "{s}●{s} Late completion\n",
         .{ ui_render.system_notice_text_style, ui_render.reset_style },
@@ -14753,7 +14752,7 @@ test "transcript lifecycle terminal markers preserve ANSI summaries and normaliz
         },
     } });
     var styled_expected: [128]u8 = undefined;
-    try expectRawEntryBytes(&runtime, styled_entry_id, try std.fmt.bufPrint(
+    try expectRawEntryBytes(&runtime, styled_entry_id, try std.mem.print(
         &styled_expected,
         "{s}●{s} Ran command\x1b[0m\n",
         .{ ui_render.system_notice_text_style, ui_render.reset_style },
@@ -14768,7 +14767,7 @@ test "transcript lifecycle terminal markers preserve ANSI summaries and normaliz
         },
     } });
     var styled_cancelled_expected: [256]u8 = undefined;
-    try expectRawEntryBytes(&runtime, styled_cancelled_entry_id, try std.fmt.bufPrint(
+    try expectRawEntryBytes(&runtime, styled_cancelled_entry_id, try std.mem.print(
         &styled_cancelled_expected,
         "{s}■{s}{s} Cancelled\x1b[0m \x1b[38;5;245msleep 30\x1b[0m{s}" ++
             " · What can fx do differently?\n",
@@ -14789,7 +14788,7 @@ test "transcript lifecycle terminal markers preserve ANSI summaries and normaliz
         },
     } });
     var malformed_expected: [128]u8 = undefined;
-    try expectRawEntryBytes(&runtime, malformed_entry_id, try std.fmt.bufPrint(
+    try expectRawEntryBytes(&runtime, malformed_entry_id, try std.mem.print(
         &malformed_expected,
         "{s}●{s} write_file failed: invalid JSON arguments\n",
         .{ ui_render.red_style, ui_render.reset_style },
@@ -14801,7 +14800,7 @@ test "transcript lifecycle terminal markers preserve ANSI summaries and normaliz
         .outcome = .interrupted,
     } });
     var cancelled_expected: [128]u8 = undefined;
-    try expectRawEntryBytes(&runtime, cancelled_entry_id, try std.fmt.bufPrint(
+    try expectRawEntryBytes(&runtime, cancelled_entry_id, try std.mem.print(
         &cancelled_expected,
         "{s}■{s} {s}Tool cancelled{s} · What can fx do differently?\n",
         .{
@@ -14818,7 +14817,7 @@ test "transcript lifecycle terminal markers preserve ANSI summaries and normaliz
         .outcome = .failed,
     } });
     var failed_expected: [128]u8 = undefined;
-    try expectRawEntryBytes(&runtime, failed_entry_id, try std.fmt.bufPrint(
+    try expectRawEntryBytes(&runtime, failed_entry_id, try std.mem.print(
         &failed_expected,
         "{s}●{s} Tool failed\n",
         .{ ui_render.red_style, ui_render.reset_style },
@@ -14929,7 +14928,7 @@ fn checkLifecycleRepositionAllocationFailures(alloc: Allocator) !void {
 
 test "coalesced approval lifecycle reposition is atomic across allocation failures" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkLifecycleRepositionAllocationFailures,
         .{},
     );
@@ -15108,7 +15107,7 @@ fn checkLifecycleAllocationFailures(alloc: Allocator) !void {
 
 test "transcript lifecycle transactions are atomic across allocation failures" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkLifecycleAllocationFailures,
         .{},
     );
@@ -15149,7 +15148,7 @@ fn checkLateTerminalFallbackAllocationFailuresImpl(alloc: Allocator) !void {
     };
 
     var expected: [128]u8 = undefined;
-    try expectRawEntryBytes(&runtime, entry_id, try std.fmt.bufPrint(
+    try expectRawEntryBytes(&runtime, entry_id, try std.mem.print(
         &expected,
         "{s}●{s} Late completion\n",
         .{ ui_render.system_notice_text_style, ui_render.reset_style },
@@ -15172,7 +15171,7 @@ fn checkLateTerminalFallbackAllocationFailures(alloc: Allocator) !void {
 
 test "late terminal fallback replacement is atomic across allocation failures" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkLateTerminalFallbackAllocationFailures,
         .{},
     );
@@ -15229,7 +15228,7 @@ fn checkProvisionalTerminalAllocationFailures(alloc: Allocator) !void {
 
 test "provisional terminal admission is atomic across allocation failures" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkProvisionalTerminalAllocationFailures,
         .{},
     );
@@ -15292,14 +15291,14 @@ fn checkCommandProcessTerminalAllocationFailures(alloc: Allocator) !void {
 
 test "command process terminal admission is atomic across allocation failures" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkCommandProcessTerminalAllocationFailures,
         .{},
     );
 }
 
 test "capped parallel lifecycle progress keeps bounded allocations and pins" {
-    const backing = std.testing.allocator;
+    const backing = testing_allocator.no_resize;
     var counted = std.testing.FailingAllocator.init(backing, .{});
     const alloc = counted.allocator();
     var runtime = lifecycleTestRuntime(256);
@@ -15316,7 +15315,7 @@ test "capped parallel lifecycle progress keeps bounded allocations and pins" {
     try std.testing.expect(runtime.toolDetailForEntry(first_entry_id) != null);
     try std.testing.expect(runtime.toolDetailForEntry(second_entry_id) != null);
     const capacity_after_start = runtime.tool_details.capacity;
-    const progress_text = "● Reading progress " ++ ("x" ** 256);
+    const progress_text = "● Reading progress " ++ text_utils.repeat("x", 256);
     _ = try runtime.applyToolLifecycle(alloc, .{ .progress = .{
         .id = lifecycleId(1, call_ids[0]),
         .text = progress_text,
@@ -15370,7 +15369,7 @@ test "lifecycle pins survive low cap until batch cleanup restores prune eligibil
     try std.testing.expectEqual(@as(usize, 2), runtime.lifecyclePinCount());
     var first_complete_expected: [128]u8 = undefined;
     try std.testing.expectEqualStrings(
-        try std.fmt.bufPrint(
+        try std.mem.print(
             &first_complete_expected,
             "{s}●{s} First complete\n",
             .{ ui_render.system_notice_text_style, ui_render.reset_style },
@@ -15546,7 +15545,7 @@ test "finality floor holds unfenced tool turn across quiet ticks and settles aft
 
     for (0..6) |index| {
         var line: [32]u8 = undefined;
-        const text = try std.fmt.bufPrint(&line, "final context {d:0>2}\n", .{index});
+        const text = try std.mem.print(&line, "final context {d:0>2}\n", .{index});
         _ = try runtime.appendRawTranscriptEntry(alloc, text);
     }
     var base_source = try runtime.prepareTranscriptSource(alloc, null);
@@ -15557,7 +15556,7 @@ test "finality floor holds unfenced tool turn across quiet ticks and settles aft
 
     var turn_call_ids: [8][12]u8 = undefined;
     for (0..8) |index| {
-        const call_id = try std.fmt.bufPrint(&turn_call_ids[index], "t2-call-{d:0>2}", .{index});
+        const call_id = try std.mem.print(&turn_call_ids[index], "t2-call-{d:0>2}", .{index});
         const id = types.ToolLifecycleId{ .turn_id = 2, .call_id = call_id };
         _ = try runtime.applyToolLifecycle(alloc, .{ .authoritative_started = .{
             .id = id,
@@ -15863,7 +15862,7 @@ test "pending replacement notice holds release until the finished replacement se
 
     for (0..4) |index| {
         var line: [24]u8 = undefined;
-        const text = try std.fmt.bufPrint(&line, "history {d:0>2}\n", .{index});
+        const text = try std.mem.print(&line, "history {d:0>2}\n", .{index});
         _ = try runtime.appendRawTranscriptEntry(alloc, text);
     }
     var base_source = try runtime.prepareTranscriptSource(alloc, null);
@@ -15878,7 +15877,7 @@ test "pending replacement notice holds release until the finished replacement se
     });
     for (0..6) |index| {
         var line: [24]u8 = undefined;
-        const text = try std.fmt.bufPrint(&line, "later {d:0>2}\n", .{index});
+        const text = try std.mem.print(&line, "later {d:0>2}\n", .{index});
         _ = try runtime.appendRawTranscriptEntry(alloc, text);
     }
 
@@ -16015,14 +16014,12 @@ test "finality candidates anchor a fully grouped turn at its newest rendered gro
     try std.testing.expectEqual(@as(usize, 1), source.finality.tool_turn_floors.len);
     try std.testing.expect(source.finality.mutation_pin_start == null);
 
-    const group_a_header = try std.fmt.allocPrint(
-        alloc,
+    const group_a_header = try alloc.print(
         "{s}●\x1b[0m {s}3 tool calls · 3 read\x1b[0m",
         .{ user_message_card.promptMarkerStyle(), ui_render.statusline_style },
     );
     defer alloc.free(group_a_header);
-    const group_b_header = try std.fmt.allocPrint(
-        alloc,
+    const group_b_header = try alloc.print(
         "{s}●\x1b[0m {s}1 tool call · 1 read\x1b[0m",
         .{ user_message_card.promptMarkerStyle(), ui_render.statusline_style },
     );
@@ -16058,8 +16055,7 @@ test "finality candidates keep a mixed legacy turn at its earliest rendered tool
     try std.testing.expectEqual(@as(usize, 1), source.finality.tool_turn_floors.len);
     try std.testing.expect(source.finality.mutation_pin_start == null);
 
-    const group_a_header = try std.fmt.allocPrint(
-        alloc,
+    const group_a_header = try alloc.print(
         "{s}●\x1b[0m {s}1 tool call · 1 read\x1b[0m",
         .{ user_message_card.promptMarkerStyle(), ui_render.statusline_style },
     );

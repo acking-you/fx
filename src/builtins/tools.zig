@@ -851,14 +851,14 @@ pub fn toolHasPermissionContract(tool_name: []const u8) bool {
 test "registry classifies every built-in progress label" {
     inline for (all) |tool| {
         var started_buf: [96]u8 = undefined;
-        const started = try std.fmt.bufPrint(&started_buf, "{s} value", .{tool.action_label});
+        const started = try std.mem.print(&started_buf, "{s} value", .{tool.action_label});
         try std.testing.expectEqual(
             tool_dispatch.ProgressLabelKind.started,
             tool_dispatch.classifyProgressLabel(registry, started),
         );
 
         var completed_buf: [96]u8 = undefined;
-        const completed = try std.fmt.bufPrint(&completed_buf, "{s} value", .{tool.completed_action_label});
+        const completed = try std.mem.print(&completed_buf, "{s} value", .{tool.completed_action_label});
         try std.testing.expectEqual(
             tool_dispatch.ProgressLabelKind.completed,
             tool_dispatch.classifyProgressLabel(registry, completed),

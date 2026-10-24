@@ -20,7 +20,7 @@ extern "c" fn execv(path: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_i
 extern "c" fn execve(path: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, envp: [*:null]const ?[*:0]const u8) c_int;
 
 pub fn supported() bool {
-    return switch (builtin.os.tag) {
+    return switch (builtin.target.os.tag) {
         .linux, .macos => true,
         else => false,
     };
@@ -41,14 +41,14 @@ fn spawnUnix(
     cwd: []const u8,
 ) !Spawned {
     if (argv.len == 0) return error.PtyUnavailable;
-    const cwd_z = try alloc.dupeZ(u8, cwd);
+    const cwd_z = try alloc.dupeSentinel(u8, cwd, 0);
     defer alloc.free(cwd_z);
     const argv_z = try alloc.alloc([:0]u8, argv.len);
     defer alloc.free(argv_z);
     var copied: usize = 0;
     defer for (argv_z[0..copied]) |value| alloc.free(value);
     for (argv, 0..) |value, index| {
-        argv_z[index] = try alloc.dupeZ(u8, value);
+        argv_z[index] = try alloc.dupeSentinel(u8, value, 0);
         copied += 1;
     }
     const argv_ptrs = try alloc.allocSentinel(?[*:0]const u8, argv.len, null);

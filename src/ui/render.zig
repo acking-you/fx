@@ -151,8 +151,7 @@ pub fn buildInputLineForRow(input: []const u8, cursor: usize, line_index: usize,
 }
 
 pub fn welcomeMessage(alloc: std.mem.Allocator) ![]u8 {
-    return std.fmt.allocPrint(
-        alloc,
+    return alloc.print(
         "{s}𝒇x{s}{s} v{s} · Run /help for commands" ++ reset_style ++ "\n\n",
         .{ subtitle_style, reset_style, dim_style, main.version },
     );
@@ -190,7 +189,7 @@ fn compactModelLabel(model: []const u8, out: []u8) []const u8 {
         const prefix = mapping[0];
         const label = mapping[1];
         if (std.mem.startsWith(u8, claude_name, prefix)) {
-            return std.fmt.bufPrint(out, "{s}{s}", .{ label, claude_name[prefix.len..] }) catch bare;
+            return std.mem.print(out, "{s}{s}", .{ label, claude_name[prefix.len..] }) catch bare;
         }
     }
 
@@ -200,8 +199,8 @@ fn compactModelLabel(model: []const u8, out: []u8) []const u8 {
 fn permissionModeStatusLabel(mode: types.PermissionMode, out: []u8) []const u8 {
     return switch (mode) {
         .ask => "ask",
-        .auto => std.fmt.bufPrint(out, "{s}auto{s}", .{ permission_auto_style, statusline_style }) catch "auto",
-        .yolo => std.fmt.bufPrint(out, "{s}YOLO{s}", .{ permission_auto_style, statusline_style }) catch "YOLO",
+        .auto => std.mem.print(out, "{s}auto{s}", .{ permission_auto_style, statusline_style }) catch "auto",
+        .yolo => std.mem.print(out, "{s}YOLO{s}", .{ permission_auto_style, statusline_style }) catch "YOLO",
     };
 }
 
@@ -372,7 +371,7 @@ pub fn buildHintLine(
     }
     if (!awaiting_permission and queued_count > 0) {
         var queued_buf: [32]u8 = undefined;
-        appendStatusSegment(out, &end, std.fmt.bufPrint(&queued_buf, "queued {d}", .{queued_count}) catch "");
+        appendStatusSegment(out, &end, std.mem.print(&queued_buf, "queued {d}", .{queued_count}) catch "");
     }
     const status_limit = @min(@as(usize, width), out.len);
     // Effort is a user-visible session setting. Model capability metadata may
@@ -406,11 +405,11 @@ pub fn buildHintLine(
             const total_k: u64 = @as(u64, total) / 1000;
             const pct = if (total > 0) (statusline.context_used * 100) / @as(u64, total) else 0;
             var ctx_buf: [48]u8 = undefined;
-            appendStatusSegment(out, &end, std.fmt.bufPrint(&ctx_buf, "Context: {d}k/{d}k {d}%", .{ used_k, total_k, pct }) catch "");
+            appendStatusSegment(out, &end, std.mem.print(&ctx_buf, "Context: {d}k/{d}k {d}%", .{ used_k, total_k, pct }) catch "");
         } else {
             const used_k = statusline.context_used / 1000;
             var ctx_buf: [32]u8 = undefined;
-            appendStatusSegment(out, &end, std.fmt.bufPrint(&ctx_buf, "Context: {d}k", .{used_k}) catch "");
+            appendStatusSegment(out, &end, std.mem.print(&ctx_buf, "Context: {d}k", .{used_k}) catch "");
         }
     }
     appendWorkspaceIdentity(out, &end, status_limit, statusline);
@@ -585,7 +584,7 @@ test "render geometry wrappers match visual layout projections" {
 
 test "render row window stays cursor-containing for direct and restored input" {
     var buf: [128]u8 = undefined;
-    inline for (.{ "x" ** 4096, "y" ** 5000 }) |input| {
+    inline for (.{ text_utils.repeat("x", 4096), text_utils.repeat("y", 5000) }) |input| {
         const summary = visual_layout.summarize(.{ .input = input, .cursor = input.len, .terminal_cols = 80 }, null);
         const window = visual_layout.visibleWindow(summary.cursor.row_index, summary.total_rows, 4);
         try std.testing.expect(window.first_row <= summary.cursor.row_index);
@@ -658,7 +657,7 @@ fn sanitizedTerminalTitleLabel(raw: []const u8, buffer: *[terminal_title_max_lab
         };
         if (raw.len - source_index < sequence_len) break;
         const sequence = raw[source_index .. source_index + sequence_len];
-        const codepoint = std.unicode.utf8Decode(sequence) catch {
+        const codepoint = display_width.decodeUtf8Sequence(sequence) catch {
             source_index += 1;
             continue;
         };
@@ -723,7 +722,7 @@ test "terminal title sanitizes and bounds untrusted labels" {
     var sink = try tmp.dir.createFile(std.testing.io, "terminal-title-hostile.log", .{});
     defer sink.close(io_mod.getIo());
 
-    terminalTitleFor(&sink).set("safe\x07\x1b]2;owned\xc2\x9b" ++ ("é" ** 80));
+    terminalTitleFor(&sink).set("safe\x07\x1b]2;owned\xc2\x9b" ++ text_utils.repeat("é", 80));
 
     var written_file = try tmp.dir.openFile(io_mod.getIo(), "terminal-title-hostile.log", .{});
     defer written_file.close(io_mod.getIo());
@@ -762,7 +761,7 @@ pub fn formatResumeHandoff(
     const command = "fx --resume ";
     const single_row_width = label.len + 1 + command.len + session_id.len;
     const separator = if (single_row_width <= terminal_cols) " " else "\n  ";
-    return std.fmt.bufPrint(
+    return std.mem.print(
         buffer,
         "{s}{s}{s}{s}{s}{s}\n",
         .{ dim_style, label, separator, command, session_id, reset_style },
@@ -834,7 +833,7 @@ test "initTheme selects the light inline code foreground" {
     defer out.deinit(alloc);
 
     try processor.push(alloc, "run `zig build` now\n", &out);
-    try std.testing.expectEqualStrings("run \x1b[38;5;247mzig build\x1b[39m now\n", out.items);
+    try std.testing.expectEqualStrings("run \x1b[38;5;235mzig build\x1b[39m now\n", out.items);
 }
 
 test "welcomeMessage shows version and help hint" {
@@ -851,8 +850,7 @@ test "welcomeMessage keeps only the app name bright" {
     const message = try welcomeMessage(std.testing.allocator);
     defer std.testing.allocator.free(message);
 
-    const expected = try std.fmt.allocPrint(
-        std.testing.allocator,
+    const expected = try std.testing.allocator.print(
         "{s}𝒇x{s}{s} v{s} · Run /help for commands" ++ reset_style ++ "\n\n",
         .{ subtitle_style, reset_style, dim_style, main.version },
     );
@@ -1018,8 +1016,7 @@ test "buildHintLine keeps system labels and dot separators" {
         .context_used = 43_000,
         .context_total = 1_000_000,
     }, 256, &buf);
-    const expected = try std.fmt.allocPrint(
-        std.testing.allocator,
+    const expected = try std.testing.allocator.print(
         "run /login · queued 2 · {s}auto{s} · opus 4.8 · low · ⚡︎ · Context: 43k/1000k 4%",
         .{ permission_auto_style, statusline_style },
     );
@@ -1042,7 +1039,7 @@ test "buildHintLine colors auto mode with theme accent" {
     const dark_status = statusline_style;
     var dark_buf: [128]u8 = undefined;
     const dark_line = buildHintLine(false, false, true, "openai/gpt-4o", .auto, 0, null, false, false, .auto, .{}, 80, &dark_buf);
-    const dark_expected = try std.fmt.allocPrint(std.testing.allocator, "{s}auto{s} · gpt-4o", .{ dark_accent, dark_status });
+    const dark_expected = try std.testing.allocator.print("{s}auto{s} · gpt-4o", .{ dark_accent, dark_status });
     defer std.testing.allocator.free(dark_expected);
     try std.testing.expectEqualStrings(dark_expected, dark_line);
 
@@ -1051,7 +1048,7 @@ test "buildHintLine colors auto mode with theme accent" {
     try std.testing.expect(!std.mem.eql(u8, permission_auto_style, dark_accent));
     var light_buf: [128]u8 = undefined;
     const light_line = buildHintLine(false, false, true, "openai/gpt-4o", .auto, 0, null, false, false, .auto, .{}, 80, &light_buf);
-    const light_expected = try std.fmt.allocPrint(std.testing.allocator, "{s}auto{s} · gpt-4o", .{ permission_auto_style, statusline_style });
+    const light_expected = try std.testing.allocator.print("{s}auto{s} · gpt-4o", .{ permission_auto_style, statusline_style });
     defer std.testing.allocator.free(light_expected);
     try std.testing.expectEqualStrings(light_expected, light_line);
 }
@@ -1060,8 +1057,7 @@ test "buildHintLine renders yolo uppercase with subdued permission styling" {
     initTheme(false, null);
     var buf: [128]u8 = undefined;
     const line = buildHintLine(false, false, true, "openai/gpt-4o", .yolo, 0, null, false, false, .auto, .{}, 80, &buf);
-    const expected = try std.fmt.allocPrint(
-        std.testing.allocator,
+    const expected = try std.testing.allocator.print(
         "{s}YOLO{s} · gpt-4o",
         .{ permission_auto_style, statusline_style },
     );
@@ -1076,7 +1072,7 @@ test "buildHintLine clips styled auto mode by visible width" {
 
     var buf: [128]u8 = undefined;
     const line = buildHintLine(false, false, true, "openai/gpt-4o", .auto, 0, null, false, false, .auto, .{}, 13, &buf);
-    const expected = try std.fmt.allocPrint(std.testing.allocator, "{s}auto{s} · gpt-4o", .{ permission_auto_style, statusline_style });
+    const expected = try std.testing.allocator.print("{s}auto{s} · gpt-4o", .{ permission_auto_style, statusline_style });
     defer std.testing.allocator.free(expected);
 
     try std.testing.expectEqualStrings(expected, line);

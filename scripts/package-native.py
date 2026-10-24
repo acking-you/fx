@@ -45,8 +45,8 @@ def main():
     root = Path(__file__).resolve().parents[1]
     os.chdir(root)
     zig = os.environ.get("ZIG", "zig")
-    if subprocess.check_output([zig, "version"], text=True).strip() != "0.16.0":
-        raise SystemExit("Native releases require Zig 0.16.0")
+    if subprocess.check_output([zig, "version"], text=True).strip() != "0.17.0":
+        raise SystemExit("Native releases require Zig 0.17.0")
     revision = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
     version = re.search(r'pub const version = "([^"]+)";', (root / "src/main.zig").read_text())[1]
     target, libraries, minimum = TARGETS[args.target]
@@ -69,7 +69,7 @@ def main():
             shutil.copyfile(root / name, stage / name)
         manifest = {
             "schema_version": 1, "version": version, "revision": revision, "abi_version": 1,
-            "target": args.target, "zig_target": target, "zig_version": "0.16.0",
+            "target": args.target, "zig_target": target, "zig_version": "0.17.0",
             "optimization": "ReleaseSafe", "cpu": "baseline", "minimum_system": minimum,
             "linkage": "static", "library": f"lib/{archive}", "system_libraries": libraries,
             "library_sha256": hashlib.sha256(native.read_bytes()).hexdigest(),

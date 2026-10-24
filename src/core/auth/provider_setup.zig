@@ -185,7 +185,7 @@ fn readSourceAuth(
     fallback_dir_name: []const u8,
 ) !?[]u8 {
     var source_dir = if (io_mod.getenv(home_env)) |configured| configured: {
-        if (!std.fs.path.isAbsolute(configured)) return error.InvalidSourceCredentialPath;
+        if (!std.Io.Dir.path.isAbsolute(configured)) return error.InvalidSourceCredentialPath;
         break :configured try io_mod.openDirAbsoluteNoFollow(configured, .{});
     } else fallback: {
         const home = io_mod.getenv("HOME") orelse return error.HomeNotSet;
@@ -473,15 +473,14 @@ fn testJwt(alloc: Allocator, payload: []const u8) ![]u8 {
     const encoded = try alloc.alloc(u8, encoded_len);
     defer alloc.free(encoded);
     _ = std.base64.url_safe_no_pad.Encoder.encode(encoded, payload);
-    return std.fmt.allocPrint(alloc, "header.{s}.signature", .{encoded});
+    return alloc.print("header.{s}.signature", .{encoded});
 }
 
 test "Codex CLI parser validates the account bound to the access token" {
     const alloc = std.testing.allocator;
     const token = try testJwt(alloc, "{\"exp\":4102444800,\"https://api.openai.com/auth\":{\"chatgpt_account_id\":\"acct_setup\"}}");
     defer alloc.free(token);
-    const text = try std.fmt.allocPrint(
-        alloc,
+    const text = try alloc.print(
         "{{\"auth_mode\":\"chatgpt\",\"tokens\":{{\"access_token\":\"{s}\",\"refresh_token\":\"refresh\",\"account_id\":\"acct_setup\"}}}}",
         .{token},
     );
@@ -496,8 +495,7 @@ test "Grok Build parser preserves team refresh identity" {
     const alloc = std.testing.allocator;
     const token = try testJwt(alloc, "{\"exp\":4102444800,\"sub\":\"user_setup\",\"principal_type\":\"Team\",\"principal_id\":\"team_setup\"}");
     defer alloc.free(token);
-    const text = try std.fmt.allocPrint(
-        alloc,
+    const text = try alloc.print(
         "{{\"{s}\":{{\"key\":\"{s}\",\"auth_mode\":\"oidc\",\"user_id\":\"team_setup\",\"refresh_token\":\"refresh\",\"oidc_issuer\":\"{s}\",\"oidc_client_id\":\"{s}\",\"principal_type\":\"Team\",\"principal_id\":\"team_setup\"}}}}",
         .{ grok_scope, token, grok_issuer, grok_client_id },
     );

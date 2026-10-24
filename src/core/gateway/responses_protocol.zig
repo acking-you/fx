@@ -1,3 +1,4 @@
+const testing_allocator = @import("../shared/testing_allocator.zig");
 const std = @import("std");
 const stream_provider = @import("../agent/stream_provider.zig");
 const responses_compaction_provider = @import("responses_compaction_provider.zig");
@@ -2769,7 +2770,7 @@ fn checkRawResponsesRequestAllocationFailures(alloc: Allocator) !void {
 
 test "Responses raw request options clean up every allocation failure" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkRawResponsesRequestAllocationFailures,
         .{},
     );

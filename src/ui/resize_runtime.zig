@@ -24,7 +24,7 @@ pub const FrameCommit = enum {
     reset,
 };
 
-pub const supports_resize_signal = switch (builtin.os.tag) {
+pub const supports_resize_signal = switch (builtin.target.os.tag) {
     .linux,
     .plan9,
     .illumos,
@@ -823,7 +823,7 @@ const ProbeOrderingTerminal = struct {
 };
 
 test "Windows resize polling applies changed console geometry" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag != .windows) return error.SkipZigTest;
     const next_layout: Layout = .{
         .rows = 40,
         .cols = 100,

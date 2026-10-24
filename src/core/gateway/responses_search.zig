@@ -1,3 +1,4 @@
+const testing_allocator = @import("../shared/testing_allocator.zig");
 const std = @import("std");
 
 const Allocator = std.mem.Allocator;
@@ -374,7 +375,7 @@ fn checkAllocationFailures(alloc: Allocator) !void {
 
 test "Responses standalone search codecs clean up allocation failures" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkAllocationFailures,
         .{},
     );

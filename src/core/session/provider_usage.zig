@@ -111,7 +111,7 @@ pub const Summary = struct {
         }
         if (self.total_tokens == 0 and self.request_count == 0) return "Usage: 0";
         const total_k = self.total_tokens / 1000;
-        return std.fmt.bufPrint(out, "Usage: {d}k", .{total_k}) catch "Usage";
+        return std.mem.print(out, "Usage: {d}k", .{total_k}) catch "Usage";
     }
 
     pub fn writeJson(self: Summary, writer: *std.Io.Writer) !void {
@@ -151,7 +151,7 @@ fn formatAccountLimits(summary: Summary, out: []u8) []const u8 {
 }
 
 fn appendWindow(out: []u8, end: *usize, window: WindowRemaining) void {
-    const formatted = std.fmt.bufPrint(
+    const formatted = std.mem.print(
         out[end.*..],
         "{s} {d}%",
         .{ window.kind.label(), window.remaining_percent },

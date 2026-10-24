@@ -52,7 +52,7 @@ const HttpOperation = struct {
         defer secret.zeroAndFree(self.alloc, response_buffer);
         var response_writer = std.Io.Writer.fixed(response_buffer);
 
-        const result = client.fetch(.{
+        const result = http_client.fetchHttp(&client, .{
             .location = .{ .url = self.request.url },
             .method = switch (self.request.method) {
                 .get => .GET,

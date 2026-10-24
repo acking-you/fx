@@ -121,8 +121,7 @@ pub const MigrationStats = struct {
 };
 
 pub fn encodeCursor(alloc: Allocator, cursor: Cursor) Allocator.Error![]u8 {
-    return std.fmt.allocPrint(
-        alloc,
+    return alloc.print(
         "v1:{x:0>16}:{x:0>16}",
         .{ cursor.generation, cursor.offset },
     );
@@ -1365,7 +1364,7 @@ test "relationship index codec reads schema one files into the original epoch" {
     try writeInt(&header_out.writer, u64, 0);
     try writeInt(&header_out.writer, i128, 0);
     try writeInt(&header_out.writer, u64, 0);
-    try header_out.writer.writeByte(@intFromEnum(PendingKind.none));
+    try header_out.writer.writeByte(@backingInt(PendingKind.none));
     try writeInt(&header_out.writer, u64, no_slot);
     try writeInt(&header_out.writer, u64, no_slot);
     try writeInt(&header_out.writer, u16, 0);

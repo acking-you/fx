@@ -591,8 +591,7 @@ test "exact command sources delete replay and missing handles retain it" {
     var body: std.ArrayList(u8) = .empty;
     defer body.deinit(arena);
     try body.appendNTimes(arena, 'x', 80 * 1024);
-    const stored_source = try std.fmt.allocPrint(
-        arena,
+    const stored_source = try arena.print(
         "exit_code=0\n<stdout>\n{s}\n</stdout>\n",
         .{body.items},
     );
@@ -650,8 +649,7 @@ test "exact command sources delete replay and missing handles retain it" {
         );
         transformed_capture.appendAccepted(arena, .stdout, case.raw);
         transformed_capture.seal(arena);
-        const projected_source = try std.fmt.allocPrint(
-            arena,
+        const projected_source = try arena.print(
             "exit_code=0\n<stdout>\n{s}\n</stdout>\n",
             .{case.projected},
         );
@@ -832,8 +830,7 @@ test "required exec command stores large output only as replay" {
     var cancel = std.atomic.Value(bool).init(false);
     const body = try arena.alloc(u8, result_store.large_result_threshold_bytes + 1024);
     @memset(body, 'x');
-    const raw_output = try std.fmt.allocPrint(
-        arena,
+    const raw_output = try arena.print(
         "exit_code=0\n<stdout>\n{s}\n</stdout>\n",
         .{body},
     );

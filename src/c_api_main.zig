@@ -8,7 +8,7 @@ pub const Handle = opaque {};
 threadlocal var error_buffer: [256]u8 = @splat(0);
 
 fn fail(err: anyerror) c_int {
-    _ = std.fmt.bufPrintZ(&error_buffer, "{s}", .{@errorName(err)}) catch unreachable;
+    _ = std.mem.printSentinel(&error_buffer, "{s}", .{@errorName(err)}, 0) catch unreachable;
     return switch (err) {
         error.Closed => 3,
         error.Backpressure => 4,

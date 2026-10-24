@@ -1,4 +1,5 @@
 const std = @import("std");
+const testing_allocator = @import("../../core/shared/testing_allocator.zig");
 const question_prompt = @import("../../core/agent/question_prompt.zig");
 const approval_decision = @import("../../core/permissions/approval_decision.zig");
 const subagent_input = @import("../../core/subagent/input_action.zig");
@@ -24,6 +25,7 @@ const visual_layout = @import("visual_layout.zig");
 const escape_parser = @import("escape_parser.zig");
 const shortcuts = @import("shortcuts.zig");
 const terminal_action_decoder = @import("terminal_action_decoder.zig");
+const text_utils = @import("../../core/shared/text_utils.zig");
 
 const ImageBlocks = kill_ring.ImageBlocks;
 const InputRuntime = core_input_runtime.Runtime;
@@ -676,7 +678,7 @@ test "word and line deletion families remove forward and reverse selections firs
 }
 
 test "history allocation failure preserves deletion and replacement edits" {
-    const alloc = std.testing.allocator;
+    const alloc = testing_allocator.no_resize;
     var runtime: InputRuntime = .{};
     defer runtime.deinit(alloc);
 
@@ -1364,7 +1366,7 @@ test "prompt history recalls previous inputs with up and down" {
 test "prompt history recall restores compact paste backing" {
     const alloc = std.testing.allocator;
     const placeholder = "[Pasted text #1, 1 line]";
-    const backing = "x" ** (paste_blocks.large_paste_char_threshold + 1);
+    const backing = text_utils.repeat("x", paste_blocks.large_paste_char_threshold + 1);
     var runtime = InputRuntime{};
     defer runtime.deinit(alloc);
 
@@ -1403,7 +1405,7 @@ test "prompt history recall restores image snapshots with fresh ids and exact sk
     defer alloc.free(source_path);
     const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
     defer alloc.free(root);
-    const snapshot_dir = try std.fs.path.join(alloc, &.{ root, "snapshots" });
+    const snapshot_dir = try std.Io.Dir.path.join(alloc, &.{ root, "snapshots" });
     defer alloc.free(snapshot_dir);
 
     var runtime = InputRuntime{};
@@ -1586,7 +1588,7 @@ test "prompt history semantic dedupe distinguishes paste and skill provenance" {
 }
 
 test "prompt history capture releases partial semantic entries across allocation failures" {
-    const backing = std.testing.allocator;
+    const backing = testing_allocator.no_resize;
     const text = "[Pasted text #4, 1 line] $review";
     const blocks = [_]paste_blocks.PastedBlock{.{
         .id = 4,
@@ -1676,7 +1678,7 @@ test "prompt history replacement preserves the draft across allocation failures"
             runtime.edit_state.cursor = runtime.edit_state.input.items.len;
         }
     };
-    const backing = std.testing.allocator;
+    const backing = testing_allocator.no_resize;
 
     var probe = std.testing.FailingAllocator.init(backing, .{});
     var replacement_allocations: usize = undefined;
@@ -1765,7 +1767,7 @@ test "prompt history restores the complete saved semantic draft" {
     defer alloc.free(source_path);
     const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
     defer alloc.free(root);
-    const snapshot_dir = try std.fs.path.join(alloc, &.{ root, "snapshots" });
+    const snapshot_dir = try std.Io.Dir.path.join(alloc, &.{ root, "snapshots" });
     defer alloc.free(snapshot_dir);
 
     var runtime = InputRuntime{};
@@ -1906,7 +1908,7 @@ test "prompt history limit rejection preserves active and saved drafts" {
 test "prompt history limit counts registered paste backing text" {
     const alloc = std.testing.allocator;
     const placeholder = "[Pasted text #1, 1 line]";
-    const backing = "x" ** (paste_blocks.large_paste_char_threshold + 1);
+    const backing = text_utils.repeat("x", paste_blocks.large_paste_char_threshold + 1);
     const blocks = [_]paste_blocks.PastedBlock{.{
         .id = 1,
         .text = @constCast(backing),
@@ -1956,7 +1958,7 @@ test "prompt history corrupt image rejection preserves the active draft" {
     defer alloc.free(source_path);
     const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
     defer alloc.free(root);
-    const snapshot_dir = try std.fs.path.join(alloc, &.{ root, "snapshots" });
+    const snapshot_dir = try std.Io.Dir.path.join(alloc, &.{ root, "snapshots" });
     defer alloc.free(snapshot_dir);
 
     var runtime = InputRuntime{};
@@ -2148,7 +2150,7 @@ test "backspace image placeholder removal preserves sorted attachment ids" {
     var token_start: usize = 0;
     inline for (.{ 1, 2, 3 }) |id| {
         var token_buf: [32]u8 = undefined;
-        const token = try std.fmt.bufPrint(&token_buf, "[Image #{d}]", .{id});
+        const token = try std.mem.print(&token_buf, "[Image #{d}]", .{id});
         try runtime.entities.image_tokens.append(alloc, .{
             .id = id,
             .span = .{ .raw_start = token_start, .raw_end = token_start + token.len },
@@ -2156,7 +2158,7 @@ test "backspace image placeholder removal preserves sorted attachment ids" {
         token_start += token.len;
         try blocks.append(alloc, .{
             .id = id,
-            .path = try std.fmt.allocPrint(alloc, "/tmp/{d}.png", .{id}),
+            .path = try alloc.print("/tmp/{d}.png", .{id}),
             .media_type = try alloc.dupe(u8, "image/png"),
         });
     }
@@ -2252,6 +2254,109 @@ test "input escape parser preserves modified arrow intent" {
     try expectEscapeAction("[57353;5u", moveEscape(.visual_down, false));
     try expectEscapeAction("[57353;9u", moveEscape(.draft_end, false));
     try expectEscapeAction("[1;4D", moveEscape(.word_left, true));
+}
+
+test "input escape parser maps kitty keypad keys to their main-row characters" {
+    // Kitty reports keypad keys as dedicated codes: KP_0..KP_9 = 57399-57408.
+    try expectEscapeAction("[57399u", .{ .remapped_byte = '0' });
+    try expectEscapeAction("[57408u", .{ .remapped_byte = '9' });
+    try expectEscapeAction("[57400;1u", .{ .remapped_byte = '1' });
+    // Num Lock (bit 7) is a lock state, not a modifier.
+    try expectEscapeAction("[57400;129u", .{ .remapped_byte = '1' });
+    try expectEscapeAction("[57409u", .{ .remapped_byte = '.' });
+    try expectEscapeAction("[57410u", .{ .remapped_byte = '/' });
+    try expectEscapeAction("[57411u", .{ .remapped_byte = '*' });
+    try expectEscapeAction("[57412u", .{ .remapped_byte = '-' });
+    try expectEscapeAction("[57413u", .{ .remapped_byte = '+' });
+    try expectEscapeAction("[57415u", .{ .remapped_byte = '=' });
+    // Shift keeps the character; the main row has no text for the other
+    // modifiers, and Hyper/Meta must not start typing digits either.
+    try expectEscapeAction("[57412;2u", .{ .remapped_byte = '-' });
+    try expectEscapeAction("[57410;3u", .ignore);
+    try expectEscapeAction("[57410;5u", .ignore);
+    try expectEscapeAction("[57412;9u", .ignore);
+    try expectEscapeAction("[57412;17u", .ignore);
+    try expectEscapeAction("[57412;33u", .ignore);
+    try expectEscapeAction("\x1b[57412u", .ignore);
+    try expectEscapeAction("\x1b[57412;2u", .ignore);
+}
+
+test "input escape parser keeps keypad Enter, navigation, and Delete contracts" {
+    try expectEscapeAction("[57414u", .{ .remapped_byte = '\r' });
+    try expectEscapeAction("[57414;1u", .{ .remapped_byte = '\r' });
+    try expectEscapeAction("[57414;5u", .{ .remapped_byte = '\r' });
+    try expectEscapeAction("[57414;2u", .insert_newline);
+    try expectEscapeAction("[57414;3u", .insert_newline);
+    try expectEscapeAction("[57419;1u", .cursor_up);
+    try expectEscapeAction("[57420;1u", .cursor_down);
+    try expectEscapeAction("[57417;1u", .cursor_left);
+    try expectEscapeAction("[57418;1u", .cursor_right);
+    try expectEscapeAction("[57423;1u", .home);
+    try expectEscapeAction("[57424;1u", .end);
+    try expectEscapeAction("[57419;2u", moveEscape(.visual_up, true));
+    try expectEscapeAction("[57417;5u", moveEscape(.word_left, false));
+    try expectEscapeAction("[57421u", .page_up);
+    try expectEscapeAction("[57422u", .page_down);
+    try expectEscapeAction("[57426u", .delete_next);
+    try expectEscapeAction("[3;1~", .delete_next);
+    try expectEscapeAction("[57426;2u", .ignore);
+    try expectEscapeAction("[3;2~", .ignore);
+    try expectEscapeAction("[57426;3u", .delete_word_right);
+    try expectEscapeAction("[3;3~", .delete_word_right);
+    try expectEscapeAction("[57426;5u", .delete_word_right);
+    try expectEscapeAction("[3;5~", .delete_word_right);
+    try expectEscapeAction("[57426;9u", .delete_to_line_end);
+    try expectEscapeAction("[3;9~", .delete_to_line_end);
+    // Keypad keys with no main-row equivalent stay unmapped.
+    try expectEscapeAction("[57416u", .ignore);
+    try expectEscapeAction("[57425u", .ignore);
+    try expectEscapeAction("[57427u", .ignore);
+}
+
+test "input escape parser resolves keypad keys reported with an event type" {
+    // Ghostty can append the Kitty event type as a colon-qualified modifier.
+    try expectEscapeAction("[57412;1:1u", .{ .remapped_byte = '-' });
+    try expectEscapeAction("[57412;1:2u", .{ .remapped_byte = '-' });
+    try expectEscapeAction("[57412;1:3u", .ignore);
+    // A multi-digit event type stays non-actionable instead of collapsing to
+    // its last digit.
+    try expectEscapeAction("[57412;1:12u", .ignore);
+    // A colon-qualified report with no event type is not a press.
+    try expectEscapeAction("[57412;1:0u", .ignore);
+    try expectEscapeAction("[57414;1:0u", .ignore);
+    try expectEscapeAction("[57410;1:1u", .{ .remapped_byte = '/' });
+    try expectEscapeAction("[57414;1:1u", .{ .remapped_byte = '\r' });
+    try expectEscapeAction("[57419;1:1u", .cursor_up);
+}
+
+test "input escape parser decodes application-keypad SS3 keys" {
+    // A terminal left in keypad application mode reports `ESC O <byte>`.
+    try expectEscapeAction("Op", .{ .remapped_byte = '0' });
+    try expectEscapeAction("Oq", .{ .remapped_byte = '1' });
+    try expectEscapeAction("Ox", .{ .remapped_byte = '8' });
+    try expectEscapeAction("Oy", .{ .remapped_byte = '9' });
+    try expectEscapeAction("Ol", .{ .remapped_byte = ',' });
+    try expectEscapeAction("On", .{ .remapped_byte = '.' });
+    try expectEscapeAction("Oj", .{ .remapped_byte = '*' });
+    try expectEscapeAction("Ok", .{ .remapped_byte = '+' });
+    try expectEscapeAction("Om", .{ .remapped_byte = '-' });
+    try expectEscapeAction("Oo", .{ .remapped_byte = '/' });
+    try expectEscapeAction("OM", .{ .remapped_byte = '\r' });
+    try expectEscapeAction("OX", .{ .remapped_byte = '=' });
+    // Arrows, Home, and End keep their existing SS3 mapping.
+    try expectEscapeAction("OA", .cursor_up);
+    try expectEscapeAction("OB", .cursor_down);
+    try expectEscapeAction("OC", .cursor_right);
+    try expectEscapeAction("OD", .cursor_left);
+    try expectEscapeAction("OH", .home);
+    try expectEscapeAction("OF", .end);
+    // F1-F4 and the keypad bytes with no main-row equivalent stay unmapped.
+    try expectEscapeAction("OP", .ignore);
+    try expectEscapeAction("OQ", .ignore);
+    try expectEscapeAction("OR", .ignore);
+    try expectEscapeAction("OS", .ignore);
+    try expectEscapeAction("OE", .ignore);
+    try expectEscapeAction("OI", .ignore);
 }
 
 test "input escape parser preserves double escape meta behavior" {
@@ -2371,7 +2476,7 @@ test "vertical movement never targets inside a registered paste" {
     try runtime.edit_state.input.appendSlice(alloc, input);
     try runtime.entities.pasted_blocks.append(alloc, .{
         .id = 7,
-        .text = try alloc.dupe(u8, "P" ** 1001),
+        .text = try alloc.dupe(u8, text_utils.repeat("P", 1001)),
         .line_count = 1,
         .span = .{
             .raw_start = "x\n".len,
@@ -3926,11 +4031,11 @@ fn appendPastedBlockForTest(runtime: *InputRuntime, alloc: Allocator, id: usize,
 fn appendImageBlockForTest(runtime: *InputRuntime, blocks: *ImageBlocks, alloc: Allocator, id: usize) !void {
     try blocks.append(alloc, .{
         .id = id,
-        .path = try std.fmt.allocPrint(alloc, "/tmp/{d}.png", .{id}),
+        .path = try alloc.print("/tmp/{d}.png", .{id}),
         .media_type = try alloc.dupe(u8, "image/png"),
     });
     var placeholder_buf: [64]u8 = undefined;
-    const placeholder = try std.fmt.bufPrint(&placeholder_buf, "[Image #{d}]", .{id});
+    const placeholder = try std.mem.print(&placeholder_buf, "[Image #{d}]", .{id});
     if (std.mem.find(u8, runtime.edit_state.input.items, placeholder)) |raw_start| {
         try runtime.entities.image_tokens.ensureUnusedCapacity(alloc, 1);
         runtime.entities.registerImageTokenAssumeCapacity(.{
@@ -3959,7 +4064,7 @@ fn appendCapturedImageBlockForTest(
     attachment_owned = false;
 
     var placeholder_buf: [64]u8 = undefined;
-    const placeholder = try std.fmt.bufPrint(&placeholder_buf, "[Image #{d}]", .{id});
+    const placeholder = try std.mem.print(&placeholder_buf, "[Image #{d}]", .{id});
     if (std.mem.find(u8, runtime.edit_state.input.items, placeholder)) |raw_start| {
         try runtime.entities.image_tokens.ensureUnusedCapacity(alloc, 1);
         runtime.entities.registerImageTokenAssumeCapacity(.{
@@ -3996,7 +4101,7 @@ test "line kill and repeated yank preserve images and exact skill provenance" {
     defer alloc.free(source_path);
     const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
     defer alloc.free(root);
-    const snapshot_dir = try std.fs.path.join(alloc, &.{ root, "snapshots" });
+    const snapshot_dir = try std.Io.Dir.path.join(alloc, &.{ root, "snapshots" });
     defer alloc.free(snapshot_dir);
 
     var runtime = InputRuntime{};
@@ -4116,13 +4221,13 @@ fn checkStructuredKillYankAllocationFailure(
     std.crypto.hash.sha2.Sha256.hash(image_bytes, &digest_bytes, .{});
     const digest_hex = std.fmt.bytesToHex(digest_bytes, .lower);
     var snapshot_name_buf: [96]u8 = undefined;
-    const snapshot_name = try std.fmt.bufPrint(
+    const snapshot_name = try std.mem.print(
         &snapshot_name_buf,
         "image-8-{s}.bin",
         .{digest_hex[0..16]},
     );
     var snapshot_relative_buf: [128]u8 = undefined;
-    const snapshot_relative = try std.fmt.bufPrint(
+    const snapshot_relative = try std.mem.print(
         &snapshot_relative_buf,
         "snapshots/{s}",
         .{snapshot_name},
@@ -4153,7 +4258,7 @@ fn checkStructuredKillYankAllocationFailure(
     const media_type = try alloc.dupe(u8, "image/png");
     var media_type_owned = true;
     errdefer if (media_type_owned) alloc.free(media_type);
-    const snapshot_path = try std.fs.path.join(
+    const snapshot_path = try std.Io.Dir.path.join(
         alloc,
         &.{ root, "snapshots", snapshot_name },
     );
@@ -4242,14 +4347,14 @@ fn checkStructuredKillYankAllocationFailure(
 }
 
 test "structured kill and yank stay atomic across allocation failures" {
-    var probe = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var probe = std.testing.FailingAllocator.init(testing_allocator.no_resize, .{});
     try checkStructuredKillYankAllocationFailure(&probe);
     const allocation_count = probe.alloc_index;
     try std.testing.expectEqual(probe.allocated_bytes, probe.freed_bytes);
 
     for (0..allocation_count) |fail_index| {
         var failing = std.testing.FailingAllocator.init(
-            std.testing.allocator,
+            testing_allocator.no_resize,
             .{ .fail_index = fail_index },
         );
         checkStructuredKillYankAllocationFailure(&failing) catch |err| {
@@ -4666,7 +4771,7 @@ test "known-id pasted scans reject dense different-id prefixes" {
     try runtime.edit_state.input.appendSlice(alloc, "[Pasted text #7, 1 line]");
     for (0..128) |suffix| {
         var buf: [96]u8 = undefined;
-        const lookalike = try std.fmt.bufPrint(&buf, "[Pasted text #7{d}, nested ", .{suffix});
+        const lookalike = try std.mem.print(&buf, "[Pasted text #7{d}, nested ", .{suffix});
         try runtime.edit_state.input.appendSlice(alloc, lookalike);
     }
     try runtime.edit_state.input.append(alloc, ']');
@@ -4683,7 +4788,7 @@ test "atomic line deletion trace logs dropped backing without sensitive contents
     defer tmp.cleanup();
     const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
     defer alloc.free(root);
-    const trace_path = try std.fs.path.join(alloc, &.{ root, "line-delete-trace.log" });
+    const trace_path = try std.Io.Dir.path.join(alloc, &.{ root, "line-delete-trace.log" });
     defer alloc.free(trace_path);
 
     debug_trace.resetForTest();
@@ -4717,7 +4822,7 @@ test "atomic line deletion trace logs a same-id backing once and skips survivors
     defer tmp.cleanup();
     const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
     defer alloc.free(root);
-    const trace_path = try std.fs.path.join(alloc, &.{ root, "line-delete-dedup-trace.log" });
+    const trace_path = try std.Io.Dir.path.join(alloc, &.{ root, "line-delete-dedup-trace.log" });
     defer alloc.free(trace_path);
 
     debug_trace.resetForTest();

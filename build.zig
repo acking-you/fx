@@ -36,7 +36,7 @@ pub fn build(b: *std.Build) void {
         "napi-surface",
         "Build a Node-API addon surface (core)",
     ) orelse .none;
-    const test_filters = testFiltersFromArgs(b);
+    const test_filters = b.option([]const []const u8, "test-filter", "Only compile tests whose names contain one of these strings") orelse &.{};
 
     const git_commit = b.option([]const u8, "git-revision", "Source revision for archive builds") orelse readGitCommit(b);
     const app_version = readAppVersion(b);
@@ -56,20 +56,19 @@ pub fn build(b: *std.Build) void {
             .stack_check = false,
             .stack_protector = false,
             .omit_frame_pointer = true,
-            .unwind_tables = .none,
+            .unwind_tables = if (target.result.os.tag == .windows) null else .none,
             .error_tracing = false,
-            .strip = optimize != .Debug,
+            .strip = optimize != .debug,
         }),
     });
     exe.root_module.addImport("build_options", build_options.createModule());
+    exe.root_module.addImport("fuzz_corpus", addFuzzCorpusModule(b, readFuzzCorpora(b)));
 
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    run_cmd.addPassthruArgs();
 
     const run_step = b.step("run", "Run fx");
     run_step.dependOn(&run_cmd.step);
@@ -84,10 +83,9 @@ pub fn build(b: *std.Build) void {
     exe_tests.step.dependOn(b.getInstallStep());
     const run_exe_tests = b.addRunArtifact(exe_tests);
     run_exe_tests.step.dependOn(b.getInstallStep());
-    run_exe_tests.setEnvironmentVariable(
-        "FX_TEST_PRODUCT_EXE",
-        b.getInstallPath(.bin, "fx"),
-    );
+    const test_paths = b.addOptions();
+    test_paths.addOptionPathUntracked("product_exe", b.graph.path(.install_bin, "fx"));
+    exe.root_module.addImport("test_paths", test_paths.createModule());
 
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_exe_tests.step);
@@ -122,7 +120,7 @@ pub fn build(b: *std.Build) void {
 
     const run_bench = b.addRunArtifact(file_index_bench);
     run_bench.step.dependOn(&install_bench.step);
-    if (b.args) |args| run_bench.addArgs(args);
+    run_bench.addPassthruArgs();
     const run_bench_step = b.step("run-bench-file-index", "Build and run file_index search benchmark");
     run_bench_step.dependOn(&run_bench.step);
 
@@ -201,7 +199,7 @@ pub fn build(b: *std.Build) void {
 
     const run_approval_review_bench = b.addRunArtifact(approval_review_bench);
     run_approval_review_bench.step.dependOn(&install_approval_review_bench.step);
-    if (b.args) |args| run_approval_review_bench.addArgs(args);
+    run_approval_review_bench.addPassthruArgs();
     const run_approval_review_bench_step = b.step(
         "run-bench-approval-review",
         "Build and run the file-diff approval review benchmark",
@@ -297,7 +295,7 @@ fn addWasmArtifact(
         .root_module = b.createModule(.{
             .root_source_file = b.path(wasm_root),
             .target = wasm_target,
-            .optimize = .ReleaseSmall,
+            .optimize = .small,
             .single_threaded = true,
             .link_libc = true,
             .stack_check = false,
@@ -328,12 +326,16 @@ fn addEmbeddedArtifact(
     const root = b.createModule(.{
         .root_source_file = b.path("src/c_api_main.zig"),
         .target = target,
-        .optimize = .ReleaseSafe,
+        .optimize = .safe,
         .link_libc = true,
         .pic = true,
         .strip = b.option(bool, "embedded-strip", "Strip debug information from the embedded library") orelse false,
     });
     root.addImport("build_options", options.createModule());
+    const test_paths = b.addOptions();
+    test_paths.addOptionPathUntracked("product_exe", b.graph.path(.install_bin, "fx"));
+    root.addImport("test_paths", test_paths.createModule());
+    root.addImport("fuzz_corpus", addFuzzCorpusModule(b, readFuzzCorpora(b)));
     const library = b.addLibrary(.{
         .name = "fx_core",
         .linkage = .static,
@@ -354,6 +356,7 @@ fn addEmbeddedArtifact(
         step.dependOn(&b.addInstallArtifact(library, .{}).step);
     }
     const tests = b.addTest(.{ .root_module = root, .filters = &.{"embedded"} });
+    tests.step.dependOn(b.getInstallStep());
     const run_tests = b.addRunArtifact(tests);
     const test_step = b.step("test-embedded", "Test the embedded runtime ownership boundaries");
     test_step.dependOn(&run_tests.step);
@@ -381,7 +384,7 @@ fn addNapiArtifact(
         .root_module = b.createModule(.{
             .root_source_file = b.path(root),
             .target = target,
-            .optimize = .ReleaseSafe,
+            .optimize = .safe,
             .link_libc = true,
             .strip = true,
         }),
@@ -392,7 +395,13 @@ fn addNapiArtifact(
         "node-include-dir",
         "Directory containing node_api.h for the N-API addon",
     ) orelse discoverNodeIncludeDir(b);
-    lib.root_module.addSystemIncludePath(.{ .cwd_relative = node_include });
+    const node_api = b.addTranslateC(.{
+        .root_source_file = .{ .cwd_relative = b.pathJoin(&.{ node_include, "node_api.h" }) },
+        .target = target,
+        .optimize = .safe,
+    });
+    node_api.addSystemIncludePath(.{ .cwd_relative = node_include });
+    lib.root_module.addImport("node_api", node_api.createModule());
     lib.linker_allow_shlib_undefined = true;
 
     const install = b.addInstallArtifact(lib, .{ .dest_sub_path = "libfx.node" });
@@ -402,48 +411,36 @@ fn addNapiArtifact(
 }
 
 fn discoverNodeIncludeDir(b: *std.Build) []const u8 {
-    var code: u8 = 0;
-    const out = b.runAllowFail(
+    const out = switch (b.runFallible(
         &.{ "node", "-p", "require('node:path').join(require('node:path').dirname(process.execPath), '..', 'include', 'node')" },
-        &code,
-        .ignore,
-    ) catch std.process.fatal("Node.js is required to locate node_api.h; pass -Dnode-include-dir=<path>", .{});
-    if (code != 0) std.process.fatal("could not locate node_api.h; pass -Dnode-include-dir=<path>", .{});
+        .{ .stderr_behavior = .ignore },
+    )) {
+        .success => |stdout| stdout,
+        .spawn_failed, .crashed => std.process.fatal("Node.js is required to locate node_api.h; pass -Dnode-include-dir=<path>", .{}),
+        .bad_exit_code => std.process.fatal("could not locate node_api.h; pass -Dnode-include-dir=<path>", .{}),
+    };
     const trimmed = std.mem.trim(u8, out, " \t\r\n");
     return b.allocator.dupe(u8, trimmed) catch std.process.fatal("could not allocate Node include path", .{});
 }
 
-fn testFiltersFromArgs(b: *std.Build) []const []const u8 {
-    const args = b.args orelse return &.{};
-    var filters: std.ArrayList([]const u8) = .empty;
-    var index: usize = 0;
-    while (index < args.len) : (index += 1) {
-        if (!std.mem.eql(u8, args[index], "--test-filter")) continue;
-        if (index + 1 >= args.len) {
-            std.process.fatal("--test-filter requires a value", .{});
-        }
-        index += 1;
-        filters.append(b.allocator, args[index]) catch
-            std.process.fatal("could not allocate test filters", .{});
-    }
-    return filters.toOwnedSlice(b.allocator) catch
-        std.process.fatal("could not allocate test filters", .{});
-}
-
 fn readGitCommit(b: *std.Build) []const u8 {
-    var code: u8 = 0;
-    const out = b.runAllowFail(
+    // The configure cache cannot see a new commit, so rerun configure.
+    b.graph.poisonCache();
+    const out = switch (b.runFallible(
         &.{ "git", "rev-parse", "--short=12", "HEAD" },
-        &code,
-        .ignore,
-    ) catch return "unknown";
-    if (code != 0) return "unknown";
+        .{ .stderr_behavior = .ignore },
+    )) {
+        .success => |stdout| stdout,
+        .spawn_failed, .bad_exit_code, .crashed => return "unknown",
+    };
     const trimmed = std.mem.trim(u8, out, " \t\r\n");
     return b.allocator.dupe(u8, trimmed) catch "unknown";
 }
 
 fn readAppVersion(b: *std.Build) []const u8 {
-    const bytes = std.Io.Dir.cwd().readFileAlloc(b.graph.io, "src/main.zig", b.allocator, .limited(1024 * 1024)) catch
+    b.dependOnFileContents(b.path("src/main.zig"));
+    const main_path = b.pathJoin(&.{ b.root.sub_path, "src/main.zig" });
+    const bytes = b.root.root_dir.handle.readFileAlloc(b.graph.io, main_path, b.allocator, .limited(1024 * 1024)) catch
         @panic("could not read src/main.zig to resolve app version");
     defer b.allocator.free(bytes);
 
@@ -454,4 +451,154 @@ fn readAppVersion(b: *std.Build) []const u8 {
         @panic("could not parse pub const version in src/main.zig");
     return b.allocator.dupe(u8, bytes[start .. start + end_rel]) catch
         @panic("could not allocate app version");
+}
+
+const fuzz_registry_path = "tests/fuzz/targets.json";
+const fuzz_corpus_dir = "tests/fuzz/corpus";
+/// A saved input this large is almost certainly a mistake, such as a build
+/// artifact copied into a corpus folder.
+const max_fuzz_input_bytes = 1024 * 1024;
+
+const FuzzModule = enum { fx };
+
+/// One entry in `tests/fuzz/targets.json`.
+const FuzzTarget = struct {
+    /// Names the target's corpus folder and its `fuzz_corpus` declaration.
+    name: []const u8,
+    /// The module whose test binary holds the fuzz test.
+    module: FuzzModule,
+    /// The fuzz test's exact name, used as the test filter.
+    @"test": []const u8,
+    /// Iterations for one nightly run. Only the nightly workflow reads it.
+    iterations: u64,
+};
+
+const FuzzRegistry = struct {
+    targets: []const FuzzTarget,
+};
+
+/// A registered fuzz target and its saved inputs, sorted by file name.
+const FuzzCorpus = struct {
+    target: FuzzTarget,
+    inputs: []const []const u8,
+};
+
+/// Reads the fuzz registry and each target's saved inputs. Configuration
+/// reruns on every build (see `readGitCommit`), so a newly added input is
+/// picked up without listing it anywhere.
+fn readFuzzCorpora(b: *std.Build) []const FuzzCorpus {
+    b.dependOnFileContents(b.path(fuzz_registry_path));
+    const registry_bytes = b.root.root_dir.handle.readFileAlloc(
+        b.graph.io,
+        b.pathJoin(&.{ b.root.sub_path, fuzz_registry_path }),
+        b.allocator,
+        .limited(max_fuzz_input_bytes),
+    ) catch |err| std.process.fatal("could not read {s}: {t}", .{ fuzz_registry_path, err });
+    const registry = std.json.parseFromSliceLeaky(FuzzRegistry, b.allocator, registry_bytes, .{}) catch |err|
+        std.process.fatal("{s} is not a valid fuzz registry: {t}", .{ fuzz_registry_path, err });
+
+    const corpora = b.allocator.alloc(FuzzCorpus, registry.targets.len) catch |err|
+        std.process.fatal("could not list the fuzz targets: {t}", .{err});
+    for (registry.targets, corpora, 0..) |fuzz_target, *corpus, index| {
+        if (!isFuzzTargetName(fuzz_target.name)) std.process.fatal(
+            "{s}: fuzz target name '{s}' must start with a lowercase letter and use only lowercase letters, digits, and underscores",
+            .{ fuzz_registry_path, fuzz_target.name },
+        );
+        for (registry.targets[0..index]) |earlier| {
+            if (std.mem.eql(u8, earlier.name, fuzz_target.name)) std.process.fatal(
+                "{s}: fuzz target '{s}' is listed twice",
+                .{ fuzz_registry_path, fuzz_target.name },
+            );
+        }
+        corpus.* = .{ .target = fuzz_target, .inputs = readFuzzInputs(b, fuzz_target.name) };
+    }
+    rejectUnregisteredCorpusFolders(b, registry.targets);
+    return corpora;
+}
+
+fn isFuzzTargetName(name: []const u8) bool {
+    if (name.len == 0 or !std.ascii.isLower(name[0])) return false;
+    for (name) |byte| {
+        if (!std.ascii.isLower(byte) and !std.ascii.isDigit(byte) and byte != '_') return false;
+    }
+    return true;
+}
+
+/// Returns the files in `tests/fuzz/corpus/<name>/`, sorted by file name so
+/// the generated module does not depend on directory order. A missing folder
+/// means the target has no saved inputs yet. Dotfiles are skipped.
+fn readFuzzInputs(b: *std.Build, name: []const u8) []const []const u8 {
+    const io = b.graph.io;
+    const folder = b.pathJoin(&.{ fuzz_corpus_dir, name });
+    var dir = b.root.root_dir.handle.openDir(io, b.pathJoin(&.{ b.root.sub_path, folder }), .{
+        .iterate = true,
+    }) catch |err| switch (err) {
+        error.FileNotFound => return &.{},
+        else => std.process.fatal("could not open {s}: {t}", .{ folder, err }),
+    };
+    defer dir.close(io);
+
+    var file_names: std.ArrayList([]const u8) = .empty;
+    var entries = dir.iterate();
+    while (entries.next(io) catch |err| std.process.fatal("could not list {s}: {t}", .{ folder, err })) |entry| {
+        if (entry.name[0] == '.') continue;
+        if (entry.kind != .file) std.process.fatal(
+            "{s}/{s}: saved fuzz inputs must be regular files",
+            .{ folder, entry.name },
+        );
+        file_names.append(b.allocator, b.dupe(entry.name)) catch |err|
+            std.process.fatal("could not list {s}: {t}", .{ folder, err });
+    }
+    std.mem.sort([]const u8, file_names.items, {}, lessThanBytes);
+
+    const inputs = b.allocator.alloc([]const u8, file_names.items.len) catch |err|
+        std.process.fatal("could not read {s}: {t}", .{ folder, err });
+    for (file_names.items, inputs) |file_name, *input| {
+        b.dependOnFileContents(b.path(b.pathJoin(&.{ folder, file_name })));
+        input.* = dir.readFileAlloc(io, file_name, b.allocator, .limited(max_fuzz_input_bytes + 1)) catch |err| switch (err) {
+            error.StreamTooLong => std.process.fatal("{s}/{s} is larger than 1 MiB", .{ folder, file_name }),
+            else => std.process.fatal("could not read {s}/{s}: {t}", .{ folder, file_name, err }),
+        };
+    }
+    return inputs;
+}
+
+/// Fails the build when a corpus folder has no registry entry, so a typo in
+/// a folder name cannot leave saved inputs that never run.
+fn rejectUnregisteredCorpusFolders(b: *std.Build, targets: []const FuzzTarget) void {
+    const io = b.graph.io;
+    var dir = b.root.root_dir.handle.openDir(io, b.pathJoin(&.{ b.root.sub_path, fuzz_corpus_dir }), .{
+        .iterate = true,
+    }) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => std.process.fatal("could not open {s}: {t}", .{ fuzz_corpus_dir, err }),
+    };
+    defer dir.close(io);
+
+    var entries = dir.iterate();
+    entries: while (entries.next(io) catch |err| std.process.fatal("could not list {s}: {t}", .{ fuzz_corpus_dir, err })) |entry| {
+        if (entry.name[0] == '.') continue;
+        for (targets) |fuzz_target| {
+            if (entry.kind == .directory and std.mem.eql(u8, entry.name, fuzz_target.name)) continue :entries;
+        }
+        std.process.fatal(
+            "{s}/{s} does not match a fuzz target in {s}",
+            .{ fuzz_corpus_dir, entry.name, fuzz_registry_path },
+        );
+    }
+}
+
+fn lessThanBytes(_: void, lhs: []const u8, rhs: []const u8) bool {
+    return std.mem.lessThan(u8, lhs, rhs);
+}
+
+/// The `fuzz_corpus` module: one `[]const []const u8` of saved inputs per fx
+/// fuzz target, named after the target.
+fn addFuzzCorpusModule(b: *std.Build, corpora: []const FuzzCorpus) *std.Build.Module {
+    const options = b.addOptions();
+    for (corpora) |corpus| {
+        if (corpus.target.module != .fx) continue;
+        options.addOption([]const []const u8, corpus.target.name, corpus.inputs);
+    }
+    return options.createModule();
 }

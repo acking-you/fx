@@ -102,7 +102,7 @@ When running fx for verification, **always use the freshly-built binary at** **`
 
 ## Language and Toolchain
 
-This project is written in **Zig 0.16+**. There is no Node.js runtime, no `package.json` at the root, and no JavaScript build step for the main binary.
+This project is written in **Zig 0.17+**. There is no Node.js runtime, no `package.json` at the root, and no JavaScript build step for the main binary.
 
 Build and test commands:
 
@@ -310,9 +310,9 @@ If the change streams into the TUI, run `./zig-out/bin/fx` and drive that stream
 
 * For JSON string escaping (writing raw JSON), use the project's `writeJsonStr` helper in `src/acp/jsonrpc.zig` rather than assuming `std.json.encodeJsonString` exists.
 
-* Zig 0.16 uses `std.Io.File.stdin()` / `.stdout()` / `.stderr()`, not `std.io.getStdIn()`.
+* Zig 0.17 uses `std.Io.File.stdin()` / `.stdout()` / `.stderr()`, not `std.io.getStdIn()`.
 
-### I/O (Zig 0.16 "Juicy Main")
+### I/O (Zig 0.17 "Juicy Main")
 
 * `main` uses `pub fn main(init: std.process.Init) !void` signature.
 

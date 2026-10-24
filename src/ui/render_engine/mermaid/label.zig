@@ -52,7 +52,7 @@ pub fn wrap(alloc: Allocator, label: []const u8) Allocator.Error!Wrapped {
         const last = result.lines.items.len - 1;
         const fitted = try fitOwned(alloc, result.lines.items[last], wrap_width - 1);
         defer alloc.free(fitted);
-        const truncated = try std.fmt.allocPrint(alloc, "{s}…", .{fitted});
+        const truncated = try alloc.print("{s}…", .{fitted});
         alloc.free(result.lines.items[last]);
         result.lines.items[last] = truncated;
     }

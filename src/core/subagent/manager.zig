@@ -5477,7 +5477,7 @@ test "manager preserves one-off authority and fails oversized child evidence clo
         .prompt = "continue safely",
     } });
     defer oversized.deinit(alloc);
-    const oversized_message = "x" ** (domain.max_root_user_evidence_bytes + 1);
+    const oversized_message = text_utils.repeat("x", (domain.max_root_user_evidence_bytes + 1));
     var created_oversized = try manager.execute(alloc, oversized, .{
         .actor_id = "parent-id",
         .operation_id = "op-oversized-authority",
@@ -6649,7 +6649,7 @@ fn seedCapacityPolicyLedger(
     defer policy.deinit(alloc);
     for (0..communication.max_active_work_notifications - 1) |index| {
         var id_buffer: [64]u8 = undefined;
-        const id = try std.fmt.bufPrint(
+        const id = try std.mem.print(
             &id_buffer,
             "capacity-seed-{d}",
             .{index},
@@ -7221,7 +7221,7 @@ test "durable approval registry commits root grant before resolving child reques
         .tool_name = @constCast("bash"),
         .target_path = @constCast("git status"),
     }};
-    const prepared = [_]u8{9} ** 32;
+    const prepared = @as([32]u8, @splat(9));
     const tool_approval: communication.ApprovalInput = .{
         .id = "approval-tool",
         .kind = .tool,
@@ -7267,7 +7267,7 @@ test "durable approval registry commits root grant before resolving child reques
         .child_id = "child-id",
         .root_id = "parent-id",
         .work_id = "op-create",
-        .prepared_fingerprint = [_]u8{8} ** 32,
+        .prepared_fingerprint = @as([32]u8, @splat(8)),
         .label = "run once",
         .explanation = null,
         .grants = &grants,
@@ -7371,7 +7371,7 @@ test "durable approval registry commits root grant before resolving child reques
                 .child_id = "child-id",
                 .root_id = "parent-id",
                 .work_id = "op-create",
-                .prepared_fingerprint = [_]u8{6} ** 32,
+                .prepared_fingerprint = @as([32]u8, @splat(6)),
                 .label = "partially committed response",
                 .explanation = null,
                 .grants = &.{},
@@ -8102,9 +8102,9 @@ test "manager snapshot bounds discovery before tree pagination" {
 
     for (0..relationship_count) |index| {
         var child_buffer: [32]u8 = undefined;
-        const child_id = try std.fmt.bufPrint(&child_buffer, "child-{d:0>4}", .{index});
+        const child_id = try std.mem.print(&child_buffer, "child-{d:0>4}", .{index});
         var operation_buffer: [32]u8 = undefined;
-        const operation_id = try std.fmt.bufPrint(&operation_buffer, "attach-{d:0>4}", .{index});
+        const operation_id = try std.mem.print(&operation_buffer, "attach-{d:0>4}", .{index});
         try env.createSession(alloc, child_id);
         try executeRelationshipForTest(
             alloc,
@@ -8118,7 +8118,7 @@ test "manager snapshot bounds discovery before tree pagination" {
     }
     for (0..session_store.relationship_migration_candidate_limit + 1) |index| {
         var id_buffer: [32]u8 = undefined;
-        const id = try std.fmt.bufPrint(&id_buffer, "ordinary-{d:0>4}", .{index});
+        const id = try std.mem.print(&id_buffer, "ordinary-{d:0>4}", .{index});
         try env.createSession(alloc, id);
     }
 
@@ -8136,7 +8136,7 @@ test "manager snapshot bounds discovery before tree pagination" {
     try std.testing.expect(counters.candidates_owned <= 128);
     for (snapshot.snapshot.nodes, 0..) |node, index| {
         var expected_buffer: [32]u8 = undefined;
-        const expected = try std.fmt.bufPrint(
+        const expected = try std.mem.print(
             &expected_buffer,
             "child-{d:0>4}",
             .{index},
@@ -8161,7 +8161,7 @@ test "manager snapshot bounds discovery before tree pagination" {
     try std.testing.expect(page_counters.candidates_owned <= 128);
     for (page.snapshot.nodes) |node| {
         var expected_buffer: [32]u8 = undefined;
-        const expected = try std.fmt.bufPrint(
+        const expected = try std.mem.print(
             &expected_buffer,
             "child-{d:0>4}",
             .{expected_index},
@@ -8172,7 +8172,7 @@ test "manager snapshot bounds discovery before tree pagination" {
     try std.testing.expectEqual(@as(usize, 50), expected_index);
 
     var last_child_buffer: [32]u8 = undefined;
-    const last_child_id = try std.fmt.bufPrint(
+    const last_child_id = try std.mem.print(
         &last_child_buffer,
         "child-{d:0>4}",
         .{relationship_count - 1},
@@ -8271,7 +8271,7 @@ test "descendant count remains unknown until legacy migration completes" {
 
     for (0..session_store.relationship_migration_candidate_limit + 1) |index| {
         var id_buffer: [32]u8 = undefined;
-        const id = try std.fmt.bufPrint(&id_buffer, "newer-{d:0>3}", .{index});
+        const id = try std.mem.print(&id_buffer, "newer-{d:0>3}", .{index});
         try env.createSession(alloc, id);
         try env.commitSession(alloc, id, @intCast(100 + index));
     }
@@ -8387,19 +8387,19 @@ test "manager snapshot recovers every pending free boundary without exposing the
 
     for (2..4) |fail_at| {
         var root_buffer: [32]u8 = undefined;
-        const root_id = try std.fmt.bufPrint(
+        const root_id = try std.mem.print(
             &root_buffer,
             "free-root-{d}",
             .{fail_at},
         );
         var child_buffer: [32]u8 = undefined;
-        const child_id = try std.fmt.bufPrint(
+        const child_id = try std.mem.print(
             &child_buffer,
             "free-child-{d}",
             .{fail_at},
         );
         var operation_buffer: [32]u8 = undefined;
-        const operation_id = try std.fmt.bufPrint(
+        const operation_id = try std.mem.print(
             &operation_buffer,
             "free-attach-{d}",
             .{fail_at},
@@ -8508,7 +8508,7 @@ test "manager legacy migration survives index republication and restart" {
     try env.indexSession(alloc, "legacy-child");
     for (0..64) |index| {
         var id_buffer: [32]u8 = undefined;
-        const id = try std.fmt.bufPrint(
+        const id = try std.mem.print(
             &id_buffer,
             "ordinary-{d:0>3}",
             .{index},
@@ -8940,12 +8940,12 @@ test "unrelated over-depth component is isolated from a healthy root snapshot" {
     var index: usize = 0;
     while (index < test_depth_limit) : (index += 1) {
         var child_buffer: [32]u8 = undefined;
-        const child_id = try std.fmt.bufPrint(&child_buffer, "deep-{d:0>4}", .{index});
+        const child_id = try std.mem.print(&child_buffer, "deep-{d:0>4}", .{index});
         var parent_buffer: [32]u8 = undefined;
         const parent_id = if (index == 0)
             "deep-root"
         else
-            try std.fmt.bufPrint(&parent_buffer, "deep-{d:0>4}", .{index - 1});
+            try std.mem.print(&parent_buffer, "deep-{d:0>4}", .{index - 1});
         try env.createSession(alloc, child_id);
         try writeCanonicalParentForTest(
             alloc,
@@ -9459,7 +9459,7 @@ test "bounded replay identity classifies retained expired and new without effect
         alloc,
         record,
         older_id,
-        [_]u8{0} ** 32,
+        @as([32]u8, @splat(0)),
         null,
         .{ .bound = .{
             .identity = tool_result.parseBoundOperationId(older_id).?,
@@ -9473,7 +9473,7 @@ test "bounded replay identity classifies retained expired and new without effect
         alloc,
         null,
         older_id,
-        [_]u8{0} ** 32,
+        @as([32]u8, @splat(0)),
         null,
         .{ .bound = .{
             .identity = tool_result.parseBoundOperationId(older_id).?,
@@ -9565,7 +9565,7 @@ test "canonical byte compaction preserves active work and continued control oper
 
     for (1..10) |epoch| {
         var invocation_buffer: [64]u8 = undefined;
-        const invocation = try std.fmt.bufPrint(&invocation_buffer, "byte-send-{d}", .{epoch});
+        const invocation = try std.mem.print(&invocation_buffer, "byte-send-{d}", .{epoch});
         const operation_id = try tool_result.boundOperationIdAlloc(alloc, invocation, .model, epoch);
         defer alloc.free(operation_id);
         var send = try validateSend(alloc, "child-id", content);
@@ -10248,7 +10248,7 @@ test "control queue admission remains available while another process owns sessi
     defer env.deinit(alloc);
     try env.createSession(alloc, "parent-id");
     try env.createSession(alloc, "child-id");
-    const session_lock_path = try std.fs.path.join(
+    const session_lock_path = try std.Io.Dir.path.join(
         alloc,
         &.{ env.store.sessions_dir, "child-id", "session.lock" },
     );
@@ -10287,7 +10287,7 @@ test "control queue admission remains available while another process owns sessi
         try std.posix.read(locker.stdout.?.handle, &ready),
     );
     try std.testing.expectEqual(@as(u8, 'R'), ready[0]);
-    const child_session_path = try std.fs.path.join(
+    const child_session_path = try std.Io.Dir.path.join(
         alloc,
         &.{ env.store.sessions_dir, "child-id" },
     );
@@ -11048,7 +11048,7 @@ const ProcessDeliveryOutcome = enum(u8) {
 };
 
 fn processDeliveryError(err: communication_manager_mod.Error) u8 {
-    return @intFromEnum(switch (err) {
+    return @backingInt(switch (err) {
         error.InvalidRequest => ProcessDeliveryOutcome.invalid_request,
         error.LockBusy => ProcessDeliveryOutcome.lock_busy,
         else => ProcessDeliveryOutcome.other_error,
@@ -11066,7 +11066,7 @@ fn runProcessMutation(
         .interval_poll,
         .capacity_policy,
         .relationship_snapshot,
-        => @intFromEnum(ProcessDeliveryOutcome.other_error),
+        => @backingInt(ProcessDeliveryOutcome.other_error),
         .send, .attach => 90,
     };
     defer store.deinit(alloc);
@@ -11128,7 +11128,7 @@ fn runProcessMutation(
                     null,
                 ) catch |err| return processDeliveryError(err);
                 defer result.deinit(alloc);
-                return @intFromEnum(if (result == .inject)
+                return @backingInt(if (result == .inject)
                     ProcessDeliveryOutcome.data_exposed
                 else
                     ProcessDeliveryOutcome.empty_or_wait);
@@ -11142,7 +11142,7 @@ fn runProcessMutation(
                 10,
             ) catch |err| return processDeliveryError(err);
             defer result.deinit(alloc);
-            return @intFromEnum(if (result.deliveries.len != 0)
+            return @backingInt(if (result.deliveries.len != 0)
                 ProcessDeliveryOutcome.data_exposed
             else
                 ProcessDeliveryOutcome.empty_or_wait);
@@ -11156,8 +11156,8 @@ fn runProcessMutation(
                 query.child_id,
                 query.work_id,
                 query.now_ms,
-            ) catch return @intFromEnum(ProcessDeliveryOutcome.other_error);
-            return @intFromEnum(switch (outcome) {
+            ) catch return @backingInt(ProcessDeliveryOutcome.other_error);
+            return @backingInt(switch (outcome) {
                 .emitted => ProcessDeliveryOutcome.interval_emitted,
                 .pending => ProcessDeliveryOutcome.interval_pending,
                 .inactive => ProcessDeliveryOutcome.interval_inactive,
@@ -11170,21 +11170,21 @@ fn runProcessMutation(
                 &store,
                 admission.child_id,
                 admission.work_id,
-            ) catch |err| return @intFromEnum(
+            ) catch |err| return @backingInt(
                 if (err == error.CapacityExceeded)
                     ProcessDeliveryOutcome.capacity_rejected
                 else
                     ProcessDeliveryOutcome.other_error,
             );
-            return @intFromEnum(ProcessDeliveryOutcome.capacity_admitted);
+            return @backingInt(ProcessDeliveryOutcome.capacity_admitted);
         },
         .relationship_snapshot => |query| {
             var snapshot = manager.snapshot(
                 alloc,
                 .{ .root_id = query.root_id },
-            ) catch return @intFromEnum(ProcessDeliveryOutcome.other_error);
+            ) catch return @backingInt(ProcessDeliveryOutcome.other_error);
             defer snapshot.deinit(alloc);
-            return @intFromEnum(switch (snapshot) {
+            return @backingInt(switch (snapshot) {
                 .snapshot => |value| if (!value.restart_required and
                     value.nodes.len == 1)
                     ProcessDeliveryOutcome.relationship_present
@@ -11398,8 +11398,8 @@ test "competing processes converge while recovering one pending relationship tra
     );
     std.mem.sort(u8, &outcomes, {}, std.sort.asc(u8));
     try std.testing.expectEqualSlices(u8, &.{
-        @intFromEnum(ProcessDeliveryOutcome.relationship_present),
-        @intFromEnum(ProcessDeliveryOutcome.relationship_present),
+        @backingInt(ProcessDeliveryOutcome.relationship_present),
+        @backingInt(ProcessDeliveryOutcome.relationship_present),
     }, &outcomes);
 
     var page = try relationship_index.page(
@@ -11442,8 +11442,8 @@ test "competing process interval polls append one durable delivery" {
     );
     std.mem.sort(u8, &outcomes, {}, std.sort.asc(u8));
     try std.testing.expectEqualSlices(u8, &.{
-        @intFromEnum(ProcessDeliveryOutcome.interval_emitted),
-        @intFromEnum(ProcessDeliveryOutcome.interval_pending),
+        @backingInt(ProcessDeliveryOutcome.interval_emitted),
+        @backingInt(ProcessDeliveryOutcome.interval_pending),
     }, &outcomes);
 
     var communication_manager = communication_manager_mod.Manager{
@@ -11483,8 +11483,8 @@ test "competing process policy admissions cannot cross the capacity budget" {
     );
     std.mem.sort(u8, &outcomes, {}, std.sort.asc(u8));
     try std.testing.expectEqualSlices(u8, &.{
-        @intFromEnum(ProcessDeliveryOutcome.capacity_admitted),
-        @intFromEnum(ProcessDeliveryOutcome.capacity_rejected),
+        @backingInt(ProcessDeliveryOutcome.capacity_admitted),
+        @backingInt(ProcessDeliveryOutcome.capacity_rejected),
     }, &outcomes);
 
     var capability = try env.store.openSubagentControlCapabilityReadOnly(
@@ -11513,11 +11513,11 @@ const ProcessDeliveryRaceAction = union(enum) {
 
 fn processDeliveryOutcome(exit_code: u8) !ProcessDeliveryOutcome {
     return switch (exit_code) {
-        @intFromEnum(ProcessDeliveryOutcome.invalid_request) => .invalid_request,
-        @intFromEnum(ProcessDeliveryOutcome.data_exposed) => .data_exposed,
-        @intFromEnum(ProcessDeliveryOutcome.lock_busy) => .lock_busy,
-        @intFromEnum(ProcessDeliveryOutcome.empty_or_wait) => .empty_or_wait,
-        @intFromEnum(ProcessDeliveryOutcome.other_error) => .other_error,
+        @backingInt(ProcessDeliveryOutcome.invalid_request) => .invalid_request,
+        @backingInt(ProcessDeliveryOutcome.data_exposed) => .data_exposed,
+        @backingInt(ProcessDeliveryOutcome.lock_busy) => .lock_busy,
+        @backingInt(ProcessDeliveryOutcome.empty_or_wait) => .empty_or_wait,
+        @backingInt(ProcessDeliveryOutcome.other_error) => .other_error,
         else => error.ProcessWaitFailed,
     };
 }

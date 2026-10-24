@@ -146,7 +146,7 @@ fn isInspection(alloc: std.mem.Allocator, call: types.ToolCall) !bool {
 }
 
 fn readOnlySegment(alloc: std.mem.Allocator, command: []const u8) !bool {
-    var plan = try command_effect.plan(alloc, command, ".", false, builtin.os.tag);
+    var plan = try command_effect.plan(alloc, command, ".", false, builtin.target.os.tag);
     defer plan.deinit(alloc);
     if (plan == .direct_read_only) return true;
     const pipelines = command_lex.pipe_segments(alloc, command) catch return false;
@@ -263,7 +263,7 @@ test "progress guard permits long useful reads failures polling and repeated tes
     };
     var buf: [32]u8 = undefined;
     for (0..1024) |index| {
-        messages[1].content = try std.fmt.bufPrint(&buf, "evidence {d}", .{index});
+        messages[1].content = try std.mem.print(&buf, "evidence {d}", .{index});
         try std.testing.expectEqual(Guard.Decision.proceed, try guard.observeBatch(std.testing.allocator, &messages));
     }
     for ([_][]const u8{ "write_stdin", "write_file", "exec_command" }) |name| {
@@ -290,7 +290,7 @@ test "progress guard permits mixed inspections that keep discovering evidence" {
     };
     var buf: [32]u8 = undefined;
     for (0..1024) |index| {
-        messages[1].content = try std.fmt.bufPrint(&buf, "new evidence {d}", .{index});
+        messages[1].content = try std.mem.print(&buf, "new evidence {d}", .{index});
         try std.testing.expectEqual(Guard.Decision.proceed, try guard.observeBatch(std.testing.allocator, &messages));
     }
 }

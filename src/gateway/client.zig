@@ -7,6 +7,7 @@ const secret = @import("../core/auth/secret.zig");
 const agent_stream_provider = @import("../core/agent/stream_provider.zig");
 const debug_trace = @import("../core/shared/debug_trace.zig");
 const io_mod = @import("../core/shared/io.zig");
+const select_watch = @import("../core/shared/select_watch.zig");
 const types = @import("../core/shared/types.zig");
 const provider_route = @import("../core/gateway/provider_route.zig");
 const responses_compaction_binding = @import("../core/gateway/responses_compaction_binding.zig");
@@ -416,8 +417,7 @@ fn executeProviderJsonBounded(
 
     try provider_route.validateBaseUrl(input.url);
     const uri = try std.Uri.parse(input.url);
-    const auth_header = try std.fmt.allocPrint(
-        alloc,
+    const auth_header = try alloc.print(
         "Bearer {s}",
         .{input.credential},
     );
@@ -437,7 +437,7 @@ fn executeProviderJsonBounded(
         input.fedramp,
         input.openai_identity,
     );
-    var req = try client.request(switch (input.method) {
+    var req = try openHttpRequest(&client, switch (input.method) {
         .get => .GET,
         .post_json => .POST,
     }, uri, .{
@@ -533,60 +533,7 @@ fn runCancellableGatewayJsonFetch(
     cancel_flag: *std.atomic.Value(bool),
     operation: *GatewayJsonFetchOperation,
 ) !GatewayJsonResult {
-    if (cancel_flag.load(.seq_cst)) return error.Cancelled;
-
-    const Event = union(enum) {
-        request: anyerror!GatewayJsonResult,
-        cancelled: anyerror!void,
-    };
-    const Runner = struct {
-        fn run(value: *GatewayJsonFetchOperation) anyerror!GatewayJsonResult {
-            return value.run();
-        }
-    };
-    const Cleanup = struct {
-        fn drain(result_alloc: std.mem.Allocator, select: *std.Io.Select(Event)) void {
-            while (select.cancel()) |item| switch (item) {
-                .request => |request_result| {
-                    var late_result = request_result catch continue;
-                    late_result.deinit(result_alloc);
-                },
-                .cancelled => {},
-            };
-        }
-    };
-
-    var select_buffer: [2]Event = undefined;
-    var select: std.Io.Select(Event) = .init(io_mod.getIo(), &select_buffer);
-    select.concurrent(.cancelled, waitForBoundedCancellation, .{cancel_flag}) catch |err| return err;
-    select.concurrent(.request, Runner.run, .{operation}) catch |err| {
-        select.cancelDiscard();
-        return err;
-    };
-
-    const event = select.await() catch |err| {
-        Cleanup.drain(alloc, &select);
-        return err;
-    };
-    switch (event) {
-        .request => |request_result| {
-            Cleanup.drain(alloc, &select);
-            if (cancel_flag.load(.seq_cst)) {
-                var result = request_result catch return error.Cancelled;
-                result.deinit(alloc);
-                return error.Cancelled;
-            }
-            return request_result;
-        },
-        .cancelled => |cancel_result| {
-            cancel_result catch |err| {
-                Cleanup.drain(alloc, &select);
-                return err;
-            };
-            Cleanup.drain(alloc, &select);
-            return error.Cancelled;
-        },
-    }
+    return runBoundedHttpOperation(GatewayJsonResult, alloc, cancel_flag, null, operation);
 }
 
 fn fetchProviderJsonAtUrlCore(
@@ -621,7 +568,7 @@ fn fetchProviderJsonAtUrlCore(
     var headers: std.http.Client.Request.Headers = .{};
     headers.accept_encoding = .omit;
     headers.user_agent = .{ .override = user_agent };
-    auth_header = try std.fmt.allocPrint(alloc, "Bearer {s}", .{api_key});
+    auth_header = try alloc.print("Bearer {s}", .{api_key});
     headers.authorization = .{ .override = auth_header.? };
     var extra_headers_buf: [8]std.http.Header = undefined;
     const extra_headers = providerJsonExtraHeaders(
@@ -632,7 +579,7 @@ fn fetchProviderJsonAtUrlCore(
         null,
     );
 
-    var req = client.request(.GET, uri, .{
+    var req = openHttpRequest(&client, .GET, uri, .{
         .headers = headers,
         .extra_headers = extra_headers,
         .redirect_behavior = .unhandled,
@@ -971,6 +918,7 @@ const ConnectedRequestWatch = struct {
 
 const RequestOpenOperation = struct {
     client: *std.http.Client,
+    method: std.http.Method = .POST,
     uri: std.Uri,
     options: std.http.Client.RequestOptions,
     request_open_override: ?RequestOpenOverride,
@@ -980,12 +928,12 @@ const RequestOpenOperation = struct {
             request_open.run(
                 request_open.ctx,
                 self.client,
-                .POST,
+                self.method,
                 self.uri,
                 self.options,
             )
         else
-            self.client.request(.POST, self.uri, self.options);
+            self.client.request(self.method, self.uri, self.options);
         // Opening sends no request bytes. std.Io reports an unclassified
         // errno as Unexpected; on POSIX this includes connect(2) failing with
         // EISCONN when a stray cancellation signal interrupted a connection
@@ -993,6 +941,128 @@ const RequestOpenOperation = struct {
         return request catch |err| if (err == error.Unexpected) error.ConnectionSetupFailed else err;
     }
 };
+
+/// Opens an ordinary HTTP request with bounded recovery for std's stray-signal
+/// connect failure. No request bytes have been sent here, so even OAuth token
+/// exchanges can recover without replaying a submitted body. The caller owns
+/// the returned request and retains its enclosing cancellation/deadline watch.
+/// Streamed model requests keep their existing setup epoch and retry budget.
+pub fn openHttpRequest(
+    client: *std.http.Client,
+    method: std.http.Method,
+    uri: std.Uri,
+    options: std.http.Client.RequestOptions,
+) !std.http.Client.Request {
+    var operation = RequestOpenOperation{
+        .client = client,
+        .method = method,
+        .uri = uri,
+        .options = options,
+        .request_open_override = null,
+    };
+    return recoverHttpSetup(&operation);
+}
+
+/// The standard Client.fetch flow with setup-only recovery at request open.
+/// Keep framing, redirects, compression and body ownership aligned with std;
+/// each provider still owns its response writer's resource limit and watch.
+pub fn fetchHttp(client: *std.http.Client, options: std.http.Client.FetchOptions) !std.http.Client.FetchResult {
+    const uri = switch (options.location) {
+        .url => |u| try std.Uri.parse(u),
+        .uri => |u| u,
+    };
+    const method: std.http.Method = options.method orelse
+        if (options.payload != null) .POST else .GET;
+
+    const redirect_behavior: std.http.Client.Request.RedirectBehavior = options.redirect_behavior orelse
+        if (options.payload == null) @fromBackingInt(@intCast(3)) else .unhandled;
+
+    var req = try openHttpRequest(client, method, uri, .{
+        .redirect_behavior = redirect_behavior,
+        .headers = options.headers,
+        .extra_headers = options.extra_headers,
+        .privileged_headers = options.privileged_headers,
+        .keep_alive = options.keep_alive,
+    });
+    defer req.deinit();
+
+    if (options.payload) |payload| {
+        req.transfer_encoding = .{ .content_length = payload.len };
+        var body = try req.sendBodyUnflushed(&.{});
+        try body.writer.writeAll(payload);
+        try body.end();
+        try req.connection.?.flush();
+    } else {
+        try req.sendBodiless();
+    }
+
+    const redirect_buffer: []u8 = if (redirect_behavior == .unhandled) &.{} else options.redirect_buffer orelse
+        try client.allocator.alloc(u8, 8 * 1024);
+    defer if (options.redirect_buffer == null) client.allocator.free(redirect_buffer);
+
+    var response = try req.receiveHead(redirect_buffer);
+
+    const response_writer = options.response_writer orelse {
+        const reader = response.reader(&.{});
+        _ = reader.discardRemaining() catch |err| switch (err) {
+            error.ReadFailed => return response.bodyErr().?,
+        };
+        return .{ .status = response.head.status };
+    };
+
+    const decompress_buffer: []u8 = switch (response.head.content_encoding) {
+        .identity => &.{},
+        .zstd => options.decompress_buffer orelse try client.allocator.alloc(u8, std.compress.zstd.default_window_len),
+        .deflate, .gzip => options.decompress_buffer orelse try client.allocator.alloc(u8, std.compress.flate.max_window_len),
+        .compress => return error.UnsupportedCompressionMethod,
+    };
+    defer if (options.decompress_buffer == null) client.allocator.free(decompress_buffer);
+
+    var transfer_buffer: [64]u8 = undefined;
+    var decompress: std.http.Decompress = undefined;
+    const reader = response.readerDecompressing(&transfer_buffer, &decompress, decompress_buffer);
+
+    _ = reader.streamRemaining(response_writer) catch |err| switch (err) {
+        error.ReadFailed => return response.bodyErr().?,
+        else => |e| return e,
+    };
+
+    return .{ .status = response.head.status };
+}
+
+fn recoverHttpSetup(operation: anytype) @TypeOf(operation.run()) {
+    var retries: usize = 0;
+    while (true) {
+        return operation.run() catch |err| {
+            if (err != error.ConnectionSetupFailed or retries == 2) return err;
+            retries += 1;
+            continue;
+        };
+    }
+}
+
+test "ordinary HTTP setup recovery is bounded and never retries a delivery failure" {
+    const Operation = struct {
+        calls: usize = 0,
+        failures: usize,
+        failure: anyerror = error.ConnectionSetupFailed,
+
+        fn run(self: *@This()) anyerror!u32 {
+            self.calls += 1;
+            if (self.calls <= self.failures) return self.failure;
+            return 7;
+        }
+    };
+    var transient = Operation{ .failures = 1 };
+    try std.testing.expectEqual(@as(u32, 7), try recoverHttpSetup(&transient));
+    try std.testing.expectEqual(@as(usize, 2), transient.calls);
+    var persistent = Operation{ .failures = 4 };
+    try std.testing.expectError(error.ConnectionSetupFailed, recoverHttpSetup(&persistent));
+    try std.testing.expectEqual(@as(usize, 3), persistent.calls);
+    var delivered = Operation{ .failures = 1, .failure = error.WriteFailed };
+    try std.testing.expectError(error.WriteFailed, recoverHttpSetup(&delivered));
+    try std.testing.expectEqual(@as(usize, 1), delivered.calls);
+}
 
 fn openGatewayRequestBounded(
     client: *std.http.Client,
@@ -1011,17 +1081,17 @@ fn openGatewayRequestBounded(
 
     const Event = union(enum) {
         request: anyerror!std.http.Client.Request,
-        cancelled: anyerror!void,
-        deadline: anyerror!void,
+        watch: anyerror!select_watch.Outcome,
     };
     const Cleanup = struct {
-        fn drain(select: *std.Io.Select(Event)) void {
+        fn drain(select: *std.Io.Select(Event), watch: *BoundedRequestWatch) void {
+            watch.stop(select.io);
             while (select.cancel()) |item| switch (item) {
                 .request => |request_result| {
                     var late_request = request_result catch continue;
                     late_request.deinit();
                 },
-                .cancelled, .deadline => {},
+                .watch => {},
             };
         }
     };
@@ -1032,58 +1102,42 @@ fn openGatewayRequestBounded(
         .options = options,
         .request_open_override = request_open_override,
     };
-    var select_buffer: [3]Event = undefined;
+    var watch: BoundedRequestWatch = .{};
+    var select_buffer: [2]Event = undefined;
     var select: std.Io.Select(Event) = .init(io_mod.getIo(), &select_buffer);
-    select.concurrent(.cancelled, waitForBoundedCancellation, .{cancel_flag}) catch |err| return err;
-    select.concurrent(.deadline, waitForBoundedDeadline, .{epoch.deadline}) catch |err| {
-        select.cancelDiscard();
-        return err;
-    };
+    select.concurrent(.watch, BoundedRequestWatch.run, .{ &watch, select.io, RequestCondition{ .cancel_flag = cancel_flag, .deadline = epoch.deadline } }) catch |err| return err;
     select.concurrent(.request, RequestOpenOperation.run, .{&operation}) catch |err| {
-        select.cancelDiscard();
+        watch.finish(&select);
         return err;
     };
 
-    while (true) {
-        const event = select.await() catch |err| {
-            Cleanup.drain(&select);
-            return err;
-        };
-        switch (event) {
-            .request => |request_result| {
-                Cleanup.drain(&select);
-                if (cancel_flag.load(.seq_cst)) {
-                    var cancelled_request = request_result catch return error.Cancelled;
-                    cancelled_request.deinit();
-                    return error.Cancelled;
-                }
-
-                var owned_request = request_result catch |request_err| return request_err;
-                const result_now = std.Io.Clock.Timestamp.now(io_mod.getIo(), .awake);
-                if (!std.Io.Clock.Timestamp.compare(result_now, .lt, epoch.deadline)) {
-                    owned_request.deinit();
-                    return error.ConnectionSetupTimedOut;
-                }
-                return owned_request;
-            },
-            .cancelled => |cancelled_result| {
-                cancelled_result catch |err| {
-                    Cleanup.drain(&select);
-                    return err;
-                };
-                Cleanup.drain(&select);
+    const event = select.await() catch |err| {
+        Cleanup.drain(&select, &watch);
+        return err;
+    };
+    switch (event) {
+        .request => |request_result| {
+            watch.finish(&select);
+            if (cancel_flag.load(.seq_cst)) {
+                var cancelled_request = request_result catch return error.Cancelled;
+                cancelled_request.deinit();
                 return error.Cancelled;
-            },
-            .deadline => |deadline_result| {
-                deadline_result catch |err| {
-                    Cleanup.drain(&select);
-                    return err;
-                };
-                Cleanup.drain(&select);
-                if (cancel_flag.load(.seq_cst)) return error.Cancelled;
+            }
+
+            var owned_request = request_result catch |request_err| return request_err;
+            const result_now = std.Io.Clock.Timestamp.now(io_mod.getIo(), .awake);
+            if (!std.Io.Clock.Timestamp.compare(result_now, .lt, epoch.deadline)) {
+                owned_request.deinit();
                 return error.ConnectionSetupTimedOut;
-            },
-        }
+            }
+            return owned_request;
+        },
+        .watch => |watch_result| {
+            Cleanup.drain(&select, &watch);
+            const outcome = try watch_result;
+            if (outcome == .cancelled or cancel_flag.load(.seq_cst)) return error.Cancelled;
+            return error.ConnectionSetupTimedOut;
+        },
     }
 }
 
@@ -1373,7 +1427,7 @@ fn streamGatewayCompletionCoreWithOptions(
         );
     }
 
-    const auth_header = try std.fmt.allocPrint(alloc, "Bearer {s}", .{request.api_key});
+    const auth_header = try alloc.print("Bearer {s}", .{request.api_key});
     defer secret.zeroAndFree(alloc, auth_header);
 
     var extra_headers_buf: [12]std.http.Header = undefined;
@@ -1568,12 +1622,12 @@ fn streamGatewayCompletionCoreWithOptions(
         if (active_connected_watch) |watch| {
             if (watch.commit_response_head()) |err| return @as(anyerror!StreamResult, err);
         }
-        debug_trace.eventf("gateway", "after_receive_head", trace_ctx, "attempt={d} status={d}", .{ attempt + 1, @intFromEnum(response.head.status) });
+        debug_trace.eventf("gateway", "after_receive_head", trace_ctx, "attempt={d} status={d}", .{ attempt + 1, @backingInt(response.head.status) });
         if (response.head.status != .ok) {
             const status = response.head.status;
-            if (@intFromEnum(status) >= 500) delivery_ambiguous = true;
+            if (@backingInt(status) >= 500) delivery_ambiguous = true;
             var retry_after_seconds = retryAfterSeconds(response.head);
-            debug_trace.logf("stream", "http status={d} attempt={d}", .{ @intFromEnum(status), attempt + 1 });
+            debug_trace.logf("stream", "http status={d} attempt={d}", .{ @backingInt(status), attempt + 1 });
             var err_buf: [4096]u8 = undefined;
             const err_reader = response.reader(&err_buf);
             const err_body = readProviderErrorBodyBounded(alloc, err_reader) catch null;
@@ -1585,7 +1639,7 @@ fn streamGatewayCompletionCoreWithOptions(
                 if (err_body) |body| {
                     retry_after_seconds = responsesRetryAfterFromBody(
                         alloc,
-                        @intCast(@intFromEnum(status)),
+                        @intCast(@backingInt(status)),
                         body,
                     ) catch null;
                 }
@@ -1602,7 +1656,7 @@ fn streamGatewayCompletionCoreWithOptions(
             if (retry_delay_ns) |delay_ns| {
                 debug_trace.eventf("gateway", "http_status_retry", trace_ctx, "attempt={d} status={d} delay_ms={d}", .{
                     attempt + 1,
-                    @intFromEnum(status),
+                    @backingInt(status),
                     delay_ns / std.time.ns_per_ms,
                 });
                 try sleepGatewayRetry(delay_ns, cancel_flag);
@@ -2050,32 +2104,26 @@ pub fn runBoundedHttpOperation(
     comptime Result: type,
     alloc: std.mem.Allocator,
     cancel_flag: *std.atomic.Value(bool),
-    deadline: std.Io.Clock.Timestamp,
+    deadline: ?std.Io.Clock.Timestamp,
     operation: anytype,
 ) !Result {
     if (cancel_flag.load(.seq_cst)) {
         debug_trace.logf("stream", "bounded termination cause=cancellation phase=admission", .{});
         return error.Cancelled;
     }
-    std.debug.assert(deadline.clock == .awake);
-
     const zio = io_mod.getIo();
-    const now = std.Io.Clock.Timestamp.now(zio, .awake);
-    if (!std.Io.Clock.Timestamp.compare(now, .lt, deadline)) {
-        debug_trace.logf("stream", "bounded termination cause=deadline phase=admission", .{});
-        return error.Timeout;
+    if (deadline) |limit| {
+        std.debug.assert(limit.clock == .awake);
+        const now = std.Io.Clock.Timestamp.now(zio, .awake);
+        if (!std.Io.Clock.Timestamp.compare(now, .lt, limit)) {
+            debug_trace.logf("stream", "bounded termination cause=deadline phase=admission", .{});
+            return error.Timeout;
+        }
     }
-
-    // `std.Io.Select.cancel` interrupts test-I/O operations, but native sleep
-    // implementations are not required to observe that select cancellation.
-    // Give the cancellation watcher an explicit request-lifetime signal so a
-    // successful request can always join its control branches promptly.
-    var control_done: std.Io.Event = .unset;
 
     const Event = union(enum) {
         request: anyerror!Result,
-        cancelled: anyerror!void,
-        deadline: anyerror!void,
+        watch: anyerror!select_watch.Outcome,
     };
     const Operation = @TypeOf(operation);
     const Runner = struct {
@@ -2084,42 +2132,36 @@ pub fn runBoundedHttpOperation(
         }
     };
     const Cleanup = struct {
-        fn drain(result_alloc: std.mem.Allocator, select: *std.Io.Select(Event)) void {
+        fn drain(result_alloc: std.mem.Allocator, select: *std.Io.Select(Event), watch: *BoundedRequestWatch) void {
+            watch.stop(select.io);
             while (select.cancel()) |item| switch (item) {
                 .request => |request_result| {
                     var late_result = request_result catch continue;
                     late_result.deinit(result_alloc);
                 },
-                .cancelled, .deadline => {},
+                .watch => {},
             };
         }
     };
 
-    var select_buffer: [3]Event = undefined;
+    var watch: BoundedRequestWatch = .{};
+    var select_buffer: [2]Event = undefined;
     var select: std.Io.Select(Event) = .init(zio, &select_buffer);
-    select.concurrent(.cancelled, waitForBoundedCancellationOrDone, .{ cancel_flag, &control_done }) catch |err| {
-        return err;
-    };
-    select.concurrent(.deadline, waitForBoundedDeadlineOrDone, .{ deadline, &control_done }) catch |err| {
-        control_done.set(zio);
-        select.cancelDiscard();
+    select.concurrent(.watch, BoundedRequestWatch.run, .{ &watch, select.io, RequestCondition{ .cancel_flag = cancel_flag, .deadline = deadline } }) catch |err| {
         return err;
     };
     select.concurrent(.request, Runner.run, .{operation}) catch |err| {
-        control_done.set(zio);
-        select.cancelDiscard();
+        watch.finish(&select);
         return err;
     };
 
     const event = select.await() catch |err| {
-        control_done.set(zio);
-        Cleanup.drain(alloc, &select);
+        Cleanup.drain(alloc, &select, &watch);
         return err;
     };
-    control_done.set(zio);
     switch (event) {
         .request => |request_result| {
-            Cleanup.drain(alloc, &select);
+            watch.finish(&select);
             if (cancel_flag.load(.seq_cst)) {
                 debug_trace.logf("stream", "bounded termination cause=cancellation phase=request_result", .{});
                 var owned_result = request_result catch return error.Cancelled;
@@ -2128,21 +2170,13 @@ pub fn runBoundedHttpOperation(
             }
             return request_result;
         },
-        .cancelled => |cancel_result| {
-            cancel_result catch |err| {
-                Cleanup.drain(alloc, &select);
-                return err;
-            };
-            Cleanup.drain(alloc, &select);
-            debug_trace.logf("stream", "bounded termination cause=cancellation phase=control", .{});
-            return error.Cancelled;
-        },
-        .deadline => |deadline_result| {
-            deadline_result catch |err| {
-                Cleanup.drain(alloc, &select);
-                return err;
-            };
-            Cleanup.drain(alloc, &select);
+        .watch => |watch_result| {
+            Cleanup.drain(alloc, &select, &watch);
+            const outcome = try watch_result;
+            if (outcome == .cancelled) {
+                debug_trace.logf("stream", "bounded termination cause=cancellation phase=control", .{});
+                return error.Cancelled;
+            }
             if (cancel_flag.load(.seq_cst)) {
                 debug_trace.logf("stream", "bounded termination cause=cancellation phase=deadline_cleanup", .{});
                 return error.Cancelled;
@@ -2153,37 +2187,12 @@ pub fn runBoundedHttpOperation(
     }
 }
 
-fn waitForBoundedCancellationOrDone(
-    cancel_flag: *std.atomic.Value(bool),
-    control_done: *std.Io.Event,
-) anyerror!void {
-    while (!cancel_flag.load(.seq_cst)) {
-        control_done.waitTimeout(io_mod.getIo(), .{
-            .duration = .{ .clock = .awake, .raw = .fromMilliseconds(5) },
-        }) catch |err| switch (err) {
-            error.Timeout => continue,
-            else => return err,
-        };
-        return;
-    }
-}
+/// Ends a bounded request's watch when its cancel flag is set or its deadline
+/// passes. The request owner stops the watch with `finish` when the request
+/// wins, as `select_watch` explains.
+const RequestCondition = select_watch.CancellationDeadline;
 
-fn waitForBoundedDeadlineOrDone(
-    deadline: std.Io.Clock.Timestamp,
-    control_done: *std.Io.Event,
-) anyerror!void {
-    _ = try io_mod.waitEventUntil(control_done, deadline);
-}
-
-fn waitForBoundedCancellation(cancel_flag: *std.atomic.Value(bool)) anyerror!void {
-    while (!cancel_flag.load(.seq_cst)) {
-        try io_mod.getIo().sleep(.fromMilliseconds(5), .awake);
-    }
-}
-
-fn waitForBoundedDeadline(deadline: std.Io.Clock.Timestamp) anyerror!void {
-    try deadline.wait(io_mod.getIo());
-}
+const BoundedRequestWatch = select_watch.Watch(RequestCondition);
 
 const GatewayCancelWatcher = struct {
     /// The request owner keeps the stream alive until this watcher joins.
@@ -2191,7 +2200,7 @@ const GatewayCancelWatcher = struct {
     /// receive. Abort the connection so cancellation can wake a silent stream.
     fn interrupt_stream(stream: std.Io.net.Stream) void {
         const io = io_mod.getIo();
-        if (comptime builtin.os.tag == .windows) {
+        if (comptime builtin.target.os.tag == .windows) {
             const windows = std.os.windows;
             const result = io.operate(.{ .device_io_control = .{
                 .file = .{ .handle = stream.socket.handle, .flags = .{ .nonblocking = false } },
@@ -2206,7 +2215,7 @@ const GatewayCancelWatcher = struct {
             };
             const status = result.device_io_control.u.Status;
             if (status != .SUCCESS) {
-                debug_trace.logf("stream", "connection interruption status: 0x{x}", .{@intFromEnum(status)});
+                debug_trace.logf("stream", "connection interruption status: 0x{x}", .{@backingInt(status)});
             }
         } else {
             stream.shutdown(io, .both) catch |err| {
@@ -2937,8 +2946,7 @@ const ConnectionSetupHarness = struct {
     fn init(mode: LoopbackGatewayMode, use_tls: bool) !ConnectionSetupHarness {
         var fixture = try LoopbackGatewayFixture.init(mode, 500);
         errdefer fixture.deinit();
-        const url = try std.fmt.allocPrint(
-            std.testing.allocator,
+        const url = try std.testing.allocator.print(
             "{s}://127.0.0.1:{d}/chat",
             .{ if (use_tls) "https" else "http", fixture.port() },
         );
@@ -3155,7 +3163,7 @@ test "gateway setup trace distinguishes attempt limits from retries used" {
     defer tmp.cleanup();
     const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
     defer alloc.free(root);
-    const trace_path = try std.fs.path.join(alloc, &.{ root, "gateway-attempts.log" });
+    const trace_path = try std.Io.Dir.path.join(alloc, &.{ root, "gateway-attempts.log" });
     defer alloc.free(trace_path);
 
     debug_trace.resetForTest();
@@ -3562,8 +3570,7 @@ test "direct gateway cancellation before admission opens no connection" {
     try fixture.start();
     try std.testing.expect(fixture.waitForAcceptStart(5000));
 
-    const chat_url = try std.fmt.allocPrint(
-        std.testing.allocator,
+    const chat_url = try std.testing.allocator.print(
         "http://127.0.0.1:{d}/v1/chat/completions",
         .{fixture.port()},
     );
@@ -3617,8 +3624,7 @@ fn expectCancellableGatewayJsonCancellation(
     try fixture.start();
     try std.testing.expect(fixture.waitForAcceptStart(5000));
 
-    const models_url = try std.fmt.allocPrint(
-        std.testing.allocator,
+    const models_url = try std.testing.allocator.print(
         "{s}://127.0.0.1:{d}/v1/models",
         .{ if (use_tls) "https" else "http", fixture.port() },
     );
@@ -3765,7 +3771,7 @@ fn expectBoundedLoopbackTimeout(
     try fixture.start();
     try std.testing.expect(fixture.waitForAcceptStart(5000));
 
-    const url = try std.fmt.allocPrint(std.testing.allocator, "http://127.0.0.1:{d}/chat", .{fixture.port()});
+    const url = try std.testing.allocator.print("http://127.0.0.1:{d}/chat", .{fixture.port()});
     defer std.testing.allocator.free(url);
 
     var cancel_flag = std.atomic.Value(bool).init(false);
@@ -3806,7 +3812,7 @@ fn expectBoundedLoopbackCancellation(
     try std.testing.expect(fixture.waitForAcceptStart(5000));
 
     const scheme = if (use_tls) "https" else "http";
-    const url = try std.fmt.allocPrint(std.testing.allocator, "{s}://127.0.0.1:{d}/chat", .{ scheme, fixture.port() });
+    const url = try std.testing.allocator.print("{s}://127.0.0.1:{d}/chat", .{ scheme, fixture.port() });
     defer std.testing.allocator.free(url);
 
     var cancel_flag = std.atomic.Value(bool).init(false);
@@ -3965,7 +3971,7 @@ test "bounded stream traces deadline termination" {
     defer tmp.cleanup();
     const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
     defer alloc.free(root);
-    const trace_path = try std.fs.path.join(alloc, &.{ root, "bounded-deadline.log" });
+    const trace_path = try std.Io.Dir.path.join(alloc, &.{ root, "bounded-deadline.log" });
     defer alloc.free(trace_path);
 
     debug_trace.resetForTest();
@@ -4105,8 +4111,7 @@ test "delivery certainty becomes possibly sent before response head" {
     defer fixture.deinit();
     try fixture.start();
     try std.testing.expect(fixture.waitForAcceptStart(5000));
-    const url = try std.fmt.allocPrint(
-        std.testing.allocator,
+    const url = try std.testing.allocator.print(
         "http://127.0.0.1:{d}/chat",
         .{fixture.port()},
     );
@@ -4141,8 +4146,7 @@ test "server error response preserves billing ambiguity" {
     defer fixture.deinit();
     try fixture.start();
     try std.testing.expect(fixture.waitForAcceptStart(5000));
-    const url = try std.fmt.allocPrint(
-        std.testing.allocator,
+    const url = try std.testing.allocator.print(
         "http://127.0.0.1:{d}/chat",
         .{fixture.port()},
     );
@@ -4198,7 +4202,7 @@ fn expectDirectLoopbackCancellation(
     try fixture.start();
     try std.testing.expect(fixture.waitForAcceptStart(5000));
 
-    const url = try std.fmt.allocPrint(std.testing.allocator, "http://127.0.0.1:{d}/chat", .{fixture.port()});
+    const url = try std.testing.allocator.print("http://127.0.0.1:{d}/chat", .{fixture.port()});
     defer std.testing.allocator.free(url);
 
     var cancel_flag = std.atomic.Value(bool).init(false);
@@ -4271,7 +4275,7 @@ test "direct gateway times out only while awaiting the response head" {
     try fixture.start();
     try std.testing.expect(fixture.waitForAcceptStart(5000));
 
-    const url = try std.fmt.allocPrint(std.testing.allocator, "http://127.0.0.1:{d}/chat", .{fixture.port()});
+    const url = try std.testing.allocator.print("http://127.0.0.1:{d}/chat", .{fixture.port()});
     defer std.testing.allocator.free(url);
     const Noop = struct {
         fn onChunk(_: *anyopaque, _: []const u8) void {}
@@ -4313,7 +4317,7 @@ test "direct gateway response head timeout does not limit a delayed SSE body" {
     try fixture.start();
     try std.testing.expect(fixture.waitForAcceptStart(5000));
 
-    const url = try std.fmt.allocPrint(std.testing.allocator, "http://127.0.0.1:{d}/chat", .{fixture.port()});
+    const url = try std.testing.allocator.print("http://127.0.0.1:{d}/chat", .{fixture.port()});
     defer std.testing.allocator.free(url);
     const Noop = struct {
         fn onChunk(_: *anyopaque, _: []const u8) void {}
@@ -4361,7 +4365,7 @@ test "direct gateway fails fast when cancellation watcher cannot start" {
     try fixture.start();
     try std.testing.expect(fixture.waitForAcceptStart(5000));
 
-    const url = try std.fmt.allocPrint(std.testing.allocator, "http://127.0.0.1:{d}/chat", .{fixture.port()});
+    const url = try std.testing.allocator.print("http://127.0.0.1:{d}/chat", .{fixture.port()});
     defer std.testing.allocator.free(url);
 
     test_cancel_watcher_spawn_error = error.TestCancelWatcherSpawnFailed;
@@ -4403,7 +4407,7 @@ test "direct gateway core callbacks stay on the invoking thread" {
     try fixture.start();
     try std.testing.expect(fixture.waitForAcceptStart(5000));
 
-    const url = try std.fmt.allocPrint(std.testing.allocator, "http://127.0.0.1:{d}/chat", .{fixture.port()});
+    const url = try std.testing.allocator.print("http://127.0.0.1:{d}/chat", .{fixture.port()});
     defer std.testing.allocator.free(url);
 
     const CallbackCapture = struct {
@@ -4450,7 +4454,7 @@ test "Responses request sends fx user agent without vendor gateway headers" {
     try fixture.start();
     try std.testing.expect(fixture.waitForAcceptStart(5000));
 
-    const url = try std.fmt.allocPrint(std.testing.allocator, "http://127.0.0.1:{d}/chat", .{fixture.port()});
+    const url = try std.testing.allocator.print("http://127.0.0.1:{d}/chat", .{fixture.port()});
     defer std.testing.allocator.free(url);
 
     const Noop = struct {

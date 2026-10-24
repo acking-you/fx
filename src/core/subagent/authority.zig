@@ -1,3 +1,4 @@
+const testing_allocator = @import("../shared/testing_allocator.zig");
 const std = @import("std");
 const session_child_store = @import("../session/session_child_store.zig");
 const session_store = @import("../session/session_store.zig");
@@ -647,7 +648,7 @@ fn checkGrantMergeResolutionAllocationFailures(alloc: Allocator) !void {
 
 test "grant merge resolution cleans every failing allocation path" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkGrantMergeResolutionAllocationFailures,
         .{},
     );

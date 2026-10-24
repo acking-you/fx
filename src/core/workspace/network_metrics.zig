@@ -30,11 +30,11 @@ pub const NetworkCall = struct {
     turn_id: u64 = 0,
     step_id: u64 = 0,
     subagent_id: u64 = 0,
-    model_buf: [max_model_len]u8 = [_]u8{0} ** max_model_len,
+    model_buf: [max_model_len]u8 = @as([max_model_len]u8, @splat(0)),
     model_len: u8 = 0,
-    error_buf: [max_error_len]u8 = [_]u8{0} ** max_error_len,
+    error_buf: [max_error_len]u8 = @as([max_error_len]u8, @splat(0)),
     error_len: u8 = 0,
-    stop_reason_buf: [max_stop_reason_len]u8 = [_]u8{0} ** max_stop_reason_len,
+    stop_reason_buf: [max_stop_reason_len]u8 = @as([max_stop_reason_len]u8, @splat(0)),
     stop_reason_len: u8 = 0,
 
     pub fn model(self: *const NetworkCall) []const u8 {
@@ -69,7 +69,7 @@ pub const NetworkCall = struct {
 };
 
 var mutex: std.Io.Mutex = .init;
-var ring: [ring_capacity]NetworkCall = [_]NetworkCall{.{}} ** ring_capacity;
+var ring: [ring_capacity]NetworkCall = @splat(.{});
 var head: usize = 0;
 var stored: usize = 0;
 

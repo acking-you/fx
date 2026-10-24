@@ -921,8 +921,7 @@ pub fn Runtime(comptime App: type) type {
                     .text = message.content,
                     .work_id = message.id,
                 });
-                const status = try std.fmt.allocPrint(
-                    app.alloc,
+                const status = try app.alloc.print(
                     "[{s}]",
                     .{@tagName(message.status)},
                 );
@@ -934,8 +933,7 @@ pub fn Runtime(comptime App: type) type {
                 });
             }
             if (chat.failure_reason) |reason| {
-                const body = try std.fmt.allocPrint(
-                    app.alloc,
+                const body = try app.alloc.print(
                     "Latest failure: {s}",
                     .{reason},
                 );
@@ -992,8 +990,7 @@ pub fn Runtime(comptime App: type) type {
                     .body = ui_subagents.childInputFailureDisplay(failure),
                 });
             } else if (view.submission_failure) |failure| {
-                const body = try std.fmt.allocPrint(
-                    app.alloc,
+                const body = try app.alloc.print(
                     "Send failed [{s}{s}]",
                     .{
                         @tagName(failure.code),
@@ -1546,7 +1543,17 @@ pub fn Runtime(comptime App: type) type {
                     render_requests.animation_next_deadline_ms,
                 },
             );
-            errdefer |err| {
+            defer attempt.deinit();
+
+            const resize_commit = if (comptime has_resize_lifecycle)
+                shell_runtime.pendingResizeFrameCommit(
+                    &app.shell,
+                    snapshot.reasons.contains(.resize),
+                )
+            else
+                shell_runtime.ResizeFrameCommit.none;
+            const attempted = attemptRequestedFrame(app, snapshot) catch |err| {
+                attempt.restore();
                 if (comptime @hasField(App, "terminal")) {
                     _ = app_lifecycle.closeFullTranscriptIfActive(
                         app.alloc,
@@ -1568,17 +1575,9 @@ pub fn Runtime(comptime App: type) type {
                         render_requests.animation_next_deadline_ms,
                     },
                 );
-            }
-            defer attempt.deinit();
-
-            const resize_commit = if (comptime has_resize_lifecycle)
-                shell_runtime.pendingResizeFrameCommit(
-                    &app.shell,
-                    snapshot.reasons.contains(.resize),
-                )
-            else
-                shell_runtime.ResizeFrameCommit.none;
-            const result = (try attemptRequestedFrame(app, snapshot)) orelse {
+                return err;
+            };
+            const result = attempted orelse {
                 attempt.restore();
                 render_requests.noteInputPendingAbort();
                 debug_trace.logf(
@@ -3792,7 +3791,7 @@ test "assistant tail writability changes remain traceable" {
     defer tmp.cleanup();
     const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
     defer alloc.free(root);
-    const trace_path = try std.fs.path.join(alloc, &.{ root, "assistant-tail.log" });
+    const trace_path = try std.Io.Dir.path.join(alloc, &.{ root, "assistant-tail.log" });
     defer alloc.free(trace_path);
 
     debug_trace.resetForTest();
@@ -4068,11 +4067,11 @@ const CoordinatorFaultTestApp = struct {
     notification_flushes: usize = 0,
     last_snapshot: ?render_request.AttemptSnapshot = null,
 
-    fn flushNotifications(self: *CoordinatorFaultTestApp) void {
+    pub fn flushNotifications(self: *CoordinatorFaultTestApp) void {
         self.notification_flushes += 1;
     }
 
-    fn renderFrameAttemptForTest(
+    pub fn renderFrameAttemptForTest(
         self: *CoordinatorFaultTestApp,
         snapshot: render_request.AttemptSnapshot,
     ) !FrameAttemptResult {
@@ -4587,7 +4586,7 @@ const CoordinatorTestPacer = struct {
         return self.completed_token_progress != null;
     }
 
-    fn hasPending(self: *const CoordinatorTestPacer) bool {
+    pub fn hasPending(self: *const CoordinatorTestPacer) bool {
         return self.pending;
     }
 
@@ -4698,7 +4697,7 @@ const CoordinatorTestApp = struct {
         return fallback;
     }
 
-    fn isFileIndexLoading(_: *CoordinatorTestApp) bool {
+    pub fn isFileIndexLoading(_: *CoordinatorTestApp) bool {
         return false;
     }
 
@@ -5539,7 +5538,7 @@ test "core.app_render_runtime width-changed queued editor keeps mention navigati
     try app.selected_model.appendSlice(alloc, "test-model");
     app.skills.items = @constCast(&skills);
     app.skills.openMenuWithQuery(.dollar, .{ .start = 0, .end = 1 }, "");
-    try app.input_runtime.textReplacementState().replace(alloc, "$" ++ "x" ** 59);
+    try app.input_runtime.textReplacementState().replace(alloc, "$" ++ text_utils.repeat("x", 59));
 
     const entries = try alloc.alloc(input_queue_runtime.ReviewEntry, 2);
     entries[0] = try makeCoordinatorReviewEntry(alloc, 1, "stored");
@@ -6282,7 +6281,7 @@ test "core.app_render_runtime lifecycle rewrite recovers normal buffer after fil
     try app.shell.writeTranscript(
         alloc,
         &app.metrics,
-        "retained assistant history\n" ** 64,
+        text_utils.repeat("retained assistant history\n", 64),
         true,
     );
     app.shell.render_requests.request(.first_frame);
@@ -6386,7 +6385,7 @@ test "core.app_render_runtime full transcript defers repaint until its page is r
     try app.shell.writeTranscript(
         alloc,
         &app.metrics,
-        ("historical transcript row\n" ** 512) ++ "FULL_ASYNC_SENTINEL\n",
+        text_utils.repeat("historical transcript row\n", 512) ++ "FULL_ASYNC_SENTINEL\n",
         true,
     );
     app.shell.render_requests.request(.first_frame);
@@ -6450,7 +6449,7 @@ test "core.app_render_runtime changed resized full transcript close preserves pr
     try app.shell.writeTranscript(
         alloc,
         &app.metrics,
-        "old primary history\n" ** 256,
+        text_utils.repeat("old primary history\n", 256),
         true,
     );
     app.shell.render_requests.request(.first_frame);
@@ -6784,7 +6783,7 @@ test "child approval arrival closes full transcript depth before rendering" {
     defer tmp.cleanup();
     const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
     defer alloc.free(root);
-    const trace_path = try std.fs.path.join(alloc, &.{ root, "child-approval-handoff.log" });
+    const trace_path = try std.Io.Dir.path.join(alloc, &.{ root, "child-approval-handoff.log" });
     defer alloc.free(trace_path);
     debug_trace.resetForTest();
     defer debug_trace.resetForTest();

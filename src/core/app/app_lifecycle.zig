@@ -1097,15 +1097,15 @@ fn initialModelId(default_model: []const u8, configured: ?[]const u8) []const u8
 
 test "startup provider chooses only its provider-scoped model" {
     var gateway_settings = config_runtime.Settings{ .provider = .gateway };
-    gateway_settings.models.values[@intFromEnum(model_provider.ProviderId.gateway)] = @constCast("gateway/model");
-    gateway_settings.models.values[@intFromEnum(model_provider.ProviderId.codex)] = @constCast("gpt-model");
+    gateway_settings.models.values[@backingInt(model_provider.ProviderId.gateway)] = @constCast("gateway/model");
+    gateway_settings.models.values[@backingInt(model_provider.ProviderId.codex)] = @constCast("gpt-model");
     const gateway = try configuredProviderSelection("default/model", &gateway_settings);
     try std.testing.expectEqual(model_provider.ProviderId.gateway, gateway.provider);
     try std.testing.expectEqualStrings("gateway/model", gateway.model);
 
     var codex_settings = config_runtime.Settings{ .provider = .codex };
-    codex_settings.models.values[@intFromEnum(model_provider.ProviderId.gateway)] = @constCast("gateway/model");
-    codex_settings.models.values[@intFromEnum(model_provider.ProviderId.codex)] = @constCast("gpt-model");
+    codex_settings.models.values[@backingInt(model_provider.ProviderId.gateway)] = @constCast("gateway/model");
+    codex_settings.models.values[@backingInt(model_provider.ProviderId.codex)] = @constCast("gpt-model");
     const codex = try configuredProviderSelection("default/model", &codex_settings);
     try std.testing.expectEqual(model_provider.ProviderId.codex, codex.provider);
     try std.testing.expectEqualStrings("gpt-model", codex.model);
@@ -1117,7 +1117,7 @@ test "startup provider chooses only its provider-scoped model" {
     );
 
     var grok_settings = config_runtime.Settings{ .provider = .grok };
-    grok_settings.models.values[@intFromEnum(model_provider.ProviderId.grok)] = @constCast("grok-model");
+    grok_settings.models.values[@backingInt(model_provider.ProviderId.grok)] = @constCast("grok-model");
     const grok = try configuredProviderSelection("default/model", &grok_settings);
     try std.testing.expectEqual(model_provider.ProviderId.grok, grok.provider);
     try std.testing.expectEqualStrings("grok-model", grok.model);
@@ -1956,10 +1956,10 @@ test "shutdown cleanup erases from footer frame top after frame commit" {
 }
 
 test "startup credential modes select a refresh policy, never a narrower source set" {
-    const modes = std.meta.fields(CredentialLoadMode);
+    const modes = @typeInfo(CredentialLoadMode).@"enum".field_names;
     try std.testing.expectEqual(@as(usize, 2), modes.len);
-    try std.testing.expectEqualStrings("stored", modes[0].name);
-    try std.testing.expectEqualStrings("refresh_if_needed", modes[1].name);
+    try std.testing.expectEqualStrings("stored", modes[0]);
+    try std.testing.expectEqualStrings("refresh_if_needed", modes[1]);
 }
 
 test "loadStartupState applies core env overrides" {
@@ -2012,8 +2012,7 @@ test "loadStartupState defaults fast mode on only for the compiled Gateway defau
     const codex_root = try io_mod.dirRealpathAlloc(std.testing.allocator, tmp.dir, "codex");
     defer std.testing.allocator.free(codex_root);
 
-    const fixture = try std.fmt.allocPrint(
-        std.testing.allocator,
+    const fixture = try std.testing.allocator.print(
         "{{\"workspaces\":{{\"{s}\":{{\"model\":\"openai/gpt-5\"}},\"{s}\":{{\"fast_mode\":false}},\"{s}\":{{\"provider\":\"codex\",\"codex_model\":\"gpt-5.4-mini\"}}}}}}\n",
         .{ configured_root, disabled_root, codex_root },
     );
@@ -2061,8 +2060,7 @@ test "loadStartupState resolves startup scrollback default and explicit false" {
     const disabled_root = try io_mod.dirRealpathAlloc(std.testing.allocator, tmp.dir, "disabled");
     defer std.testing.allocator.free(disabled_root);
 
-    const fixture = try std.fmt.allocPrint(
-        std.testing.allocator,
+    const fixture = try std.testing.allocator.print(
         "{{\"workspaces\":{{\"{s}\":{{\"startup_scrollback\":false}}}}}}\n",
         .{disabled_root},
     );

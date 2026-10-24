@@ -165,24 +165,24 @@ fn format_status_label(
     return if (status.isRecovered())
         format_recovered_label(buf, status)
     else if (status.action == .waiting_for_connectivity)
-        std.fmt.bufPrint(
+        std.mem.print(
             buf,
             "{s} · Esc to try later",
             .{status.label(&base_buf)},
         ) catch status.label(buf)
     else if (status.action == .paused)
         switch (status.required_action) {
-            .continue_later => std.fmt.bufPrint(
+            .continue_later => std.mem.print(
                 buf,
                 "{s} · /continue to resume",
                 .{status.label(&base_buf)},
             ) catch status.label(buf),
-            .inspect_uncertain_tool => std.fmt.bufPrint(
+            .inspect_uncertain_tool => std.mem.print(
                 buf,
                 "{s} · inspect tool state before /continue",
                 .{status.label(&base_buf)},
             ) catch status.label(buf),
-            .change_request => std.fmt.bufPrint(
+            .change_request => std.mem.print(
                 buf,
                 "{s} · change the request to continue",
                 .{status.label(&base_buf)},
@@ -216,7 +216,7 @@ fn format_retry_label(
 fn format_recovered_label(buf: []u8, status: types.RouteRecoveryStatus) []const u8 {
     return switch (status.kind) {
         .auto_recovered => if (status.succeeded_attempt > 0 and status.attempt_limit > 0)
-            std.fmt.bufPrint(
+            std.mem.print(
                 buf,
                 "✓ recovered · attempt {d}/{d}",
                 .{ status.succeeded_attempt, status.attempt_limit },

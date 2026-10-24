@@ -57,7 +57,7 @@ pub const Runtime = struct {
 
     pub fn initInto(storage: *Self, alloc: Allocator) void {
         comptime {
-            if (std.meta.fields(Self).len != 9) {
+            if (@typeInfo(Self).@"struct".field_names.len != 9) {
                 @compileError("update Runtime.initInto for the changed field set");
             }
         }

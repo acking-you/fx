@@ -1,5 +1,6 @@
 const std = @import("std");
 const io_mod = @import("../shared/io.zig");
+const text_utils = @import("../shared/text_utils.zig");
 
 pub const max_frontmatter_bytes: usize = 64 * 1024;
 pub const max_name_bytes: usize = 256;
@@ -531,7 +532,7 @@ pub fn invalidSkillNameCause(name: []const u8) ?InvalidMetadataCause {
 pub fn validateManagedSkillName(name: []const u8) !void {
     if (name.len == 0 or name.len > max_name_bytes) return error.InvalidSkillName;
     if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) return error.InvalidSkillName;
-    if (std.fs.path.isAbsolute(name)) return error.InvalidSkillName;
+    if (std.Io.Dir.path.isAbsolute(name)) return error.InvalidSkillName;
     if (std.mem.findScalar(u8, name, '/') != null) return error.InvalidSkillName;
     if (std.mem.findScalar(u8, name, '\\') != null) return error.InvalidSkillName;
 }
@@ -644,7 +645,7 @@ test "description blocks return to top-level metadata and reject malformed struc
 }
 
 test "description blocks enforce the decoded byte limit" {
-    const exact = "d" ** max_description_bytes;
+    const exact = text_utils.repeat("d", max_description_bytes);
     const over = exact ++ "d";
     try std.testing.expectEqual(
         MetadataStatus.valid,
@@ -656,7 +657,7 @@ test "description blocks enforce the decoded byte limit" {
     );
     try std.testing.expectEqual(
         MetadataStatus.valid,
-        parseSkillFile("---\nname: clipped\ndescription: |\n  " ++ ("d" ** (max_description_bytes - 1)) ++ "\n---\n").status,
+        parseSkillFile("---\nname: clipped\ndescription: |\n  " ++ (text_utils.repeat("d", (max_description_bytes - 1))) ++ "\n---\n").status,
     );
 }
 
@@ -732,9 +733,9 @@ test "parseSkillFile with partial frontmatter" {
 }
 
 test "parseSkillFile enforces hard metadata field bounds" {
-    const valid_name = "n" ** max_name_bytes;
+    const valid_name = text_utils.repeat("n", max_name_bytes);
     const oversized_name = valid_name ++ "n";
-    const valid_description = "d" ** max_description_bytes;
+    const valid_description = text_utils.repeat("d", max_description_bytes);
     const oversized_description = valid_description ++ "d";
 
     const name_at_limit = parseSkillFile("---\nname: " ++ valid_name ++ "\n---\n");

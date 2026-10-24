@@ -818,7 +818,7 @@ pub fn handleListSessions(state: *server.ServerState, alloc: Allocator, msg: *js
     defer page.deinit(alloc);
     var next_cursor_buf: [320]u8 = undefined;
     const next_cursor = if (page.has_more and page.summaries.items.len > 0)
-        try std.fmt.bufPrint(&next_cursor_buf, "v1:{d}:{s}", .{
+        try std.mem.print(&next_cursor_buf, "v1:{d}:{s}", .{
             page.summaries.items[page.summaries.items.len - 1].updated_at_ms,
             page.summaries.items[page.summaries.items.len - 1].id,
         })
@@ -839,7 +839,7 @@ pub fn handleListSessions(state: *server.ServerState, alloc: Allocator, msg: *js
             );
             continue;
         };
-        if (!std.fs.path.isAbsolute(workspace_root)) {
+        if (!std.Io.Dir.path.isAbsolute(workspace_root)) {
             debug_trace.logf(
                 "acp",
                 "session operation=list outcome=omitted id={s} reason=workspace_not_absolute",
@@ -889,7 +889,7 @@ fn parseListSessionsParams(
     var result = ListSessionsParams{};
     if (parsed.value.object.get("cwd")) |cwd| {
         if (cwd != .null) {
-            if (cwd != .string or !std.fs.path.isAbsolute(cwd.string)) {
+            if (cwd != .string or !std.Io.Dir.path.isAbsolute(cwd.string)) {
                 return error.InvalidParams;
             }
             result.cwd = cwd.string;
@@ -1056,9 +1056,9 @@ fn formatIso8601(alloc: Allocator, timestamp_ms: i64) ![]u8 {
     const year_day = epoch.getEpochDay().calculateYearDay();
     const month_day = year_day.calculateMonthDay();
 
-    return std.fmt.allocPrint(alloc, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{
+    return alloc.print("{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{
         year_day.year,
-        @intFromEnum(month_day.month),
+        @backingInt(month_day.month),
         month_day.day_index + 1,
         day.getHoursIntoDay(),
         day.getMinutesIntoHour(),

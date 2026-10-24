@@ -65,7 +65,7 @@ fn stream(raw: ?*anyopaque, alloc: Allocator, request: stream_provider.ModelRequ
         .codex_responses_oauth => unreachable,
     };
     defer alloc.free(payload);
-    const auth = try std.fmt.allocPrint(alloc, "Bearer {s}", .{request.credential.secret});
+    const auth = try alloc.print("Bearer {s}", .{request.credential.secret});
     defer secret.zeroAndFree(alloc, auth);
 
     const Header = struct { name: []const u8, value: []const u8 };
@@ -121,7 +121,7 @@ fn stream(raw: ?*anyopaque, alloc: Allocator, request: stream_provider.ModelRequ
         try pulse(request.cooperative_pulse);
     }
 
-    const status: std.http.Status = @enumFromInt(status_code);
+    const status: std.http.Status = @fromBackingInt(@intCast(status_code));
     if (status != .ok) {
         const detail = try readBody(alloc, transport, handle, request.cancel_flag, request.cooperative_pulse);
         errdefer alloc.free(detail);

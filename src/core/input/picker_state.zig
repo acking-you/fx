@@ -1,3 +1,4 @@
+const testing_allocator = @import("../shared/testing_allocator.zig");
 const std = @import("std");
 const editor_state = @import("editor_state.zig");
 const text_utils = @import("../shared/text_utils.zig");
@@ -568,7 +569,7 @@ test "model picker flow accepts aliased pending model input" {
 }
 
 test "model picker flow preserves state when allocation fails" {
-    const alloc = std.testing.allocator;
+    const alloc = testing_allocator.no_resize;
     var state: State = .{};
     defer state.deinit(alloc);
 

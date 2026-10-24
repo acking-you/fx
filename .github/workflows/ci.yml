@@ -24,7 +24,7 @@ jobs:
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: "0.16.0"
+          version: "0.17.0"
           cache-key: ci-unit-${{ matrix.optimize }}
 
       - name: Check formatting
@@ -34,7 +34,9 @@ jobs:
         run: python3 -m scripts.pgso.corpus --manifest scripts/pgso/corpus.json --list
 
       - name: Audit public surface
-        run: ./scripts/check-public-surface.sh
+        run: |
+          ./scripts/check-public-surface.sh
+          ./scripts/check-indexer-boundary.sh
 
       - name: Build
         run: zig build -Doptimize=${{ matrix.optimize }}
@@ -67,7 +69,7 @@ jobs:
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: "0.16.0"
+          version: "0.17.0"
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -94,7 +96,7 @@ jobs:
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: "0.16.0"
+          version: "0.17.0"
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -116,7 +118,7 @@ jobs:
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: "0.16.0"
+          version: "0.17.0"
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -150,7 +152,7 @@ jobs:
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: "0.16.0"
+          version: "0.17.0"
           cache-key: ci-e2e-${{ matrix.optimize }}
 
       - name: Build
@@ -265,7 +267,7 @@ jobs:
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: "0.16.0"
+          version: "0.17.0"
           cache-key: ci-cross-target-${{ matrix.name }}
 
       - name: Build target
@@ -294,7 +296,7 @@ jobs:
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: "0.16.0"
+          version: "0.17.0"
           cache-key: ci-windows-native
 
       - name: Check formatting
@@ -306,37 +308,37 @@ jobs:
       - name: Run Windows runtime tests
         shell: pwsh
         run: |
-          zig build test -Doptimize=ReleaseSafe -- `
-            --test-filter "resolver builds Windows command invocations" `
-            --test-filter "Windows shell discovery prefers Git Bash installations and PATH roots" `
-            --test-filter "model tool projection identifies the actual default command shell" `
-            --test-filter "Windows resize polling applies changed console geometry" `
-            --test-filter "raw console setup restores captured modes after a partial failure" `
-            --test-filter "platform temporary directory resolves to an existing absolute directory" `
-            --test-filter "temporary image snapshots use the platform temporary directory" `
-            --test-filter "web_fetch Windows connect control does not truncate a later deadline to one second" `
-            --test-filter "Windows AFD listener accepts a connection arriving during the wait" `
-            --test-filter "browser callback reads request bytes arriving after accept" `
-            --test-filter "browser callback classifies the Windows AFD reset status as unrelated" `
-            --test-filter "browser callback survives a reset queued before accept" `
-            --test-filter "unified exec returns short commands synchronously" `
-            --test-filter "unified exec Windows resolver runs commands through installed Git Bash" `
-            --test-filter "unified exec keeps long process addressable and polls output" `
-            --test-filter "unified exec writes interactive input without blocking the caller" `
-            --test-filter "unified exec Windows reaps each completed stdin writer before replacement" `
-            --test-filter "unified exec activates the observer before a direct write can fail" `
-            --test-filter "unified exec manager cleanup terminates a still-running process group" `
-            --test-filter "Codex CLI parser validates the account bound to the access token" `
-            --test-filter "Grok Build parser" `
-            --test-filter "provider setup JSON never contains credentials" `
-            --test-filter "provider setup poll does not expose the completion transition as idle" `
-            --test-filter "private file permissions accept owner-only read-only mode" `
-            --test-filter "bounded native profile file is present" `
-            --test-filter "Grok team refresh preserves the principal binding" `
-            --test-filter "Grok team principal round trips for refresh" `
-            --test-filter "recovery markers are idempotent and clear durably" `
-            --test-filter "cloneEnvironMap converts the native Windows environment to WTF-8" `
-            --test-filter "native hosts still load project instruction files"
+          zig build test -Doptimize=ReleaseSafe `
+            -Dtest-filter="resolver builds Windows command invocations" `
+            -Dtest-filter="Windows shell discovery prefers Git Bash installations and PATH roots" `
+            -Dtest-filter="model tool projection identifies the actual default command shell" `
+            -Dtest-filter="Windows resize polling applies changed console geometry" `
+            -Dtest-filter="raw console setup restores captured modes after a partial failure" `
+            -Dtest-filter="platform temporary directory resolves to an existing absolute directory" `
+            -Dtest-filter="temporary image snapshots use the platform temporary directory" `
+            -Dtest-filter="web_fetch Windows connect control does not truncate a later deadline to one second" `
+            -Dtest-filter="Windows AFD listener accepts a connection arriving during the wait" `
+            -Dtest-filter="browser callback reads request bytes arriving after accept" `
+            -Dtest-filter="browser callback classifies the Windows AFD reset status as unrelated" `
+            -Dtest-filter="browser callback survives a reset queued before accept" `
+            -Dtest-filter="unified exec returns short commands synchronously" `
+            -Dtest-filter="unified exec Windows resolver runs commands through installed Git Bash" `
+            -Dtest-filter="unified exec keeps long process addressable and polls output" `
+            -Dtest-filter="unified exec writes interactive input without blocking the caller" `
+            -Dtest-filter="unified exec Windows reaps each completed stdin writer before replacement" `
+            -Dtest-filter="unified exec activates the observer before a direct write can fail" `
+            -Dtest-filter="unified exec manager cleanup terminates a still-running process group" `
+            -Dtest-filter="Codex CLI parser validates the account bound to the access token" `
+            -Dtest-filter="Grok Build parser" `
+            -Dtest-filter="provider setup JSON never contains credentials" `
+            -Dtest-filter="provider setup poll does not expose the completion transition as idle" `
+            -Dtest-filter="private file permissions accept owner-only read-only mode" `
+            -Dtest-filter="bounded native profile file is present" `
+            -Dtest-filter="Grok team refresh preserves the principal binding" `
+            -Dtest-filter="Grok team principal round trips for refresh" `
+            -Dtest-filter="recovery markers are idempotent and clear durably" `
+            -Dtest-filter="cloneEnvironMap converts the native Windows environment to WTF-8" `
+            -Dtest-filter="native hosts still load project instruction files"
 
       - name: Smoke test CLI and ACP
         shell: pwsh

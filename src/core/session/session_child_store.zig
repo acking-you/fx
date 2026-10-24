@@ -187,8 +187,8 @@ const CapabilityImpl = struct {
     terminal_parent: ?io_mod.VerifiedDir = null,
     terminal_state: ?io_mod.VerifiedDir = null,
     terminal_proofs: ?io_mod.VerifiedDir = null,
-    indeterminate_names: [@typeInfo(ManagedChildKind).@"enum".fields.len]?[]u8 =
-        [_]?[]u8{null} ** @typeInfo(ManagedChildKind).@"enum".fields.len,
+    indeterminate_names: [@typeInfo(ManagedChildKind).@"enum".field_names.len]?[]u8 =
+        @splat(null),
 
     fn deinit(self: *CapabilityImpl) void {
         closeOptionalDir(&self.background_logs);
@@ -400,7 +400,7 @@ const CapabilityImpl = struct {
     ) ![]u8 {
         const route_path = try self.displayRoutePath(alloc, kind);
         defer alloc.free(route_path);
-        return std.fs.path.join(alloc, &.{ route_path, name });
+        return std.Io.Dir.path.join(alloc, &.{ route_path, name });
     }
 
     fn displayRoutePath(
@@ -417,7 +417,7 @@ const CapabilityImpl = struct {
                     u8,
                     self.legacy_display_route.?,
                 ),
-                .background_logs => std.fs.path.join(
+                .background_logs => std.Io.Dir.path.join(
                     alloc,
                     &.{ self.legacy_display_route.?, "logs" },
                 ),
@@ -425,35 +425,35 @@ const CapabilityImpl = struct {
             };
         }
         return switch (kind) {
-            .background_records => std.fs.path.join(
+            .background_records => std.Io.Dir.path.join(
                 alloc,
                 &.{ self.display_session_path, "background" },
             ),
-            .background_logs => std.fs.path.join(
+            .background_logs => std.Io.Dir.path.join(
                 alloc,
                 &.{ self.display_session_path, "background", "logs" },
             ),
-            .command_artifacts => std.fs.path.join(
+            .command_artifacts => std.Io.Dir.path.join(
                 alloc,
                 &.{ self.display_session_path, "logs", "commands" },
             ),
-            .browser_artifacts => std.fs.path.join(
+            .browser_artifacts => std.Io.Dir.path.join(
                 alloc,
                 &.{ self.display_session_path, "artifacts", "browser" },
             ),
-            .tool_results => std.fs.path.join(
+            .tool_results => std.Io.Dir.path.join(
                 alloc,
                 &.{ self.display_session_path, "tool-results" },
             ),
-            .subagent_control => std.fs.path.join(
+            .subagent_control => std.Io.Dir.path.join(
                 alloc,
                 &.{ self.display_session_path, "subagent" },
             ),
-            .terminal_state => std.fs.path.join(
+            .terminal_state => std.Io.Dir.path.join(
                 alloc,
                 &.{ self.display_session_path, "terminal", "state" },
             ),
-            .terminal_proofs => std.fs.path.join(
+            .terminal_proofs => std.Io.Dir.path.join(
                 alloc,
                 &.{ self.display_session_path, "terminal", "proofs" },
             ),
@@ -474,19 +474,19 @@ const CapabilityImpl = struct {
         kind: ManagedChildKind,
         replacement: []u8,
     ) void {
-        const index = @intFromEnum(kind);
+        const index = @backingInt(kind);
         if (self.indeterminate_names[index]) |old| self.alloc.free(old);
         self.indeterminate_names[index] = replacement;
     }
 
     fn clearIndeterminate(self: *CapabilityImpl, kind: ManagedChildKind) void {
-        const index = @intFromEnum(kind);
+        const index = @backingInt(kind);
         if (self.indeterminate_names[index]) |name| self.alloc.free(name);
         self.indeterminate_names[index] = null;
     }
 
     fn resolveIndeterminate(self: *CapabilityImpl, kind: ManagedChildKind) !void {
-        const name = self.indeterminate_names[@intFromEnum(kind)] orelse return;
+        const name = self.indeterminate_names[@backingInt(kind)] orelse return;
         const route_dir = try self.route(kind, false) orelse
             return error.FileNotFound;
         var file = try openPrivateFile(route_dir, name, .read_only, self.mode);
@@ -1120,7 +1120,7 @@ pub const SessionChildCapability = struct {
         kind: ManagedChildKind,
         name: []const u8,
     ) bool {
-        const pending = self.impl.indeterminate_names[@intFromEnum(kind)] orelse
+        const pending = self.impl.indeterminate_names[@backingInt(kind)] orelse
             return false;
         return std.mem.eql(u8, pending, name);
     }
@@ -1141,7 +1141,7 @@ pub const SessionChildCapability = struct {
         self: SessionChildCapability,
         kind: ManagedChildKind,
     ) ?[]const u8 {
-        return self.impl.indeterminate_names[@intFromEnum(kind)];
+        return self.impl.indeterminate_names[@backingInt(kind)];
     }
 
     /// Returns non-authoritative metadata for compatibility rendering only.
@@ -1302,8 +1302,8 @@ fn countEntries(dir: std.Io.Dir) !usize {
 }
 
 test "private read-only file remains valid after atomic replacement unlinks it" {
-    if (comptime @import("builtin").os.tag == .windows or
-        @import("builtin").os.tag == .wasi)
+    if (comptime @import("builtin").target.os.tag == .windows or
+        @import("builtin").target.os.tag == .wasi)
     {
         return error.SkipZigTest;
     }
@@ -1373,9 +1373,9 @@ test "managed child capability rejects invalid names and unsafe routes" {
     var linked = try capability.createExclusiveFile(alloc, .tool_results, "linked.txt");
     linked.deinit();
     var source_buf: [128]u8 = undefined;
-    const source = try std.fmt.bufPrintZ(&source_buf, "tool-results/linked.txt", .{});
+    const source = try std.mem.printSentinel(&source_buf, "tool-results/linked.txt", .{}, 0);
     var target_buf: [128]u8 = undefined;
-    const target = try std.fmt.bufPrintZ(&target_buf, "tool-results/linked-again.txt", .{});
+    const target = try std.mem.printSentinel(&target_buf, "tool-results/linked-again.txt", .{}, 0);
     try std.testing.expectEqual(
         @as(c_int, 0),
         std.c.linkat(session.dir.handle, source, session.dir.handle, target, 0),

@@ -1,4 +1,5 @@
 const std = @import("std");
+const text_utils = @import("../shared/text_utils.zig");
 
 const Allocator = std.mem.Allocator;
 const Sha256 = std.crypto.hash.sha2.Sha256;
@@ -14,8 +15,7 @@ pub fn contentAddressedHandle(
         return error.InvalidArtifactHandle;
     }
     const digest_hex = std.fmt.bytesToHex(digest[0..8].*, .lower);
-    return std.fmt.allocPrint(
-        alloc,
+    return alloc.print(
         "{s}-{s}{s}",
         .{
             source_handle[0 .. source_handle.len - suffix.len],

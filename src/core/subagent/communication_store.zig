@@ -1,3 +1,4 @@
+const testing_allocator = @import("../shared/testing_allocator.zig");
 const std = @import("std");
 const io_mod = @import("../shared/io.zig");
 const permission_request = @import("../permissions/permission_request.zig");
@@ -816,7 +817,7 @@ fn decodeApprovalsV5V6(
             if (encoded_private_text)
                 return error.InvalidCommunicationRecord
             else
-                [_]u8{0} ** 32;
+                @as([32]u8, @splat(0));
         const grants = try decodeWireGrantsV5V6(
             alloc,
             approval.grants,
@@ -1014,8 +1015,7 @@ test "schema v6 persists large captured command approvals" {
             environment,
             command,
         );
-        const grant_target = try std.fmt.allocPrint(
-            arena,
+        const grant_target = try arena.print(
             "/tmp/workspace::{s}",
             .{command_identity},
         );
@@ -1032,7 +1032,7 @@ test "schema v6 persists large captured command approvals" {
             .child_id = "child",
             .root_id = "root",
             .work_id = "work",
-            .prepared_fingerprint = [_]u8{11} ** 32,
+            .prepared_fingerprint = @as([32]u8, @splat(11)),
             .label = "captured command",
             .explanation = null,
             .command = approval_command,
@@ -1095,7 +1095,7 @@ test "schema v6 rejects a malformed later grant without leaking partial state" {
         .child_id = "child",
         .root_id = "root",
         .work_id = "work",
-        .prepared_fingerprint = [_]u8{12} ** 32,
+        .prepared_fingerprint = @as([32]u8, @splat(12)),
         .label = "partial decode",
         .explanation = null,
         .command = "printf command",
@@ -1109,8 +1109,7 @@ test "schema v6 rejects a malformed later grant without leaking partial state" {
         &second_target,
         grants[1].target_path,
     );
-    const needle = try std.fmt.allocPrint(
-        alloc,
+    const needle = try alloc.print(
         "\"data\":\"{s}\"",
         .{target_data},
     );
@@ -1144,7 +1143,7 @@ test "schema v6 file approval projection round trips as independent owned state"
         .child_id = "child",
         .root_id = "root",
         .work_id = "work",
-        .prepared_fingerprint = [_]u8{4} ** 32,
+        .prepared_fingerprint = @as([32]u8, @splat(4)),
         .label = "file_mutation",
         .explanation = "review the file change",
         .file = .{
@@ -1195,7 +1194,7 @@ test "schema v5 approvals without file projection remain compatible" {
         .child_id = "child",
         .root_id = "root",
         .work_id = "work",
-        .prepared_fingerprint = [_]u8{5} ** 32,
+        .prepared_fingerprint = @as([32]u8, @splat(5)),
         .label = "exec_command printf ok",
         .explanation = null,
         .command = "printf legacy",
@@ -1301,7 +1300,7 @@ test "canonical byte retention keeps valid delivery traffic encodable" {
 
     for (0..50) |index| {
         var id_buffer: [64]u8 = undefined;
-        const id = try std.fmt.bufPrint(&id_buffer, "byte-fill-{d}", .{index});
+        const id = try std.mem.print(&id_buffer, "byte-fill-{d}", .{index});
         _ = try communication.appendDelivery(alloc, &ledger, .{
             .id = id,
             .source_id = "child",
@@ -1403,7 +1402,7 @@ fn registerCapacityTestApproval(
         .child_id = "child",
         .root_id = "root",
         .work_id = "work",
-        .prepared_fingerprint = [_]u8{7} ** 32,
+        .prepared_fingerprint = @as([32]u8, @splat(7)),
         .label = &label,
         .explanation = &explanation,
         .grants = grants,
@@ -1421,7 +1420,7 @@ test "valid active notification policies cannot exceed the communication record"
     var rejected = false;
     for (0..140) |index| {
         var work_id_buffer: [64]u8 = undefined;
-        const work_id = try std.fmt.bufPrint(
+        const work_id = try std.mem.print(
             &work_id_buffer,
             "capacity-policy-{d}",
             .{index},
@@ -1462,7 +1461,7 @@ test "irreducible collection count budgets reject only the next admission" {
 
     for (0..communication.max_active_work_notifications) |index| {
         var id_buffer: [64]u8 = undefined;
-        const id = try std.fmt.bufPrint(&id_buffer, "count-work-{d}", .{index});
+        const id = try std.mem.print(&id_buffer, "count-work-{d}", .{index});
         try communication.upsertWorkNotification(
             alloc,
             &ledger,
@@ -1484,7 +1483,7 @@ test "irreducible collection count budgets reject only the next admission" {
 
     for (0..communication.max_live_approvals) |index| {
         var id_buffer: [64]u8 = undefined;
-        const id = try std.fmt.bufPrint(
+        const id = try std.mem.print(
             &id_buffer,
             "count-approval-{d}",
             .{index},
@@ -1495,7 +1494,7 @@ test "irreducible collection count budgets reject only the next admission" {
             .child_id = "child",
             .root_id = "root",
             .work_id = "work",
-            .prepared_fingerprint = [_]u8{5} ** 32,
+            .prepared_fingerprint = @as([32]u8, @splat(5)),
             .label = "approve",
             .explanation = null,
             .grants = &.{},
@@ -1511,7 +1510,7 @@ test "irreducible collection count budgets reject only the next admission" {
             .child_id = "child",
             .root_id = "root",
             .work_id = "work",
-            .prepared_fingerprint = [_]u8{6} ** 32,
+            .prepared_fingerprint = @as([32]u8, @splat(6)),
             .label = "approve",
             .explanation = null,
             .grants = &.{},
@@ -1649,7 +1648,7 @@ test "valid mixed irreducible state cannot exceed the communication record" {
     defer policy.deinit(alloc);
     for (0..5) |index| {
         var work_id_buffer: [64]u8 = undefined;
-        const work_id = try std.fmt.bufPrint(
+        const work_id = try std.mem.print(
             &work_id_buffer,
             "mixed-policy-{d}",
             .{index},
@@ -1676,7 +1675,7 @@ test "valid mixed irreducible state cannot exceed the communication record" {
     );
     for (0..communication.max_consumers) |index| {
         var consumer_buffer: [64]u8 = undefined;
-        const consumer = try std.fmt.bufPrint(
+        const consumer = try std.mem.print(
             &consumer_buffer,
             "mixed-consumer-{d}",
             .{index},
@@ -1780,7 +1779,7 @@ test "valid mixed irreducible state cannot exceed the communication record" {
         .child_id = "child",
         .root_id = "root",
         .work_id = "work",
-        .prepared_fingerprint = [_]u8{8} ** 32,
+        .prepared_fingerprint = @as([32]u8, @splat(8)),
         .label = "next approval",
         .explanation = null,
         .grants = &.{},
@@ -1840,7 +1839,7 @@ test "terminal and resolved cycles remain writable beyond retained bounds" {
 
     for (0..512) |index| {
         var work_buffer: [64]u8 = undefined;
-        const work_id = try std.fmt.bufPrint(
+        const work_id = try std.mem.print(
             &work_buffer,
             "cycle-work-{d}",
             .{index},
@@ -1858,7 +1857,7 @@ test "terminal and resolved cycles remain writable beyond retained bounds" {
         try communication.compactStoppedWorkNotifications(alloc, &ledger);
 
         var approval_buffer: [64]u8 = undefined;
-        const approval_id = try std.fmt.bufPrint(
+        const approval_id = try std.mem.print(
             &approval_buffer,
             "cycle-approval-{d}",
             .{index},
@@ -1869,7 +1868,7 @@ test "terminal and resolved cycles remain writable beyond retained bounds" {
             .child_id = "child",
             .root_id = "root",
             .work_id = "work",
-            .prepared_fingerprint = [_]u8{9} ** 32,
+            .prepared_fingerprint = @as([32]u8, @splat(9)),
             .label = "approve",
             .explanation = null,
             .grants = &.{},
@@ -1884,7 +1883,7 @@ test "terminal and resolved cycles remain writable beyond retained bounds" {
         );
         ledger.generation = revision;
         var delivery_buffer: [64]u8 = undefined;
-        const delivery_id = try std.fmt.bufPrint(
+        const delivery_id = try std.mem.print(
             &delivery_buffer,
             "cycle-delivery-{d}",
             .{index},
@@ -2000,7 +1999,7 @@ test "schema v1 resolved approvals receive a deterministic migration revision" {
         .child_id = "child",
         .root_id = "root",
         .work_id = "work",
-        .prepared_fingerprint = [_]u8{3} ** 32,
+        .prepared_fingerprint = @as([32]u8, @splat(3)),
         .label = "tool action",
         .explanation = null,
         .grants = &.{},
@@ -2059,7 +2058,7 @@ test "legacy over-budget records load and migrate only after safe reduction" {
     defer policy.deinit(alloc);
     for (0..communication.max_active_work_notifications) |index| {
         var id_buffer: [64]u8 = undefined;
-        const id = try std.fmt.bufPrint(&id_buffer, "legacy-work-{d}", .{index});
+        const id = try std.mem.print(&id_buffer, "legacy-work-{d}", .{index});
         try communication.upsertWorkNotification(
             alloc,
             &ledger,
@@ -2265,7 +2264,7 @@ fn checkCommunicationCodecAllocationFailures(alloc: Allocator) !void {
 
 test "communication codec cleans every failing allocation path" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkCommunicationCodecAllocationFailures,
         .{},
     );
@@ -2292,7 +2291,7 @@ fn checkCommunicationCompactionAllocationFailures(alloc: Allocator) !void {
 
 test "communication compaction cleans every failing allocation path" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkCommunicationCompactionAllocationFailures,
         .{},
     );
@@ -2330,7 +2329,7 @@ fn checkCapacityMutationAllocationFailures(alloc: Allocator) !void {
         .child_id = "child",
         .root_id = "root",
         .work_id = "work",
-        .prepared_fingerprint = [_]u8{4} ** 32,
+        .prepared_fingerprint = @as([32]u8, @splat(4)),
         .label = "approve",
         .explanation = "allocation sweep",
         .grants = &grants,
@@ -2345,7 +2344,7 @@ fn checkCapacityMutationAllocationFailures(alloc: Allocator) !void {
 
 test "capacity mutations clean every failing allocation path" {
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        testing_allocator.no_resize,
         checkCapacityMutationAllocationFailures,
         .{},
     );

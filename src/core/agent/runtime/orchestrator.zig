@@ -384,8 +384,7 @@ fn preparedTerminalModelOutput(
 ) Allocator.Error![]const u8 {
     if (terminal.model_output) |model_output| return model_output;
     return switch (terminal.kind) {
-        .unsupported => try std.fmt.allocPrint(
-            alloc,
+        .unsupported => try alloc.print(
             "Unsupported tool: {s}",
             .{call.name},
         ),
@@ -1062,8 +1061,7 @@ fn appendReadFailureRecoveryContext(
     const projected = try alloc.alloc(ChatMessage, messages.len + 1);
     @memcpy(projected[0..messages.len], messages);
     const instruction = switch (selected) {
-        .continue_response => try std.fmt.allocPrint(
-            alloc,
+        .continue_response => try alloc.print(
             "<network_recovery>\nThe response stream was interrupted. Continue the same response from the exact partial source below. Do not repeat it and do not start a new answer.\n<partial_assistant>\n{s}\n</partial_assistant>\n</network_recovery>",
             .{partial_assistant},
         ),
@@ -1431,12 +1429,12 @@ test "recovery checkpoints do not accumulate temporary history copies in the tur
     const alloc = turn.allocator();
     var messages: std.ArrayList(ChatMessage) = .empty;
     for (0..1000) |step_index| {
-        const id = try std.fmt.allocPrint(alloc, "read_{d}", .{step_index});
+        const id = try alloc.print("read_{d}", .{step_index});
         const calls = try alloc.alloc(ToolCall, 1);
         calls[0] = .{ .id = id, .name = "read_file", .arguments_json = "{\"path\":\"evidence.txt\"}" };
         try messages.appendSlice(alloc, &.{
             .{ .role = .assistant, .tool_calls = calls },
-            .{ .role = .tool, .tool_call_id = id, .tool_name = "read_file", .tool_result_status = .success, .content = "current evidence" ** 16 },
+            .{ .role = .tool, .tool_call_id = id, .tool_name = "read_file", .tool_result_status = .success, .content = text_utils.repeat("current evidence", 16) },
         });
         const retained_bytes = turn.queryCapacity();
         try persistRecoveryCheckpoint(&deps, alloc, fixture.job(), messages.items, "partial", "model", false, false, 10, 1, false, .transport_interrupted, .retry_request, .confirmed, .{});
@@ -1887,7 +1885,7 @@ fn prepareExternalFailureDiagnostic(
 ) !types.ModelFailureDiagnostic {
     const trimmed = std.mem.trim(u8, raw, " \t\r\n");
     const owned_source = if (trimmed.len > 0 and !hasDiagnosticIdentifier(trimmed))
-        try std.fmt.allocPrint(alloc, "{s}: {s}", .{ fallback, trimmed })
+        try alloc.print("{s}: {s}", .{ fallback, trimmed })
     else
         null;
     defer if (owned_source) |source| alloc.free(source);
@@ -1906,9 +1904,9 @@ fn prepareExternalFailureDiagnostic(
 }
 
 fn hasDiagnosticIdentifier(text: []const u8) bool {
-    if (std.mem.indexOf(u8, text, ": ")) |separator| {
+    if (std.mem.find(u8, text, ": ")) |separator| {
         if (separator == 0) return false;
-        return std.mem.indexOfAny(u8, text[0..separator], " \t\r\n") == null;
+        return std.mem.findAny(u8, text[0..separator], " \t\r\n") == null;
     }
     for (text) |byte| {
         if (!std.ascii.isAlphanumeric(byte) and byte != '_' and byte != '-' and byte != '.') return false;
@@ -3588,7 +3586,7 @@ fn processQueuedPromptLoop(
                     const notice = if (err == error.InvalidGenerationRecord)
                         "Invalid provider usage: token counts are inconsistent. Usage accounting is incomplete; the request was not retried."
                     else
-                        try std.fmt.allocPrint(arena, "Request failed: {s}", .{failure_diagnostic.view()});
+                        try arena.print("Request failed: {s}", .{failure_diagnostic.view()});
                     try deps.push_system_notice(deps.ctx, notice);
                 }
                 try runtime_assistant_stream.flushAssistantStream(&stream_ctx);
@@ -4270,7 +4268,7 @@ fn processQueuedPromptLoop(
                         "context_overflow_recovery",
                         step_ctx,
                         "status={d} action=compact_retry",
-                        .{@intFromEnum(failureHttpStatus(failure.kind))},
+                        .{@backingInt(failureHttpStatus(failure.kind))},
                     );
                     stream_result.deinit(arena);
                     stream_result_set = false;

@@ -29,7 +29,7 @@ pub fn decode(ctx: tool_dispatch.DispatchContext, args_json: []const u8) tool_di
     }
     const is_legacy = parsed.value.object.get("query") != null;
     if ((if (is_legacy) unknownLegacyField(parsed.value.object) else unknownCommandField(parsed.value.object))) |field| {
-        return .{ .failure = try std.fmt.allocPrint(ctx.allocator, "web_search field \"{s}\" is not supported", .{field}) };
+        return .{ .failure = try ctx.allocator.print("web_search field \"{s}\" is not supported", .{field}) };
     }
 
     if (!is_legacy) return decodeCommands(ctx, parsed.value.object, args_json);
@@ -138,7 +138,7 @@ const DecodeOwned = struct {
 fn decodeOptionalStrings(ctx: tool_dispatch.DispatchContext, object: std.json.ObjectMap, field: []const u8) tool_dispatch.DispatchError!OptionalStringsDecodeResult {
     const value = object.get(field) orelse return .{ .strings = null };
     if (value != .array) {
-        return .{ .failure = try std.fmt.allocPrint(ctx.allocator, "web_search field \"{s}\" must be an array of strings", .{field}) };
+        return .{ .failure = try ctx.allocator.print("web_search field \"{s}\" must be an array of strings", .{field}) };
     }
 
     const strings = try ctx.allocator.alloc([]u8, value.array.items.len);
@@ -153,7 +153,7 @@ fn decodeOptionalStrings(ctx: tool_dispatch.DispatchContext, object: std.json.Ob
 
     for (value.array.items, 0..) |item, index| {
         if (item != .string) {
-            return .{ .failure = try std.fmt.allocPrint(ctx.allocator, "web_search field \"{s}\" item {d} must be a string", .{ field, index }) };
+            return .{ .failure = try ctx.allocator.print("web_search field \"{s}\" item {d} must be a string", .{ field, index }) };
         }
         strings[index] = try ctx.allocator.dupe(u8, item.string);
         initialized += 1;
