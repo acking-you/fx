@@ -2052,9 +2052,15 @@ describe("cli: sessions", () => {
 
 describe("cli: removed legacy process commands", () => {
   test(
-    "fx task, fx tasks, and fx background are unknown commands",
+    "fx rejects retired process commands and internal execution entrypoints",
     async () => {
-      for (const command of ["task", "tasks", "background"]) {
+      for (const command of [
+        "task",
+        "tasks",
+        "background",
+        "--fx-internal-terminal-host",
+        "__fx_foreground_session__",
+      ]) {
         const result = await runFx([command], { env: NO_GATEWAY_AUTH });
         expect(result.code).toBe(1);
         expect(`${result.stdout}\n${result.stderr}`).toContain("unknown subcommand");

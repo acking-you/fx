@@ -18,7 +18,6 @@ const catalogModels = [
   { id: "gpt-5.4-mini", object: "model", created: 2, owned_by: "openai" },
 ];
 let fetchCalls = 0;
-let workspaceExecs = 0;
 const mockFetch = async (url, init) => {
   if (init.method === "GET" && String(url).endsWith("/v1/models")) {
     return Response.json({ object: "list", data: catalogModels });
@@ -68,10 +67,7 @@ const agent = await Promise.race([
         ephemeral: true,
       },
       permission: "allow-sandboxed",
-      async exec() {
-        workspaceExecs += 1;
-        throw new Error("workspace.exec should not run during a text-only prompt");
-      },
+
     },
   }),
   initializeTimeout.promise,
@@ -96,7 +92,6 @@ if (notices.some((notice) => notice.includes("home unavailable"))) {
 if (streamedText !== "hello world") throw new Error(`unexpected streamed text: ${JSON.stringify(chunks)}`);
 if (result.stopReason !== "end_turn") throw new Error(`unexpected stop reason: ${result.stopReason}`);
 if (fetchCalls !== 1) throw new Error(`expected one gateway fetch, got ${fetchCalls}`);
-if (workspaceExecs !== 0) throw new Error(`workspace.exec ran ${workspaceExecs} time(s)`);
 
 await agent.close();
 console.log("core SDK HOME=/repo unavailable filesystem passed: prompt reached the model");

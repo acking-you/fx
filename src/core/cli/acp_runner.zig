@@ -1,8 +1,5 @@
 const std = @import("std");
 const config_runtime = @import("../config/config_runtime.zig");
-const background_process_provider = @import(
-    "../execution/background_process_provider.zig",
-);
 const gateway_provider = @import("../gateway/gateway_provider.zig");
 const provider_set = @import("../gateway/provider_set.zig");
 const model_provider = @import("../config/model_provider.zig");
@@ -27,8 +24,6 @@ pub const Config = struct {
     gateway_models_path: []const u8,
     gateway_provider: gateway_provider.Provider,
     provider_set: provider_set.Set,
-    background_process_provider: background_process_provider.Provider =
-        background_process_provider.unavailable_provider,
     secret_store: host.SecretStore,
     prompt_policy: prompt_policy.Policy,
     ignored_list_entries: []const []const u8,

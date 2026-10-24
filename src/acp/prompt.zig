@@ -1499,17 +1499,11 @@ pub fn handleUnifiedExecKill(
     try state.writer.writeResponse(alloc, msg.id, response.writer.buffered());
 }
 
-fn terminalVisibleInProcessStatus(row: anytype) bool {
-    return row.lifecycle == .running or row.lifecycle == .starting;
-}
-
-fn writeBackgroundTerminalsJson(
+fn writeBackgroundProcessesJson(
     writer: *std.Io.Writer,
     state: *server.ServerState,
     alloc: Allocator,
 ) !void {
-    var terminal_snapshot = try state.terminal_client.terminalProjection(alloc);
-    defer terminal_snapshot.deinit();
     const commands = try state.unified_exec.snapshotProcesses(alloc);
     defer unified_exec_runtime.Manager.freeProcessSnapshots(
         alloc,
@@ -1518,20 +1512,6 @@ fn writeBackgroundTerminalsJson(
 
     try writer.writeAll("{\"data\":[");
     var first = true;
-    for (terminal_snapshot.rows) |row| {
-        if (!terminalVisibleInProcessStatus(row)) continue;
-        if (!first) try writer.writeByte(',');
-        first = false;
-        try writer.writeAll("{\"kind\":\"terminal\",\"id\":");
-        try jsonrpc.writeJsonStr(row.session_id, writer);
-        try writer.writeAll(",\"command\":");
-        try jsonrpc.writeJsonStr(row.label, writer);
-        try writer.writeAll(",\"state\":");
-        try jsonrpc.writeJsonStr(@tagName(row.lifecycle), writer);
-        try writer.writeAll(",\"backend\":");
-        try jsonrpc.writeJsonStr(@tagName(row.backend), writer);
-        try writer.writeAll("}");
-    }
     for (commands) |command| {
         if (!first) try writer.writeByte(',');
         first = false;
@@ -1565,7 +1545,7 @@ pub fn handleBackgroundTerminalsList(
     }
     var response: std.Io.Writer.Allocating = .init(alloc);
     defer response.deinit();
-    try writeBackgroundTerminalsJson(&response.writer, state, alloc);
+    try writeBackgroundProcessesJson(&response.writer, state, alloc);
     try state.writer.writeResponse(alloc, msg.id, response.writer.buffered());
 }
 
@@ -1585,8 +1565,6 @@ pub fn handleProcessStatusPrompt(
     msg: *jsonrpc.Message,
 ) !void {
     const session = if (state.active_session) |*active| active else return state.writer.writeError(alloc, msg.id, no_active_session_rpc_error);
-    var terminal_snapshot = try state.terminal_client.terminalProjection(alloc);
-    defer terminal_snapshot.deinit();
     const commands = try state.unified_exec.snapshotProcesses(alloc);
     defer unified_exec_runtime.Manager.freeProcessSnapshots(
         alloc,
@@ -1607,22 +1585,11 @@ pub fn handleProcessStatusPrompt(
         try text.writer.writeAll("Turn: idle\nPending steers: 0\n");
     }
 
-    var running_count: usize = 0;
-    for (terminal_snapshot.rows) |row| {
-        if (terminalVisibleInProcessStatus(row)) running_count += 1;
-    }
-    running_count += commands.len;
+    const running_count = commands.len;
     if (running_count == 0) {
         try text.writer.writeAll("Background processes: none");
     } else {
         try text.writer.print("Background processes: {d}\n", .{running_count});
-        for (terminal_snapshot.rows) |row| {
-            if (!terminalVisibleInProcessStatus(row)) continue;
-            try text.writer.print(
-                "- [{s}] {s} ({s}, {s})\n",
-                .{ row.session_id, row.label, @tagName(row.lifecycle), @tagName(row.backend) },
-            );
-        }
         for (commands) |command| {
             try text.writer.print(
                 "- [#{d}] {s} ({s}, pid {d}, {s})\n",

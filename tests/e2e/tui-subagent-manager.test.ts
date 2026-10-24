@@ -399,7 +399,7 @@ async function launch(
   return session;
 }
 
-describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
+describe.skipIf(!tmuxAvailable())("tui: Agents", () => {
   test(
     "empty manager preserves the exact main screen, composer, cursor, resize, and repeated cycles",
     async () => {
@@ -412,11 +412,9 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
       const gridBefore = await active.capturePaneGrid();
       const cursorBefore = active.cursorPosition();
       await active.sendKeys("C-x");
-      let manager = await active.waitForText("Agents & processes", TIMEOUT);
+      let manager = await active.waitForText("Agents", TIMEOUT);
       expect(manager).toContain("Agents 0");
       expect(manager).toContain("No active agents");
-      expect(manager).toContain("Background processes 0");
-      expect(manager).toContain("No background processes");
       expect(manager).toContain(
         "↑↓ select   enter inspect   c new agent   t attach   r archives   ctrl-x close",
       );
@@ -425,7 +423,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
       expect(manager).not.toContain("MANAGER_COMPOSER_SENTINEL");
 
       await active.pasteText("ROOT_PASTE_LEAK");
-      manager = await active.waitForText("Agents & processes", TIMEOUT);
+      manager = await active.waitForText("Agents", TIMEOUT);
       expect(manager).not.toContain("ROOT_PASTE_LEAK");
       const pasteDeadline = Date.now() + TIMEOUT;
       let pasteTrace = "";
@@ -444,24 +442,24 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
       await active.sendKeys("C-x");
       await active.waitForPane(
         (pane) =>
-          !pane.includes("Agents & processes") &&
+          !pane.includes("Agents") &&
           pane.includes("MANAGER_COMPOSER_SENTINEL"),
         TIMEOUT,
       );
       expect(await active.capturePaneGrid()).toEqual(gridBefore);
       expect(active.cursorPosition()).toEqual(cursorBefore);
       await active.sendKeys("C-x");
-      await active.waitForText("Agents & processes", TIMEOUT);
+      await active.waitForText("Agents", TIMEOUT);
 
       await active.sendKeys("Escape");
       await Bun.sleep(300);
-      manager = await active.waitForText("Agents & processes", TIMEOUT);
+      manager = await active.waitForText("Agents", TIMEOUT);
       expect(manager).toContain("r archives");
 
       await active.sendKeys("C-x");
       await active.waitForPane(
         (pane) =>
-          !pane.includes("Agents & processes") &&
+          !pane.includes("Agents") &&
           pane.includes("MANAGER_COMPOSER_SENTINEL"),
         TIMEOUT,
       );
@@ -470,7 +468,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
 
       await active.sendKeys("Escape");
       await active.sendKeys("C-x");
-      await active.waitForText("Agents & processes", TIMEOUT);
+      await active.waitForText("Agents", TIMEOUT);
       await active.sendKeys("C-x");
       await active.waitForText("MANAGER_COMPOSER_SENTINEL", TIMEOUT);
       expect(await active.capturePaneGrid()).toEqual(gridBefore);
@@ -478,7 +476,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
 
       for (let cycle = 0; cycle < 3; cycle++) {
         await active.sendKeys("C-x");
-        await active.waitForText("Agents & processes", TIMEOUT);
+        await active.waitForText("Agents", TIMEOUT);
         await active.sendKeys("C-x");
         await active.waitForText("MANAGER_COMPOSER_SENTINEL", TIMEOUT);
       }
@@ -486,13 +484,13 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
       expect(active.cursorPosition()).toEqual(cursorBefore);
 
       await active.sendKeys("C-x");
-      await active.waitForText("Agents & processes", TIMEOUT);
+      await active.waitForText("Agents", TIMEOUT);
       await active.resizeWindow(52, 10);
-      const narrow = await active.waitForText("Agents & processes", TIMEOUT);
+      const narrow = await active.waitForText("Agents", TIMEOUT);
       expect(narrow).toContain("ctrl-x close");
       expect(active.paneSize()).toEqual({ cols: 52, rows: 10 });
       await active.resizeWindow(80, 20);
-      await active.waitForText("Agents & processes", TIMEOUT);
+      await active.waitForText("Agents", TIMEOUT);
       await active.sendKeys("C-x");
       await active.waitForText("MANAGER_COMPOSER_SENTINEL", TIMEOUT);
       expect(active.paneStatus()).toEqual({ dead: false, status: null });
@@ -569,7 +567,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         await active.sendKeys("C-x");
         const manager = await active.waitForPane(
           (pane) =>
-            pane.includes("Agents & processes") &&
+            pane.includes("Agents") &&
             pane.includes("isolated-child") &&
             pane.includes("idle"),
           TIMEOUT,
@@ -633,11 +631,11 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         expect(await active.capturePaneGrid()).toEqual(settledChildGrid);
 
         await active.sendKeys("Escape");
-        await active.waitForText("Agents & processes", TIMEOUT);
+        await active.waitForText("Agents", TIMEOUT);
         const handoffFrameStart = readTapeFrames(tapePath).at(-1)?.index ?? 0;
         await active.sendKeys("C-x");
         const restored = await active.waitForText("PARENT_BACKGROUND_DONE", TIMEOUT);
-        expect(restored).not.toContain("Agents & processes");
+        expect(restored).not.toContain("Agents");
         expect(restored).not.toContain("ISOLATED_CHILD_COMPLETE");
         let handoffFrames = readTapeFrames(tapePath);
         let inputIndex = -1;
@@ -754,7 +752,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         await active.sendKeys("C-x");
         const manager = await active.waitForPane(
           (pane) =>
-            pane.includes("Agents & processes") &&
+            pane.includes("Agents") &&
             pane.includes(visibleName) &&
             pane.includes("idle"),
           TIMEOUT,
@@ -831,7 +829,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         await resumed.sendKeys("C-x");
         await resumed.waitForPane(
           (pane) =>
-            pane.includes("Agents & processes") &&
+            pane.includes("Agents") &&
             pane.includes(visibleName) &&
             pane.includes("idle"),
           TIMEOUT,
@@ -922,7 +920,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         const active = session;
         await active.waitForComposer(TIMEOUT);
         await active.sendKeys("C-x");
-        await active.waitForText("Agents & processes", TIMEOUT);
+        await active.waitForText("Agents", TIMEOUT);
         await active.sendLiteralText("c");
         await active.waitForText("Create persistent agent", TIMEOUT);
         await pasteVisibleText(active, childName);
@@ -1035,7 +1033,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         const active = session;
         await active.waitForComposer(TIMEOUT);
         await active.sendKeys("C-x");
-        await active.waitForText("Agents & processes", TIMEOUT);
+        await active.waitForText("Agents", TIMEOUT);
         await active.sendLiteralText("c");
         await active.waitForText("Create persistent agent", TIMEOUT);
         await pasteVisibleText(active, childName);
@@ -1175,7 +1173,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         await active.sendKeys("C-x");
         await active.waitForPane(
           (pane) =>
-            pane.includes("Agents & processes") &&
+            pane.includes("Agents") &&
             pane.includes(childName) &&
             pane.includes("running"),
           TIMEOUT,
@@ -1238,7 +1236,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         await resumed.sendKeys("C-x");
         await resumed.waitForPane(
           (pane) =>
-            pane.includes("Agents & processes") &&
+            pane.includes("Agents") &&
             pane.includes(childName) &&
             pane.includes("idle") &&
             pane.includes("unread 1"),
@@ -1742,7 +1740,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         await active.sendKeys("C-x");
         await active.waitForPane(
           (pane) =>
-            pane.includes("Agents & processes") &&
+            pane.includes("Agents") &&
             pane.includes(childName) &&
             pane.includes("running"),
           TIMEOUT,
@@ -1758,7 +1756,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
 
         for (let cycle = 0; cycle < 2; cycle += 1) {
           await active.sendKeys("Escape");
-          await active.waitForText("Agents & processes", TIMEOUT);
+          await active.waitForText("Agents", TIMEOUT);
           await active.sendKeys("Enter");
           await active.waitForText(childName, TIMEOUT);
         }
@@ -1766,7 +1764,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
           await active.sendKeys("C-x");
           await active.waitForText("COMMAND_STREAM_PARENT_COMPLETE", TIMEOUT);
           await active.sendKeys("C-x");
-          await active.waitForText("Agents & processes", TIMEOUT);
+          await active.waitForText("Agents", TIMEOUT);
           await active.sendKeys("Enter");
           await active.waitForText(childName, TIMEOUT);
         }
@@ -1832,7 +1830,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         await active.waitForComposer(TIMEOUT);
 
         await active.sendKeys("C-x");
-        await active.waitForText("Agents & processes", TIMEOUT);
+        await active.waitForText("Agents", TIMEOUT);
         await active.sendLiteralText("c");
         await active.waitForText("Create persistent agent", TIMEOUT);
         await pasteVisibleText(active, childA);
@@ -1843,7 +1841,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         await active.waitForText("FAST_ROUTE_A_READY", TIMEOUT);
 
         await active.sendKeys("Escape");
-        await active.waitForText("Agents & processes", TIMEOUT);
+        await active.waitForText("Agents", TIMEOUT);
         await active.sendLiteralText("c");
         await active.waitForText("Create persistent agent", TIMEOUT);
         await pasteVisibleText(active, childB);
@@ -1854,7 +1852,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         await active.waitForText("FAST_ROUTE_B_READY", TIMEOUT);
 
         await active.sendKeys("Escape");
-        await active.waitForText("Agents & processes", TIMEOUT);
+        await active.waitForText("Agents", TIMEOUT);
         await active.sendKeys("Up");
         const selectedA = await active.waitForPane(
           (pane) => pane.split("\n").some((line) =>
@@ -1868,7 +1866,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
           (pane) =>
             pane.includes(childA) &&
             pane.includes("status: idle") &&
-            !pane.includes("Agents & processes"),
+            !pane.includes("Agents"),
           TIMEOUT,
         );
 
@@ -1877,7 +1875,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
           (pane) =>
             pane.includes(childB) &&
             pane.includes("status: idle") &&
-            !pane.includes("Agents & processes"),
+            !pane.includes("Agents"),
           TIMEOUT,
         );
         await active.sendText(marker);
@@ -2108,7 +2106,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         const mainCursor = active.cursorPosition();
 
         await active.sendKeys("C-x");
-        await active.waitForText("Agents & processes", TIMEOUT);
+        await active.waitForText("Agents", TIMEOUT);
         await active.sendLiteralText("c");
         await active.waitForText("Create persistent agent", TIMEOUT);
         await pasteVisibleText(active, "checkpoint-two-child");
@@ -2143,7 +2141,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         );
 
         await active.sendKeys("Escape");
-        await active.waitForText("Agents & processes", TIMEOUT);
+        await active.waitForText("Agents", TIMEOUT);
         await active.sendLiteralText("t");
         const detach = await active.waitForPane(
           (pane) => pane.includes("Attach visible chat") && pane.includes("[detach]"),
@@ -2161,7 +2159,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         expect(attach).toContain("CREATE_INITIAL_🦎");
         await active.sendKeys("Enter");
         await active.waitForPane(
-          (pane) => pane.includes("Agents & processes") && pane.includes("renamed-human-λ"),
+          (pane) => pane.includes("Agents") && pane.includes("renamed-human-λ"),
           TIMEOUT,
         );
 
@@ -2188,15 +2186,15 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         );
 
         await active.sendKeys("Escape");
-        await active.waitForText("Agents & processes", TIMEOUT);
+        await active.waitForText("Agents", TIMEOUT);
         await active.sendKeys("Escape");
         await Bun.sleep(200);
-        expect(await active.capturePane()).toContain("Agents & processes");
+        expect(await active.capturePane()).toContain("Agents");
         await active.sendKeys("C-x");
         const restored = await active.waitForPane(
           (pane) =>
             pane.includes("CHECKPOINT2_MAIN_COMPOSER") &&
-            !pane.includes("Agents & processes"),
+            !pane.includes("Agents"),
           TIMEOUT,
         );
         expect(restored).not.toContain("renamed-human-λ");
@@ -2245,7 +2243,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         await active.sendText("ACTIVE_RELATIONSHIP_ROOT");
         await active.waitForText("RELATIONSHIP_DISCLOSURE_READY", TIMEOUT);
         await active.sendKeys("C-x");
-        await active.waitForText("Agents & processes", TIMEOUT);
+        await active.waitForText("Agents", TIMEOUT);
         await active.sendLiteralText("t");
         await active.waitForPane(
           (pane) => pane.includes("ATTACH_WINDOW_11") && pane.includes("] Load 10 more visible chats"),
@@ -2332,7 +2330,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         await active.sendText("ACTIVE_RELATIONSHIP_ROOT");
         await active.waitForText("RELATIONSHIP_DISCLOSURE_READY", TIMEOUT);
         await active.sendKeys("C-x");
-        await active.waitForText("Agents & processes", TIMEOUT);
+        await active.waitForText("Agents", TIMEOUT);
         await active.sendLiteralText("t");
         await active.waitForText("Shared sub", TIMEOUT);
         await active.sendLiteralText("j");
@@ -2716,7 +2714,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         await active.sendKeys("C-x");
         const nestedTree = await active.waitForPane(
           (pane) =>
-            pane.includes("Agents & processes") &&
+            pane.includes("Agents") &&
             pane.split("\n").some((line) =>
               line.includes(parentName) && line.includes("idle")
             ) &&
@@ -2742,14 +2740,14 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         await active.waitForPane(
           (pane) =>
             pane.includes("DIRECT_TTY_REPARENT_MAIN_COMPOSER") &&
-            !pane.includes("Agents & processes"),
+            !pane.includes("Agents"),
           TIMEOUT,
         );
         const mainGridBefore = await active.capturePaneGrid();
         const mainCursorBefore = active.cursorPosition();
 
         await active.sendKeys("C-x");
-        await active.waitForText("Agents & processes", TIMEOUT);
+        await active.waitForText("Agents", TIMEOUT);
         await active.sendLiteralText("t");
         const attach = await active.waitForPane(
           (pane) =>
@@ -2789,7 +2787,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         await active.sendKeys("Enter");
 
         const directTree = await active.waitForPane((pane) => {
-          if (!pane.includes("Agents & processes")) return false;
+          if (!pane.includes("Agents")) return false;
           const child = readControl(childBefore.path);
           if (
             child.parent_id !== rootId ||
@@ -2837,7 +2835,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         const restored = await active.waitForPane(
           (pane) =>
             pane.includes("DIRECT_TTY_REPARENT_MAIN_COMPOSER") &&
-            !pane.includes("Agents & processes"),
+            !pane.includes("Agents"),
           TIMEOUT,
         );
         expect(restored).not.toContain(parentName);
@@ -2869,13 +2867,13 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
       await active.sendLiteralText("ABNORMAL_MANAGER_COMPOSER");
       await active.waitForText("ABNORMAL_MANAGER_COMPOSER", TIMEOUT);
       await active.sendKeys("C-x");
-      await active.waitForText("Agents & processes", TIMEOUT);
+      await active.waitForText("Agents", TIMEOUT);
 
       const targetPid = active.processPid();
       expect(Number.isInteger(targetPid)).toBe(true);
       process.kill(targetPid, "SIGTERM");
       await active.waitForPane(
-        (pane) => pane.includes("ABNORMAL_MANAGER_COMPOSER") && !pane.includes("Agents & processes"),
+        (pane) => pane.includes("ABNORMAL_MANAGER_COMPOSER") && !pane.includes("Agents"),
         TIMEOUT,
       );
       await active.waitForPane(() => active.paneStatus().dead, TIMEOUT);
@@ -2963,7 +2961,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
           (pane) => pane.includes("restart-child") && pane.includes("running"),
           TIMEOUT,
         );
-        expect(tree).toContain("Agents & processes");
+        expect(tree).toContain("Agents");
         await active.sendKeys("Enter");
         const running = await active.waitForPane(
           (pane) =>
@@ -3038,7 +3036,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         await active.sendKeys("C-x");
         const interruptedTree = await active.waitForPane(
           (pane) =>
-            pane.includes("Agents & processes") &&
+            pane.includes("Agents") &&
             pane.includes("restart-child") &&
             pane.includes("interrupted"),
           TIMEOUT,
@@ -3067,7 +3065,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         await active.sendKeys("Escape");
         await active.waitForPane(
           (pane) =>
-            pane.includes("Agents & processes") &&
+            pane.includes("Agents") &&
             pane.includes("restart-child") &&
             !pane.includes("Activity —"),
           TIMEOUT,
@@ -3078,7 +3076,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         await active.sendKeys("Escape");
         await active.waitForPane(
           (pane) =>
-            pane.includes("Agents & processes") &&
+            pane.includes("Agents") &&
             pane.includes("restart-child") &&
             !pane.includes("Activity —"),
           TIMEOUT,
@@ -3174,7 +3172,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         await active.waitForComposer(TIMEOUT);
 
         await active.sendKeys("C-x");
-        await active.waitForText("Agents & processes", TIMEOUT);
+        await active.waitForText("Agents", TIMEOUT);
         await active.sendLiteralText("c");
         await active.waitForText("Create persistent agent", TIMEOUT);
         await pasteVisibleText(active, "direct-resume-child");
@@ -3191,7 +3189,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         if (!childId) throw new Error("manager-created child did not expose its ID");
 
         await active.sendKeys("C-x");
-        await active.waitForPane((pane) => !pane.includes("Agents & processes"), TIMEOUT);
+        await active.waitForPane((pane) => !pane.includes("Agents"), TIMEOUT);
         await pasteVisibleText(active, "CHECKPOINT3_MAIN_COMPOSER_RESTORED");
         await active.sendKeys("Left");
         const mainGridBefore = await active.capturePaneGrid();
@@ -3214,7 +3212,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         });
         const directPane = await direct.waitForText("● Session resumed:", TIMEOUT);
         expect(hasEmptyComposer(directPane)).toBe(true);
-        expect(directPane).not.toContain("Agents & processes");
+        expect(directPane).not.toContain("Agents");
 
         const eventsPath = join(
           fixture.home,
@@ -3226,7 +3224,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         const transcriptBeforeEnqueue = readFileSync(eventsPath, "utf8");
 
         await active.sendKeys("C-x");
-        await active.waitForText("Agents & processes", TIMEOUT);
+        await active.waitForText("Agents", TIMEOUT);
         await active.sendKeys("Enter");
         const relationship = await active.waitForPane(
           (pane) =>
@@ -3304,7 +3302,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
           TIMEOUT,
         );
         await active.sendKeys("Escape");
-        await active.waitForText("Agents & processes", TIMEOUT);
+        await active.waitForText("Agents", TIMEOUT);
         await active.sendKeys("C-x");
         await active.waitForText("CHECKPOINT3_MAIN_COMPOSER_RESTORED", TIMEOUT);
         expect(await active.capturePaneGrid()).toEqual(mainGridBefore);
@@ -3373,7 +3371,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         await setup.sendText(parentPrompt);
         await setup.waitForText(parentComplete, TIMEOUT);
         await setup.sendKeys("C-x");
-        await setup.waitForText("Agents & processes", TIMEOUT);
+        await setup.waitForText("Agents", TIMEOUT);
         await setup.sendLiteralText("c");
         await setup.waitForText("Create persistent agent", TIMEOUT);
         await pasteVisibleText(setup, childName);
@@ -3484,7 +3482,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         await parent.sendKeys("C-x");
         const externalTree = await parent.waitForPane(
           (pane) =>
-            pane.includes("Agents & processes") &&
+            pane.includes("Agents") &&
             pane.includes(childName) &&
             pane.includes("external busy"),
           TIMEOUT,
@@ -3497,7 +3495,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         await parent.sendKeys("C-x");
         await parent.waitForComposer(TIMEOUT);
         await parent.sendKeys("C-x");
-        await parent.waitForText("Agents & processes", TIMEOUT);
+        await parent.waitForText("Agents", TIMEOUT);
         expect(countOccurrences(
           readFileSync(parentTracePath, "utf8"),
           recoveryMarker,
@@ -3722,7 +3720,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         await active.waitForComposer(TIMEOUT);
 
         await active.sendKeys("C-x");
-        await active.waitForText("Agents & processes", TIMEOUT);
+        await active.waitForText("Agents", TIMEOUT);
         await active.sendLiteralText("c");
         await active.waitForText("Create persistent agent", TIMEOUT);
         await pasteVisibleText(active, "approval-child");
@@ -3758,7 +3756,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         const mainCursor = active.cursorPosition();
 
         await active.sendKeys("C-x");
-        await active.waitForText("Agents & processes", TIMEOUT);
+        await active.waitForText("Agents", TIMEOUT);
         await active.sendKeys("Enter");
         await active.waitForPane(
           (pane) =>
@@ -3827,7 +3825,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
           await readLiveStdoutFrames(tapePath)
         ).length;
         await active.sendKeys("C-x");
-        await active.waitForText("Agents & processes", TIMEOUT);
+        await active.waitForText("Agents", TIMEOUT);
         const inlineApprovalToggleFrames = await waitForLiveStdoutFrames(
           tapePath,
           inlineApprovalToggleStart,
@@ -3878,12 +3876,12 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
 
         await active.sendKeys("C-x");
         const restored = await active.waitForText("APPROVAL_MAIN_COMPOSER", TIMEOUT);
-        expect(restored).not.toContain("Agents & processes");
+        expect(restored).not.toContain("Agents");
         expect(restored).not.toContain("Subagent approval-child needs permission");
         expect(active.cursorPosition()).toEqual(mainCursor);
 
         await active.sendKeys("C-x");
-        await active.waitForText("Agents & processes", TIMEOUT);
+        await active.waitForText("Agents", TIMEOUT);
         await active.sendKeys("Enter");
         await active.waitForText("CHECKPOINT2_CHILD_APPROVAL_COMPLETE", TIMEOUT);
         expect(await active.capturePaneGrid()).toEqual(childGrid);
@@ -3926,7 +3924,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
           await readLiveStdoutFrames(tapePath)
         ).length;
         await active.sendKeys("C-x");
-        await active.waitForText("Agents & processes", TIMEOUT);
+        await active.waitForText("Agents", TIMEOUT);
         const ownedApprovalToggleFrames = await waitForLiveStdoutFrames(
           tapePath,
           ownedApprovalToggleStart,
@@ -4068,7 +4066,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         const active = session;
         await active.waitForComposer(TIMEOUT);
         await active.sendKeys("C-x");
-        await active.waitForText("Agents & processes", TIMEOUT);
+        await active.waitForText("Agents", TIMEOUT);
         await active.sendLiteralText("c");
         await active.waitForText("Create persistent agent", TIMEOUT);
         await pasteVisibleText(active, persistentName);
@@ -4081,7 +4079,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
           TIMEOUT,
         );
         await active.sendKeys("Escape");
-        await active.waitForText("Agents & processes", TIMEOUT);
+        await active.waitForText("Agents", TIMEOUT);
         await active.sendKeys("C-x");
         await active.waitForComposer(TIMEOUT);
 
@@ -4216,7 +4214,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         const active = session;
         await active.waitForComposer(TIMEOUT);
         await active.sendKeys("C-x");
-        await active.waitForText("Agents & processes", TIMEOUT);
+        await active.waitForText("Agents", TIMEOUT);
         await active.sendLiteralText("c");
         await active.waitForText("Create persistent agent", TIMEOUT);
         await pasteVisibleText(active, childName);
@@ -4292,7 +4290,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         await active.sendLiteralText("MAIN_MODELS_DRAFT");
         await active.waitForText("MAIN_MODELS_DRAFT", TIMEOUT);
         await active.sendKeys("C-x");
-        await active.waitForText("Agents & processes", TIMEOUT);
+        await active.waitForText("Agents", TIMEOUT);
         await active.sendLiteralText("c");
         await active.waitForText("Create persistent agent", TIMEOUT);
         await pasteVisibleText(active, childName);
@@ -4317,7 +4315,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
 
         releaseModels();
         await active.sendKeys("C-x");
-        await active.waitForText("Agents & processes", TIMEOUT);
+        await active.waitForText("Agents", TIMEOUT);
         await active.sendKeys("Enter");
         await active.waitForText("CHILD_LOCAL_MODELS_READY", TIMEOUT);
         await active.sendText("/model");
@@ -4352,7 +4350,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         );
         expect(mainAfterModelsResolve).toContain("MAIN_MODELS_DRAFT");
         await active.sendKeys("C-x");
-        await active.waitForText("Agents & processes", TIMEOUT);
+        await active.waitForText("Agents", TIMEOUT);
         await active.sendKeys("Enter");
         await active.waitForText("CHILD_LOCAL_MODELS_READY", TIMEOUT);
         await active.sendText("/model");
@@ -4421,7 +4419,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         const active = session;
         await active.waitForComposer(TIMEOUT);
         await active.sendKeys("C-x");
-        await active.waitForText("Agents & processes", TIMEOUT);
+        await active.waitForText("Agents", TIMEOUT);
         await active.sendLiteralText("c");
         await active.waitForText("Create persistent agent", TIMEOUT);
         await pasteVisibleText(active, "pointer-child");
@@ -4514,7 +4512,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         await active.sendLiteralText("MAIN_SKILLS_DRAFT");
         await active.waitForText("MAIN_SKILLS_DRAFT", TIMEOUT);
         await active.sendKeys("C-x");
-        await active.waitForText("Agents & processes", TIMEOUT);
+        await active.waitForText("Agents", TIMEOUT);
         await active.sendLiteralText("c");
         await active.waitForText("Create persistent agent", TIMEOUT);
         await pasteVisibleText(active, childName);
@@ -4565,7 +4563,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         );
         expect(mainWithSkillsOpen).toContain("MAIN_SKILLS_DRAFT");
         await active.sendKeys("C-x");
-        await active.waitForText("Agents & processes", TIMEOUT);
+        await active.waitForText("Agents", TIMEOUT);
         await active.sendKeys("Enter");
         await active.waitForText("CHILD_LOCAL_SKILLS_READY", TIMEOUT);
         await active.sendText("/skills");
@@ -4587,7 +4585,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         const restoredMain = await active.waitForPane(
           (pane) =>
             pane.includes("MAIN_SKILLS_DRAFT") &&
-            !pane.includes("Agents & processes"),
+            !pane.includes("Agents"),
           TIMEOUT,
         );
         expect(restoredMain).not.toContain("ctrl+x manager");
@@ -4641,7 +4639,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         const active = session;
         await active.waitForComposer(TIMEOUT);
         await active.sendKeys("C-x");
-        await active.waitForText("Agents & processes", TIMEOUT);
+        await active.waitForText("Agents", TIMEOUT);
         await active.sendLiteralText("c");
         await active.waitForText("Create persistent agent", TIMEOUT);
         await pasteVisibleText(active, "child-narrow-config");
@@ -4748,7 +4746,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         let active = session;
         await active.waitForComposer(TIMEOUT);
         await active.sendKeys("C-x");
-        await active.waitForText("Agents & processes", TIMEOUT);
+        await active.waitForText("Agents", TIMEOUT);
         await active.sendLiteralText("c");
         await active.waitForText("Create persistent agent", TIMEOUT);
         await pasteVisibleText(active, "duration-worker");
@@ -4944,7 +4942,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         let active = session;
         await active.waitForComposer(TIMEOUT);
         await active.sendKeys("C-x");
-        await active.waitForText("Agents & processes", TIMEOUT);
+        await active.waitForText("Agents", TIMEOUT);
         await active.sendLiteralText("c");
         await active.waitForText("Create persistent agent", TIMEOUT);
         await pasteVisibleText(active, "stale-form-child");
@@ -4975,7 +4973,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         await active.sendKeys("C-x");
         await active.waitForPane(
           (pane) =>
-            pane.includes("Agents & processes") &&
+            pane.includes("Agents") &&
             pane.includes("stale-form-child"),
           TIMEOUT,
         );
@@ -5161,7 +5159,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         const active = session;
         await active.waitForComposer(TIMEOUT);
         await active.sendKeys("C-x");
-        await active.waitForText("Agents & processes", TIMEOUT);
+        await active.waitForText("Agents", TIMEOUT);
         await active.sendLiteralText("c");
         await active.waitForText("Create persistent agent", TIMEOUT);
         await pasteVisibleText(active, childName);
@@ -5185,7 +5183,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         expect(beforeEscape.max).toBeLessThan(90);
 
         await active.sendKeys("Escape");
-        await active.waitForText("Agents & processes", TIMEOUT);
+        await active.waitForText("Agents", TIMEOUT);
         await active.sendKeys("Enter");
         const afterEscape = await active.waitForPane(
           (pane) => pane.includes("CHILD_POSITION_"),
@@ -5196,7 +5194,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         await active.sendKeys("C-x");
         await active.waitForComposer(TIMEOUT);
         await active.sendKeys("C-x");
-        await active.waitForText("Agents & processes", TIMEOUT);
+        await active.waitForText("Agents", TIMEOUT);
         await active.sendKeys("Enter");
         const afterCtrlX = await active.waitForPane(
           (pane) => pane.includes("CHILD_POSITION_"),
@@ -5221,7 +5219,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         await active.sendKeys("C-x");
         await active.waitForComposer(TIMEOUT);
         await active.sendKeys("C-x");
-        await active.waitForText("Agents & processes", TIMEOUT);
+        await active.waitForText("Agents", TIMEOUT);
         await active.sendKeys("Enter");
         const afterFullRoundTrip = await active.waitForPane(
           (pane) =>
@@ -5296,7 +5294,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         expect(mainLineCountBefore).toBeGreaterThanOrEqual(150);
 
         await active.sendKeys("C-x");
-        await active.waitForText("Agents & processes", TIMEOUT);
+        await active.waitForText("Agents", TIMEOUT);
         await active.sendLiteralText("c");
         await active.waitForText("Create persistent agent", TIMEOUT);
         await pasteVisibleText(active, childName);
@@ -5382,7 +5380,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         const mainCursor = active.cursorPosition();
 
         await active.sendKeys("C-x");
-        await active.waitForText("Agents & processes", TIMEOUT);
+        await active.waitForText("Agents", TIMEOUT);
         await active.sendLiteralText("c");
         await active.waitForText("Create persistent agent", TIMEOUT);
         await pasteVisibleText(active, childA);
@@ -5399,7 +5397,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         const childACursor = active.cursorPosition();
 
         await active.sendKeys("Escape");
-        await active.waitForText("Agents & processes", TIMEOUT);
+        await active.waitForText("Agents", TIMEOUT);
         await active.sendLiteralText("c");
         await active.waitForText("Create persistent agent", TIMEOUT);
         await pasteVisibleText(active, childB);
@@ -5416,7 +5414,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         const childBCursor = active.cursorPosition();
 
         await active.sendKeys("Escape");
-        await active.waitForText("Agents & processes", TIMEOUT);
+        await active.waitForText("Agents", TIMEOUT);
         await active.sendKeys("Up");
         await active.waitForPane(
           (pane) => pane.split("\n").some((line) =>
@@ -5433,7 +5431,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         expect(active.cursorPosition()).toEqual(childACursor);
 
         await active.sendKeys("Escape");
-        await active.waitForText("Agents & processes", TIMEOUT);
+        await active.waitForText("Agents", TIMEOUT);
         await active.sendKeys("Down");
         await active.waitForPane(
           (pane) => pane.split("\n").some((line) =>
@@ -5453,7 +5451,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         await active.waitForText(mainDraft, TIMEOUT);
         expect(active.cursorPosition()).toEqual(mainCursor);
         await active.sendKeys("C-x");
-        await active.waitForText("Agents & processes", TIMEOUT);
+        await active.waitForText("Agents", TIMEOUT);
         await active.sendKeys("Enter");
         const afterCtrlX = await active.waitForText("CHILD_B_DRAFT_LINE_TWO", TIMEOUT);
         expect(afterCtrlX).toContain("CHILD_B_DRAFT_LINE_ONE");
@@ -5553,7 +5551,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         const active = session;
         await active.waitForComposer(TIMEOUT);
         await active.sendKeys("C-x");
-        await active.waitForText("Agents & processes", TIMEOUT);
+        await active.waitForText("Agents", TIMEOUT);
         await active.sendLiteralText("c");
         await active.waitForText("Create persistent agent", TIMEOUT);
         await pasteVisibleText(active, childName);
@@ -5575,7 +5573,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         await active.sendKeys("Escape");
         const afterEscape = await active.waitForPane((pane) => {
           const line = childLine(pane);
-          return pane.includes("Agents & processes") &&
+          return pane.includes("Agents") &&
             line !== undefined &&
             !line.includes("unread");
         }, TIMEOUT);
@@ -5595,7 +5593,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         await active.sendKeys("C-x");
         const afterCtrlX = await active.waitForPane((pane) => {
           const line = childLine(pane);
-          return pane.includes("Agents & processes") &&
+          return pane.includes("Agents") &&
             line !== undefined &&
             !line.includes("unread");
         }, TIMEOUT);
@@ -5621,7 +5619,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         await active.sendKeys("Escape");
         const readAfterPresentation = await active.waitForPane((pane) => {
           const line = childLine(pane);
-          return pane.includes("Agents & processes") &&
+          return pane.includes("Agents") &&
             line !== undefined &&
             !line.includes("unread");
         }, TIMEOUT);
@@ -5693,7 +5691,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         const mainCursor = active.cursorPosition();
 
         await active.sendKeys("C-x");
-        await active.waitForText("Agents & processes", TIMEOUT);
+        await active.waitForText("Agents", TIMEOUT);
         await active.sendLiteralText("c");
         await active.waitForText("Create persistent agent", TIMEOUT);
         await pasteVisibleText(active, "approval-first");
@@ -5714,7 +5712,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
           TIMEOUT,
         );
         await active.sendKeys("C-x");
-        await active.waitForText("Agents & processes", TIMEOUT);
+        await active.waitForText("Agents", TIMEOUT);
         await active.sendLiteralText("c");
         await active.waitForText("Create persistent agent", TIMEOUT);
         await pasteVisibleText(active, "approval-second");
@@ -5739,7 +5737,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         expect(firstMain).toContain("printf first >");
 
         await active.sendKeys("C-x");
-        await active.waitForText("Agents & processes", TIMEOUT);
+        await active.waitForText("Agents", TIMEOUT);
         await active.sendKeys("Enter");
         await active.waitForPane(
           (pane) =>
@@ -5828,7 +5826,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
           "SIMULTANEOUS_APPROVAL_MAIN_COMPOSER",
           TIMEOUT,
         );
-        expect(restored).not.toContain("Agents & processes");
+        expect(restored).not.toContain("Agents");
         expect(restored).not.toContain("approval pending");
         expect(active.cursorPosition()).toEqual(mainCursor);
         expect(gateway.classifierRequests).toHaveLength(0);
@@ -5929,7 +5927,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
             !pane.includes("assembled-nested"),
           TIMEOUT,
         );
-        expect(tree).toContain("Agents & processes");
+        expect(tree).toContain("Agents");
         expect(tree).not.toContain("assembled-one-off");
         expect(tree).not.toContain("assembled-nested");
 
@@ -6043,7 +6041,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         await active.sendKeys("C-x");
         await active.waitForPane(
           (pane) =>
-            pane.includes("Agents & processes") &&
+            pane.includes("Agents") &&
             pane.includes("manager-cancel-child") &&
             pane.includes("running"),
           TIMEOUT,
@@ -6052,7 +6050,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         const restoredMain = await active.waitForPane(
           (pane) =>
             pane.includes("CHECKPOINT3_CANCEL_MAIN_COMPOSER") &&
-            !pane.includes("Agents & processes"),
+            !pane.includes("Agents"),
           TIMEOUT,
         );
         expect(restoredMain).not.toContain("ctrl+x manager");
@@ -6062,7 +6060,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         await active.sendKeys("C-x");
         await active.waitForPane(
           (pane) =>
-            pane.includes("Agents & processes") &&
+            pane.includes("Agents") &&
             pane.includes("manager-cancel-child") &&
             pane.includes("running"),
           TIMEOUT,
@@ -6192,7 +6190,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         await active.sendKeys("C-x");
         await active.waitForPane(
           (pane) =>
-            pane.includes("Agents & processes") &&
+            pane.includes("Agents") &&
             pane.includes("approval-cancel-child") &&
             pane.includes("approval"),
           TIMEOUT,
@@ -6277,7 +6275,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         await resumed.sendKeys("C-x");
         await resumed.waitForPane(
           (pane) =>
-            pane.includes("Agents & processes") &&
+            pane.includes("Agents") &&
             pane.includes("approval-cancel-child") &&
             pane.includes("interrupted"),
           TIMEOUT,
@@ -6506,12 +6504,12 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         expect(gateway.requestCount()).toBeGreaterThanOrEqual(3);
 
         await active.sendKeys("C-x");
-        await active.waitForText("Agents & processes", TIMEOUT);
+        await active.waitForText("Agents", TIMEOUT);
         await active.sendKeys("C-x");
         const restoredMain = await active.waitForPane(
           (pane) =>
             pane.includes("Create the live manager fixture.") &&
-            !pane.includes("Agents & processes"),
+            !pane.includes("Agents"),
           TIMEOUT,
         );
         expect(restoredMain).not.toContain("ctrl+x manager");
@@ -6520,7 +6518,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         await active.sendKeys("C-x");
         const rootView = await active.waitForPane(
           (pane) =>
-            pane.includes("Agents & processes") &&
+            pane.includes("Agents") &&
             pane.split("\n").some((line) =>
               line.startsWith("› ") &&
               line.includes("live-child") &&
@@ -6555,7 +6553,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         await active.sendKeys("Escape");
         const streamingRoot = await active.waitForPane(
           (pane) =>
-            pane.includes("Agents & processes") &&
+            pane.includes("Agents") &&
             pane.includes("live-child") &&
             pane.includes("running") &&
             pane.includes("r archives"),
@@ -6715,7 +6713,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
 
         await active.sendKeys("Escape");
         await active.waitForPane(
-          (pane) => pane.includes("Agents & processes") && pane.includes("r archives"),
+          (pane) => pane.includes("Agents") && pane.includes("r archives"),
           TIMEOUT,
         );
         const idleReopenFrameStart = stdoutFrames(tapePath).length;
@@ -6736,7 +6734,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         expect(await active.capturePaneGrid()).toEqual(settledChildGrid);
         await active.sendKeys("Escape");
         await active.waitForPane(
-          (pane) => pane.includes("Agents & processes") && pane.includes("r archives"),
+          (pane) => pane.includes("Agents") && pane.includes("r archives"),
           TIMEOUT,
         );
         await active.sendLiteralText("a");
@@ -6749,7 +6747,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         );
         await active.sendKeys("C-x");
         await active.waitForPane(
-          (pane) => !pane.includes("Agents & processes") && pane.includes("Create the live manager fixture."),
+          (pane) => !pane.includes("Agents") && pane.includes("Create the live manager fixture."),
           TIMEOUT,
         );
         expect(normalizeThinkingFrame(await active.capturePaneGrid())).toEqual(
@@ -6767,7 +6765,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         await active.waitForText("MANAGER_PARENT_COMPLETE", TIMEOUT);
 
         await active.sendKeys("C-x");
-        const activeTree = await active.waitForText("Agents & processes", TIMEOUT);
+        const activeTree = await active.waitForText("Agents", TIMEOUT);
         expect(activeTree).not.toContain(`› live-child`);
         await active.sendLiteralText("r");
         const archived = await active.waitForText("Archived subagents", TIMEOUT);
@@ -6786,16 +6784,16 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         await active.sendKeys("Escape");
         await active.waitForText("Archived subagents", TIMEOUT);
         await active.sendKeys("C-x");
-        await active.waitForPane((pane) => !pane.includes("Agents & processes"), TIMEOUT);
+        await active.waitForPane((pane) => !pane.includes("Agents"), TIMEOUT);
 
         const restoredBeforeRepeat = await active.capturePaneGrid();
         const cursorBeforeRepeat = active.cursorPosition();
         await active.sendKeys("C-x");
-        await active.waitForText("Agents & processes", TIMEOUT);
+        await active.waitForText("Agents", TIMEOUT);
         await active.sendLiteralText("r");
         await active.waitForText("Archived subagents", TIMEOUT);
         await active.sendKeys("C-x");
-        await active.waitForPane((pane) => !pane.includes("Agents & processes"), TIMEOUT);
+        await active.waitForPane((pane) => !pane.includes("Agents"), TIMEOUT);
         expect(await active.capturePaneGrid()).toEqual(restoredBeforeRepeat);
         expect(active.cursorPosition()).toEqual(cursorBeforeRepeat);
         expect(readFileSync(fixture.stderrPath, "utf8")).toBe("");
@@ -6920,7 +6918,7 @@ describe.skipIf(!tmuxAvailable())("tui: Agents & processes", () => {
         let active = session;
         await active.waitForComposer(TIMEOUT);
         await active.sendKeys("C-x");
-        await active.waitForText("Agents & processes", TIMEOUT);
+        await active.waitForText("Agents", TIMEOUT);
         await active.sendLiteralText("c");
         await active.waitForText("Create persistent agent", TIMEOUT);
         await pasteVisibleText(active, "zero-turn-child");

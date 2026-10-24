@@ -1,10 +1,10 @@
-//! Bounded text-terminal engine shared by live terminal sessions, recovery,
-//! replay, and deterministic rendering tests. Graphical terminal protocols
+//! Bounded text-terminal engine shared by TUI rendering, transcript replay,
+//! and deterministic rendering tests. Graphical terminal protocols
 //! are intentionally outside this module's contract.
 
 const std = @import("std");
 const display_width = @import("../shared/display_width.zig");
-const contracts = @import("contracts.zig");
+const contracts = @import("render_contracts.zig");
 
 const Allocator = std.mem.Allocator;
 

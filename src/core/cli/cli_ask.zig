@@ -8,15 +8,11 @@ const app_runtime_setup = @import("../app/app_runtime_setup.zig");
 const auth_runtime = @import("../auth/auth_runtime.zig");
 const credentials = @import("../auth/credentials.zig");
 const oauth_transport = @import("../auth/oauth_transport.zig");
-const terminal_client_runtime = @import("../terminal/client.zig");
 const unified_exec_runtime = @import("../execution/unified_exec.zig");
 const context_contract = @import("../workspace/context_contract.zig");
 const gateway_provider = @import("../gateway/gateway_provider.zig");
 const model_catalog = @import("../gateway/model_catalog.zig");
 const provider_set = @import("../gateway/provider_set.zig");
-const background_process_provider = @import(
-    "../execution/background_process_provider.zig",
-);
 const host = @import("../hosts/host.zig");
 const pathing = @import("../workspace/pathing.zig");
 const workspace_access = @import("../workspace/workspace_access.zig");
@@ -216,8 +212,6 @@ pub const Config = struct {
     gateway_models_path: []const u8,
     gateway_provider: gateway_provider.Provider,
     provider_set: provider_set.Set,
-    background_process_provider: background_process_provider.Provider =
-        background_process_provider.unavailable_provider,
     secret_store: host.SecretStore,
     prompt_policy: prompt_policy.Policy,
     skill_root_policy: skill_contract.RootPolicy,
@@ -506,7 +500,6 @@ const AskContext = struct {
         permission_auto_classifier.Classifier.disabled(),
     worker: WorkerRuntime = .{},
     use_process_interrupt_flag: bool = false,
-    terminal_client: terminal_client_runtime.Runtime = .{},
     unified_exec: unified_exec_runtime.Manager = unified_exec_runtime.Manager.init(std.heap.c_allocator),
     ephemeral_command_replay: command_replay_store.EphemeralStore,
     subagent_host: ?*subagent_tool_host.Runtime = null,
@@ -564,9 +557,6 @@ const AskContext = struct {
             .mode_id = cfg.mode_registry.default_mode_id,
             .session = session_runtime.SessionRuntime.init(cfg.max_history_turns),
             .web_search_runtime = web_search_runtime.Runtime.init(.{}),
-            .terminal_client = terminal_client_runtime.Runtime.init(
-                cfg.background_process_provider,
-            ),
             .ephemeral_command_replay = command_replay_store.EphemeralStore.init(alloc),
             .lifecycle_runtime = lifecycle_runtime,
             .lifecycle_view = hooks.RuntimeView.empty(),
@@ -654,7 +644,6 @@ const AskContext = struct {
     fn deinit(self: *AskContext) void {
         if (self.subagent_host) |subagent_host| subagent_host.deinit();
         self.subagent_host = null;
-        self.terminal_client.deinit();
         self.unified_exec.deinit();
         self.workspace_access.deinit(self.alloc);
         self.worker.deinit(std.heap.c_allocator);

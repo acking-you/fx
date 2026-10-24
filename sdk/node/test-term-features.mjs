@@ -45,6 +45,17 @@ const runtime = await createFxTerminal({
   backend: "wasm",
   wasm: await readFile(wasmPath),
   terminal: xtermAdapter(terminal),
+  workspace: {
+    info: {
+      version: 1,
+      root: "/metadata-only-workspace",
+      cwd: "/metadata-only-workspace",
+      home: "/browser-home",
+      gitAvailable: false,
+      ephemeral: true,
+    },
+    permission: "allow-sandboxed",
+  },
   env: {
     OPENAI_API_KEY: "feature-key",
     FX_TRACE_STDERR: "1",
@@ -81,6 +92,9 @@ await command("first question", "first answer");
 await command("second question", "second answer");
 if (requests.length !== 2) throw new Error(`expected two gateway turns, got ${requests.length}`);
 const secondBody = JSON.stringify(requests[1]);
+if (!secondBody.includes("/metadata-only-workspace")) {
+  throw new Error("workspace metadata without an exec callback was not delivered to the model");
+}
 for (const expected of ["first question", "first answer", "second question"]) {
   if (!secondBody.includes(expected)) throw new Error(`second turn omitted ${expected}: ${secondBody}`);
 }

@@ -6111,7 +6111,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       await Bun.sleep(250);
       await session.sendText("/ps");
       const pane = await session.waitForText(
-        "No background commands or terminals are running.",
+        "No background commands are running.",
         TIMEOUT,
       );
       await Bun.sleep(750);

@@ -3018,7 +3018,7 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
       await session.sendText("/skills");
       await waitForSkillsMenu(session, 4);
       await session.sendHexBytes(["1b", "18"]);
-      await session.waitForText("Agents & processes", 5_000);
+      await session.waitForText("Agents", 5_000);
       await session.sendKeys("C-x");
       await session.waitForComposer(5_000);
       await session.sendText("/quit");

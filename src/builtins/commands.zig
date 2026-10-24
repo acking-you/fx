@@ -388,7 +388,7 @@ pub const slash_specs = [_]SlashSpec{
     .{ .kind = .stats, .command = "/stats", .help_entry = "/stats", .completion_description = "show token and turn statistics", .presentation_category = .account },
     .{ .kind = .usage, .command = "/usage", .aliases = &.{"/cost"}, .help_entry = "/usage (/cost)", .completion_description = "show local fx tokens, models, and spend", .presentation_category = .account },
     .{ .kind = .status, .command = "/status", .help_entry = "/status", .completion_description = "show runtime configuration", .presentation_category = .general, .show_in_welcome = true },
-    .{ .kind = .background, .command = "/background", .aliases = &.{"/ps"}, .help_entry = "/background (/ps) [stop <command-id|last>]", .completion_description = "inspect yielded commands and hosted terminals", .presentation_category = .agents, .show_in_welcome = true, .has_args = true },
+    .{ .kind = .background, .command = "/background", .aliases = &.{"/ps"}, .help_entry = "/background (/ps) [stop <command-id|last>]", .completion_description = "inspect yielded commands", .presentation_category = .agents, .show_in_welcome = true, .has_args = true },
     .{ .kind = .background_stop, .command = "/background stop", .accepts_payload = true },
     .{ .kind = .image, .command = "/image", .aliases = &.{"/img"}, .help_entry = "/image <path> (/img)", .completion_description = "attach an image by path", .presentation_category = .media, .has_args = true, .accepts_payload = true },
     .{ .kind = .images, .command = "/images", .help_entry = "/images [clear]", .completion_description = "manage pending image attachments", .presentation_category = .media, .has_args = true, .accepts_payload = true },
