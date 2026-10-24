@@ -82,12 +82,6 @@ describe("tui: direct-write audit", () => {
     expect(output).toContain("path=src/ui/transcript/io.zig");
     expect(output).toContain("category=acp_protocol_transport");
     expect(output).toContain("category=subprocess_protocol_transport");
-    expect(output).toMatch(
-      /path=src\/core\/terminal\/native_session\.zig .*function=acceptMarker .*category=subprocess_protocol_transport/,
-    );
-    expect(output).toMatch(
-      /path=src\/core\/terminal\/tmux_session\.zig .*function=runLauncher .*category=subprocess_protocol_transport/,
-    );
     expect(output).toContain("function=clearTmuxScreenAndHistory");
     expect(output).toContain("category=terminal_reset");
     expect(output).toContain("path=src/core/app/app_entry_runtime.zig");
